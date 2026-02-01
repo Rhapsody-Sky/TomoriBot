@@ -1,4 +1,4 @@
-import { sql } from "@/utils/db/client";
+import { sql, withCachedPlanRetry } from "@/utils/db/client";
 import {
 	tomoriStateSchema,
 	userSchema,
@@ -172,7 +172,9 @@ export async function loadTomoriState(
 export async function loadAllPersonasForServer(
 	serverDiscId: string,
 ): Promise<TomoriState[]> {
-	try {
+	return (
+		(await withCachedPlanRetry(async () => {
+			try {
 		// 1. Load all Tomori persona rows for this server (main first, then alters)
 		const tomoriRows = await sql`
 			SELECT t.*
@@ -302,11 +304,16 @@ export async function loadAllPersonasForServer(
 			return [];
 		}
 
-		return personas;
-	} catch (error) {
-		log.error(`Error loading all personas for server ${serverDiscId}:`, error);
-		return [];
-	}
+			return personas;
+		} catch (error) {
+			log.error(
+				`Error loading all personas for server ${serverDiscId}:`,
+				error,
+			);
+			return [];
+		}
+	}, `load all personas for server ${serverDiscId}`)) ?? []
+	);
 }
 
 /**
@@ -315,34 +322,36 @@ export async function loadAllPersonasForServer(
  * @returns UserRow object or null if not found or invalid.
  */
 export async function loadUserRow(userDiscId: string): Promise<UserRow | null> {
-	try {
-		const rows = await sql`
-			SELECT * FROM users 
-			WHERE user_disc_id = ${userDiscId}
-			LIMIT 1
-		`;
+	return await withCachedPlanRetry(async () => {
+		try {
+			const rows = await sql`
+				SELECT * FROM users
+				WHERE user_disc_id = ${userDiscId}
+				LIMIT 1
+			`;
 
-		if (!rows.length) {
-			// It's common for users not to exist yet, so use info level
-			log.info(`No user data found for ID ${userDiscId}.`);
+			if (!rows.length) {
+				// It's common for users not to exist yet, so use info level
+				log.info(`No user data found for ID ${userDiscId}.`);
+				return null;
+			}
+
+			// Validate the row against the schema
+			const parsedUser = userSchema.safeParse(rows[0]);
+			if (!parsedUser.success) {
+				log.error(
+					`Failed to validate user data for ID ${userDiscId}:`,
+					parsedUser.error.flatten(),
+				);
+				return null;
+			}
+
+			return parsedUser.data;
+		} catch (error) {
+			log.error(`Error loading user row for ID ${userDiscId}:`, error);
 			return null;
 		}
-
-		// Validate the row against the schema
-		const parsedUser = userSchema.safeParse(rows[0]);
-		if (!parsedUser.success) {
-			log.error(
-				`Failed to validate user data for ID ${userDiscId}:`,
-				parsedUser.error.flatten(),
-			);
-			return null;
-		}
-
-		return parsedUser.data;
-	} catch (error) {
-		log.error(`Error loading user row for ID ${userDiscId}:`, error);
-		return null;
-	}
+	}, `load user row for ID ${userDiscId}`);
 }
 
 /**
@@ -1407,45 +1416,47 @@ export async function loadServerStickers(
  * @returns Array of due ReminderRow objects, or null if error
  */
 export async function getDueReminders(): Promise<ReminderRow[] | null> {
-	try {
-		// Query for reminders that are due (reminder_time <= now)
-		const reminderData = await sql`
-			SELECT * FROM reminders
-			WHERE reminder_time <= CURRENT_TIMESTAMP
-			ORDER BY reminder_time ASC
-		`;
+	return await withCachedPlanRetry(async () => {
+		try {
+			// Query for reminders that are due (reminder_time <= now)
+			const reminderData = await sql`
+				SELECT * FROM reminders
+				WHERE reminder_time <= CURRENT_TIMESTAMP
+				ORDER BY reminder_time ASC
+			`;
 
-		if (!reminderData) {
-			log.warn(
-				"Reminders data was unexpectedly null when fetching due reminders",
-			);
-			return [];
-		}
-
-		if (reminderData.length === 0) {
-			// log.info("No due reminders found");
-			return [];
-		}
-
-		// Validate each reminder row
-		const validatedReminders: ReminderRow[] = [];
-		for (const reminder of reminderData) {
-			const parsed = reminderSchema.safeParse(reminder);
-			if (parsed.success) {
-				validatedReminders.push(parsed.data);
-			} else {
+			if (!reminderData) {
 				log.warn(
-					`Invalid reminder data found in DB for reminder_id ${reminder.reminder_id}: ${JSON.stringify(reminder)}. Errors: ${parsed.error.flatten()}`,
+					"Reminders data was unexpectedly null when fetching due reminders",
 				);
+				return [];
 			}
-		}
 
-		log.info(`Found ${validatedReminders.length} due reminders`);
-		return validatedReminders;
-	} catch (error) {
-		log.error("Error loading due reminders from database:", error);
-		return null;
-	}
+			if (reminderData.length === 0) {
+				// log.info("No due reminders found");
+				return [];
+			}
+
+			// Validate each reminder row
+			const validatedReminders: ReminderRow[] = [];
+			for (const reminder of reminderData) {
+				const parsed = reminderSchema.safeParse(reminder);
+				if (parsed.success) {
+					validatedReminders.push(parsed.data);
+				} else {
+					log.warn(
+						`Invalid reminder data found in DB for reminder_id ${reminder.reminder_id}: ${JSON.stringify(reminder)}. Errors: ${parsed.error.flatten()}`,
+					);
+				}
+			}
+
+			log.info(`Found ${validatedReminders.length} due reminders`);
+			return validatedReminders;
+		} catch (error) {
+			log.error("Error loading due reminders from database:", error);
+			return null;
+		}
+	}, "load due reminders");
 }
 
 /**

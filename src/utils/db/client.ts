@@ -102,11 +102,35 @@ function createDatabaseClient(): SQL {
 // initialization when modules import sql before dotenv/Secrets Manager runs).
 let cachedClient: SQL | null = null;
 
+/**
+ * Gets the singleton database client, creating it on first access.
+ *
+ * @returns Configured SQL client instance
+ */
 function getClient(): SQL {
 	if (!cachedClient) {
 		cachedClient = createDatabaseClient();
 	}
 	return cachedClient;
+}
+
+/**
+ * Resets the database connection by clearing the cached client.
+ * This forces a new connection on the next query, which clears PostgreSQL
+ * prepared statement cache and resolves "cached plan must not change result type" errors.
+ *
+ * Use this when schema changes (migrations, extension installations) cause
+ * prepared statement cache invalidation.
+ */
+export function resetDatabaseConnection(): void {
+	if (cachedClient) {
+		// Bun's SQL client doesn't have an explicit close method, but clearing
+		// the reference allows garbage collection and forces reconnection
+		cachedClient = null;
+		console.log(
+			"\x1b[33m[WARN]\x1b[0m Database connection reset (prepared statement cache cleared)",
+		);
+	}
 }
 
 // Proxy keeps the same sql API (tagged template + helper methods) while
@@ -127,3 +151,60 @@ export const sql = new Proxy(
 		},
 	},
 ) as SQL;
+
+/**
+ * Executes a database query with automatic retry on cached plan errors.
+ *
+ * When PostgreSQL prepared statements become stale after schema changes,
+ * this wrapper detects the error, resets the connection (clearing the cache),
+ * and retries the query once.
+ *
+ * @param queryFn - Async function that executes the database query
+ * @param operationName - Descriptive name for logging (e.g., "load user", "load reminders")
+ * @returns Query result or null on failure
+ *
+ * @example
+ * ```typescript
+ * const reminders = await withCachedPlanRetry(
+ *   async () => await sql`SELECT * FROM reminders WHERE due_at <= NOW()`,
+ *   "load due reminders"
+ * );
+ * ```
+ */
+export async function withCachedPlanRetry<T>(
+	queryFn: () => Promise<T>,
+	operationName: string,
+): Promise<T | null> {
+	try {
+		return await queryFn();
+	} catch (error) {
+		// Check if this is a cached plan error
+		const errorMessage =
+			error instanceof Error ? error.message : String(error);
+		const isCachedPlanError =
+			errorMessage.includes("cached plan must not change result type");
+
+		if (isCachedPlanError) {
+			console.log(
+				`\x1b[33m[WARN]\x1b[0m Cached plan error detected during ${operationName}, resetting connection and retrying...`,
+			);
+
+			// Reset the connection to clear prepared statement cache
+			resetDatabaseConnection();
+
+			try {
+				// Retry the query with fresh connection
+				return await queryFn();
+			} catch (retryError) {
+				console.error(
+					`\x1b[31m[ERROR]\x1b[0m Retry failed for ${operationName}:`,
+					retryError,
+				);
+				return null;
+			}
+		}
+
+		// Not a cached plan error - rethrow for normal error handling
+		throw error;
+	}
+}
