@@ -161,10 +161,12 @@ Before running TomoriBot, ensure you have the following installed:
   - Don't forget to set `ACTIVATE_LOCAL_RAG` as true in your .env
 
   **Install and enable pgvector on Linux**
+  
     On Linux you will have to compile the extension first to run it.
     Follow these steps to enable vector support in your database.
   
-    **1. Install pgvector**
+    **1. Install dev headers**
+  
     If you haven't compiled the extension yet, run:
     ```bash
     sudo apt update
@@ -173,12 +175,12 @@ Before running TomoriBot, ensure you have the following installed:
     **2. Install pgvector**
     ``` bash
     cd /usr/local/src
-    sudo git clone [https://github.com/pgvector/pgvector.git](https://github.com/pgvector/pgvector.git)
+    sudo git clone https://github.com/pgvector/pgvector.git)
     cd pgvector
     sudo make
     sudo make install
     ```
-    **3. Clean up**
+    **3. Clean up (optional)**
     ```bash
     cd ..
     sudo rm -rf pgvector
