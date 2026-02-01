@@ -160,41 +160,42 @@ Before running TomoriBot, ensure you have the following installed:
   ```
   - Don't forget to set `ACTIVATE_LOCAL_RAG` as true in your .env
 
-  On Linux you will have to compile the extension first to run it.
-  Follow these steps to enable vector support in your database.
+  **Install and enable pgvector on Linux**
+    On Linux you will have to compile the extension first to run it.
+    Follow these steps to enable vector support in your database.
   
-  1. Install pgvector
-  If you haven't compiled the extension yet, run:
-```bash
-sudo apt update
-sudo apt install build-essential git postgresql-server-dev-all
-```
-2. Install pgvector
-``` bash
-cd /usr/local/src
-sudo git clone [https://github.com/pgvector/pgvector.git](https://github.com/pgvector/pgvector.git)
-cd pgvector
-sudo make
-sudo make install
-```
-3. Clean up
-```bash
-cd ..
-sudo rm -rf pgvector
-```
-4. Enable the database extension
-```bash
-# Enable the extension:
-sudo -u postgres psql -d tomoribot_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
-# Verify the installation:
-sudo -u postgres psql -d tomoribot_db -c "\dx vector"
-# you should see vector listed with its version number.
-```
-5. Add ENABLE_RAG to your .env
-```
-# RAG Settings
-ENABLE_RAG=true
-```
+    **1. Install pgvector**
+    If you haven't compiled the extension yet, run:
+    ```bash
+    sudo apt update
+    sudo apt install build-essential git postgresql-server-dev-all
+    ```
+    **2. Install pgvector**
+    ``` bash
+    cd /usr/local/src
+    sudo git clone [https://github.com/pgvector/pgvector.git](https://github.com/pgvector/pgvector.git)
+    cd pgvector
+    sudo make
+    sudo make install
+    ```
+    **3. Clean up**
+    ```bash
+    cd ..
+    sudo rm -rf pgvector
+    ```
+    **4. Enable the database extension**
+    ```bash
+    # Enable the extension:
+    sudo -u postgres psql -d tomoribot_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
+    # Verify the installation:
+    sudo -u postgres psql -d tomoribot_db -c "\dx vector"
+    # you should see vector listed with its version number.
+    ```
+   **5. Add ENABLE_RAG to your .env**
+    ```
+    # RAG Settings
+    ENABLE_RAG=true
+    ```
 
 * **Python 3** (Optional but recommended) - Required for URL Fetching MCP server tool
   ```sh
