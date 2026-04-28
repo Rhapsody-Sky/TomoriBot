@@ -79,4 +79,4 @@ Health is computed from:
 
 ## Optional Settings Website
 
-When `WEB_SETTINGS_ENABLED=true`, `src/web/settingsServer.ts` starts after Discord `clientReady`. The website listens on `WEB_SETTINGS_HOST` / `WEB_SETTINGS_PORT` and serves the admin dashboard at `/settings`.
+When `WEB_SETTINGS_ENABLED=true`, `src/web/index.ts` registers the optional settings dashboard plugin after Discord `clientReady`. The website listens on `WEB_SETTINGS_HOST` / `WEB_SETTINGS_PORT` and serves the dashboard at `/settings`.

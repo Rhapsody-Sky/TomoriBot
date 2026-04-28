@@ -4,11 +4,32 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
-import { THINKING_LEVEL_VALUES } from "@/constants/thinkingLevels";
-import { invalidateUserCache } from "@/utils/cache/userCache";
-import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
-import { sql } from "@/utils/db/client";
 import {
+  THINKING_LEVEL_VALUES,
+  NAI_IMAGE_NOISE_SCHEDULES,
+  NAI_IMAGE_SAMPLERS,
+  PrivacyLevel,
+  ProviderFactory,
+  type CustomEndpointApiStyle,
+  type CustomEndpointCapability,
+  type FallbackModelRef,
+  type OpenRouterModelCapability,
+  type PersonalProviderCapability,
+  type UserRow,
+  type UserSavedProviderConfigRow,
+  addPersonalMemoryByTomori,
+  addServerMemoryByTomori,
+  buildUserSavedProviderConfigFromExistingOrDefaults,
+  checkServerMemoryLimit,
+  deleteUserSavedProviderConfig,
+  encryptApiKey,
+  getAllProviderChoices,
+  getMemoryLimits,
+  getProviderDisplayName,
+  getStaticProviderInfo,
+  invalidateTomoriStateCache,
+  invalidateUserCache,
+  isCustomProvider,
   loadAvailableDiffusionModelsForProvider,
   loadAvailableEmbeddingModelsForProvider,
   loadAvailableModelsForProvider,
@@ -18,46 +39,25 @@ import {
   loadCustomEndpointsForUser,
   loadNaiPresetsForModel,
   loadSavedProviderConfigs,
+  loadRegisteredOpenRouterModelsForScope,
   loadUserSavedProviderConfig,
   loadUserSavedProviderConfigs,
-} from "@/utils/db/dbRead";
-import {
-  addPersonalMemoryByTomori,
-  addServerMemoryByTomori,
-  deleteUserSavedProviderConfig,
+  log,
+  personalMemorySchema,
   registerUser,
+  registerCustomEndpoint,
+  registerOpenRouterModelForScope,
+  removeCustomEndpointRegistration,
+  removeOpenRouterModelForScope,
   setFallbackModelRefs,
-  updateUser,
-  upsertUserSavedProviderConfig,
+  serverMemorySchema,
+  sql,
   updateTomori,
   updateTomoriConfig,
-} from "@/utils/db/dbWrite";
-import { checkServerMemoryLimit, getMemoryLimits, validateMemoryContent } from "@/utils/db/memoryLimits";
-import { NAI_IMAGE_NOISE_SCHEDULES, NAI_IMAGE_SAMPLERS } from "@/utils/image/naiImageParams";
-import { log } from "@/utils/misc/logger";
-import {
-  type CustomEndpointApiStyle,
-  type CustomEndpointCapability,
-  type FallbackModelRef,
-  type PersonalProviderCapability,
-  PrivacyLevel,
-  type UserRow,
-  type UserSavedProviderConfigRow,
-  personalMemorySchema,
-  serverMemorySchema,
-} from "@/types/db/schema";
-import { registerCustomEndpoint, removeCustomEndpointRegistration } from "@/utils/provider/customEndpointService";
-import { isCustomProvider } from "@/utils/provider/customProviderUtils";
-import {
-  type OpenRouterModelCapability,
-  loadRegisteredOpenRouterModelsForScope,
-  registerOpenRouterModelForScope,
-  removeOpenRouterModelForScope,
-} from "@/utils/provider/openrouterModelRegistry";
-import { ProviderFactory } from "@/utils/provider/providerFactory";
-import { getAllProviderChoices, getProviderDisplayName, getStaticProviderInfo } from "@/utils/provider/providerInfoRegistry";
-import { buildUserSavedProviderConfigFromExistingOrDefaults } from "@/utils/provider/savedProviderConfig";
-import { encryptApiKey } from "@/utils/security/crypto";
+  updateUser,
+  upsertUserSavedProviderConfig,
+  validateMemoryContent,
+} from "./tomoriCoreAdapter";
 
 const BASE_PATH = "/settings";
 const SESSION_COOKIE = "tomori_settings_session";

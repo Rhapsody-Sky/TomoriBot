@@ -45,6 +45,16 @@ http://localhost:3001/settings/oauth/callback
 
 For Docker or reverse-proxy deployments, set `WEB_SETTINGS_HOST=0.0.0.0` inside the container and set `WEB_SETTINGS_PUBLIC_URL` to the externally reachable HTTPS origin.
 
+## Plugin Boundary
+
+The dashboard is organized as an optional add-on under `src/web`.
+
+- `src/web/index.ts` exposes `registerSettingsDashboardPlugin(client)` for the bot entry point.
+- `src/web/settingsServer.ts` owns the HTTP server, OAuth/session handling, routes, UI, and dashboard-only validation.
+- `src/web/tomoriCoreAdapter.ts` is the single import boundary to TomoriBot internals such as DB helpers, provider helpers, cache invalidation, schemas, logging, and encryption.
+
+The main bot does not route through the dashboard. If core modules are renamed or moved later, the intended first repair point is the adapter instead of the dashboard route/UI code.
+
 ## Security Model
 
 - The browser stores only a signed opaque session cookie.

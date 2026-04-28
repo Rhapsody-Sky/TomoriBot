@@ -10,7 +10,7 @@ import { initializeLocalizer } from "./utils/text/localizer";
 import { getAppSecrets } from "./utils/security/secretsManager";
 import { keyManager } from "./utils/security/keyManager";
 import { healthTracker } from "./utils/misc/healthTracker";
-import { startSettingsWebsite } from "./web/settingsServer";
+import { registerSettingsDashboardPlugin } from "./web";
 
 config({ quiet: true });
 
@@ -423,9 +423,7 @@ client.once("clientReady", () => {
   log.success("Health tracker initialized");
 });
 
-client.once("clientReady", () => {
-  startSettingsWebsite(client);
-});
+registerSettingsDashboardPlugin(client);
 
 // Initialize shared scheduled work coordinator for reminders and random triggers
 log.section("Initializing Scheduled Work Coordinator...");
