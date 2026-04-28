@@ -266,9 +266,6 @@ SELECT add_column_if_not_exists('llms', 'is_uncensored', 'BOOLEAN', 'false');
 SELECT add_column_if_not_exists('llms', 'supports_structoutput', 'BOOLEAN', 'false');
 SELECT add_column_if_not_exists('llms', 'llm_description', 'TEXT');
 SELECT add_column_if_not_exists('llms', 'ja_description', 'TEXT');
-SELECT add_column_if_not_exists('image_diffusion_models', 'is_scoped_registration', 'BOOLEAN', 'false');
-SELECT add_column_if_not_exists('video_generation_models', 'is_scoped_registration', 'BOOLEAN', 'false');
-SELECT add_column_if_not_exists('embedding_models', 'is_scoped_registration', 'BOOLEAN', 'false');
 
 
 -- Removed updated_at trigger for llms table (static metadata, rarely changes)
@@ -347,6 +344,10 @@ CREATE INDEX IF NOT EXISTS idx_embedding_models_default ON embedding_models(is_d
 CREATE INDEX IF NOT EXISTS idx_embedding_models_family ON embedding_models(model_family);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_models_provider_codename
   ON embedding_models(provider, codename);
+
+SELECT add_column_if_not_exists('image_diffusion_models', 'is_scoped_registration', 'BOOLEAN', 'false');
+SELECT add_column_if_not_exists('video_generation_models', 'is_scoped_registration', 'BOOLEAN', 'false');
+SELECT add_column_if_not_exists('embedding_models', 'is_scoped_registration', 'BOOLEAN', 'false');
 
 -- Allow the same codename to exist under different providers for model metadata tables.
 DO $$

@@ -466,6 +466,16 @@ RUN_ENV=development
 
 If you want to tune optional limits, integrations, or provider-specific settings, copy the entries you need from `.env.optional.example` into your real `.env`.
 
+#### Optional Settings Website
+
+TomoriBot can host a Discord OAuth admin dashboard at `/settings`. It is disabled by default. Copy the `WEB_SETTINGS_*` values from `.env.optional.example`, set `WEB_SETTINGS_ENABLED=true`, and add your redirect URI in the Discord Developer Portal, for example:
+
+```text
+http://localhost:3001/settings/oauth/callback
+```
+
+See [`docs/systems/settings-website.md`](docs/systems/settings-website.md) for the route list and deployment notes.
+
 ### Running TomoriBot
 
 Once you've completed the configuration, start the bot:

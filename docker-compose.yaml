@@ -63,6 +63,10 @@ services:
     restart: unless-stopped
     networks:
       - tomori-network
+    ports:
+      # Optional settings website. Set WEB_SETTINGS_ENABLED=true and
+      # WEB_SETTINGS_HOST=0.0.0.0 to serve it from the container.
+      - "${WEB_SETTINGS_PORT:-3001}:${WEB_SETTINGS_PORT:-3001}"
     # Optional: Mount logs directory for debugging
     volumes:
       - ./logs:/app/logs:rw

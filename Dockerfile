@@ -103,9 +103,10 @@ ENV NODE_ENV=production
 ENV RUN_ENV=production
 ENV TOKENIZER_ASSET_DIR=./tokenizers
 
-# Expose health check port for AWS ECS monitoring
-# This port is only accessible from localhost inside the container
+# Expose health check port for AWS ECS monitoring and the optional settings website port.
+# The health port is only accessible from localhost inside the container.
 EXPOSE 3000
+EXPOSE 3001
 
 # Health check to ensure TomoriBot is running properly
 # Checks the HTTP health endpoint which verifies:

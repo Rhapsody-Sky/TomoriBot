@@ -29,6 +29,7 @@ This document reflects the current `src/index.ts` startup pipeline.
 14. Attach all event listeners (`eventHandler(client)`).
 15. Register post-ready startup hooks:
     - health tracker init
+    - optional settings website startup (`WEB_SETTINGS_ENABLED=true`)
     - scheduled work coordinator init (reminders + random triggers; next-due wakeups with reconcile fallback)
     - memory monitor init
 16. Initialize upload quota cleanup scheduler.
@@ -75,3 +76,7 @@ Health is computed from:
 - Discord ready state
 - websocket ping threshold
 - recent Discord event activity
+
+## Optional Settings Website
+
+When `WEB_SETTINGS_ENABLED=true`, `src/web/settingsServer.ts` starts after Discord `clientReady`. The website listens on `WEB_SETTINGS_HOST` / `WEB_SETTINGS_PORT` and serves the admin dashboard at `/settings`.

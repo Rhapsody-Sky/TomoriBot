@@ -42,8 +42,29 @@ export interface TomoriSecrets {
   MATRIX_APPSERVICE_PUBLIC_URL?: string; // Optional callback URL used in appservice registration for remote homeservers
   TOPGG_TOKEN?: string; // Optional: Top.gg API token for posting server stats
   CONTAINER_MEMORY_LIMIT_MB?: string; // Optional: AWS instance memory limit in MB (default: 1024)
+  WEB_SETTINGS_ENABLED?: string; // Optional: enable the hosted settings website
+  WEB_SETTINGS_HOST?: string;
+  WEB_SETTINGS_PORT?: string;
+  WEB_SETTINGS_PUBLIC_URL?: string;
+  WEB_SETTINGS_DISCORD_REDIRECT_URI?: string;
+  WEB_SETTINGS_DISCORD_CLIENT_ID?: string;
+  WEB_SETTINGS_DISCORD_CLIENT_SECRET?: string;
+  WEB_SETTINGS_SESSION_SECRET?: string;
+  WEB_SETTINGS_COOKIE_SECURE?: string;
   [key: string]: string | undefined; // Allow dynamic CRYPTO_SECRET_V* keys
 }
+
+const OPTIONAL_WEB_SETTINGS_SECRET_KEYS = [
+  "WEB_SETTINGS_ENABLED",
+  "WEB_SETTINGS_HOST",
+  "WEB_SETTINGS_PORT",
+  "WEB_SETTINGS_PUBLIC_URL",
+  "WEB_SETTINGS_DISCORD_REDIRECT_URI",
+  "WEB_SETTINGS_DISCORD_CLIENT_ID",
+  "WEB_SETTINGS_DISCORD_CLIENT_SECRET",
+  "WEB_SETTINGS_SESSION_SECRET",
+  "WEB_SETTINGS_COOKIE_SECURE",
+] as const;
 
 /**
  * Fetches application secrets from AWS Secrets Manager (production) or process.env (development).
@@ -176,6 +197,12 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
       secrets.CONTAINER_MEMORY_LIMIT_MB = process.env.CONTAINER_MEMORY_LIMIT_MB;
     }
 
+    for (const key of OPTIONAL_WEB_SETTINGS_SECRET_KEYS) {
+      if (process.env[key]) {
+        secrets[key] = process.env[key];
+      }
+    }
+
     // Validate required fields
     validateRequiredSecrets(secrets);
 
@@ -282,6 +309,12 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
     // Optional infrastructure config
     if (rawSecrets.CONTAINER_MEMORY_LIMIT_MB) {
       secrets.CONTAINER_MEMORY_LIMIT_MB = rawSecrets.CONTAINER_MEMORY_LIMIT_MB;
+    }
+
+    for (const key of OPTIONAL_WEB_SETTINGS_SECRET_KEYS) {
+      if (rawSecrets[key]) {
+        secrets[key] = rawSecrets[key];
+      }
     }
 
     // 7. Validate required fields

@@ -10,6 +10,7 @@ import { initializeLocalizer } from "./utils/text/localizer";
 import { getAppSecrets } from "./utils/security/secretsManager";
 import { keyManager } from "./utils/security/keyManager";
 import { healthTracker } from "./utils/misc/healthTracker";
+import { startSettingsWebsite } from "./web/settingsServer";
 
 config({ quiet: true });
 
@@ -95,6 +96,22 @@ if (secrets.TOPGG_TOKEN) {
 // Optional infrastructure config — must be set before any module reads MEMORY_PROTECTION()
 if (secrets.CONTAINER_MEMORY_LIMIT_MB) {
   process.env.CONTAINER_MEMORY_LIMIT_MB = secrets.CONTAINER_MEMORY_LIMIT_MB;
+}
+
+for (const key of [
+  "WEB_SETTINGS_ENABLED",
+  "WEB_SETTINGS_HOST",
+  "WEB_SETTINGS_PORT",
+  "WEB_SETTINGS_PUBLIC_URL",
+  "WEB_SETTINGS_DISCORD_REDIRECT_URI",
+  "WEB_SETTINGS_DISCORD_CLIENT_ID",
+  "WEB_SETTINGS_DISCORD_CLIENT_SECRET",
+  "WEB_SETTINGS_SESSION_SECRET",
+  "WEB_SETTINGS_COOKIE_SECURE",
+] as const) {
+  if (secrets[key]) {
+    process.env[key] = secrets[key];
+  }
 }
 
 log.success(
@@ -404,6 +421,10 @@ eventHandler(client);
 client.once("clientReady", () => {
   healthTracker.initialize(client);
   log.success("Health tracker initialized");
+});
+
+client.once("clientReady", () => {
+  startSettingsWebsite(client);
 });
 
 // Initialize shared scheduled work coordinator for reminders and random triggers

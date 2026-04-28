@@ -2089,6 +2089,7 @@ export async function upsertUserSavedProviderConfig(
     const provider = config.provider.toLowerCase();
     const enabledCapabilitiesLiteral = `{${(config.enabled_capabilities ?? []).map((capability) => `"${capability.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
     const fallbackJson = JSON.stringify(config.fallback_llm_ids ?? []);
+    const fallbackRefsJson = JSON.stringify(config.fallback_model_refs ?? []);
     const logitBiasesJson = JSON.stringify(config.llm_logit_biases ?? []);
     const disabledParamsLiteral = `{${(config.llm_disabled_params ?? []).map((param) => `"${param.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
 
@@ -2099,7 +2100,7 @@ export async function upsertUserSavedProviderConfig(
 				video_model_id,
 				nai_diffusion_model_id, vision_llm_id, nai_preset_name,
 				custom_endpoint_url, custom_model_name, custom_num_ctx, thinking_level,
-				enabled_capabilities, fallback_llm_ids,
+				enabled_capabilities, fallback_llm_ids, fallback_model_refs,
 				llm_temperature, llm_top_p, llm_top_k,
 				llm_frequency_penalty, llm_presence_penalty, llm_min_p,
 				llm_logit_biases, llm_disabled_params
@@ -2109,7 +2110,7 @@ export async function upsertUserSavedProviderConfig(
 				${config.video_model_id ?? null},
 				${config.nai_diffusion_model_id}, ${config.vision_llm_id ?? null}, ${config.nai_preset_name},
 				${config.custom_endpoint_url}, ${config.custom_model_name}, ${config.custom_num_ctx ?? null}, ${config.thinking_level},
-				${enabledCapabilitiesLiteral}::text[], ${fallbackJson}::jsonb,
+				${enabledCapabilitiesLiteral}::text[], ${fallbackJson}::jsonb, ${fallbackRefsJson}::jsonb,
 				${config.llm_temperature ?? null}, ${config.llm_top_p ?? null}, ${config.llm_top_k ?? null},
 				${config.llm_frequency_penalty ?? null}, ${config.llm_presence_penalty ?? null}, ${config.llm_min_p ?? null},
 				${logitBiasesJson}::jsonb, ${disabledParamsLiteral}::text[]
@@ -2130,6 +2131,7 @@ export async function upsertUserSavedProviderConfig(
 				thinking_level = EXCLUDED.thinking_level,
 				enabled_capabilities = EXCLUDED.enabled_capabilities,
 				fallback_llm_ids = EXCLUDED.fallback_llm_ids,
+				fallback_model_refs = EXCLUDED.fallback_model_refs,
 				llm_temperature = EXCLUDED.llm_temperature,
 				llm_top_p = EXCLUDED.llm_top_p,
 				llm_top_k = EXCLUDED.llm_top_k,
