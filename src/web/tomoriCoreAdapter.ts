@@ -41,6 +41,7 @@ export {
   type CustomEndpointCapability,
   type FallbackModelRef,
   type PersonalProviderCapability,
+  type TomoriRow,
   PrivacyLevel,
   type UserRow,
   type UserSavedProviderConfigRow,
@@ -59,3 +60,8 @@ export { ProviderFactory } from "@/utils/provider/providerFactory";
 export { getAllProviderChoices, getProviderDisplayName, getStaticProviderInfo } from "@/utils/provider/providerInfoRegistry";
 export { buildUserSavedProviderConfigFromExistingOrDefaults } from "@/utils/provider/savedProviderConfig";
 export { encryptApiKey } from "@/utils/security/crypto";
+export {
+  isLocalPersonaAvatarPath,
+  loadStoredPersonaAvatarBuffer,
+  resolvePersonaAvatarPublicUrl,
+} from "@/utils/storage/avatarStorage";

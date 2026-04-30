@@ -15,6 +15,7 @@ import {
   type FallbackModelRef,
   type OpenRouterModelCapability,
   type PersonalProviderCapability,
+  type TomoriRow,
   type UserRow,
   type UserSavedProviderConfigRow,
   addPersonalMemoryByTomori,
@@ -30,6 +31,8 @@ import {
   invalidateTomoriStateCache,
   invalidateUserCache,
   isCustomProvider,
+  isLocalPersonaAvatarPath,
+  loadStoredPersonaAvatarBuffer,
   loadAvailableDiffusionModelsForProvider,
   loadAvailableEmbeddingModelsForProvider,
   loadAvailableModelsForProvider,
@@ -49,6 +52,7 @@ import {
   registerOpenRouterModelForScope,
   removeCustomEndpointRegistration,
   removeOpenRouterModelForScope,
+  resolvePersonaAvatarPublicUrl,
   setFallbackModelRefs,
   serverMemorySchema,
   sql,
@@ -264,6 +268,11 @@ const personaUpdateSchema = z
     context_note: nullableString(4000),
     context_note_depth: z.number().int().min(0).max(100).optional(),
     nai_tags: z.array(z.string().trim().min(1).max(120)).max(80).optional(),
+    trigger_words: z.array(z.string().trim().min(1).max(80)).max(80).optional(),
+    persona_prompt: nullableString(8000),
+    reward_conditioning_enabled: z.boolean().optional(),
+    punish_conditioning_enabled: z.boolean().optional(),
+    llm_id: z.number().int().positive().nullable().optional(),
   })
   .strict();
 
@@ -898,15 +907,33 @@ function serializeConfig(config: GuildState["config"]) {
   return serialized;
 }
 
-function serializePersona(persona: GuildState["personas"][number]) {
+function dashboardPersonaAvatarUrl(persona: GuildState["personas"][number], guildId?: string): string | null {
+  const storedAvatar = persona.webhook_avatar_url ?? null;
+  const publicUrl = resolvePersonaAvatarPublicUrl(storedAvatar);
+  if (publicUrl) return publicUrl;
+  if (!storedAvatar || !guildId || !persona.tomori_id || !isLocalPersonaAvatarPath(storedAvatar)) return null;
+  return `${BASE_PATH}/api/guilds/${encodeURIComponent(guildId)}/personas/${persona.tomori_id}/avatar`;
+}
+
+function serializePersona(persona: GuildState["personas"][number], guildId?: string) {
   return {
     tomoriId: persona.tomori_id,
     personaLineageId: persona.persona_lineage_id ?? 0,
     nickname: persona.tomori_nickname,
     isAlter: persona.is_alter,
+    avatarUrl: dashboardPersonaAvatarUrl(persona, guildId),
+    hasStoredAvatar: Boolean(persona.webhook_avatar_url),
     contextNote: persona.context_note ?? "",
     contextNoteDepth: persona.context_note_depth ?? 0,
     naiTags: persona.nai_tags ?? [],
+    triggerWords: persona.trigger_words ?? [],
+    personaPrompt: persona.persona_prompt ?? "",
+    rewardConditioningEnabled: persona.reward_conditioning_enabled ?? true,
+    punishConditioningEnabled: persona.punish_conditioning_enabled ?? true,
+    personaLlmId: persona.persona_llm?.llm_id ?? null,
+    personaLlmLabel: persona.persona_llm
+      ? `${persona.persona_llm.llm_provider}/${persona.persona_llm.llm_codename}`
+      : "",
     memoryCount: persona.server_memories.length,
   };
 }
@@ -1097,6 +1124,77 @@ async function findDuplicatePersonalMemory(
             AND lower(trim(content)) = ${normalizedContent}
           LIMIT 1
         `;
+
+  return rows.length > 0;
+}
+
+async function findEditableLlmById(
+  llmId: number,
+  serverId: number,
+): Promise<{ llm_id: number; llm_codename: string } | null> {
+  const [model] = await sql<Array<{ llm_id: number; llm_codename: string }>>`
+    SELECT llm_id, llm_codename
+    FROM llms
+    WHERE llm_id = ${llmId}
+      AND COALESCE(is_deprecated, false) = false
+      AND (
+        COALESCE(is_scoped_registration, false) = false
+        OR (
+          llm_provider = 'openrouter'
+          AND EXISTS (
+            SELECT 1
+            FROM openrouter_model_registrations omr
+            WHERE omr.llm_id = llms.llm_id
+              AND omr.server_id = ${serverId}
+              AND omr.user_id IS NULL
+          )
+        )
+      )
+    LIMIT 1
+  `;
+
+  return model ?? null;
+}
+
+async function upsertPersonaDashboardConfig(
+  tomoriId: number,
+  config: {
+    triggerWords: string[];
+    personaPrompt: string | null;
+    rewardConditioningEnabled: boolean;
+    punishConditioningEnabled: boolean;
+    llmId: number | null;
+  },
+): Promise<boolean> {
+  const triggerWordsLiteral = `{${config.triggerWords
+    .map((trigger) => `"${trigger.replace(/(["\\])/g, "\\$1")}"`)
+    .join(",")}}`;
+
+  const rows = await sql`
+    INSERT INTO persona_configs (
+      tomori_id,
+      trigger_words,
+      persona_prompt,
+      reward_conditioning_enabled,
+      punish_conditioning_enabled,
+      llm_id
+    ) VALUES (
+      ${tomoriId},
+      ${triggerWordsLiteral}::text[],
+      ${config.personaPrompt},
+      ${config.rewardConditioningEnabled},
+      ${config.punishConditioningEnabled},
+      ${config.llmId}
+    )
+    ON CONFLICT (tomori_id) DO UPDATE SET
+      trigger_words = EXCLUDED.trigger_words,
+      persona_prompt = EXCLUDED.persona_prompt,
+      reward_conditioning_enabled = EXCLUDED.reward_conditioning_enabled,
+      punish_conditioning_enabled = EXCLUDED.punish_conditioning_enabled,
+      llm_id = EXCLUDED.llm_id,
+      updated_at = CURRENT_TIMESTAMP
+    RETURNING tomori_id
+  `;
 
   return rows.length > 0;
 }
@@ -1781,6 +1879,35 @@ button:disabled {
   padding: 14px;
   background: rgba(34, 41, 54, 0.72);
   backdrop-filter: blur(6px);
+}
+
+.persona-card-header {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.persona-avatar,
+.persona-avatar-fallback {
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(14, 17, 22, 0.78);
+}
+
+.persona-avatar {
+  object-fit: cover;
+}
+
+.persona-avatar-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 24px;
+  font-weight: 800;
 }
 
 .memory-meta,
@@ -3862,6 +3989,15 @@ function renderJs(): string {
     }
   }
 
+  function personaAvatarHtml(persona) {
+    const guild = state.guilds.find((item) => item.id === state.activeGuildId);
+    const avatarUrl = persona.avatarUrl || (!persona.isAlter ? guild?.iconUrl : "");
+    if (avatarUrl) {
+      return \`<img class="persona-avatar" src="\${escapeText(avatarUrl)}" alt="" loading="lazy" />\`;
+    }
+    return \`<div class="persona-avatar-fallback">\${escapeText(persona.nickname || "?").slice(0, 1).toUpperCase()}</div>\`;
+  }
+
   function renderPersonas() {
     if (!state.overview?.canManage) {
       state.tab = "personal-memories";
@@ -3883,7 +4019,13 @@ function renderJs(): string {
       const item = document.createElement("article");
       item.className = "persona-item";
       item.innerHTML = \`
-        <div class="persona-meta">\${persona.isAlter ? "Alter" : "Main"} - \${persona.memoryCount} memories</div>
+        <div class="persona-card-header">
+          \${personaAvatarHtml(persona)}
+          <div>
+            <div class="persona-meta">\${persona.isAlter ? "Alter" : "Main"} - \${persona.memoryCount} memories</div>
+            <strong>\${escapeText(persona.nickname)}</strong>
+          </div>
+        </div>
         <div class="settings-grid">
           <div class="field">
             <label>Nickname</label>
@@ -3897,6 +4039,26 @@ function renderJs(): string {
             <label>NovelAI Tags</label>
             <input data-persona-tags value="\${escapeText((persona.naiTags || []).join(", "))}" />
           </div>
+          <div class="field">
+            <label>Persona Model Override</label>
+            <select data-persona-llm>\${optionHtml(state.overview.modelOptions?.llms, persona.personaLlmId, true)}</select>
+          </div>
+          <div class="switch-row">
+            <label>Reward Conditioning</label>
+            <input data-persona-reward-conditioning type="checkbox" \${persona.rewardConditioningEnabled ? "checked" : ""} />
+          </div>
+          <div class="switch-row">
+            <label>Punish Conditioning</label>
+            <input data-persona-punish-conditioning type="checkbox" \${persona.punishConditioningEnabled ? "checked" : ""} />
+          </div>
+        </div>
+        <div class="field" style="margin-top: 12px">
+          <label>Trigger Words</label>
+          <textarea data-persona-trigger-words>\${escapeText((persona.triggerWords || []).join("\\n"))}</textarea>
+        </div>
+        <div class="field" style="margin-top: 12px">
+          <label>Persona Prompt</label>
+          <textarea data-persona-prompt>\${escapeText(persona.personaPrompt || "")}</textarea>
         </div>
         <div class="field" style="margin-top: 12px">
           <label>Context Note</label>
@@ -3917,6 +4079,12 @@ function renderJs(): string {
       .value.split(",")
       .map((tag) => tag.trim())
       .filter(Boolean);
+    const triggerWords = item
+      .querySelector("[data-persona-trigger-words]")
+      .value.split(/\\n|,/)
+      .map((trigger) => trigger.trim())
+      .filter(Boolean);
+    const llmValue = item.querySelector("[data-persona-llm]").value;
 
     try {
       setStatus("Saving persona...", "warn");
@@ -3927,6 +4095,11 @@ function renderJs(): string {
           context_note: item.querySelector("[data-persona-note]").value,
           context_note_depth: Number(item.querySelector("[data-persona-depth]").value),
           nai_tags: tags,
+          trigger_words: triggerWords,
+          persona_prompt: item.querySelector("[data-persona-prompt]").value,
+          reward_conditioning_enabled: item.querySelector("[data-persona-reward-conditioning]").checked,
+          punish_conditioning_enabled: item.querySelector("[data-persona-punish-conditioning]").checked,
+          llm_id: llmValue ? Number(llmValue) : null,
         }),
       });
       await loadOverview(state.activeGuildId);
@@ -4337,7 +4510,7 @@ export function startSettingsWebsite(client: Client): void {
       canManage: true,
       ...personalDashboard,
       config: serializeConfig(state.config),
-      personas: state.personas.map(serializePersona),
+      personas: state.personas.map((persona) => serializePersona(persona, guildId)),
       settingDefinitions: CONFIG_FIELD_DEFINITIONS,
       modelOptions: {
         ...modelOptions,
@@ -4398,6 +4571,31 @@ export function startSettingsWebsite(client: Client): void {
     });
   });
 
+  app.get(`${BASE_PATH}/api/guilds/:guildId/personas/:tomoriId/avatar`, async (context) => {
+    const session = getSession(context, config);
+    if (!session) return jsonError(context, 401, "auth_required");
+
+    const guildId = context.req.param("guildId");
+    const guild = await assertGuildAdmin(session, client, guildId);
+    if (!guild) return jsonError(context, 403, "guild_forbidden");
+
+    const state = await loadGuildState(guildId);
+    if (!state) return jsonError(context, 404, "server_not_setup");
+
+    const tomoriId = Number.parseInt(context.req.param("tomoriId"), 10);
+    const persona = state.personas.find((item) => item.tomori_id === tomoriId);
+    if (!persona?.webhook_avatar_url) return jsonError(context, 404, "persona_avatar_not_found");
+    if (!isLocalPersonaAvatarPath(persona.webhook_avatar_url)) return jsonError(context, 404, "persona_avatar_not_local");
+
+    const buffer = await loadStoredPersonaAvatarBuffer(persona.webhook_avatar_url);
+    if (!buffer) return jsonError(context, 404, "persona_avatar_not_found");
+
+    context.header("Content-Type", "image/png");
+    context.header("Cache-Control", "private, max-age=300");
+    const body = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    return context.body(body);
+  });
+
   app.patch(`${BASE_PATH}/api/guilds/:guildId/personas/:tomoriId`, async (context) => {
     const session = getSession(context, config);
     if (!session) return jsonError(context, 401, "auth_required");
@@ -4418,12 +4616,36 @@ export function startSettingsWebsite(client: Client): void {
     const parsed = personaUpdateSchema.safeParse(body);
     if (!parsed.success) return jsonError(context, 400, "invalid_persona_payload");
 
-    const updatedPersona = await updateTomori(tomoriId, parsed.data);
+    if (parsed.data.llm_id) {
+      const selectedLlm = await findEditableLlmById(parsed.data.llm_id, state.serverId);
+      if (!selectedLlm) return jsonError(context, 400, "invalid_persona_model");
+      if (selectedLlm.llm_codename === "other-model") return jsonError(context, 400, "register_openrouter_model_first");
+    }
+
+    const tomoriUpdates = withoutUndefined({
+      tomori_nickname: parsed.data.tomori_nickname,
+      context_note: parsed.data.context_note,
+      context_note_depth: parsed.data.context_note_depth,
+      nai_tags: parsed.data.nai_tags,
+    }) as Partial<TomoriRow>;
+    const updatedPersona = Object.keys(tomoriUpdates).length
+      ? await updateTomori(tomoriId, tomoriUpdates)
+      : persona;
     if (!updatedPersona) return jsonError(context, 500, "persona_update_failed");
+
+    const personaConfigSaved = await upsertPersonaDashboardConfig(tomoriId, {
+      triggerWords: parsed.data.trigger_words ?? persona.trigger_words ?? [],
+      personaPrompt: parsed.data.persona_prompt !== undefined ? parsed.data.persona_prompt : (persona.persona_prompt ?? null),
+      rewardConditioningEnabled:
+        parsed.data.reward_conditioning_enabled ?? persona.reward_conditioning_enabled ?? true,
+      punishConditioningEnabled: parsed.data.punish_conditioning_enabled ?? persona.punish_conditioning_enabled ?? true,
+      llmId: parsed.data.llm_id !== undefined ? parsed.data.llm_id : (persona.persona_llm?.llm_id ?? null),
+    });
+    if (!personaConfigSaved) return jsonError(context, 500, "persona_config_update_failed");
 
     invalidateTomoriStateCache(guildId);
     return context.json({
-      persona: serializePersona({ ...persona, ...updatedPersona }),
+      persona: serializePersona({ ...persona, ...updatedPersona }, guildId),
     });
   });
 

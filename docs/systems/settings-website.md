@@ -15,7 +15,7 @@ TomoriBot can host an optional settings website from the same Bun process as the
 - channel selectors for autochat, welcome, thought logs, RP suppression, private STM, and cross-channel blocklists
 - NovelAI preset/tag/image parameter controls and voice/media toggles
 - JSON memory import/export for server and signed-in personal memories
-- persona nickname, context note, context note depth, and NovelAI tag editing
+- persona avatars, nickname, trigger words, persona prompt, context note/depth, conditioning toggles, NovelAI tags, and model override editing
 - server memory list, add, edit, and delete flows
 - signed-in user taught server memory list, add, edit, and delete flows scoped to `server_memories.user_id`
 - signed-in user personal memory list, add, edit, delete, import, and export flows for global lineage `0` and the selected server's persona lineages
@@ -79,7 +79,8 @@ The main bot does not route through the dashboard. If core modules are renamed o
 - `DELETE /settings/api/personal-settings` resets the signed-in user's personal settings.
 - `GET /settings/api/guilds/:guildId/overview` returns personal dashboard data for shared guild users and server config data for admins.
 - `PATCH /settings/api/guilds/:guildId/config` updates dashboard-safe config fields.
-- `PATCH /settings/api/guilds/:guildId/personas/:tomoriId` updates persona basics.
+- `GET /settings/api/guilds/:guildId/personas/:tomoriId/avatar` serves a local stored persona avatar to admins.
+- `PATCH /settings/api/guilds/:guildId/personas/:tomoriId` updates persona basics plus persona-scoped trigger words, prompt, conditioning toggles, and text model override.
 - `GET /settings/api/guilds/:guildId/memories` lists server memories for a persona lineage.
 - `POST /settings/api/guilds/:guildId/memories` adds a server memory.
 - `PATCH /settings/api/guilds/:guildId/memories/:memoryId` edits a server memory.
