@@ -18,14 +18,14 @@ import type { FunctionCall, FunctionResponseImageMetadata, ThoughtLogEntry } fro
 import { ContextItemTag, type StructuredContextItem } from "../../types/misc/context";
 import { log } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
-import { isRegisteredOrReservedSpeakerLabel } from "../../utils/text/stringHelper";
+import { truncateBeforeGenericSpeakerLine } from "../../utils/text/stringHelper";
 import {
   getOpenRouterCapabilities,
   getOpenRouterSupportedParameters,
   getOpenRouterTokenLimits,
   isOpenRouterCapabilityCacheReady,
 } from "../../utils/cache/openrouterCapabilityCache";
-import { buildPersonaSpeakerStopString, buildProviderStopStrings } from "../utils/stopStrings";
+import { buildProviderStopStrings } from "../utils/stopStrings";
 import { fetchAndOptimizeImage } from "../../utils/image/imageProcessor";
 import { buildOpenrouterProviderRouting } from "./providerRouting";
 import { buildOpenRouterReasoningRequest } from "@/utils/provider/thinkingControl";
@@ -188,8 +188,6 @@ export class OpenrouterStreamAdapter implements StreamProvider {
   private speakerGuardPendingTail = "";
   private streamedTextTail = "";
   private speakerGuardEnabled = false;
-  private activePersonaNameLower = "";
-  private knownSpeakerNamesLower = new Set<string>();
 
   /**
    * Build OpenRouter chat messages from structured context.
@@ -400,11 +398,6 @@ export class OpenrouterStreamAdapter implements StreamProvider {
     this.speakerGuardPendingTail = "";
     this.streamedTextTail = "";
     this.speakerGuardEnabled = false;
-    this.activePersonaNameLower = (context.tomoriState.tomori_nickname ?? "").toLowerCase();
-    this.knownSpeakerNamesLower = this.collectKnownSpeakerNames(context.contextItems);
-    if (this.activePersonaNameLower) {
-      this.knownSpeakerNamesLower.add(this.activePersonaNameLower);
-    }
 
     // Cast config to OpenrouterStreamConfig to access provider-specific fields
     const openrouterConfig = config as OpenrouterStreamConfig;
@@ -445,11 +438,13 @@ export class OpenrouterStreamAdapter implements StreamProvider {
       const skippedUnsupportedParams: string[] = [];
       const normalizedModel = (config.model ?? "").toLowerCase();
       const omitTemperatureByModelOverride = OpenrouterStreamAdapter.TEMPERATURE_OMIT_MODELS.has(normalizedModel);
-      const personaSpeakerStop = buildPersonaSpeakerStopString(context.tomoriState.tomori_nickname);
+      const speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
       const stopStrings = buildProviderStopStrings({
         providerName: "openrouter",
         model: config.model,
         personaName: context.tomoriState.tomori_nickname,
+        configuredStops: context.tomoriState.config.llm_stop_strings,
+        includePersonaSpeakerStop: speakerStopPatternEnabled,
       });
       let stopParamSupported = false;
 
@@ -620,9 +615,9 @@ export class OpenrouterStreamAdapter implements StreamProvider {
         }
       }
 
-      this.speakerGuardEnabled = Boolean(personaSpeakerStop) && !stopParamSupported;
+      this.speakerGuardEnabled = speakerStopPatternEnabled;
       if (this.speakerGuardEnabled) {
-        log.info("OpenRouter: Speaker-boundary fallback guard enabled (stop parameter unsupported)");
+        log.info("OpenRouter: Speaker-boundary fallback guard enabled");
       }
 
       if (supportedParameters && skippedUnsupportedParams.length > 0) {
@@ -1001,31 +996,6 @@ export class OpenrouterStreamAdapter implements StreamProvider {
     }
   }
 
-  private collectKnownSpeakerNames(contextItems: StructuredContextItem[]): Set<string> {
-    const names = new Set<string>();
-
-    for (const item of contextItems) {
-      if (item.role !== "user" && item.role !== "model") continue;
-
-      for (const part of item.parts) {
-        if (part.type !== "text") continue;
-        const lines = part.text.split("\n");
-        for (const line of lines) {
-          const match = line.match(/^\s*([^\n:]{1,64}):\s*/);
-          if (!match) continue;
-
-          const rawName = match[1].trim();
-          if (!rawName) continue;
-          if (rawName.startsWith("[") || rawName.startsWith("<")) continue;
-
-          names.add(rawName.toLowerCase());
-        }
-      }
-    }
-
-    return names;
-  }
-
   private deduplicateChunkTextAgainstRecentStream(chunk: OpenrouterStreamChunk): OpenrouterStreamChunk {
     const firstChoice = chunk.choices?.[0];
     const content = firstChoice?.delta?.content;
@@ -1114,30 +1084,8 @@ export class OpenrouterStreamAdapter implements StreamProvider {
 
     const chunkText = String(content);
     const combined = `${this.speakerGuardPendingTail}${chunkText}`;
-
-    const speakerPattern = /\n+([^\n:]{1,64}):\s*/g;
-    let match: RegExpExecArray | null = null;
-    let matchedSpeaker: string | undefined;
-    let transitionIndex = -1;
-
-    while (true) {
-      match = speakerPattern.exec(combined);
-      if (!match) break;
-
-      const rawLabel = match[1].trim();
-      if (!isRegisteredOrReservedSpeakerLabel(rawLabel, this.knownSpeakerNamesLower)) {
-        continue;
-      }
-
-      const normalizedLabel = rawLabel.toLowerCase();
-      if (this.activePersonaNameLower && normalizedLabel === this.activePersonaNameLower) {
-        continue;
-      }
-
-      transitionIndex = match.index;
-      matchedSpeaker = rawLabel;
-      break;
-    }
+    const speakerGuardResult = truncateBeforeGenericSpeakerLine(combined);
+    const transitionIndex = speakerGuardResult.stopTriggered ? speakerGuardResult.text.length : -1;
 
     if (transitionIndex === -1) {
       const holdback = OpenrouterStreamAdapter.SPEAKER_GUARD_HOLDBACK_CHARS;
@@ -1159,7 +1107,7 @@ export class OpenrouterStreamAdapter implements StreamProvider {
     return {
       chunk,
       stopTriggered: true,
-      matchedSpeaker,
+      matchedSpeaker: speakerGuardResult.matchedSpeaker,
     };
   }
 

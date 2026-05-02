@@ -457,7 +457,8 @@ export class VertexProvider
   // ─── Config ─────────────────────────────────────────────────────────
 
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<VertexProviderConfig> {
-    const maxOutputTokens = Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
+    const maxOutputTokens =
+      tomoriState.config.llm_max_output_tokens ?? Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
     const disabledParams = tomoriState.config.llm_disabled_params ?? [];
     const temperature = getActiveTemperature(tomoriState.config);
     const topKDisabled = isParamDisabled(disabledParams, "topK");

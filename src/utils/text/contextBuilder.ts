@@ -291,10 +291,17 @@ export async function convertMentions(
           const cachedName = mentionCache.get(id);
           if (cachedName) return `${cachedName}`;
           try {
-            // Check if this is Tomori herself
+            // Preserve the display name that Discord users actually mentioned.
+            // `{bot}` still resolves to the active persona nickname later, but a
+            // raw <@botId> mention may be a guild nickname like "Ren".
             if (client.user && id === client.user.id && currentTomoriNickname) {
-              mentionCache.set(id, currentTomoriNickname);
-              return `${currentTomoriNickname}`;
+              const guild = serverId === "DM" ? null : client.guilds.cache.get(serverId);
+              const member = guild
+                ? (guild.members.cache.get(id) ?? (await guild.members.fetch(id).catch(() => null)))
+                : null;
+              const displayName = member?.displayName?.trim() || currentTomoriNickname;
+              mentionCache.set(id, displayName);
+              return `${displayName}`;
             }
 
             // Check if this is the triggerer and we have snapshot data

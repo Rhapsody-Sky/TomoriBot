@@ -1,15 +1,17 @@
 import type { ButtonInteraction, ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import { MessageFlags } from "discord.js";
 import { THINKING_LEVEL_VALUES, type ThinkingLevelValue, isThinkingLevelValue } from "@/constants/thinkingLevels";
-import type { ErrorContext, SavedProviderConfigRow, UserRow } from "@/types/db/schema";
+import type { ErrorContext, UserRow } from "@/types/db/schema";
+import { getCachedTomoriState, invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
+import { sql } from "@/utils/db/client";
+import { upsertSavedProviderConfig } from "@/utils/db/dbWrite";
 import { createStandardEmbed } from "@/utils/discord/embedHelper";
 import { replyInfoEmbed } from "@/utils/discord/interactionHelper";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
-import { localizer } from "@/utils/text/localizer";
-import { loadUserSavedProvidersForCapability } from "@/utils/provider/savedProviderConfig";
-import { upsertUserSavedProviderConfig } from "@/utils/db/dbWrite";
+import { loadSavedProvidersForCapability } from "@/utils/provider/savedProviderConfig";
 import { promptForSavedProvider } from "@/commands/config/model/providerPicker";
+import { localizer } from "@/utils/text/localizer";
 
 /**
  * Formats a list of changed sampler settings into a human-readable string.
@@ -25,12 +27,13 @@ function formatChangedSettings(locale: string, settings: Array<{ label: string; 
  */
 function getChangedSettingLabel(locale: string, setting: string): string {
   const labelKeys: Record<string, string> = {
-    temperature: "commands.config.samplers.sampler_temperature_label",
-    top_p: "commands.config.samplers.sampler_top_p_label",
-    top_k: "commands.config.samplers.sampler_top_k_label",
-    frequency_penalty: "commands.config.samplers.sampler_frequency_penalty_label",
-    presence_penalty: "commands.config.samplers.sampler_presence_penalty_label",
-    min_p: "commands.config.samplers.sampler_min_p_label",
+    temperature: "commands.config.parameters.sampler_temperature_label",
+    top_p: "commands.config.parameters.sampler_top_p_label",
+    top_k: "commands.config.parameters.sampler_top_k_label",
+    frequency_penalty: "commands.config.parameters.sampler_frequency_penalty_label",
+    presence_penalty: "commands.config.parameters.sampler_presence_penalty_label",
+    min_p: "commands.config.parameters.sampler_min_p_label",
+    max_output_tokens: "commands.config.parameters.sampler_max_output_tokens_label",
     thinking_level: "commands.config.thinking-level.select_label",
   };
 
@@ -39,12 +42,12 @@ function getChangedSettingLabel(locale: string, setting: string): string {
 
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
   subcommand
-    .setName("samplers")
-    .setDescription(localizer("en-US", "commands.personal.samplers.description"))
+    .setName("parameters")
+    .setDescription(localizer("en-US", "commands.config.parameters.description"))
     .addNumberOption((option) =>
       option
         .setName("temperature")
-        .setDescription(localizer("en-US", "commands.config.samplers.temperature_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.temperature_description"))
         .setMinValue(0)
         .setMaxValue(2)
         .setRequired(false),
@@ -52,7 +55,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("top_p")
-        .setDescription(localizer("en-US", "commands.config.samplers.top_p_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.top_p_description"))
         .setMinValue(0)
         .setMaxValue(1)
         .setRequired(false),
@@ -60,7 +63,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addIntegerOption((option) =>
       option
         .setName("top_k")
-        .setDescription(localizer("en-US", "commands.config.samplers.top_k_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.top_k_description"))
         .setMinValue(0)
         .setMaxValue(40)
         .setRequired(false),
@@ -68,7 +71,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("frequency_penalty")
-        .setDescription(localizer("en-US", "commands.config.samplers.frequency_penalty_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.frequency_penalty_description"))
         .setMinValue(-2)
         .setMaxValue(2)
         .setRequired(false),
@@ -76,7 +79,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("presence_penalty")
-        .setDescription(localizer("en-US", "commands.config.samplers.presence_penalty_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.presence_penalty_description"))
         .setMinValue(-2)
         .setMaxValue(2)
         .setRequired(false),
@@ -84,15 +87,23 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("min_p")
-        .setDescription(localizer("en-US", "commands.config.samplers.min_p_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.min_p_description"))
         .setMinValue(0)
         .setMaxValue(1)
+        .setRequired(false),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName("max_output_tokens")
+        .setDescription(localizer("en-US", "commands.config.parameters.max_output_tokens_description"))
+        .setMinValue(1)
+        .setMaxValue(131072)
         .setRequired(false),
     )
     .addStringOption((option) =>
       option
         .setName("thinking_level")
-        .setDescription(localizer("en-US", "commands.config.samplers.thinking_level_description"))
+        .setDescription(localizer("en-US", "commands.config.parameters.thinking_level_description"))
         .setRequired(false)
         .addChoices(
           ...THINKING_LEVEL_VALUES.map((value) => ({
@@ -117,7 +128,16 @@ export async function execute(
     });
     return;
   }
-  if (!userData.user_id) {
+
+  const serverId = interaction.guild?.id ?? interaction.user.id;
+  const tomoriState = await getCachedTomoriState(serverId);
+  if (!tomoriState) {
+    await replyInfoEmbed(interaction, locale, {
+      titleKey: "general.errors.tomori_not_setup_title",
+      descriptionKey: "general.errors.tomori_not_setup_description",
+      color: ColorCode.ERROR,
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
@@ -135,6 +155,7 @@ export async function execute(
     }
 
     // 2. Require at least one sampler value before showing the picker
+    const nextMaxOutputTokens = interaction.options.getInteger("max_output_tokens");
     const hasAnyChange =
       interaction.options.getNumber("temperature") !== null ||
       interaction.options.getNumber("top_p") !== null ||
@@ -142,28 +163,24 @@ export async function execute(
       interaction.options.getNumber("frequency_penalty") !== null ||
       interaction.options.getNumber("presence_penalty") !== null ||
       interaction.options.getNumber("min_p") !== null ||
+      nextMaxOutputTokens !== null ||
       nextThinkingLevel !== null;
 
     if (!hasAnyChange) {
       await replyInfoEmbed(interaction, locale, {
-        titleKey: "commands.config.samplers.no_changes_title",
-        descriptionKey: "commands.config.samplers.no_changes_description",
+        titleKey: "commands.config.parameters.no_changes_title",
+        descriptionKey: "commands.config.parameters.no_changes_description",
         color: ColorCode.WARN,
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
-    // 3. Load all saved personal text providers and present the picker.
-    //    UserSavedProviderConfigRow shares the `provider` field that promptForSavedProvider reads,
-    //    so the cast is safe — the picker only uses that field to build button labels.
-    const savedProviders = await loadUserSavedProvidersForCapability(userData.user_id, "text");
-    const providerSelection = await promptForSavedProvider(
-      interaction,
-      locale,
-      savedProviders as unknown as SavedProviderConfigRow[],
-      { descriptionKey: "commands.config.samplers.picker_description" },
-    );
+    // 3. Load all saved text providers and present the picker
+    const savedProviders = await loadSavedProvidersForCapability(tomoriState.server_id, "text");
+    const providerSelection = await promptForSavedProvider(interaction, locale, savedProviders, {
+      descriptionKey: "commands.config.parameters.picker_description",
+    });
     if (!providerSelection) return;
 
     const selectedProvider = providerSelection.provider;
@@ -203,6 +220,7 @@ export async function execute(
       llm_frequency_penalty: interaction.options.getNumber("frequency_penalty") ?? savedConfig.llm_frequency_penalty,
       llm_presence_penalty: interaction.options.getNumber("presence_penalty") ?? savedConfig.llm_presence_penalty,
       llm_min_p: interaction.options.getNumber("min_p") ?? savedConfig.llm_min_p,
+      llm_max_output_tokens: nextMaxOutputTokens ?? savedConfig.llm_max_output_tokens ?? null,
       thinking_level: (nextThinkingLevel as ThinkingLevelValue | null) ?? savedConfig.thinking_level,
     };
 
@@ -215,10 +233,16 @@ export async function execute(
       });
     }
     if (interaction.options.getNumber("top_p") !== null) {
-      changedSettings.push({ label: getChangedSettingLabel(locale, "top_p"), value: String(nextConfig.llm_top_p) });
+      changedSettings.push({
+        label: getChangedSettingLabel(locale, "top_p"),
+        value: String(nextConfig.llm_top_p),
+      });
     }
     if (interaction.options.getInteger("top_k") !== null) {
-      changedSettings.push({ label: getChangedSettingLabel(locale, "top_k"), value: String(nextConfig.llm_top_k) });
+      changedSettings.push({
+        label: getChangedSettingLabel(locale, "top_k"),
+        value: String(nextConfig.llm_top_k),
+      });
     }
     if (interaction.options.getNumber("frequency_penalty") !== null) {
       changedSettings.push({
@@ -233,7 +257,16 @@ export async function execute(
       });
     }
     if (interaction.options.getNumber("min_p") !== null) {
-      changedSettings.push({ label: getChangedSettingLabel(locale, "min_p"), value: String(nextConfig.llm_min_p) });
+      changedSettings.push({
+        label: getChangedSettingLabel(locale, "min_p"),
+        value: String(nextConfig.llm_min_p),
+      });
+    }
+    if (nextMaxOutputTokens !== null) {
+      changedSettings.push({
+        label: getChangedSettingLabel(locale, "max_output_tokens"),
+        value: String(nextConfig.llm_max_output_tokens),
+      });
     }
     if (nextThinkingLevel) {
       changedSettings.push({
@@ -242,9 +275,9 @@ export async function execute(
       });
     }
 
-    // 7. Persist the updated personal sampler config
-    const writeOk = await upsertUserSavedProviderConfig(userData.user_id, nextConfig);
-    if (!writeOk) {
+    // 7. Persist the updated sampler config
+    const upserted = await upsertSavedProviderConfig(tomoriState.server_id, nextConfig);
+    if (!upserted) {
       await replyWithResult({
         titleKey: "general.errors.update_failed_title",
         descriptionKey: "general.errors.update_failed_description",
@@ -253,11 +286,30 @@ export async function execute(
       return;
     }
 
+    // 8. Mirror sampler values into tomori_configs when this is the currently active provider,
+    //    so in-flight requests immediately reflect the new settings without a config switch.
+    if (selectedProvider === tomoriState.llm.llm_provider.toLowerCase()) {
+      await sql`
+        UPDATE tomori_configs
+        SET llm_temperature = ${nextConfig.llm_temperature},
+            llm_top_p = ${nextConfig.llm_top_p},
+            llm_top_k = ${nextConfig.llm_top_k},
+            llm_frequency_penalty = ${nextConfig.llm_frequency_penalty},
+            llm_presence_penalty = ${nextConfig.llm_presence_penalty},
+            llm_min_p = ${nextConfig.llm_min_p},
+            llm_max_output_tokens = ${nextConfig.llm_max_output_tokens ?? null},
+            thinking_level = ${nextConfig.thinking_level}
+        WHERE server_id = ${tomoriState.server_id}
+      `;
+    }
+
+    invalidateTomoriStateCache(serverId);
+
     await replyWithResult({
-      titleKey: "commands.personal.samplers.success_title",
-      descriptionKey: "commands.personal.samplers.success_description",
+      titleKey: "commands.config.parameters.success_title",
+      descriptionKey: "commands.config.parameters.success_description",
       descriptionVars: {
-        provider: getProviderDisplayName(savedConfig.provider),
+        provider: getProviderDisplayName(selectedProvider),
         settings: formatChangedSettings(locale, changedSettings),
       },
       color: ColorCode.SUCCESS,
@@ -265,14 +317,17 @@ export async function execute(
   } catch (error) {
     const context: ErrorContext = {
       userId: userData.user_id,
+      serverId: tomoriState.server_id,
+      tomoriId: tomoriState.tomori_id,
       errorType: "CommandExecutionError",
       metadata: {
-        command: "personal samplers",
+        command: "config parameters",
         guildId: interaction.guild?.id,
         executorDiscordId: interaction.user.id,
       },
     };
-    await log.error("Error executing /personal samplers", error as Error, context);
+    await log.error(`Error executing /config parameters for user ${userData.user_disc_id}`, error as Error, context);
+
     await replyInfoEmbed(interaction, locale, {
       titleKey: "general.errors.unknown_error_title",
       descriptionKey: "general.errors.unknown_error_description",

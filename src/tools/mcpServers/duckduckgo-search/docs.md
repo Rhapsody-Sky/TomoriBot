@@ -86,16 +86,16 @@ Structured metadata extraction including OpenGraph, Twitter Cards, and standard 
 Run instantly with NPX (no installation required):
 
 ```bash
-npx -y @oevortex/ddg_search@latest
+npx -y @oevortex/ddg_search@1.3.0
 ```
 
-> **Tip**: This downloads and runs the latest version directly – perfect for quick use with AI assistants!
+> **Tip**: This downloads and runs the pinned version directly - useful for quick use with AI assistants.
 
 ## 🛠️ Installation Options
 
 ### Global Installation
 ```bash
-npm install -g @oevortex/ddg_search
+npm install -g @oevortex/ddg_search@1.3.0
 ```
 
 Run globally:
@@ -122,7 +122,7 @@ Add to your MCP client configuration:
   "mcpServers": {
     "duckduckgo-search": {
       "command": "npx",
-      "args": ["-y", "@oevortex/ddg_search@latest"]
+      "args": ["-y", "@oevortex/ddg_search@1.3.0"]
     }
   }
 }
@@ -217,5 +217,5 @@ Tools work together seamlessly:
 ### MCP Inspector (Advanced)
 For deep debugging, use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
 ```bash
-npx @modelcontextprotocol/inspector npx -y @oevortex/ddg_search@latest
+npx @modelcontextprotocol/inspector npx -y @oevortex/ddg_search@1.3.0
 ```

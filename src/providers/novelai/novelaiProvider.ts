@@ -286,7 +286,7 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
       apiKey: apiKey,
       temperature: getActiveTemperature(tomoriState.config) ?? tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: 2048, // NovelAI's typical max length
+      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 2048,
       tools: tools,
     };
   }

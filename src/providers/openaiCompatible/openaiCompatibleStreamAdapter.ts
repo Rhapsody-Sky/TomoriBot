@@ -24,13 +24,12 @@ import type {
   StreamContext,
   StreamProvider,
 } from "@/types/stream/interfaces";
-import type { StructuredContextItem } from "@/types/misc/context";
 import { log } from "@/utils/misc/logger";
 import { isParamDisabled } from "@/utils/provider/samplingControl";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
 import { localizer } from "@/utils/text/localizer";
-import { isRegisteredOrReservedSpeakerLabel } from "@/utils/text/stringHelper";
-import { buildPersonaSpeakerStopString, buildProviderStopStrings } from "@/providers/utils/stopStrings";
+import { truncateBeforeGenericSpeakerLine } from "@/utils/text/stringHelper";
+import { buildProviderStopStrings } from "@/providers/utils/stopStrings";
 
 export class OpenAICompatibleStreamAdapter implements StreamProvider {
   private static readonly SPEAKER_GUARD_HOLDBACK_CHARS = 32;
@@ -44,8 +43,6 @@ export class OpenAICompatibleStreamAdapter implements StreamProvider {
   private insideThinkBlock = false;
   private pendingThinkBlockThoughtText = "";
   private speakerGuardEnabled = false;
-  private activePersonaNameLower = "";
-  private knownSpeakerNamesLower = new Set<string>();
 
   constructor(private readonly options: OpenAICompatibleStreamAdapterOptions) {}
 
@@ -67,11 +64,6 @@ export class OpenAICompatibleStreamAdapter implements StreamProvider {
     log.info(`${this.options.adapterName}: Using API URL: ${apiUrl}`);
 
     this.speakerGuardPendingTail = "";
-    this.activePersonaNameLower = (context.tomoriState.tomori_nickname ?? "").toLowerCase();
-    this.knownSpeakerNamesLower = this.collectKnownSpeakerNames(context.contextItems);
-    if (this.activePersonaNameLower) {
-      this.knownSpeakerNamesLower.add(this.activePersonaNameLower);
-    }
 
     // Determine whether the resolved endpoint accepts system-role messages.
     // The supportsSystemRole callback receives the final API URL and model so
@@ -110,15 +102,18 @@ export class OpenAICompatibleStreamAdapter implements StreamProvider {
         requestBody.temperature = config.temperature;
       }
 
-      const personaSpeakerStop = buildPersonaSpeakerStopString(context.tomoriState.tomori_nickname);
-      this.speakerGuardEnabled = this.options.enableSpeakerGuard !== false && Boolean(personaSpeakerStop);
+      const speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
+      const includePersonaSpeakerStop = speakerStopPatternEnabled && this.options.includePersonaSpeakerStop !== false;
+      this.speakerGuardEnabled = speakerStopPatternEnabled && this.options.enableSpeakerGuard !== false;
       if (this.speakerGuardEnabled) {
         log.info(`${this.options.adapterName}: Speaker-boundary fallback guard enabled`);
       }
       const stopStrings = buildProviderStopStrings({
         providerName: this.options.providerName,
         model: config.model,
-        personaName: this.options.includePersonaSpeakerStop === false ? null : context.tomoriState.tomori_nickname,
+        personaName: context.tomoriState.tomori_nickname,
+        configuredStops: context.tomoriState.config.llm_stop_strings,
+        includePersonaSpeakerStop,
       });
       if (stopStrings) {
         requestBody.stop = stopStrings;
@@ -543,37 +538,6 @@ export class OpenAICompatibleStreamAdapter implements StreamProvider {
     };
   }
 
-  private collectKnownSpeakerNames(contextItems: StructuredContextItem[]): Set<string> {
-    const names = new Set<string>();
-
-    for (const item of contextItems) {
-      if (item.role !== "user" && item.role !== "model") {
-        continue;
-      }
-
-      for (const part of item.parts) {
-        if (part.type !== "text") {
-          continue;
-        }
-
-        for (const line of part.text.split("\n")) {
-          const match = line.match(/^\s*([^\n:]{1,64}):\s*/);
-          if (!match) {
-            continue;
-          }
-
-          const rawName = match[1].trim();
-          if (!rawName || rawName.startsWith("[") || rawName.startsWith("<")) {
-            continue;
-          }
-          names.add(rawName.toLowerCase());
-        }
-      }
-    }
-
-    return names;
-  }
-
   private stripThinkBlocksFromChunkContent(chunk: OpenAICompatibleStreamChunk): OpenAICompatibleStreamChunk {
     if (this.options.stripThinkBlocksFromContent === false) {
       return chunk;
@@ -778,31 +742,8 @@ export class OpenAICompatibleStreamAdapter implements StreamProvider {
     }
 
     const combined = `${this.speakerGuardPendingTail}${String(content)}`;
-    const speakerPattern = /\n+([^\n:]{1,64}):\s*/g;
-    let match: RegExpExecArray | null = null;
-    let matchedSpeaker: string | undefined;
-    let transitionIndex = -1;
-
-    while (true) {
-      match = speakerPattern.exec(combined);
-      if (!match) {
-        break;
-      }
-
-      const rawLabel = match[1].trim();
-      if (!isRegisteredOrReservedSpeakerLabel(rawLabel, this.knownSpeakerNamesLower)) {
-        continue;
-      }
-
-      const normalizedLabel = rawLabel.toLowerCase();
-      if (this.activePersonaNameLower && normalizedLabel === this.activePersonaNameLower) {
-        continue;
-      }
-
-      transitionIndex = match.index;
-      matchedSpeaker = rawLabel;
-      break;
-    }
+    const speakerGuardResult = truncateBeforeGenericSpeakerLine(combined);
+    const transitionIndex = speakerGuardResult.stopTriggered ? speakerGuardResult.text.length : -1;
 
     if (transitionIndex === -1) {
       const holdback = OpenAICompatibleStreamAdapter.SPEAKER_GUARD_HOLDBACK_CHARS;
@@ -823,7 +764,7 @@ export class OpenAICompatibleStreamAdapter implements StreamProvider {
     return {
       chunk,
       stopTriggered: true,
-      matchedSpeaker,
+      matchedSpeaker: speakerGuardResult.matchedSpeaker,
     };
   }
 

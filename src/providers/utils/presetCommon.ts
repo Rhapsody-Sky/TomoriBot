@@ -8,6 +8,7 @@
  * tool adapter integration, and response format negotiation.
  */
 import type { ToolResult } from "@/types/tool/interfaces";
+import { PRESET_MAX_STRING_LENGTH } from "@/types/preset/presetExport";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,38 +50,37 @@ export interface PresetToolCall {
  * is injected into the system prompt alongside `buildPresetPrompt()`.
  */
 export function buildPresetResponseSchema() {
+  const maxStringLength = PRESET_MAX_STRING_LENGTH;
+
   return {
     type: "object" as const,
     properties: {
       attribute_list: {
         type: "array" as const,
-        description:
-          "Array containing exactly 6 items describing different facets of the character, in this exact order: 1) {bot}'s Description (core identity and essence), 2) {bot}'s Appearance (physical traits and style), 3) {bot}'s Personality (personality traits, comma-separated), 4) {bot}'s Likes (interests and preferences), 5) {bot}'s Dislikes (aversions and pet peeves), 6) {bot}'s Behavioral Quirks (unique mannerisms and patterns). Each item maximum 2000 characters, in this specific format per array item: \"{bot}'s Description: \"",
+        description: `Array containing exactly 6 items describing different facets of the character, in this exact order: 1) {bot}'s Description (core identity and essence), 2) {bot}'s Appearance (physical traits and style), 3) {bot}'s Personality (personality traits, comma-separated), 4) {bot}'s Likes (interests and preferences), 5) {bot}'s Dislikes (aversions and pet peeves), 6) {bot}'s Behavioral Quirks (unique mannerisms and patterns). Each item maximum ${maxStringLength} characters, in this specific format per array item: "{bot}'s Description: "`,
         items: {
           type: "string" as const,
-          maxLength: 2000,
+          maxLength: maxStringLength,
         },
         minItems: 6,
         maxItems: 6,
       },
       sample_dialogues_in: {
         type: "array" as const,
-        description:
-          "Array of exactly 5 example user messages. MUST include these 3 guided scenarios in order: 1) Self-introduction request, 2) Emotional/personal scenario, 3) Practical/functional scenario. Then add 2 free dialogue scenarios that showcase unique character traits. Do NOT prepend with speaker names. Each message maximum 2000 characters.",
+        description: `Array of exactly 5 example user messages. MUST include these 3 guided scenarios in order: 1) Self-introduction request, 2) Emotional/personal scenario, 3) Practical/functional scenario. Then add 2 free dialogue scenarios that showcase unique character traits. Do NOT prepend with speaker names. Each message maximum ${maxStringLength} characters.`,
         items: {
           type: "string" as const,
-          maxLength: 2000,
+          maxLength: maxStringLength,
         },
         minItems: 5,
         maxItems: 5,
       },
       sample_dialogues_out: {
         type: "array" as const,
-        description:
-          "Array of exactly 5 character responses paired with sample_dialogues_in. Should reflect the character's speaking style, personality, and demonstrate their full range across the 3 guided scenarios and 2 free scenarios. Do NOT prepend with speaker names. Each response maximum 2000 characters.",
+        description: `Array of exactly 5 character responses paired with sample_dialogues_in. Should reflect the character's speaking style, personality, and demonstrate their full range across the 3 guided scenarios and 2 free scenarios. Do NOT prepend with speaker names. Each response maximum ${maxStringLength} characters.`,
         items: {
           type: "string" as const,
-          maxLength: 2000,
+          maxLength: maxStringLength,
         },
         minItems: 5,
         maxItems: 5,
@@ -111,6 +111,7 @@ export function buildPresetPrompt(params: {
   useWebSearch?: boolean;
   existingPresetContext?: string;
 }): string {
+  const maxStringLength = PRESET_MAX_STRING_LENGTH;
   let prompt = `You are an expert character creator for a Discord chatbot. Create a detailed character profile based on the following information.
 
 Character Name: ${params.characterName}
@@ -190,14 +191,14 @@ ${params.existingPresetContext.trim()}`;
   prompt += `\n\nIMPORTANT:
 - Respond with COMPLETE valid JSON only
 - Follow the exact schema provided with strict length limits
-- Exactly 6 items in attribute_list in the exact order specified above (each MAX 2000 characters)
+- Exactly 6 items in attribute_list in the exact order specified above (each MAX ${maxStringLength} characters)
 - Exactly 5 dialogue pairs following the 3 GUIDED + 2 FREE structure in the exact order specified
-- sample_dialogues_in: Keep user messages concise (1-3 sentences, MAX 2000 characters each)
-- sample_dialogues_out: Character responses can be longer and more detailed to showcase personality (MAX 2000 characters each)
+- sample_dialogues_in: Keep user messages concise (1-3 sentences, MAX ${maxStringLength} characters each)
+- sample_dialogues_out: Character responses can be longer and more detailed to showcase personality (MAX ${maxStringLength} characters each)
 - No speaker name prefixes in any dialogue (no "User:", "Character:", "{user}:", "{bot}:", etc.)
 - Use "{user}" placeholder when character refers to other people in their responses
 - Use "{bot}" placeholder when character refers to themselves in their responses
-- All string lengths must not exceed 2000 characters per item`;
+- All string lengths must not exceed ${maxStringLength} characters per item`;
 
   return prompt;
 }

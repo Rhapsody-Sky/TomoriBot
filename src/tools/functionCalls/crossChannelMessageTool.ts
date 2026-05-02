@@ -15,6 +15,7 @@ import { isRefreshMarkerEmbed } from "../../utils/discord/embedDetection";
 import { resolveChannelTarget } from "@/utils/discord/targetResolver";
 import { resolveContextAuthorLabel } from "@/utils/discord/contextAuthorLabel";
 import { normalizeMessageFetchLimit } from "@/utils/discord/messageFetchLimit";
+import { convertMentions } from "@/utils/text/contextBuilder";
 
 // ─── Boomerang Mechanism ─────────────────────────────────────────────
 // Stores pending boomerang data keyed by source channel ID.
@@ -82,11 +83,11 @@ export function buildBoomerangContext(boomerang: PendingBoomerang): StructuredCo
   const resultStr = boomerang.success ? "Success" : `Failed: ${boomerang.error ?? "unknown error"}`;
 
   let contextText =
-    `[System: You have just returned from #${boomerang.targetChannelName}.\n` +
+    `[System: You have just returned from channel \`${boomerang.targetChannelName}\`.\n` +
     `Report back naturally on what happened there.\n` +
     `Outcome: ${resultStr}.`;
   if (messagesBlock) {
-    contextText += `\nHere is what was happening in #${boomerang.targetChannelName} (last 10 messages, newest first):\n${messagesBlock}`;
+    contextText += `\nHere is what was happening in channel \`${boomerang.targetChannelName}\` (last 10 messages, newest first):\n${messagesBlock}`;
   }
   contextText += "\nNow continue the conversation here with a concise update.]";
 
@@ -109,7 +110,7 @@ export function buildBoomerangContext(boomerang: PendingBoomerang): StructuredCo
 export class CrossChannelMessageTool extends BaseTool {
   name = "cross_channel_message";
   description =
-    "Send an instant message to a different channel or thread in the same server, or silently peek its recent message history. Use this when you want to immediately say something, ask a question, or perform a task in another channel or thread (NOT for scheduled or recurring posts; use create_task for those). Set peek_only to true to read what is happening there without sending any message. Optionally enable 'boomerang' to report back to the current channel about what you did.";
+    "Send an instant message to a different channel in the same server, or silently peek its recent message history. Use this when you want to immediately say something, ask a question, or perform a task in another channel (NOT for scheduled or recurring posts; use create_task for those). Set peek_only to true to read what is happening there without sending any message. Optionally enable 'boomerang' to report back to the current channel about what you did.";
   category = "discord" as const;
 
   parameters: ToolParameterSchema = {
@@ -118,7 +119,7 @@ export class CrossChannelMessageTool extends BaseTool {
       target_channel: {
         type: "string",
         description:
-          "Name of the target channel or active thread in the current server. Accepts natural channel/thread labels like 'general' or '#general'. If the prompt shows a copyable inline-code label like `#general (ID: ...)`, prefer copying that exact label to avoid ambiguity. A raw Discord channel/thread ID is also accepted.",
+          "Name of the target channel in the current server. If the conversation shows a channel in inline-code like `general` or `general (ID: ...)`, copy the exact name inside the backticks. A raw Discord channel ID is also accepted.",
       },
       task: {
         type: "string",
@@ -199,10 +200,10 @@ export class CrossChannelMessageTool extends BaseTool {
     if (!requestedChannel) {
       return {
         success: false,
-        error: "The 'target_channel' parameter is required to identify the target channel or thread.",
+        error: "The 'target_channel' parameter is required to identify the target channel.",
         data: {
           status: "cross_channel_failed_missing_channel",
-          reason: "No target channel or thread was provided.",
+          reason: "No target channel was provided.",
         },
       };
     }
@@ -253,10 +254,10 @@ export class CrossChannelMessageTool extends BaseTool {
       const candidateLabels = channelResolution.candidates.map((c) => c.label).join(", ");
       return {
         success: false,
-        error: `Multiple channels or threads match "${requestedChannel}". Please clarify using the exact inline-code label or raw ID:\n${candidateLabels}${overflowNote}`,
+        error: `Multiple channels match "${requestedChannel}". Please clarify by copying the exact inline-code label or using a raw ID:\n${candidateLabels}${overflowNote}`,
         data: {
           status: "cross_channel_failed_ambiguous_channel",
-          reason: "Multiple channels or threads matched the requested target.",
+          reason: "Multiple channels matched the requested target.",
           candidates: channelResolution.candidates.map((c) => c.label),
           total_matches: channelResolution.totalCount,
         },
@@ -266,10 +267,10 @@ export class CrossChannelMessageTool extends BaseTool {
     if (channelResolution.status === "not_found") {
       return {
         success: false,
-        error: `Could not find a text channel or thread matching "${requestedChannel}" in this server.`,
+        error: `Could not find a channel matching "${requestedChannel}" in this server. If a channel was shown in backticks in the conversation (e.g. \`name (ID: ...)\`), use that exact label or the raw ID.`,
         data: {
           status: "cross_channel_failed_channel_not_found",
-          reason: "Target channel or thread was not found or is not text-based.",
+          reason: "Target channel was not found or is not text-based.",
         },
       };
     }
@@ -281,10 +282,10 @@ export class CrossChannelMessageTool extends BaseTool {
       return {
         success: false,
         error:
-          "Cannot send a cross-channel message to the same channel or thread you are already in. Just speak normally instead.",
+          "Cannot send a cross-channel message to the same channel you are already in. Just speak normally instead.",
         data: {
           status: "cross_channel_failed_same_channel",
-          reason: "Target channel or thread is the same as source.",
+          reason: "Target channel is the same as source.",
         },
       };
     }
@@ -323,7 +324,7 @@ export class CrossChannelMessageTool extends BaseTool {
       if (perms && !perms.has(PermissionFlagsBits.ViewChannel)) {
         return {
           success: false,
-          error: `I don't have permission to view #${targetChannel.name}.`,
+          error: `I don't have permission to view channel \`${targetChannel.name}\`.`,
           data: {
             status: "cross_channel_failed_no_view_permission",
             reason: "Missing ViewChannel permission.",
@@ -338,16 +339,12 @@ export class CrossChannelMessageTool extends BaseTool {
         const sendPermission = isThread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
 
         if (perms && !perms.has(sendPermission)) {
-          const permissionName = isThread ? "SendMessagesInThreads" : "SendMessages";
-          const targetName = isThread ? `thread "${targetChannel.name}"` : `#${targetChannel.name}`;
           return {
             success: false,
-            error: `I don't have permission to send messages in ${targetName}.`,
+            error: `I don't have permission to send messages in channel \`${targetChannel.name}\`.`,
             data: {
-              status: isThread
-                ? "cross_channel_failed_no_send_in_threads_permission"
-                : "cross_channel_failed_no_send_permission",
-              reason: `Missing ${permissionName} permission.`,
+              status: "cross_channel_failed_no_send_permission",
+              reason: `Missing ${isThread ? "SendMessagesInThreads" : "SendMessages"} permission.`,
             },
           };
         }
@@ -367,7 +364,7 @@ export class CrossChannelMessageTool extends BaseTool {
       if (!recentMessages || recentMessages.size === 0) {
         return {
           success: true,
-          message: `#${targetChannel.name} has no messages.`,
+          message: `Channel \`${targetChannel.name}\` has no messages.`,
           data: {
             status: "cross_channel_peek_complete",
             target_channel_name: targetChannel.name,
@@ -397,7 +394,16 @@ export class CrossChannelMessageTool extends BaseTool {
             tomoriNickname: context.tomoriState.tomori_nickname,
             personalMemoriesEnabled: context.tomoriState.config.personal_memories_enabled,
           }),
-          content: m.content || "(no text content)",
+          content: m.content
+            ? await convertMentions(
+                m.content,
+                context.client,
+                context.guildId ?? "",
+                undefined,
+                context.tomoriState.tomori_nickname,
+                context.tomoriState.config.personal_memories_enabled,
+              )
+            : "(no text content)",
           timestamp: m.createdAt.toISOString(),
         })),
       );
@@ -408,7 +414,7 @@ export class CrossChannelMessageTool extends BaseTool {
 
       return {
         success: true,
-        message: `Fetched ${formattedMessages.length} recent messages from #${targetChannel.name}.`,
+        message: `Fetched ${formattedMessages.length} recent messages from channel \`${targetChannel.name}\`.`,
         data: {
           status: "cross_channel_peek_complete",
           target_channel_name: targetChannel.name,
@@ -442,7 +448,7 @@ export class CrossChannelMessageTool extends BaseTool {
     if (!lastMessage) {
       return {
         success: false,
-        error: `Could not fetch or create a context message in #${targetChannel.name}.`,
+        error: `Could not fetch or create a context message in channel \`${targetChannel.name}\`.`,
         data: {
           status: "cross_channel_failed_no_context_message",
           reason: "No messages available in target channel.",
@@ -553,7 +559,16 @@ export class CrossChannelMessageTool extends BaseTool {
                 tomoriNickname: context.tomoriState.tomori_nickname,
                 personalMemoriesEnabled: context.tomoriState.config.personal_memories_enabled,
               }),
-              content: m.content || "(no text content)",
+              content: m.content
+                ? await convertMentions(
+                    m.content,
+                    context.client,
+                    context.guildId ?? "",
+                    undefined,
+                    context.tomoriState.tomori_nickname,
+                    context.tomoriState.config.personal_memories_enabled,
+                  )
+                : "(no text content)",
               timestamp: m.createdAt.toISOString(),
             })),
           );
@@ -585,19 +600,19 @@ export class CrossChannelMessageTool extends BaseTool {
         return {
           success: true,
           endTurn: true,
-          message: `You just returned from #${targetChannel.name}.`,
+          message: `You just returned from channel \`${targetChannel.name}\`.`,
           data: {
             status: "cross_channel_visit_complete",
             target_channel_name: targetChannel.name,
             boomerang: true,
-            note: `You are back from #${targetChannel.name}. Report what happened there without restating the full assignment.`,
+            note: `You are back from channel \`${targetChannel.name}\`. Report what happened there without restating the full assignment.`,
           },
         };
       }
 
       return {
         success: true,
-        message: `Message sent to #${targetChannel.name}.`,
+        message: `Message sent to channel \`${targetChannel.name}\`.`,
         data: {
           status: "cross_channel_message_sent",
           target_channel_name: targetChannel.name,
@@ -625,7 +640,7 @@ export class CrossChannelMessageTool extends BaseTool {
 
       return {
         success: false,
-        error: `Failed to send message in #${targetChannel.name}: ${error instanceof Error ? error.message : "Unknown error"}`,
+        error: `Failed to send message in channel \`${targetChannel.name}\`: ${error instanceof Error ? error.message : "Unknown error"}`,
         data: {
           status: "cross_channel_failed_dispatch_error",
           reason: error instanceof Error ? error.message : "Unknown error",

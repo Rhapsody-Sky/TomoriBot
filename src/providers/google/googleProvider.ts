@@ -461,8 +461,9 @@ export class GoogleProvider
    * @returns Promise<GoogleProviderConfig> - Provider-specific configuration object
    */
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<GoogleProviderConfig> {
-    // Resolve max output tokens from env var with default fallback
-    const maxOutputTokens = Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
+    // Resolve max output tokens: user config takes priority, then env var, then hardcoded default
+    const maxOutputTokens =
+      tomoriState.config.llm_max_output_tokens ?? Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
     const modelCodename = tomoriState.llm.llm_codename;
     const disabledParams = tomoriState.config.llm_disabled_params ?? [];
     const temperature = getActiveTemperature(tomoriState.config);

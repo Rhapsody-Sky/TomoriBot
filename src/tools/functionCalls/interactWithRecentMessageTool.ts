@@ -312,6 +312,18 @@ export class InteractWithRecentMessageTool extends BaseTool {
       };
     }
 
+    if (action === "reply" && context.streamContext?.disableRecentMessageReplyTool) {
+      log.info("InteractWithRecentMessageTool: Reply action blocked because this turn is already a queued reply");
+      return {
+        success: false,
+        error: "Message reply interaction is disabled for this turn.",
+        message: "This turn is already replying to the queued message directly.",
+        data: {
+          status: "message_reply_interaction_disabled_for_turn",
+        },
+      };
+    }
+
     const rawMessageId = (
       typeof args.__original_message_id === "string" ? (args.__original_message_id as string) : messageIdResult.rawValue
     ).trim();

@@ -1,6 +1,6 @@
 # Use the official Bun image as base
 # Think of this as choosing the "apartment building type" - Bun comes pre-installed
-FROM oven/bun:1.2.12-alpine AS base
+FROM oven/bun:1.2.12-alpine@sha256:d56cd65ffd4101fe999eb6940e3bfe2a59d9bd021cdb9bca3305267b6cff0b79 AS base
 
 # Set the working directory inside the container
 # This is like choosing which floor/apartment number TomoriBot lives in
@@ -21,8 +21,7 @@ RUN apk update && apk upgrade && \
     py3-pip \
     nodejs \
     npm && \
-    ln -sf /usr/bin/python3 /usr/bin/python && \
-    npm install -g @mozilla/readability jsdom turndown
+    ln -sf /usr/bin/python3 /usr/bin/python
 
 # Note: DuckDuckGo MCP server is run via bunx (see pre-cache step below as tomori user)
 # No global npm install needed - bunx handles package resolution at runtime
@@ -38,10 +37,10 @@ RUN chown -R tomori:tomori /app
 # Switch to non-root user
 USER tomori
 
-# Add user's local bin directory to PATH for pip installed scripts
+# Add project/user bin directories to PATH for installed MCP server scripts
 # Add NODE_PATH so mcp-server-fetch can find globally installed npm packages
-ENV PATH="/home/tomori/.local/bin:$PATH"
-ENV NODE_PATH="/usr/lib/node_modules"
+ENV PATH="/app/node_modules/.bin:/home/tomori/.local/bin:$PATH"
+ENV NODE_PATH="/app/node_modules"
 
 # Copy pre-downloaded Python packages (downloaded by GitHub Actions runner)
 # This avoids network issues during Docker build in CI/CD
@@ -54,16 +53,16 @@ RUN if [ "$(ls /tmp/pip-packages/*.whl 2>/dev/null)" ]; then \
         echo "Installing Python MCP servers from pre-downloaded packages..." && \
         pip3 install --user --break-system-packages --no-index --find-links=/tmp/pip-packages mcp-server-fetch; \
     else \
-        echo "No pre-downloaded packages found, downloading from PyPI..." && \
-        pip3 install --user --break-system-packages mcp-server-fetch==2025.4.7; \
+        echo "Missing pre-downloaded Python packages; refusing live PyPI install in production image." >&2 && \
+        exit 1; \
     fi && \
     rm -rf /tmp/pip-packages
 
-# Pre-cache npm-based MCP servers by running bunx once as tomori user
-# This warms Bun's package cache, preventing timeout during bot startup
-RUN echo "Pre-caching npm MCP servers for tomori user..." && \
-    timeout 60 bunx @oevortex/ddg_search@latest --help > /dev/null 2>&1 || true && \
-    echo "DuckDuckGo MCP server cached successfully"
+# Fix readabilipy's ESM issues with Node 20 by using the project's native dependencies
+RUN echo "Linking readabilipy to root dependencies..." && \
+    READABILIPY_DIR=$(python3 -c "import readabilipy, os; print(os.path.dirname(readabilipy.__file__))") && \
+    rm -rf "$READABILIPY_DIR/javascript/node_modules" "$READABILIPY_DIR/javascript/package-lock.json" && \
+    ln -s /app/node_modules "$READABILIPY_DIR/javascript/node_modules"
 
 # Copy package files first for better Docker layer caching
 # This is like getting the "lease agreement" (dependencies) ready first

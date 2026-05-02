@@ -137,7 +137,9 @@ Rules:
 
 ## Limits and Guardrails
 
-Limits live in `.env.optional.example` and are enforced at upload time:
+Limits live in `.env.optional.example` and are enforced at upload time. Positive values are accepted as configured;
+non-numeric, zero, and negative values fall back to defaults. `DOCUMENT_CHUNK_OVERLAP` must stay lower than
+`DOCUMENT_CHUNK_SIZE`.
 - `MAX_DOCUMENT_SIZE_MB`
 - `MAX_DOCUMENT_TEXT_LENGTH`
 - `DOCUMENT_CHUNK_SIZE`

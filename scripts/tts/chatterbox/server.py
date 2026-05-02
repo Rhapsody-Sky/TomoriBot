@@ -16,13 +16,14 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 
-MODEL_NAME = "chatterbox-turbo"
+MODEL_NAME = "chatterbox"
 HOST = os.getenv("TOMORI_TTS_HOST", "127.0.0.1")
 PORT = int(os.getenv("TOMORI_TTS_PORT", "8011"))
 DEVICE = os.getenv("TOMORI_TTS_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 MAX_TEXT_CHARS = int(os.getenv("TOMORI_TTS_MAX_TEXT_CHARS", "2000"))
 
-model = None
+turbo_model = None
+standard_model = None
 model_lock = threading.Lock()
 
 
@@ -32,6 +33,9 @@ class SynthesizeRequest(BaseModel):
   ref_text: Optional[str] = None
   instruct: Optional[str] = None
   language: Optional[str] = None
+  chatterbox_turbo: bool = True
+  cfg_weight: float = 0.5
+  exaggeration: float = 0.5
 
 
 def decode_ref_audio(raw_base64: str, directory: str) -> str:
@@ -45,12 +49,26 @@ def decode_ref_audio(raw_base64: str, directory: str) -> str:
   return str(ref_path)
 
 
+def clamp_nonnegative(value: float) -> float:
+  return max(0.0, value)
+
+
 def load_model() -> None:
-  global model
+  global turbo_model
 
   from chatterbox.tts_turbo import ChatterboxTurboTTS
 
-  model = ChatterboxTurboTTS.from_pretrained(device=DEVICE)
+  turbo_model = ChatterboxTurboTTS.from_pretrained(device=DEVICE)
+
+
+def load_standard_model():
+  global standard_model
+
+  if standard_model is None:
+    from chatterbox.tts import ChatterboxTTS
+
+    standard_model = ChatterboxTTS.from_pretrained(device=DEVICE)
+  return standard_model
 
 
 @asynccontextmanager
@@ -59,21 +77,23 @@ async def lifespan(_app: FastAPI):
   yield
 
 
-app = FastAPI(title="TomoriBot Chatterbox-Turbo TTS Server", lifespan=lifespan)
+app = FastAPI(title="TomoriBot Chatterbox TTS Server", lifespan=lifespan)
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
   return {
-    "status": "ok" if model is not None else "loading",
+    "status": "ok" if turbo_model is not None else "loading",
     "model": MODEL_NAME,
     "device": DEVICE,
+    "turbo_loaded": str(turbo_model is not None).lower(),
+    "standard_loaded": str(standard_model is not None).lower(),
   }
 
 
 @app.post("/synthesize")
 def synthesize(payload: SynthesizeRequest) -> Response:
-  if model is None:
+  if turbo_model is None:
     raise HTTPException(status_code=503, detail="Model is still loading.")
 
   text = payload.text.strip()
@@ -89,9 +109,19 @@ def synthesize(payload: SynthesizeRequest) -> Response:
     output_path = Path(temp_dir) / "output.wav"
 
     with model_lock:
-      wav = model.generate(text, audio_prompt_path=ref_path)
+      if payload.chatterbox_turbo:
+        active_model = turbo_model
+        wav = active_model.generate(text, audio_prompt_path=ref_path)
+      else:
+        active_model = load_standard_model()
+        wav = active_model.generate(
+          text,
+          audio_prompt_path=ref_path,
+          cfg_weight=clamp_nonnegative(payload.cfg_weight),
+          exaggeration=clamp_nonnegative(payload.exaggeration),
+        )
 
-    ta.save(str(output_path), wav.cpu(), int(model.sr))
+    ta.save(str(output_path), wav.cpu(), int(active_model.sr))
     return Response(content=output_path.read_bytes(), media_type="audio/wav")
 
 

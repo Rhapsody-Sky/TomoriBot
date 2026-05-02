@@ -325,7 +325,7 @@ export default {
       "429_default_message": `Anthropicのレート制限に達しました。しばらく待ってから再試行してください。`,
       "500_default_message": `Anthropicで内部サーバーエラーが発生しました。`,
       "503_default_message": `Anthropicは現在利用できないか、過負荷状態です。`,
-      temperature_top_p_conflict_message: `Anthropic は Temperature と Top-P を同時に受け付けません。\`/config samplers\` を使って、そのプロバイダーの **Temperature** か **Top P** のどちらかを調整してください。`,
+      temperature_top_p_conflict_message: `Anthropic は Temperature と Top-P を同時に受け付けません。\`/config parameters\` を使って、そのプロバイダーの **Temperature** か **Top P** のどちらかを調整してください。`,
       unknown_default_message: `Anthropicとの通信中に予期しないエラーが発生しました。`,
     },
     self_teach: {
@@ -374,6 +374,21 @@ export default {
         key_validation_failed_description: `この ElevenLabs キーを検証できませんでした。キーを確認して再試行してください。`,
         success_title: `ElevenLabs を接続しました`,
         success_description: `ElevenLabs の音声生成と文字起こしエンドポイントを接続しました。\`/config speech voice-assign\` でペルソナに声を割り当てます。`,
+      },
+      chatterbox: {
+        description: `Chatterbox の音声設定を管理します。`,
+        parameters: {
+          description: `Chatterbox Turbo と標準モデルの音声生成を調整します。`,
+          cfg_weight_description: `標準モデルのみ: 下げると速い声のペース調整に役立ち、上げると参照音声により強く寄せます。`,
+          exaggeration_description: `標準モデルのみ: 上げるほど表現が強くドラマチックになり、発話が速くなる場合があります。`,
+          turbo_description: `高速生成と対応済みイベントタグ用に Chatterbox-Turbo を使います。CFG/表現調整を使う場合は無効化します。`,
+          enabled_label: `有効`,
+          disabled_label: `無効`,
+          success_title: `Chatterbox パラメータを更新しました`,
+          success_description: `Chatterbox Turbo: **{turbo}**\nCFG weight: **{cfg_weight}**\nExaggeration: **{exaggeration}**`,
+          turbo_notice: `現在 Turbo が有効なため、CFG weight と Exaggeration は保存されますが無視されます。対応済みイベントタグは保持され、未対応の角括弧記述は削除されます。`,
+          standard_notice: `現在 Turbo が無効なため、CFG weight と Exaggeration が有効です。\`[laugh]\` や \`[whisper]\` のような角括弧の記述は、音声生成前に削除されます。`,
+        },
       },
       transcripts: {
         description: `ボイスメッセージの表示用字幕投稿を切り替えます。`,
@@ -3335,7 +3350,7 @@ Prompt Guidance Rescale: {cfg_rescale}
         success_title: `思考レベルを更新しました`,
         success_description: `思考レベルを \`{previous_value}\` から \`{value}\` に変更しました。有効なのは、現在のプロバイダー/モデルがリクエスト側の思考制御に対応している場合のみです。`,
       },
-      samplers: {
+      parameters: {
         description: `プロバイダーごとの保存済みサンプラー設定を更新します。`,
         provider_description: `更新するプロバイダーを指定します。未指定なら現在のテキストプロバイダーです。`,
         temperature_description: `このプロバイダーの Temperature 上書き値（0〜2）。`,
@@ -3345,12 +3360,14 @@ Prompt Guidance Rescale: {cfg_rescale}
         presence_penalty_description: `このプロバイダーの出現ペナルティ上書き値（-2〜2）。`,
         min_p_description: `このプロバイダーの Min-P 上書き値（0〜1）。`,
         thinking_level_description: `このプロバイダーの思考レベル上書き値。`,
+        max_output_tokens_description: `このプロバイダーの最大出力トークン数（1〜131072）。未設定の場合はプロバイダーのデフォルト値を使用します。`,
         sampler_temperature_label: `温度`,
         sampler_top_p_label: `Top-P`,
         sampler_top_k_label: `Top-K`,
         sampler_frequency_penalty_label: `頻度ペナルティ`,
         sampler_presence_penalty_label: `存在ペナルティ`,
         sampler_min_p_label: `Min-P`,
+        sampler_max_output_tokens_label: `最大出力トークン数`,
         provider_not_saved_title: `保存済みプロバイダーが見つかりません`,
         provider_not_saved_description: `**{provider}** の保存済み設定がありません。先に \`/config provider add\` で追加してください。`,
         picker_description: `新しいサンプラー設定を適用する保存済みプロバイダーを選択してください。`,
@@ -3358,6 +3375,43 @@ Prompt Guidance Rescale: {cfg_rescale}
         no_changes_description: `サンプラー設定は変更されませんでした。`,
         success_title: `サンプラー設定を更新しました`,
         success_description: `**{provider}** のサンプラー設定を更新しました: {settings}`,
+      },
+      "stop-strings": {
+        description: `サーバーの停止文字列を管理します。`,
+        add: {
+          description: `サーバー全体の停止文字列を追加します。`,
+          strings_description: `追加する停止文字列。複数指定する場合はカンマで区切ります。改行は \\n を使えます。`,
+          invalid_title: `停止文字列がありません`,
+          invalid_description: `空でない停止文字列を1つ以上入力してください。複数指定する場合はカンマで区切ります。`,
+          too_long_title: `停止文字列が長すぎます`,
+          too_long_description: `停止文字列は {max_length} 文字以下にしてください。長すぎる項目: \`{stop_string}\``,
+          too_many_title: `停止文字列が多すぎます`,
+          too_many_description: `このサーバーに保存できる停止文字列は最大 {max_count} 件です。現在 {current_count} 件あり、このコマンドでは {added_count} 件追加されます。`,
+          no_changes_title: `追加する停止文字列はありません`,
+          no_changes_description: `指定された停止文字列はすでにこのサーバーに保存されています。`,
+          success_title: `停止文字列を追加しました`,
+          success_description: `サーバー全体の停止文字列を {added_count} 件追加しました: {stop_strings}`,
+          more_added: `ほか {count} 件`,
+        },
+        manage: {
+          description: `サーバー全体の停止文字列と話者パターン停止を管理します。`,
+          modal_title: `停止文字列の管理`,
+          speaker_pattern_checkbox_label: `\\n{string}: パターンで生成を停止`,
+          speaker_pattern_checkbox_description: `デフォルトはオフです。"\\nName:" のような話者ラベル停止を有効にします。`,
+          stop_strings_checkbox_label: `保存済み停止文字列`,
+          stop_strings_checkbox_label_continued: `保存済み停止文字列（続き）`,
+          stop_strings_checkbox_description: `チェックした文字列は残ります。削除する文字列はチェックを外してください。`,
+          stop_string_option_description: `停止文字列 #{index}`,
+          too_many_title: `停止文字列が多すぎます`,
+          too_many_description: `このサーバーには {count} 件の停止文字列があり、モーダル上限の {max_entries} 件を超えています。`,
+          no_changes_title: `変更はありません`,
+          no_changes_description: `停止文字列設定はすでにその状態です。`,
+          success_title: `停止文字列を更新しました`,
+          success_description: `サーバー全体の停止文字列設定を更新しました。
+削除 ({removed_count}): {removed_stop_strings}
+話者パターン停止: **{speaker_pattern_state}**`,
+          more_removed: `ほか {count} 件`,
+        },
       },
       cooldown: {
         type: {
@@ -5086,7 +5140,7 @@ RP設定を無効化したチャンネル **{disabled_count}** 件: {disabled_ch
           cleared_description: `個人 {provider} テキストプロバイダーのフォールバックモデルをクリアしました。`,
         },
       },
-      samplers: {
+      parameters: {
         description: `個人プロバイダーのサンプラー設定を調整します。`,
         provider_description: `任意: 保存済みの個人プロバイダーを選択します。未指定の場合は有効な個人テキストプロバイダーを使用します。`,
         no_provider_title: `個人プロバイダーが選択されていません`,

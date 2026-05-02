@@ -219,7 +219,7 @@ export class DeepseekProvider
       apiKey,
       temperature: tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: 4096,
+      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 4096,
       endpointUrl: DEEPSEEK_CHAT_COMPLETIONS_URL,
       seesImages: tomoriState.llm.sees_images,
       seesVideos: tomoriState.llm.sees_videos,

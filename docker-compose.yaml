@@ -66,6 +66,7 @@ services:
     # Optional: Mount logs directory for debugging
     volumes:
       - ./logs:/app/logs:rw
+      - ./data:/app/data:rw
 
 # Named volumes for persistent data
 volumes:

@@ -7,7 +7,7 @@
 
 import { GoogleGenAI, type Content, type GenerateContentConfig } from "@google/genai";
 import type { GeneratePresetParams, PresetGenerationResult } from "@/types/provider/featureInterfaces";
-import type { PresetExportData } from "../../types/preset/presetExport";
+import { PRESET_MAX_STRING_LENGTH, type PresetExportData } from "../../types/preset/presetExport";
 import { log } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
 export type {
@@ -470,38 +470,36 @@ export async function generatePresetFromPrompt(
     }
 
     // 7. Define JSON schema for structured output with length constraints
+    const maxPresetStringLength = PRESET_MAX_STRING_LENGTH;
     const responseJsonSchema = {
       type: "object" as const,
       properties: {
         attribute_list: {
           type: "array" as const,
-          description:
-            "Array containing exactly 6 items describing different facets of the character, in this exact order: 1) {bot}'s Description (core identity and essence), 2) {bot}'s Appearance (physical traits and style), 3) {bot}'s Personality (personality traits, comma-separated), 4) {bot}'s Likes (interests and preferences), 5) {bot}'s Dislikes (aversions and pet peeves), 6) {bot}'s Behavioral Quirks (unique mannerisms and patterns). Each item maximum 2000 characters, in this specific format per array item: \"{bot}'s Description: \"",
+          description: `Array containing exactly 6 items describing different facets of the character, in this exact order: 1) {bot}'s Description (core identity and essence), 2) {bot}'s Appearance (physical traits and style), 3) {bot}'s Personality (personality traits, comma-separated), 4) {bot}'s Likes (interests and preferences), 5) {bot}'s Dislikes (aversions and pet peeves), 6) {bot}'s Behavioral Quirks (unique mannerisms and patterns). Each item maximum ${maxPresetStringLength} characters, in this specific format per array item: "{bot}'s Description: "`,
           items: {
             type: "string" as const,
-            maxLength: 2000, // Match validation schema MAX_STRING_LENGTH
+            maxLength: maxPresetStringLength,
           },
           minItems: 6,
           maxItems: 6,
         },
         sample_dialogues_in: {
           type: "array" as const,
-          description:
-            "Array of exactly 5 example user messages. MUST include these 3 guided scenarios in order: 1) Self-introduction request, 2) Emotional/personal scenario, 3) Practical/functional scenario. Then add 2 free dialogue scenarios that showcase unique character traits. Do NOT prepend with speaker names. Each message maximum 2000 characters.",
+          description: `Array of exactly 5 example user messages. MUST include these 3 guided scenarios in order: 1) Self-introduction request, 2) Emotional/personal scenario, 3) Practical/functional scenario. Then add 2 free dialogue scenarios that showcase unique character traits. Do NOT prepend with speaker names. Each message maximum ${maxPresetStringLength} characters.`,
           items: {
             type: "string" as const,
-            maxLength: 2000, // Match validation schema MAX_STRING_LENGTH
+            maxLength: maxPresetStringLength,
           },
           minItems: 5,
           maxItems: 5,
         },
         sample_dialogues_out: {
           type: "array" as const,
-          description:
-            "Array of exactly 5 character responses paired with sample_dialogues_in. Should reflect the character's speaking style, personality, and demonstrate their full range across the 3 guided scenarios and 2 free scenarios. Do NOT prepend with speaker names. Each response maximum 2000 characters.",
+          description: `Array of exactly 5 character responses paired with sample_dialogues_in. Should reflect the character's speaking style, personality, and demonstrate their full range across the 3 guided scenarios and 2 free scenarios. Do NOT prepend with speaker names. Each response maximum ${maxPresetStringLength} characters.`,
           items: {
             type: "string" as const,
-            maxLength: 2000, // Match validation schema MAX_STRING_LENGTH
+            maxLength: maxPresetStringLength,
           },
           minItems: 5,
           maxItems: 5,
@@ -606,14 +604,14 @@ ${params.existingPresetContext.trim()}`;
     prompt += `\n\nIMPORTANT:
 - Respond with COMPLETE valid JSON only
 - Follow the exact schema provided with strict length limits
-- Exactly 6 items in attribute_list in the exact order specified above (each MAX 2000 characters)
+- Exactly 6 items in attribute_list in the exact order specified above (each MAX ${maxPresetStringLength} characters)
 - Exactly 5 dialogue pairs following the 3 GUIDED + 2 FREE structure in the exact order specified
-- sample_dialogues_in: Keep user messages concise (1-3 sentences, MAX 2000 characters each)
-- sample_dialogues_out: Character responses can be longer and more detailed to showcase personality (MAX 2000 characters each)
+- sample_dialogues_in: Keep user messages concise (1-3 sentences, MAX ${maxPresetStringLength} characters each)
+- sample_dialogues_out: Character responses can be longer and more detailed to showcase personality (MAX ${maxPresetStringLength} characters each)
 - No speaker name prefixes in any dialogue (no "User:", "Character:", "{user}:", "{bot}:", etc.)
 - Use "{user}" placeholder when character refers to other people in their responses
 - Use "{bot}" placeholder when character refers to themselves in their responses
-- All string lengths must not exceed 2000 characters per item`;
+- All string lengths must not exceed ${maxPresetStringLength} characters per item`;
 
     // 11. Prepare prompt parts (text + optional image)
     const promptParts: Array<{

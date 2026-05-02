@@ -32,6 +32,10 @@ import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 const MODAL_CUSTOM_ID = "config_model_text_modal";
 const MODEL_SELECT_ID = "model_select";
 
+function toPostgresTextArrayLiteral(values: readonly string[] | null | undefined): string {
+  return `{${(values ?? []).map((value) => `"${value.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
+}
+
 /**
  * Returns a localized description with capability flags prepended (e.g. "(FREE+TOOLS+IMG) Description").
  */
@@ -363,7 +367,7 @@ export async function execute(
         customModel,
       );
       const resolvedLogitBiasesJson = JSON.stringify(resolvedLogitBiases.entries);
-      const disabledParamsLiteral = `{${(selectedSavedConfig.llm_disabled_params ?? []).map((param) => `"${param.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
+      const disabledParamsLiteral = toPostgresTextArrayLiteral(selectedSavedConfig.llm_disabled_params);
       const clearFallbacks = tomoriState.llm?.llm_provider?.toLowerCase() !== selectedProvider;
       const fallbackLlmIdsJson = clearFallbacks ? "[]" : JSON.stringify(selectedSavedConfig.fallback_llm_ids ?? []);
 
@@ -510,7 +514,7 @@ export async function execute(
     const resolvedLogitBiasesJson = JSON.stringify(resolvedLogitBiases.entries);
     const clearFallbacks = tomoriState.llm?.llm_provider?.toLowerCase() !== selectedProvider;
     const fallbackLlmIdsJson = clearFallbacks ? "[]" : JSON.stringify(selectedSavedConfig?.fallback_llm_ids ?? []);
-    const disabledParamsLiteral = `{${(selectedSavedConfig?.llm_disabled_params ?? []).map((param) => `"${param.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
+    const disabledParamsLiteral = toPostgresTextArrayLiteral(selectedSavedConfig?.llm_disabled_params);
 
     const [updatedRow] = await sql`
       UPDATE tomori_configs

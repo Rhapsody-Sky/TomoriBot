@@ -659,11 +659,15 @@ function buildWebhookSendPayload(payload: WebhookSendPayload, identity?: Resolve
   } as WebhookSendPayload;
 }
 
-async function sendWebhookMessagesInternal(
-  webhook: Webhook,
-  payloads: WebhookSendPayload[],
-  identity?: ResolvedWebhookIdentity,
-): Promise<Message[]> {
+function shouldResetWebhookAvatar(webhook: Webhook, identity?: ResolvedWebhookIdentity): boolean {
+  if (identity?.avatarDataUri || sanitizeAvatarUrl(identity?.avatarUrl)) {
+    return false;
+  }
+
+  return webhookAvatarStateCache.has(webhook.id) || Boolean(webhook.avatar);
+}
+
+async function ensureWebhookAvatarState(webhook: Webhook, identity?: ResolvedWebhookIdentity): Promise<void> {
   if (identity?.avatarDataUri) {
     const cachedAvatar = webhookAvatarStateCache.get(webhook.id);
     if (cachedAvatar !== identity.avatarDataUri) {
@@ -673,7 +677,24 @@ async function sendWebhookMessagesInternal(
       });
       webhookAvatarStateCache.set(webhook.id, identity.avatarDataUri);
     }
+    return;
   }
+
+  if (shouldResetWebhookAvatar(webhook, identity)) {
+    await webhook.edit({
+      avatar: null,
+      reason: "TomoriBot persona identity reset",
+    });
+    webhookAvatarStateCache.delete(webhook.id);
+  }
+}
+
+async function sendWebhookMessagesInternal(
+  webhook: Webhook,
+  payloads: WebhookSendPayload[],
+  identity?: ResolvedWebhookIdentity,
+): Promise<Message[]> {
+  await ensureWebhookAvatarState(webhook, identity);
 
   const messages: Message[] = [];
   for (const payload of payloads) {
@@ -694,7 +715,7 @@ export async function sendWebhookMessagesWithIdentity(
   lockKey?: string,
 ): Promise<Message[]> {
   try {
-    if (identity?.avatarDataUri) {
+    if (identity?.avatarDataUri || shouldResetWebhookAvatar(webhook, identity)) {
       return await withWebhookMutationLock(lockKey ?? webhook.channelId ?? webhook.id, () =>
         sendWebhookMessagesInternal(webhook, payloads, identity),
       );

@@ -132,7 +132,7 @@ interface SuggestTagsResponse {
 export class GenerateImageNaiTool extends BaseTool {
   name = "generate_image_nai";
   description =
-    "Generate or edit an anime-styled AI image with NovelAI diffusion's uncensored. Put shared scene, background, composition, camera, lighting, atmosphere, and style tags in 'prompt'. Use 'characters' for visible people in the image, and describe each character fully in that character's 'tags'.";
+    "Generate an anime-styled AI image with NovelAI diffusion's uncensored models. Put shared scene, background, composition, camera, lighting, atmosphere, and style tags in 'prompt'. Use 'characters' for visible people in the image, and describe each character fully in that character's 'tags'.";
   category = "utility" as const;
   requiresFeatureFlag = "image_gen";
   requiresFollowUp = true; // Allow model to generate a text response after image is sent, preventing orphaned self-reply
@@ -191,6 +191,7 @@ export class GenerateImageNaiTool extends BaseTool {
           required: ["tags", "x", "y"],
         },
       },
+      /* Inpainting parameters temporarily disabled
       media_id: {
         type: "string",
         description:
@@ -201,6 +202,7 @@ export class GenerateImageNaiTool extends BaseTool {
         description:
           "Optional: Natural language description of the region to edit (e.g. 'background', 'hair', 'cat'). Required when media_id is provided. Gemini AI will segment this region to create an inpainting mask.",
       },
+      */
     },
     required: ["prompt"],
   };

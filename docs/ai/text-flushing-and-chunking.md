@@ -59,7 +59,7 @@ Additional guards:
 - No flush on newline if newline is the current last buffered char (wait for more text).
 - If sentence punctuation immediately follows newline, punctuation is carried into same flush.
   - Carried punctuation excludes `:` intentionally to avoid splitting `:emoji:` tokens.
-- Immediately before send, the orchestrator truncates at any registered non-active speaker line (`Name:`) or reserved `Assistant:` line and requests a graceful stop so later flushes cannot leak that turn.
+- Immediately before send, when the server-wide speaker-pattern stop is enabled, the orchestrator truncates at any newline-prefixed speaker-like line (`Name:`) and requests a graceful stop so later flushes cannot leak that turn.
 - Speaker-guard matches are ignored inside fenced code blocks and inline backtick code so literal examples like CSS properties do not terminate the stream.
 
 ## Semantic Marker Protection

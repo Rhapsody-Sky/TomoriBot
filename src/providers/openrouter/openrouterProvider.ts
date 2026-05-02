@@ -670,7 +670,9 @@ export class OpenrouterProvider
     // accounts with low daily credit limits.
     // If unknown (cache miss or other-model), leave it undefined so the
     // stream adapter omits max_tokens entirely and lets the model decide.
-    const maxOutputTokensCap = Number.parseInt(process.env.OPENROUTER_MAX_OUTPUT_TOKENS || "8192", 10);
+    const maxOutputTokensCap =
+      tomoriState.config.llm_max_output_tokens ??
+      Number.parseInt(process.env.OPENROUTER_MAX_OUTPUT_TOKENS || "8192", 10);
     let resolvedMaxOutputTokens: number | undefined;
     if (tomoriState.llm.llm_codename !== "other-model" && isOpenRouterCapabilityCacheReady()) {
       const tokenLimits = getOpenRouterTokenLimits(tomoriState.llm.llm_codename);

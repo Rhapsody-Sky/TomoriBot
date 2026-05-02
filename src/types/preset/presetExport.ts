@@ -4,12 +4,6 @@
  */
 
 import { z } from "zod";
-import {
-  ABSOLUTE_MAX_STRING_LENGTH,
-  ABSOLUTE_MAX_ATTRIBUTES,
-  ABSOLUTE_MAX_SAMPLE_DIALOGUES,
-  ABSOLUTE_MAX_TRIGGER_WORDS,
-} from "@/utils/db/memoryLimits";
 
 /**
  * Current version of the preset export format
@@ -23,13 +17,21 @@ export const PRESET_EXPORT_VERSION = "1.0.0";
  */
 export const UNPAIRED_SAMPLE_DIALOGUE_SENTINEL = "__UNPAIRED_SAMPLE_DIALOGUE__";
 
+function parsePositiveIntegerEnv(name: string, defaultValue: number): number {
+  const parsedValue = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : defaultValue;
+}
+
 /**
- * Maximum array sizes for validation (prevent DoS attacks)
- * These use the absolute maximum values to ensure cross-server compatibility
- * and prevent token waste from AI-generated presets that slightly exceed defaults
+ * Preset import/export schema limits.
+ * Admins can raise these with env vars, but doing so affects untrusted import files
+ * and cross-instance preset portability.
  */
-export const MAX_ARRAY_SIZE = ABSOLUTE_MAX_ATTRIBUTES; // 200 attributes max
-export const MAX_STRING_LENGTH = ABSOLUTE_MAX_STRING_LENGTH; // 5000 chars per item
+export const PRESET_MAX_STRING_LENGTH = parsePositiveIntegerEnv("PRESET_MAX_STRING_LENGTH", 5000);
+export const PRESET_MAX_ATTRIBUTES = parsePositiveIntegerEnv("PRESET_MAX_ATTRIBUTES", 200);
+export const PRESET_MAX_SAMPLE_DIALOGUES = parsePositiveIntegerEnv("PRESET_MAX_SAMPLE_DIALOGUES", 100);
+export const PRESET_MAX_TRIGGER_WORDS = parsePositiveIntegerEnv("PRESET_MAX_TRIGGER_WORDS", 100);
+export const PRESET_MAX_NAI_TAGS = parsePositiveIntegerEnv("PRESET_MAX_NAI_TAGS", 200);
 
 /**
  * Preset personality data structure
@@ -115,11 +117,11 @@ export interface ValidationResult {
  */
 export const presetExportDataSchema = z.object({
   tomori_nickname: z.string().min(1, "Nickname cannot be empty").max(100, "Nickname too long"),
-  attribute_list: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_ATTRIBUTES),
-  sample_dialogues_in: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_SAMPLE_DIALOGUES),
-  sample_dialogues_out: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_SAMPLE_DIALOGUES),
-  trigger_words: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_TRIGGER_WORDS),
-  persona_prompt: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
+  attribute_list: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_ATTRIBUTES),
+  sample_dialogues_in: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_SAMPLE_DIALOGUES),
+  sample_dialogues_out: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_SAMPLE_DIALOGUES),
+  trigger_words: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_TRIGGER_WORDS),
+  persona_prompt: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
   persona_lineage_id: z
     .preprocess((value) => {
       if (typeof value === "bigint") {
@@ -131,12 +133,12 @@ export const presetExportDataSchema = z.object({
       return value;
     }, z.number().int().nonnegative())
     .optional(),
-  nai_tags: z.array(z.string().max(MAX_STRING_LENGTH)).optional(),
-  nai_char_ref_url: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_author: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_title: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_tags: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_genre: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
+  nai_tags: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_NAI_TAGS).optional(),
+  nai_char_ref_url: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_author: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_title: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_tags: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_genre: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
   nai_attg_stars: z.number().int().min(1).max(5).nullable().optional(),
 });
 
