@@ -287,7 +287,11 @@ export async function importServerConfig(serverDiscId: string, config: ServerCon
     const disabledParamsLiteral = config.llm_disabled_params
       ? `{${config.llm_disabled_params.map((param: string) => `"${param.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`
       : null;
+    const stopStringsLiteral = config.llm_stop_strings
+      ? `{${config.llm_stop_strings.map((stop: string) => `"${stop.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`
+      : null;
     const logitBiasesJson = JSON.stringify(config.llm_logit_biases ?? []);
+    const hasMaxOutputTokens = Object.hasOwn(config, "llm_max_output_tokens");
 
     let updateRows = await sql<Array<{ tomori_config_id: number }>>`
 			UPDATE tomori_configs
@@ -298,8 +302,14 @@ export async function importServerConfig(serverDiscId: string, config: ServerCon
 				llm_frequency_penalty = ${config.llm_frequency_penalty},
 				llm_presence_penalty = ${config.llm_presence_penalty},
 				llm_min_p = ${config.llm_min_p},
+				llm_max_output_tokens = CASE
+					WHEN ${hasMaxOutputTokens} THEN ${config.llm_max_output_tokens ?? null}
+					ELSE llm_max_output_tokens
+				END,
 				llm_disabled_params = COALESCE(${disabledParamsLiteral}::text[], llm_disabled_params, ARRAY[]::text[]),
 				llm_logit_biases = ${logitBiasesJson}::jsonb,
+				llm_stop_strings = COALESCE(${stopStringsLiteral}::text[], llm_stop_strings, ARRAY[]::text[]),
+				llm_stop_speaker_pattern_enabled = COALESCE(${config.llm_stop_speaker_pattern_enabled ?? null}, llm_stop_speaker_pattern_enabled, false),
 				humanizer_degree = ${config.humanizer_degree},
 				thinking_level = ${config.thinking_level},
 				timezone_offset = ${config.timezone_offset},
@@ -340,6 +350,9 @@ export async function importServerConfig(serverDiscId: string, config: ServerCon
 				videogen_enabled = COALESCE(${config.videogen_enabled ?? null}, videogen_enabled),
 				voice_message_enabled = COALESCE(${config.voice_message_enabled ?? null}, voice_message_enabled),
 				voice_transcript_chat_mode = COALESCE(${config.voice_transcript_chat_mode ?? null}, voice_transcript_chat_mode),
+				chatterbox_turbo_enabled = COALESCE(${config.chatterbox_turbo_enabled ?? null}, chatterbox_turbo_enabled),
+				chatterbox_cfg_weight = COALESCE(${config.chatterbox_cfg_weight ?? null}, chatterbox_cfg_weight),
+				chatterbox_exaggeration = COALESCE(${config.chatterbox_exaggeration ?? null}, chatterbox_exaggeration),
 				uncensor_injection_enabled = COALESCE(${config.uncensor_injection_enabled ?? null}, uncensor_injection_enabled),
 				uncensor_unicode_space_enabled = COALESCE(${config.uncensor_unicode_space_enabled ?? null}, uncensor_unicode_space_enabled),
 				uncensor_sanitize_enabled = COALESCE(${config.uncensor_sanitize_enabled ?? null}, uncensor_sanitize_enabled),
@@ -361,8 +374,14 @@ export async function importServerConfig(serverDiscId: string, config: ServerCon
 						llm_frequency_penalty = ${config.llm_frequency_penalty},
 						llm_presence_penalty = ${config.llm_presence_penalty},
 						llm_min_p = ${config.llm_min_p},
+						llm_max_output_tokens = CASE
+							WHEN ${hasMaxOutputTokens} THEN ${config.llm_max_output_tokens ?? null}
+							ELSE llm_max_output_tokens
+						END,
 						llm_disabled_params = COALESCE(${disabledParamsLiteral}::text[], llm_disabled_params, ARRAY[]::text[]),
 						llm_logit_biases = ${logitBiasesJson}::jsonb,
+						llm_stop_strings = COALESCE(${stopStringsLiteral}::text[], llm_stop_strings, ARRAY[]::text[]),
+						llm_stop_speaker_pattern_enabled = COALESCE(${config.llm_stop_speaker_pattern_enabled ?? null}, llm_stop_speaker_pattern_enabled, false),
 						humanizer_degree = ${config.humanizer_degree},
 						thinking_level = ${config.thinking_level},
 						timezone_offset = ${config.timezone_offset},
@@ -403,6 +422,9 @@ export async function importServerConfig(serverDiscId: string, config: ServerCon
 						videogen_enabled = COALESCE(${config.videogen_enabled ?? null}, videogen_enabled),
 						voice_message_enabled = COALESCE(${config.voice_message_enabled ?? null}, voice_message_enabled),
 						voice_transcript_chat_mode = COALESCE(${config.voice_transcript_chat_mode ?? null}, voice_transcript_chat_mode),
+						chatterbox_turbo_enabled = COALESCE(${config.chatterbox_turbo_enabled ?? null}, chatterbox_turbo_enabled),
+						chatterbox_cfg_weight = COALESCE(${config.chatterbox_cfg_weight ?? null}, chatterbox_cfg_weight),
+						chatterbox_exaggeration = COALESCE(${config.chatterbox_exaggeration ?? null}, chatterbox_exaggeration),
 						uncensor_injection_enabled = COALESCE(${config.uncensor_injection_enabled ?? null}, uncensor_injection_enabled),
 						uncensor_unicode_space_enabled = COALESCE(${config.uncensor_unicode_space_enabled ?? null}, uncensor_unicode_space_enabled),
 						uncensor_sanitize_enabled = COALESCE(${config.uncensor_sanitize_enabled ?? null}, uncensor_sanitize_enabled),

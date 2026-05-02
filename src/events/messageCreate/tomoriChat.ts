@@ -1802,6 +1802,32 @@ interface TextQuotaTriggerState {
   createdAt: number;
 }
 
+type QueuedMessage = {
+  message: Message;
+  isManuallyTriggered?: boolean;
+  forceReason?: boolean;
+  reasoningQuery?: string; // Query to inject as system message for reasoning mode
+  llmOverrideCodename?: string;
+  isStopResponse?: boolean; // Flag to prevent stopping stop responses
+  isFollowUp?: boolean; // Flag to identify follow-up messages that interrupted a generation
+  selectedPersonaId?: number;
+  isPersonaJob?: boolean;
+  isUserImpersonation?: boolean; // Preserve user impersonation flag through queue
+  impersonatedUserId?: string; // Preserve impersonated user ID through queue
+  textQuotaSource?: TextQuotaSource;
+  textQuotaTriggerKey?: string;
+  textQuotaUserDiscId?: string;
+  manualSystemPrompt?: string;
+  manualPrefill?: string;
+  injectedContextItems?: StructuredContextItem[];
+  forcedMentions?: ForcedMention[];
+  manualTriggerInvoker?: ManualTriggerInvoker;
+  manualStreamingContextOverrides?: Pick<
+    StreamingContext,
+    "disableCrossChannelMessage" | "disableRecentMessageReplyTool"
+  >;
+};
+
 interface ChannelLockEntry {
   isLocked: boolean;
   lockedAt: number; // Timestamp when the lock was acquired
@@ -1817,28 +1843,7 @@ interface ChannelLockEntry {
   isCommandTriggered?: boolean; // True when generation was triggered by a slash command (/respond, /impersonate) — suppresses follow-up interrupts entirely
   typingKeepaliveTimer: NodeJS.Timeout | null;
   followUpCount: number; // Consecutive follow-up interrupts for rate limiting
-  messageQueue: Array<{
-    message: Message;
-    isManuallyTriggered?: boolean;
-    forceReason?: boolean;
-    reasoningQuery?: string; // Query to inject as system message for reasoning mode
-    llmOverrideCodename?: string;
-    isStopResponse?: boolean; // Flag to prevent stopping stop responses
-    isFollowUp?: boolean; // Flag to identify follow-up messages that interrupted a generation
-    selectedPersonaId?: number;
-    isPersonaJob?: boolean;
-    isUserImpersonation?: boolean; // Preserve user impersonation flag through queue
-    impersonatedUserId?: string; // Preserve impersonated user ID through queue
-    textQuotaSource?: TextQuotaSource;
-    textQuotaTriggerKey?: string;
-    textQuotaUserDiscId?: string;
-    manualSystemPrompt?: string;
-    manualPrefill?: string;
-    injectedContextItems?: StructuredContextItem[];
-    forcedMentions?: ForcedMention[];
-    manualTriggerInvoker?: ManualTriggerInvoker;
-    manualStreamingContextOverrides?: Pick<StreamingContext, "disableCrossChannelMessage">;
-  }>;
+  messageQueue: QueuedMessage[];
 }
 const channelLocks = new Map<string, ChannelLockEntry>(); // Key: channel.id
 const textQuotaTriggerStates = new Map<string, TextQuotaTriggerState>();
@@ -1948,6 +1953,22 @@ export function clearChannelProcessingQueue(channelId: string): number {
   log.info(`Cleared ${clearedCount} queued message(s) for channel ${channelId}.`);
 
   return clearedCount;
+}
+
+function enqueueLatestFollowUp(lockEntry: ChannelLockEntry, userDiscId: string, followUp: QueuedMessage): number {
+  const previousLength = lockEntry.messageQueue.length;
+  lockEntry.messageQueue = lockEntry.messageQueue.filter(
+    (queuedMessage) =>
+      !(
+        queuedMessage.isFollowUp &&
+        !queuedMessage.isPersonaJob &&
+        !queuedMessage.isStopResponse &&
+        queuedMessage.message.author.id === userDiscId
+      ),
+  );
+  const removedCount = previousLength - lockEntry.messageQueue.length;
+  lockEntry.messageQueue.unshift(followUp);
+  return removedCount;
 }
 
 function clearQueuedSelfReplyWork(
@@ -2495,8 +2516,12 @@ It's just 300 yen. Please. Just buy the damn audio so Bredrumb can pay the bills
     Object.assign(streamingContext, manualStreamingContextOverrides);
   }
 
-  const queuedStreamingContextOverrides: Pick<StreamingContext, "disableCrossChannelMessage"> | undefined =
+  const queuedStreamingContextOverrides: QueuedMessage["manualStreamingContextOverrides"] | undefined =
     streamingContext.disableCrossChannelMessage ? { disableCrossChannelMessage: true } : undefined;
+  const followUpStreamingContextOverrides: QueuedMessage["manualStreamingContextOverrides"] = {
+    ...(queuedStreamingContextOverrides ?? {}),
+    disableRecentMessageReplyTool: true,
+  };
 
   const chainOriginUserDiscId =
     !isManuallyTriggered && isLikelySelfMessage ? getSelfReplyChainOriginUser(channel.id) : null;
@@ -2886,9 +2911,9 @@ It's just 300 yen. Please. Just buy the damn audio so Bredrumb can pay the bills
       lockEntry.followUpCount < MAX_FOLLOW_UP_INTERRUPTS
     ) {
       if (lockEntry.isInToolCallChain) {
-        // Mid tool-call chain: queue the follow-up at the front WITHOUT interrupting.
+        // Mid tool-call chain: keep only the latest same-user follow-up at the front WITHOUT interrupting.
         // The bot finishes its current tool chain → responds → then processes this follow-up.
-        lockEntry.messageQueue.unshift({
+        const removedSupersededFollowUps = enqueueLatestFollowUp(lockEntry, userDiscId, {
           message,
           isManuallyTriggered: true,
           forceReason: false,
@@ -2899,12 +2924,13 @@ It's just 300 yen. Please. Just buy the damn audio so Bredrumb can pay the bills
           textQuotaSource,
           textQuotaTriggerKey: effectiveTextQuotaTriggerKey,
           textQuotaUserDiscId: effectiveTextQuotaUserDiscId,
-          manualStreamingContextOverrides: queuedStreamingContextOverrides,
+          manualStreamingContextOverrides: followUpStreamingContextOverrides,
         });
 
         log.info(
           `Follow-up message during tool-call chain in channel ${channelLockId} from user ${userDiscId}. ` +
-            `Queued without interrupt to preserve tool progress. Queue size: ${lockEntry.messageQueue.length}`,
+            `Queued latest without interrupt to preserve tool progress. ` +
+            `Superseded follow-ups: ${removedSupersededFollowUps}. Queue size: ${lockEntry.messageQueue.length}`,
         );
 
         return;
@@ -2919,7 +2945,7 @@ It's just 300 yen. Please. Just buy the damn audio so Bredrumb can pay the bills
       // interrupted generation completes its teardown, so the follow-up gets immediate attention.
       // Inherit the active persona so the follow-up continues with the same alter persona
       // instead of falling back to main.
-      lockEntry.messageQueue.unshift({
+      const removedSupersededFollowUps = enqueueLatestFollowUp(lockEntry, userDiscId, {
         message,
         isManuallyTriggered: true, // Bypass trigger/cooldown checks since already validated
         forceReason: false,
@@ -2930,13 +2956,13 @@ It's just 300 yen. Please. Just buy the damn audio so Bredrumb can pay the bills
         textQuotaSource,
         textQuotaTriggerKey: effectiveTextQuotaTriggerKey,
         textQuotaUserDiscId: effectiveTextQuotaUserDiscId,
-        manualStreamingContextOverrides: queuedStreamingContextOverrides,
+        manualStreamingContextOverrides: followUpStreamingContextOverrides,
       });
 
       log.info(
         `Follow-up message detected in channel ${channelLockId} from user ${userDiscId}. ` +
           `Interrupt requested. Follow-up count: ${lockEntry.followUpCount + 1}/${MAX_FOLLOW_UP_INTERRUPTS}. ` +
-          `Queue size: ${lockEntry.messageQueue.length}`,
+          `Superseded follow-ups: ${removedSupersededFollowUps}. Queue size: ${lockEntry.messageQueue.length}`,
       );
 
       // No "busy" embed for follow-ups — silent interrupt
@@ -3276,7 +3302,10 @@ It's just 300 yen. Please. Just buy the damn audio so Bredrumb can pay the bills
         return;
       }
 
-      const personalRoutingUserId = isSelfMessage && !isPersonaJob ? null : (userRow?.user_id ?? null);
+      const personalRoutingUserId =
+        isSelfMessage && !isPersonaJob && !isManuallyTriggered && !isUserImpersonation
+          ? null
+          : (userRow?.user_id ?? null);
       let textCredentialSource: "server" | "personal" = "server";
       let personalTextProvider: string | null = null;
 
@@ -8803,15 +8832,32 @@ export function determineMatchingPersonas(
         (!allowedPersonaIds || (typeof persona.tomori_id === "number" && allowedPersonaIds.has(persona.tomori_id))),
     );
 
-  // 1. Special cases: Only main persona responds
-  // (reply to a persona, reply to bot, bot mentioned, shared auto-chat hit)
-  if (replyPersona) {
-    return isPersonaAllowed(replyPersona) ? [replyPersona] : [];
-  }
+  // 1. Direct targets force a response, but do not suppress additional
+  // explicit persona triggers in the same message.
+  const forcedPersonas: TomoriState[] = [];
+  const forcedPersonaIds = new Set<number>();
+  const addForcedPersona = (persona?: TomoriState | null): void => {
+    if (!isPersonaAllowed(persona)) {
+      return;
+    }
+    if (typeof persona.tomori_id === "number" && forcedPersonaIds.has(persona.tomori_id)) {
+      return;
+    }
+    if (typeof persona.tomori_id !== "number" && forcedPersonas.includes(persona)) {
+      return;
+    }
+    forcedPersonas.push(persona);
+    if (typeof persona.tomori_id === "number") {
+      forcedPersonaIds.add(persona.tomori_id);
+    }
+  };
+
+  addForcedPersona(replyPersona);
   if (isReplyToBot || isBotMentioned) {
-    return isPersonaAllowed(mainPersona) ? [mainPersona] : [];
+    addForcedPersona(mainPersona);
   }
-  if (isAutoMsgHit) {
+
+  if (isAutoMsgHit && forcedPersonas.length === 0) {
     const autoTriggerPersona = resolveFallbackPersona(autoTriggerPersonaId);
     return isPersonaAllowed(autoTriggerPersona) ? [autoTriggerPersona] : [];
   }
@@ -8871,6 +8917,9 @@ export function determineMatchingPersonas(
     if (repliedToPersona && persona.tomori_id === repliedToPersona.tomori_id) {
       continue;
     }
+    if (typeof persona.tomori_id === "number" && forcedPersonaIds.has(persona.tomori_id)) {
+      continue;
+    }
 
     const config = persona.config;
     if (!config) continue;
@@ -8914,7 +8963,7 @@ export function determineMatchingPersonas(
     return a.insertionOrder - b.insertionOrder;
   });
 
-  const result = matchingPersonas.map((entry) => entry.persona);
+  const result = [...forcedPersonas, ...matchingPersonas.map((entry) => entry.persona)];
 
   // 4. Always-reply fallback:
   // If always-reply mode is active and no trigger matched any persona, the main persona responds.

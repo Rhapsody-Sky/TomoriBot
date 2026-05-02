@@ -1,5 +1,8 @@
 -- Ensure all required columns exist in tomori_configs table
 SELECT add_column_if_not_exists('tomori_configs', 'voice_transcript_chat_mode', 'BOOLEAN', 'true');
+SELECT add_column_if_not_exists('tomori_configs', 'chatterbox_turbo_enabled', 'BOOLEAN', 'true');
+SELECT add_column_if_not_exists('tomori_configs', 'chatterbox_cfg_weight', 'REAL', '0.5');
+SELECT add_column_if_not_exists('tomori_configs', 'chatterbox_exaggeration', 'REAL', '0.5');
 SELECT add_column_if_not_exists('tomori_configs', 'other_model_codename', 'TEXT');
 SELECT add_column_if_not_exists('tomori_configs', 'other_model_capabilities', 'JSONB');
 SELECT add_column_if_not_exists('tomori_configs', 'other_model_capabilities_fetched_at', 'TIMESTAMP');
@@ -13,6 +16,8 @@ SELECT add_column_if_not_exists('tomori_configs', 'hide_respond_embed', 'BOOLEAN
 SELECT add_column_if_not_exists('tomori_configs', 'hide_impersonation_embeds', 'BOOLEAN', 'false');
 SELECT add_column_if_not_exists('tomori_configs', 'tool_notice_hidden_keys', 'TEXT[]', 'ARRAY[]::TEXT[]');
 SELECT add_column_if_not_exists('tomori_configs', 'prompt_snapshot_enabled', 'BOOLEAN', 'false');
+SELECT add_column_if_not_exists('tomori_configs', 'llm_stop_strings', 'TEXT[]', 'ARRAY[]::TEXT[]');
+SELECT add_column_if_not_exists('tomori_configs', 'llm_stop_speaker_pattern_enabled', 'BOOLEAN', 'false');
 
 -- Ensure all required columns exist in saved_provider_configs table
 SELECT add_column_if_not_exists('saved_provider_configs', 'fallback_model_refs', 'JSONB', '''[]''::JSONB');
@@ -2247,7 +2252,7 @@ WHERE daily_user_quota = 3
 -- ============================================================
 
 -- 1. voice_samples table: stores reference audio clip metadata for TTS cloning.
---    Files live in /data/voice-samples/{server_id}/; this table holds metadata only.
+--    file_path is a production S3/CloudFront URL or a local data/voice-samples path.
 --    Phase 4.1 enforces one uploaded sample per server (enforced in application layer).
 CREATE TABLE IF NOT EXISTS voice_samples (
     sample_id   SERIAL PRIMARY KEY,

@@ -234,6 +234,8 @@ export class AnthropicStreamAdapter implements StreamProvider {
       providerName: "anthropic",
       model: config.model,
       personaName: context.prefixStrippingName ?? context.personaUsername,
+      configuredStops: context.tomoriState.config.llm_stop_strings,
+      includePersonaSpeakerStop: context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false,
     });
     if (stopSequences) {
       requestBody.stop_sequences = stopSequences;

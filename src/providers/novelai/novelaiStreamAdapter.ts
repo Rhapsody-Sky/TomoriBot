@@ -210,6 +210,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
    * Contains only user/other-character names — never the bot's own name.
    */
   private knownSpeakers: Set<string> = new Set();
+  private speakerStopPatternEnabled = false;
   private static readonly TOOL_CALL_TAG = "<tool_call>";
   private static readonly TOOL_CALL_TAG_LENGTH = NovelaiStreamAdapter.TOOL_CALL_TAG.length;
 
@@ -460,7 +461,8 @@ export class NovelaiStreamAdapter implements StreamProvider {
     // Passing byte values as token IDs produces garbage special tokens at generation
     // start (e.g. <|reserved5|>, <|maskend|>). Turn stopping is handled entirely by
     // the speaker-detection regex in processVisibleText() instead.
-    if (!isGlm) {
+    this.speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
+    if (!isGlm && this.speakerStopPatternEnabled) {
       const speakerSet = new Set<string>();
       for (const item of context.contextItems) {
         if (item.metadataTag !== ContextItemTag.DIALOGUE_HISTORY) continue;
@@ -488,6 +490,8 @@ export class NovelaiStreamAdapter implements StreamProvider {
       providerName: "novelai",
       model: config.model,
       personaName: context.tomoriState.tomori_nickname,
+      configuredStops: context.tomoriState.config.llm_stop_strings,
+      includePersonaSpeakerStop: this.speakerStopPatternEnabled,
     });
     const request: NovelAIGenerationRequest = {
       input: prompt,
@@ -778,74 +782,83 @@ export class NovelaiStreamAdapter implements StreamProvider {
     // Add to buffer for speaker detection
     this.generationBuffer += text;
 
-    // Detect speaker transitions — the model is generating another character's turn.
-    // Both Kayra and GLM 4.6 need this: Kayra has no API stop sequences, and GLM
-    // doesn't emit <|user|> tokens in completions mode (it just starts "Username: ...")
-    //
-    // Three stop conditions checked in order:
-    // 1. Dinkus (\n***): Kayra uses *** as a scene break between narrative zones.
-    //    When the model generates \n*** it considers its turn complete. Only triggered
-    //    after \n so ****-style censored words at response start are not clipped.
-    // 2. Generic colon-form (\nName:): any speaker label with a colon.
-    // 3. Known-name no-colon (\nName<space>): story-format turns where the model
-    //    writes "Name text" instead of "Name: text". Only fires for known speakers
-    //    from this.knownSpeakers to avoid false positives on mid-sentence proper nouns.
-    const markdownCodeRanges = findMarkdownCodeRanges(this.generationBuffer);
-    let speakerMatch =
-      this.findFirstMarkdownSafeMatch(
-        this.generationBuffer,
-        /\n\*\*\*/g,
-        markdownCodeRanges,
-        (match) => match.index + 1,
-      ) ??
-      this.findFirstMarkdownSafeMatch(this.generationBuffer, /\n+([^\n:]+):\s*/g, markdownCodeRanges, (match) => {
-        const rawLabel = match[1] ?? "";
-        return match.index + match[0].indexOf(rawLabel);
-      });
-
-    if (!speakerMatch && this.knownSpeakers.size > 0) {
-      const escaped = [...this.knownSpeakers].map(escapeRegExp).join("|");
-      speakerMatch = this.findFirstMarkdownSafeMatch(
-        this.generationBuffer,
-        new RegExp(`\\n+(${escaped})\\s`, "g"),
-        markdownCodeRanges,
-        (match) => {
+    if (!this.speakerStopPatternEnabled) {
+      if (!this.isGlmModel) {
+        this.generationBuffer = "";
+        if (text.trim()) this.hasEmittedVisibleText = true;
+        return { type: "text", content: text };
+      }
+      this.generationBuffer = "";
+    } else {
+      // Detect speaker transitions — the model is generating another character's turn.
+      // Both Kayra and GLM 4.6 need this: Kayra has no API stop sequences, and GLM
+      // doesn't emit <|user|> tokens in completions mode (it just starts "Username: ...")
+      //
+      // Three stop conditions checked in order:
+      // 1. Dinkus (\n***): Kayra uses *** as a scene break between narrative zones.
+      //    When the model generates \n*** it considers its turn complete. Only triggered
+      //    after \n so ****-style censored words at response start are not clipped.
+      // 2. Generic colon-form (\nName:): any speaker label with a colon.
+      // 3. Known-name no-colon (\nName<space>): story-format turns where the model
+      //    writes "Name text" instead of "Name: text". Only fires for known speakers
+      //    from this.knownSpeakers to avoid false positives on mid-sentence proper nouns.
+      const markdownCodeRanges = findMarkdownCodeRanges(this.generationBuffer);
+      let speakerMatch =
+        this.findFirstMarkdownSafeMatch(
+          this.generationBuffer,
+          /\n\*\*\*/g,
+          markdownCodeRanges,
+          (match) => match.index + 1,
+        ) ??
+        this.findFirstMarkdownSafeMatch(this.generationBuffer, /\n+([^\n:]+):\s*/g, markdownCodeRanges, (match) => {
           const rawLabel = match[1] ?? "";
           return match.index + match[0].indexOf(rawLabel);
-        },
-      );
-    }
+        });
 
-    if (speakerMatch) {
-      // Found a turn boundary — stop generation here
-      this.generationBuffer = "";
-      this.sentenceTrailingBuffer = "";
-      this.kayraHoldBuffer = "";
-      // Stream orchestrator continues reading until provider final;
-      // latch stop so subsequent Kayra/Erato tokens are ignored.
-      this.kayraSpeakerBoundaryStopPending = !this.isGlmModel;
-      return {
-        type: "done",
-      };
-    }
+      if (!speakerMatch && this.knownSpeakers.size > 0) {
+        const escaped = [...this.knownSpeakers].map(escapeRegExp).join("|");
+        speakerMatch = this.findFirstMarkdownSafeMatch(
+          this.generationBuffer,
+          new RegExp(`\\n+(${escaped})\\s`, "g"),
+          markdownCodeRanges,
+          (match) => {
+            const rawLabel = match[1] ?? "";
+            return match.index + match[0].indexOf(rawLabel);
+          },
+        );
+      }
 
-    // Kayra/Erato: also treat sentence-colon boundaries as turn transitions.
-    // Example: "... It is not healthy.: Please, don't say that..."
-    // We stop on either:
-    // 1) A complete boundary with following speaker text in-buffer.
-    // 2) A trailing boundary ending in ":" (next token would start the other turn).
-    if (!this.isGlmModel) {
-      const sentenceColonBoundary = /[.!?…]["')\]]?\s*:\s+(?=[A-Z*"])/;
-      const trailingSentenceColonBoundary = /[.!?…]["')\]]?\s*:\s*$/;
-      if (
-        sentenceColonBoundary.test(this.generationBuffer) ||
-        trailingSentenceColonBoundary.test(this.generationBuffer)
-      ) {
+      if (speakerMatch) {
+        // Found a turn boundary — stop generation here
         this.generationBuffer = "";
         this.sentenceTrailingBuffer = "";
         this.kayraHoldBuffer = "";
-        this.kayraSpeakerBoundaryStopPending = true;
-        return { type: "done" };
+        // Stream orchestrator continues reading until provider final;
+        // latch stop so subsequent Kayra/Erato tokens are ignored.
+        this.kayraSpeakerBoundaryStopPending = !this.isGlmModel;
+        return {
+          type: "done",
+        };
+      }
+
+      // Kayra/Erato: also treat sentence-colon boundaries as turn transitions.
+      // Example: "... It is not healthy.: Please, don't say that..."
+      // We stop on either:
+      // 1) A complete boundary with following speaker text in-buffer.
+      // 2) A trailing boundary ending in ":" (next token would start the other turn).
+      if (!this.isGlmModel) {
+        const sentenceColonBoundary = /[.!?…]["')\]]?\s*:\s+(?=[A-Z*"])/;
+        const trailingSentenceColonBoundary = /[.!?…]["')\]]?\s*:\s*$/;
+        if (
+          sentenceColonBoundary.test(this.generationBuffer) ||
+          trailingSentenceColonBoundary.test(this.generationBuffer)
+        ) {
+          this.generationBuffer = "";
+          this.sentenceTrailingBuffer = "";
+          this.kayraHoldBuffer = "";
+          this.kayraSpeakerBoundaryStopPending = true;
+          return { type: "done" };
+        }
       }
     }
 
@@ -863,6 +876,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
         const safeToEmit = combined.slice(0, lastNewlineIdx);
         const trailingLine = combined.slice(lastNewlineIdx + 1);
         const trailingLineStartIndex = this.generationBuffer.length - trailingLine.length;
+        const markdownCodeRanges = findMarkdownCodeRanges(this.generationBuffer);
 
         // Line-aware speaker boundary stop:
         // keep one trailing line held; if it starts with another speaker,

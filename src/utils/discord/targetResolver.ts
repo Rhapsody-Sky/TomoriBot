@@ -213,6 +213,30 @@ function dedupeChannelCandidates(
   return deduped;
 }
 
+/**
+ * Scan conversation context items for inline-code channel references that include a Discord ID.
+ * Matches patterns like: the channel named `name (ID: 12345)` or `name (ID: 12345)`
+ * Returns all IDs whose normalized channel name matches the given input.
+ */
+function extractContextChannelIds(normalizedInput: string, contextItems: StructuredContextItem[]): string[] {
+  const pattern = /`([^`]+?)\s*\(ID:\s*(\d{17,20})\)`/g;
+  const ids = new Set<string>();
+
+  for (const item of contextItems) {
+    for (const part of item.parts) {
+      if (part.type !== "text") continue;
+      pattern.lastIndex = 0;
+      for (let match = pattern.exec(part.text); match !== null; match = pattern.exec(part.text)) {
+        if (normalizeChannelTargetInput(match[1]) === normalizedInput) {
+          ids.add(match[2]);
+        }
+      }
+    }
+  }
+
+  return [...ids];
+}
+
 function getConversationUserReferences(contextItems?: StructuredContextItem[]): ConversationUserReference[] {
   if (!contextItems) {
     return [];
@@ -475,9 +499,10 @@ export async function resolveUserTarget(input: string, context: ToolContext): Pr
 
 function formatChannelCandidateLabel(channel: GuildTextBasedChannel): string {
   if (isThreadLike(channel)) {
-    const parentName =
-      "parent" in channel && channel.parent && "name" in channel.parent ? ` in #${channel.parent.name}` : "";
-    return `${channel.name}${parentName}`;
+    // Parent name is intentionally omitted — threads are referenced by name only.
+    // The resolver still accepts qualified "name in #parent" input; we just don't surface
+    // parent info in labels to avoid confusing the LLM with decorated channel slugs.
+    return channel.name;
   }
 
   return `#${channel.name}`;
@@ -517,8 +542,19 @@ export async function formatChannelReferenceLabel(channel: GuildTextBasedChannel
     .map((candidate) => candidate as GuildTextBasedChannel);
 
   if (isThreadLike(channel)) {
-    const duplicateCount = activeThreads.filter((thread) => formatChannelCandidateLabel(thread) === baseLabel).length;
-    return duplicateCount > 1 ? formatCopyableChannelCandidateLabel(channel) : baseLabel;
+    // Count other threads that share the same normalized name (including self → threshold > 1)
+    const duplicateCount = activeThreads.filter(
+      (thread) => normalizeChannelTargetInput(thread.name) === normalizeChannelTargetInput(channel.name),
+    ).length;
+    // Also flag collision when a text channel has the same name as this thread
+    const hasTextChannelCollision = textChannels.some(
+      (tc) => normalizeChannelTargetInput(tc.name) === normalizeChannelTargetInput(channel.name),
+    );
+    // "the channel named `name`" tells the LLM this is a navigable channel target;
+    // include ID in the name portion when there is any collision so it can be copied exactly.
+    return duplicateCount > 1 || hasTextChannelCollision
+      ? `the channel named \`${formatChannelCandidateLabelWithId(channel)}\``
+      : `the channel named \`${baseLabel}\``;
   }
 
   const normalizedName = normalizeChannelTargetInput(channel.name);
@@ -537,8 +573,8 @@ export async function formatChannelReferenceLabel(channel: GuildTextBasedChannel
   );
 
   return hasTextChannelCollision || hasActiveThreadCollision || hasForumParentCollision
-    ? formatCopyableChannelCandidateLabel(channel)
-    : baseLabel;
+    ? `the channel named \`${formatChannelCandidateLabelWithId(channel)}\``
+    : `the channel named \`${channel.name}\``;
 }
 
 function buildAmbiguousChannelCandidates(
@@ -591,9 +627,22 @@ export async function resolveChannelTarget(input: string, context: ToolContext):
     };
   }
 
+  /** Resolve a raw channel ID. Tries client cache, guild fetch, then active threads —
+   *  because guild.channels.fetch() does not return threads. */
+  const resolveById = async (id: string): Promise<GuildTextBasedChannel | null> => {
+    const fromClient = await context.client.channels.fetch(id).catch(() => null);
+    const fromGuild = fromClient ?? (await guild.channels.fetch(id).catch(() => null));
+    if (fromGuild && isGuildTextTarget(fromGuild) && "guildId" in fromGuild && fromGuild.guildId === guild.id) {
+      return fromGuild as GuildTextBasedChannel;
+    }
+    // guild.channels.fetch does not return threads — fall back to active thread list
+    const activeThreads = await getActiveThreadTargets(guild);
+    return activeThreads.find((t) => t.id === id) ?? null;
+  };
+
   if (explicitId) {
-    const channel = await context.client.channels.fetch(explicitId).catch(() => null);
-    if (channel && isGuildTextTarget(channel) && "guildId" in channel && channel.guildId === guild.id) {
+    const channel = await resolveById(explicitId);
+    if (channel) {
       return {
         status: "resolved",
         channel,
@@ -604,14 +653,32 @@ export async function resolveChannelTarget(input: string, context: ToolContext):
   }
 
   if (isDiscordSnowflake(parsableInput)) {
-    const channel = await context.client.channels.fetch(parsableInput).catch(() => null);
-    if (channel && isGuildTextTarget(channel) && "guildId" in channel && channel.guildId === guild.id) {
+    const channel = await resolveById(parsableInput);
+    if (channel) {
       return {
         status: "resolved",
         channel,
         displayLabel: formatChannelCandidateLabel(channel),
         source: "legacy_id",
       };
+    }
+  }
+
+  // Before running ambiguous name search, check if the conversation already showed this channel
+  // with an ID (e.g. "the channel named `name (ID: 12345)`"). A unique context match bypasses
+  // the ambiguity round-trip entirely.
+  if (normalizedInput) {
+    const contextIds = extractContextChannelIds(normalizedInput, context.contextItems ?? []);
+    if (contextIds.length === 1) {
+      const channel = await resolveById(contextIds[0]);
+      if (channel) {
+        return {
+          status: "resolved",
+          channel,
+          displayLabel: formatChannelCandidateLabel(channel),
+          source: "legacy_id",
+        };
+      }
     }
   }
 

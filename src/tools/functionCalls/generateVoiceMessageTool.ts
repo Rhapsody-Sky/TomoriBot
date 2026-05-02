@@ -371,6 +371,11 @@ export class GenerateVoiceMessageTool extends BaseTool {
         voiceSampleId,
         script,
         apiKey: speechEndpoint.apiKey,
+        chatterbox: {
+          turboEnabled: context.tomoriState.config.chatterbox_turbo_enabled ?? true,
+          cfgWeight: context.tomoriState.config.chatterbox_cfg_weight ?? 0.5,
+          exaggeration: context.tomoriState.config.chatterbox_exaggeration ?? 0.5,
+        },
       });
       if (!cloneResult.success || !cloneResult.audioBuffer) {
         return {

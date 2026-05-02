@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -14,11 +12,10 @@ import { sql } from "@/utils/db/client";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { replyInfoEmbed, promptWithPaginatedModal, safeSelectOptionText } from "@/utils/discord/interactionHelper";
 import { createStandardEmbed } from "@/utils/discord/embedHelper";
+import { deleteStoredVoiceSample } from "@/utils/storage/voiceSampleStorage";
 import type { ErrorContext, UserRow } from "@/types/db/schema";
 import type { SelectOption } from "@/types/discord/modal";
 import { localizer } from "@/utils/text/localizer";
-
-const VOICE_SAMPLES_BASE_DIR = path.resolve(process.cwd(), "data", "voice-samples");
 
 const CONFIRM_BTN_ID = "voice_remove_confirm";
 const CANCEL_BTN_ID = "voice_remove_cancel";
@@ -185,10 +182,7 @@ export async function execute(
       WHERE sample_id = ${sampleRow.sample_id}
     `;
 
-    const absoluteFilePath = path.join(VOICE_SAMPLES_BASE_DIR, sampleRow.file_path);
-    await fs.unlink(absoluteFilePath).catch((err) => {
-      log.warn(`[VoiceRemove] Could not delete sample file at ${absoluteFilePath}`, err);
-    });
+    await deleteStoredVoiceSample(sampleRow.file_path);
 
     log.info(
       `[VoiceRemove] Deleted sample "${sampleRow.name}" (id=${sampleRow.sample_id}) for server ${serverId} | ${refCount} persona(s) cleared`,

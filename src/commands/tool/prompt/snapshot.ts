@@ -755,7 +755,7 @@ type TagLabel = {
 const TAG_LABELS: Record<string, TagLabel> = {
   [ContextItemTag.SYSTEM_INSTRUCTION_BLOCK]: { title: "System Instruction Block", hint: "system-managed" },
   [ContextItemTag.SYSTEM_PERSONALITY]: { title: "Persona Attributes", hint: "/persona attribute" },
-  [ContextItemTag.SYSTEM_HUMANIZER_RULES]: { title: "Persona Prompt", hint: "/persona prompt" },
+  [ContextItemTag.SYSTEM_HUMANIZER_RULES]: { title: "System Prompt", hint: "/config system-prompt" },
   [ContextItemTag.SYSTEM_FUNCTION_GUIDE]: { title: "Function Guide", hint: "system-managed" },
   [ContextItemTag.KNOWLEDGE_SERVER_INFO]: { title: "Discord Server Info", hint: "system-managed" },
   [ContextItemTag.KNOWLEDGE_SERVER_EMOJIS]: { title: "Server Emojis", hint: "system-managed" },
@@ -1152,7 +1152,8 @@ function buildRequestConfig(persona: TomoriState, providerName: string, modelNam
 
   if (providerName === "google") {
     // 1. Google: show raw configured values (unfiltered, mirrors GoogleProviderConfig)
-    const maxOutputTokens = Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
+    const maxOutputTokens =
+      config.llm_max_output_tokens ?? Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
     const out: Record<string, unknown> = {
       generation_config: {
         temperature: config.llm_temperature,
@@ -1178,7 +1179,8 @@ function buildRequestConfig(persona: TomoriState, providerName: string, modelNam
 
   if (providerName === "vertex" || providerName === "vertexexpress") {
     // 2. Vertex family: mirrors VertexProvider/VertexexpressProvider request config
-    const maxOutputTokens = Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
+    const maxOutputTokens =
+      config.llm_max_output_tokens ?? Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
     const out: Record<string, unknown> = {
       generation_config: {
         temperature: config.llm_temperature,

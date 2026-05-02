@@ -12,6 +12,8 @@ TomoriBot treats speech as a custom endpoint capability. Local engines run outsi
 
 ElevenLabs users should use `/speech elevenlabs`; it registers the speech and transcription endpoints together.
 
+TomoriBot strips Discord custom emoji syntax such as `:pepega:` or `<:pepega:123456789012345678>` from generated voice scripts before synthesis. Unicode emojis are also stripped unless the speech endpoint uses emoji markup, which is intended for IrodoriTTS.
+
 ## Endpoint Contract
 
 Local wrappers must expose:

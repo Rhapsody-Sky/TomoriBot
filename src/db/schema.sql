@@ -388,6 +388,8 @@ CREATE TABLE IF NOT EXISTS tomori_configs (
   videogen_enabled BOOLEAN DEFAULT false,
   tool_notice_hidden_keys TEXT[] DEFAULT '{}',
   llm_disabled_params TEXT[] DEFAULT '{}', -- DEPRECATED Phase 1.5 Pass B: mirror of saved_provider_configs
+  llm_stop_strings TEXT[] DEFAULT '{}',
+  llm_stop_speaker_pattern_enabled BOOLEAN DEFAULT false,
   humanizer_degree INT DEFAULT 1,
   thinking_level TEXT DEFAULT 'auto', -- DEPRECATED Phase 1.5 Pass B: mirror of saved_provider_configs
   user_byok_mode BOOLEAN DEFAULT false,
@@ -695,6 +697,8 @@ SELECT add_column_if_not_exists('tomori_configs', 'llm_presence_penalty', 'REAL'
 SELECT add_column_if_not_exists('tomori_configs', 'llm_min_p', 'REAL', '0.05');
 -- llm_disabled_params: Parameter names omitted from outbound provider payloads
 SELECT add_column_if_not_exists('tomori_configs', 'llm_disabled_params', 'TEXT[]', 'ARRAY[]::TEXT[]');
+SELECT add_column_if_not_exists('tomori_configs', 'llm_stop_strings', 'TEXT[]', 'ARRAY[]::TEXT[]');
+SELECT add_column_if_not_exists('tomori_configs', 'llm_stop_speaker_pattern_enabled', 'BOOLEAN', 'false');
 -- llm_logit_biases: Stored OpenAI-style logit bias entries [{id, text, value}, ...]
 SELECT add_column_if_not_exists('tomori_configs', 'llm_logit_biases', 'JSONB', '''[]''::JSONB');
 
@@ -2258,7 +2262,6 @@ SELECT add_column_if_not_exists('saved_provider_configs', 'llm_presence_penalty'
 SELECT add_column_if_not_exists('saved_provider_configs', 'llm_min_p', 'REAL', 'NULL');
 SELECT add_column_if_not_exists('saved_provider_configs', 'llm_logit_biases', 'JSONB', '''[]''::JSONB');
 SELECT add_column_if_not_exists('saved_provider_configs', 'llm_disabled_params', 'TEXT[]', 'ARRAY[]::TEXT[]');
-
 -- Migration: add video_model_id column to saved_provider_configs (April 2026)
 SELECT add_column_if_not_exists('saved_provider_configs', 'video_model_id', 'INTEGER', 'NULL');
 
@@ -2572,6 +2575,10 @@ SELECT add_column_if_not_exists('tomori_configs', 'context_note_depth', 'INTEGER
 SELECT add_column_if_not_exists('tomori_configs', 'voice_message_enabled', 'BOOLEAN', 'true');
 -- voice_transcript_chat_mode: Post voice transcripts as webhook chat messages instead of internal cache
 SELECT add_column_if_not_exists('tomori_configs', 'voice_transcript_chat_mode', 'BOOLEAN', 'true');
+-- Chatterbox local TTS controls. CFG/exaggeration apply only when turbo is disabled.
+SELECT add_column_if_not_exists('tomori_configs', 'chatterbox_turbo_enabled', 'BOOLEAN', 'true');
+SELECT add_column_if_not_exists('tomori_configs', 'chatterbox_cfg_weight', 'REAL', '0.5');
+SELECT add_column_if_not_exists('tomori_configs', 'chatterbox_exaggeration', 'REAL', '0.5');
 
 -- ============================================================
 -- Prompt snapshot permission (April 2026)
@@ -2616,3 +2623,9 @@ BEGIN
     ON DELETE SET NULL;
   END IF;
 END $$;
+
+-- Max output tokens override (April 2026)
+-- User-configurable generation length cap per saved provider. NULL = use provider default (8192 or hardcoded fallback).
+SELECT add_column_if_not_exists('tomori_configs', 'llm_max_output_tokens', 'INTEGER', 'NULL');
+SELECT add_column_if_not_exists('saved_provider_configs', 'llm_max_output_tokens', 'INTEGER', 'NULL');
+SELECT add_column_if_not_exists('user_saved_provider_configs', 'llm_max_output_tokens', 'INTEGER', 'NULL');

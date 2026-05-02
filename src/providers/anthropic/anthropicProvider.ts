@@ -275,7 +275,7 @@ export class AnthropicProvider
     const config: AnthropicProviderConfig = {
       model: tomoriState.llm.llm_codename,
       apiKey,
-      maxOutputTokens: ANTHROPIC_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? ANTHROPIC_MAX_OUTPUT_TOKENS,
       seesImages: tomoriState.llm.sees_images,
       temperature: tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],

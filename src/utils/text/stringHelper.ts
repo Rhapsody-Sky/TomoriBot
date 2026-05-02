@@ -1305,8 +1305,6 @@ export function cleanLLMOutput(
   return cleanedText.replace(/\n([^:]+):$/, "");
 }
 
-const RESERVED_INVALID_SPEAKER_LABELS_LOWER = new Set(["assistant"]);
-
 function findMatchingBacktickRun(text: string, startIndex: number, delimiter: string): number {
   return text.indexOf(delimiter, startIndex);
 }
@@ -1348,10 +1346,7 @@ function isIndexInsideRanges(index: number, ranges: ReadonlyArray<{ start: numbe
   return ranges.some((range) => index >= range.start && index < range.end);
 }
 
-export function isRegisteredOrReservedSpeakerLabel(
-  rawLabel: string,
-  registeredSpeakerNamesLower?: ReadonlySet<string>,
-): boolean {
+export function isGenericSpeakerStopLabel(rawLabel: string): boolean {
   const label = rawLabel.trim();
   if (!label) {
     return false;
@@ -1363,16 +1358,12 @@ export function isRegisteredOrReservedSpeakerLabel(
     return false;
   }
 
-  const normalizedLabel = label.toLowerCase();
-  return (
-    (registeredSpeakerNamesLower?.has(normalizedLabel) ?? false) ||
-    RESERVED_INVALID_SPEAKER_LABELS_LOWER.has(normalizedLabel)
-  );
+  return /[\p{L}\p{N}_]/u.test(label);
 }
 
-export function truncateBeforeRegisteredSpeakerLine(
+export function truncateBeforeGenericSpeakerLine(
   text: string,
-  registeredSpeakerNamesLower?: ReadonlySet<string>,
+  options: { includeStart?: boolean } = {},
 ): {
   text: string;
   stopTriggered: boolean;
@@ -1386,7 +1377,7 @@ export function truncateBeforeRegisteredSpeakerLine(
   }
 
   const markdownCodeRanges = findMarkdownCodeRanges(text);
-  const speakerLinePattern = /(^|\n+)\s*([^\n:]{1,64}):\s*/g;
+  const speakerLinePattern = options.includeStart ? /(^|\n+)\s*([^\n:]{1,64}):\s*/g : /(\n+)\s*([^\n:]{1,64}):\s*/g;
   let match: RegExpExecArray | null = null;
 
   while (true) {
@@ -1406,11 +1397,7 @@ export function truncateBeforeRegisteredSpeakerLine(
     }
 
     const trimmedLabel = rawLabel.trim();
-    if (!trimmedLabel) {
-      continue;
-    }
-
-    if (!isRegisteredOrReservedSpeakerLabel(trimmedLabel, registeredSpeakerNamesLower)) {
+    if (!isGenericSpeakerStopLabel(trimmedLabel)) {
       continue;
     }
 

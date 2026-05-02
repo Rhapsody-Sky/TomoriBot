@@ -11,7 +11,7 @@
 
 <h3 align="center">TomoriBot</h3>
 
-A self-hosted and customizable personal AI assistant for Discord with robust memory, multiple personas, tool calling, multimodal support, and OpenAI-compatible/local model support.
+A self-hosted and customizable personal AI assistant/role-playing system for Discord with memory, multiple personas, tool calling, multimodality, and API/local model support.
 
 <p align="center">
 
@@ -32,6 +32,7 @@ English | [日本語](README_ja.md)
 [![GitHub Forks](https://img.shields.io/github/forks/Bredrumb/TomoriBot.svg)](https://github.com/Bredrumb/TomoriBot/forks)
 [![GitHub Issues](https://img.shields.io/github/issues/Bredrumb/TomoriBot.svg)](https://github.com/Bredrumb/TomoriBot/issues)
 [![GitHub Pull Requests](https://img.shields.io/github/issues-pr/Bredrumb/TomoriBot.svg)](https://github.com/Bredrumb/TomoriBot/pulls)
+[![License](https://img.shields.io/github/license/Bredrumb/TomoriBot.svg)](https://github.com/Bredrumb/TomoriBot/blob/main/LICENSE)
 
 
   </p>
@@ -52,11 +53,11 @@ English | [日本語](README_ja.md)
 <!-- ABOUT THE PROJECT -->
 ## About the Project
 
-TomoriBot is a free and open-source self-hosted personal AI assistant for Discord, inspired by [SillyTavern](https://github.com/SillyTavern/SillyTavern) and Discord's discontinued Clyde. It was created to bring both practical AI assistants and custom AI companions into Discord, with configurable memory, personas, tool usage, and model routing.
+TomoriBot is a free and open-source self-hosted personal AI assistant and role-playing system for Discord, inspired by SillyTavern and Discord's discontinued Clyde. It can be used as a practical assistant, customizable companion, and role-play partner for yourself in DMs, or for everyone in your Discord server. 
 
-It is designed for people who want a customizable Discord AI bot, AI companion, or agentic chatbot that they can run on their own infrastructure. TomoriBot supports long-term memory, multi-persona behavior, web and MCP tools, image understanding, roleplay-oriented workflows, and [multiple providers](#supported-providers) including self-hosted OpenAI-compatible endpoints such as Ollama, KoboldCPP, and vLLM.
+TomoriBot supports long-term memory, multi-persona behavior, web and MCP tools, in-chat media generation, 100+ Discord slash commands, and [multiple providers](#supported-providers) including custom proxies and self-hosting your own models for everything from text generation to video generation.
 
-You can [invite the public TomoriBot](https://discord.com/oauth2/authorize?client_id=841644102059556915) to your Discord server, or [self-host your own instance](#self-hosting) if you prefer full control over your privacy and API keys. TomoriBot uses encryption that keeps data safe, but self-hosting ensures that all data remain entirely on your device. 
+You can [invite the public TomoriBot](https://discord.com/oauth2/authorize?client_id=841644102059556915) to your Discord server, or [self-host your own instance](#self-hosting) if you prefer full control over your privacy and API keys. TomoriBot uses best security practices and encryption that keeps data safe, but self-hosting ensures that all data remain entirely on your device. 
 
 After adding her to your server through either method above, run the `/config setup` command for instructions. Then you can simply say her name (or @ mention her) in order to get a response. 
 
@@ -81,13 +82,13 @@ If you're enjoying TomoriBot, please consider giving her a ⭐ on GitHub or supp
 ![Screenshots 2](img/scs/2.png)
 <h3 align="center">Complete Multimodal Input/Output</h3>
 <p align="center">TomoriBot can process images, audio, and video sent       
-  directly in Discord and generate them in return directly in Discord using various APIs such as NovelAI, ElevenLabs and Google's NanoBanana/Veo. All keys are encrypted and securely stored in a persistent database. Local image generation (ComfyUI), local TTS/STT, and local LLMs are all fully supported through self-hosted endpoints!</p>
+  directly in Discord and generate them in return using your own local model endpoints or through API keys, all of which are encrypted inside a persistent database. Ready-to-use ComfyUI workflows and audio servers can be found inside this repo's <code>/scripts/</code> folder!</p>
 
 <br />
 
 ![Screenshots 3](img/scs/3.png)
 <h3 align="center">Multi-Persona Support</h3>
-<p align="center">TomoriBot's in-server personality, behavior, and avatar can be easily changed, created, as well as exported for others as Personas (akin to shareable AI Character Cards). Import and even transform your favorite SillyTavern cards through `/persona generate`. You can have an unlimited amount of different personas in a single server, each having their own memories and agendas. You can also orchestrate them to work with each other to do work in your server (or just mess around with each other).</p>
+<p align="center">TomoriBot's in-server personality, behavior, and avatar can be easily changed, created, as well as exported for others as Personas (akin to shareable AI Character Cards). Import and even transform your favorite SillyTavern cards through <code>/persona generate</code>. You can have an unlimited amount of different personas in a single server, each having their own memories and agendas. You can also orchestrate them to work with each other to do work in your server (or just mess around with each other).</p>
 
 <br />
 
@@ -102,166 +103,41 @@ If you're enjoying TomoriBot, please consider giving her a ⭐ on GitHub or supp
 ![Screenshots 6](img/scs/6.png)
 
 <h3 align="center">SillyTavern Integration (Beta)</h3>
-<p align="center">Use your favorite SillyTavern presets directly in Discord through TomoriBot which adjusts her prompt completely, just plop the .json right in through `st-preset`. Discord's new native checkbox groups for modals makes it easy to toggle nodes on and off like in SillyTavern. You can also import SillyTavern V2 character cards directly through `/persona import` or you can modify them first with `/persona generate`.</p>
+<p align="center">Use your favorite SillyTavern presets directly in Discord through TomoriBot which adjusts her prompt completely, just plop the .json right in through <code>st-preset</code>. Discord's new native checkbox groups for modals makes it easy to toggle nodes on and off like in SillyTavern. You can also import SillyTavern character cards directly through <code>/persona import</code> or you can modify them first with <code>/persona generate</code>.</p>
 
 ![Screenshots 5](img/scs/5.png)
 <h3 align="center">Lots of More Features, and Counting!</h3>
 <p align="center">A bunch of fun features that are easy to setup ranging from practical automatic greetings for new server members and cross-channel movement, to silly ones like user impersonations for some trolling. New ones are constantly in development, so please report through GitHub issues or the official Discord for any bugs (or to share any fun suggestions).</p>
 
-## Supported Providers
+## Supported API Providers
 
-TomoriBot supports a wide range of LLM providers, image generation APIs, voice services, and search tools. There are plans to add in more providers, as well as features to mix-and-match them.
+TomoriBot supports a wide range of LLM providers, image generation APIs, voice services, and search tools out of the box. This includes popular providers like Google Gemini, OpenRouter, Anthropic, NovelAI, Nvidia, Deepseek, and more. 
 
-### LLM Providers
-
-| Provider | Streaming | Tool Calling | Image Input |Embeddings |Notes |
-|----------|-----------|--------------|-------------|-------|-------|
-| **Google Gemini** | ✅ | ✅ | ✅ | ✅ |Free Models Available |
-| **OpenRouter** | ✅ | ✅ | ✅ | ✅ |Free Models Available |
-| **Anthropic (API)** | ✅ | ✅ | ✅ |- | NOT Claude Code |
-| **NovelAI** | ✅ | ✅ | - |- | Only GLM 4.6 can use Tools |
-| **Nvidia** | ✅ | ✅ | ✅ | ✅ |Free Models Available | 
-| **Deepseek** | ✅ | ✅ | - | - |- |
-| **Z.ai** | ✅ | ✅ | ✅ | - |Free Models Available |
-| **Z.ai Coding** | ✅ | ✅ | - | - |Subscription Plan ⚠️ ToS restricts to coding/agent use only |
-| **Google Vertex AI** | ✅ | ✅ | ✅ |✅ | Includes 'free' Express version |
-| **Codex CLI (via ChatMock)** | ✅ | ✅ | ✅ | - |via ChatMock (README for Instructions)) |
-| **Custom (OpenAI-compatible)** | ✅ | ✅ | ✅ | - |KoboldCPP, etc.
-
-### Image Generation
-
-| Provider | Text-to-Image | Image-to-Image | Inpainting | Notes |
-|----------|---------------|----------------|-----------|-------|
-| **Google** | ✅ | ✅ | - | - |
-| **OpenRouter** | ✅ | ✅ | - | - |
-| **NovelAI** | ✅ | ✅ | ✅ | Can be combined with other providers |
-| **Nvidia** | ✅ | ✅ | - | - |
-| **Z.ai** | ✅ | - | - | - |
-
-### Video Generation
-
-| Provider | Text-to-Video | Image-to-Video | Notes |
-|----------|---------------|----------------|-------|
-| **Google** | ✅ | ✅ | Async polling workflow |
-| **OpenRouter** | ✅ | ✅ | Async polling workflow |
-| **Z.ai** | ✅ | ✅ | Async polling workflow |
-
-### Voice & Audio
-
-| Provider | Text-to-Speech | Speech-to-Text |
-|----------|----------------|-----------------|
-| **ElevenLabs** | ✅ | ✅ |
-
-### Search & Web Tools
-
-| Provider | Search Type | MCP | Notes |
-|----------|-------------|-----|-------|
-| **Brave Search** | Web search, news, local | ✅ | REST API integration ⚠️ Set $5 usage limit in dashboard to avoid charges |
-| **DuckDuckGo/Felo Search** | Web search, instant answers | ✅ | MCP server integration |
-
+**[Read the full list of Supported Providers here](docs/wiki/supported-providers.md)**
 
 ## Local & Self-Hosted Endpoints
 
-### Local LLM (Text / Embeddings)
+Besides APIs, you can also connect TomoriBot to your own self-hosted models. She supports local LLMs (via Ollama, KoboldCPP, LM Studio, vLLM, etc.), local image/video generation via ComfyUI, as well as local TTS and STT endpoints:
 
-Any OpenAI-compatible server works out of the box using the `/custom-endpoints` command category. Popular options:
+**[Read the Local & Self-Hosted Endpoints guide here](docs/wiki/local-endpoints.md)**
 
-| Server | Notes |
-|--------|-------|
-| [Ollama](https://ollama.com) | Easiest local LLM setup; enable OpenAI-compat mode |
-| [KoboldCPP](https://github.com/LostRuins/koboldcpp) | GGUF models; OpenAI-compat mode built in |
-| [LM Studio](https://lmstudio.ai) | GUI-based; exposes a local `/v1` server |
-| [vLLM](https://github.com/vllm-project/vllm) | High-throughput GPU serving |
-| [LiteLLM](https://github.com/BerriAI/litellm) | Unified proxy over many backends |
+## Security & Threat Models
 
-Configure via `/custom-endpoints` in Discord, pointing at your local endpoint URL (e.g. `http://192.168.1.10:11434/v1`).
+TomoriBot employs encryption and security best practices to keep data and API keys completely safe (as well as your wallet through configurable per-member/server rate limits), giving you full control and privacy when self-hosting:
 
-### Local Image Generation (ComfyUI)
-
-TomoriBot ships a ready-to-use ComfyUI workflow for txt2img and img2img. Use `/help custom-endpoint` to learn how to create a TomoriBot-compatible ComfyUI workflow for images and videos as well.
-
-- **Workflow file**: [`scripts/comfyui-workflows/`](scripts/comfyui-workflows/)
-- Upload the `.json` workflow during `/config custom-endpoints add` (capability: `image`, API style: `comfyui`)
-- ComfyUI must be reachable on the network, TomoriBot polls its `/history` endpoint until the image is ready
-
-### Local TTS (Voice Messages)
-
-Three reference FastAPI wrapper servers are included, each exposing a `/synthesize` endpoint that TomoriBot calls for native Discord voice messages. All of which support voice cloning
-
-| Engine | Folder | Model | Strength |
-|--------|--------|-------|---------|
-| [Chatterbox](https://github.com/resemble-ai/chatterbox) | [`scripts/tts/chatterbox/`](scripts/tts/chatterbox/) | Chatterbox Turbo | English, lightweight, expressive bracket tags |
-| [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | [`scripts/tts/qwen3tts/`](scripts/tts/qwen3tts/) | Qwen3-TTS 1.7B Base | Large but accurate multilingual reference-audio cloning (RECOMMENDED) |
-| [IrodoriTTS](https://huggingface.co/Aratako/Irodori-TTS-500M-v2) | [`scripts/tts/irodoritts/`](scripts/tts/irodoritts/) | Irodori-TTS 500M v2 | Japanese-focused reference-audio cloning, styles with emojis |
-
-Each folder contains a `server.py` and `requirements.txt`. Start the server, then register it in Discord with `/config custom-endpoints add` (capability: `speech`). Upload a short reference audio clip via `/speech voice-add` and assign it to a persona with `/speech voice-assign`. The clip can be in any audio format (TomoriBot automatically converts it to mono WAV), but it is strongly recommended to use a 10-20 second clip with no background music.
-
-ElevenLabs is also supported as a cloud TTS/STT option via `/speech elevenlabs`.
-
-### Local STT (Audio Transcription)
-
-A reference WhisperX server is included for transcribing audio attachments sent to TomoriBot.
-
-- **Server script**: [`scripts/stt/whisperx_server.py`](scripts/stt/whisperx_server.py)
-- Exposes the standard OpenAI `/v1/audio/transcriptions` endpoint shape
-- Compatible alternatives: whisper.cpp HTTP mode, KoboldCPP STT
-
-Register via `/custom-endpoints add` (capability: `transcription`). Use `/help transcription` in Discord for a step-by-step setup guide.
+**[Read the full Security & Threat Models guide here](docs/wiki/threat-models.md)**
 
 
-## Built-In Tool Reference for Prompt Customization
+## Tool Macros for Prompt Customization
 
-If you customize TomoriBot's system prompt, persona instructions, or external provider prompt templates, prefer the stable prompt macros below instead of hardcoding tool names.
+TomoriBot comes with a variety of built-in tools (such as web search, memory management, image generation, cross-channel messaging, and more), which you can directly refer to in your prompts with macros:
 
-- Prompt macros like `{memory_tool}` are expanded during context assembly. Exact tool names are emitted wrapped in backticks, while unresolved search/fetch families fall back to plain-language text. Static macros always map to the current canonical built-in tool name. Search/fetch family macros resolve to the best currently available exact tool name for the active provider/configuration.
-- Older static macros such as `{pin_tool}` and `{timestamp_refresh_tool}` are kept as compatibility aliases, but new prompt text should prefer `{manage_message_tool}` and `{message_metadata_tool}`.
-- `Base Tool` means the tool is part of TomoriBot's normal built-in tool set. It may still depend on the current provider/model supporting tool calling.
-- Other requirements below are additional gates such as server feature flags, Discord permissions, model capabilities, or optional API keys.
-- Admin-added MCP tools are intentionally not listed here because their names depend on each server's configuration.
-
-### Built-In Function Tools
-
-| Tool name | Prompt macro | Requirements | Purpose |
-|---|---|---|---|
-| `review_capabilities` | `{capabilities_tool}` | Base Tool | Check current chat abilities, slash commands, or runtime settings before answering. |
-| `create_long_term_memory` | `{memory_tool}` | `self_teaching_enabled` | Save a new stable server fact or user-specific preference for future conversations. |
-| `update_long_term_memory` | `{memory_update_tool}` | `self_teaching_enabled` | Replace an outdated long-term memory by ID. |
-| `update_short_term_memory` | `{short_term_memory_tool}` | Base Tool; unavailable on NovelAI | Save temporary working memory for the current channel/story arc without making it permanent. |
-| `create_task` | `{task_tool}` | Base Tool | Schedule one-time or recurring reminders and self-tasks. |
-| `cross_channel_message` | `{cross_channel_tool}` | Base Tool; unavailable on NovelAI; target channel permissions and cross-channel blocklist still apply | Instantly act in another channel or thread, with optional boomerang report-back. |
-| `select_sticker_for_response` | `{sticker_tool}` | `sticker_usage_enabled`; `USE_EXTERNAL_STICKERS` | Pick a matching server sticker to accompany the response. |
-| `manage_message` | `{manage_message_tool}` | `manage_message_enabled`; `MANAGE_MESSAGES` still required for `pin` | Pin any recent message, or edit/delete recent messages sent by Tomori or its characters. |
-| `interact_with_recent_message` | `{message_interaction_tool}` | Base Tool; normal Discord send/react capability still applies at runtime | React to a recent message or send a short backtracking reply to it. |
-  | `peek_profile_picture` | `{profile_picture_tool}` | Base Tool; requires either a vision-capable chat model or a configured `vision_llm` | Inspect a user's avatar or the active persona avatar. |
-  | `read_document` | `{document_tool}` | Base Tool | Extract text from a PDF, TXT, or MD attachment in a recent message. |
-| `reveal_message_metadata` | `{message_metadata_tool}` | Base Tool | Annotate recent visible turns with `ref_N` handles and sent timestamps for precise message targeting. |
-| `increase_media_context` | `{media_context_tool}` | Base Tool; requires a vision-capable chat model | Pull older hidden images/videos back into context when media was windowed out for optimization. |
-| `process_gif` | `{gif_tool}` | Base Tool; development only; requires a vision-capable chat model | Extract keyframes from a GIF for analysis. |
-| `process_youtube_video` | `{youtube_tool}` | Base Tool; requires a model with YouTube/video support | Analyze a specific YouTube link on demand. |
-| `analyze_image` | `{image_analysis_tool}` | Base Tool; requires a configured `vision_llm`; only shown when the current chat model cannot already see images | Delegate image understanding to a separate vision model. |
-| `generate_image` | `{image_generation_tool}` | `imagegen_enabled`; active provider must support native image generation | Generate or edit an image with the current provider. |
-| `generate_image_nai` | `{anime_image_generation_tool}` | `imagegen_enabled`; NovelAI provider or NovelAI optional API key | Generate or edit anime-styled images with NovelAI. |
-| `generate_voice_message` | `{voice_message_tool}` | ElevenLabs optional API key; active persona needs an ElevenLabs voice; `voice_message_enabled` | Send a spoken Discord voice reply instead of plain text. |
-
-### Default Search / Web Extras
-
-These are the common built-in or bundled web tools Tomori can expose when web access is enabled. Exact availability depends on provider support, server config, API keys, and which MCP servers are active.
-
-Family macros below may resolve to the listed bundled tools or to compatible guild MCP replacements when admins register their own `web_search` or `url_fetcher` servers.
-
-| Tool name | Prompt macro | Requirements | Purpose |
-|---|---|---|---|
-| `brave_web_search` | `{web_search_tool}` | `web_search_enabled`; Brave API available | Search the web for general information. |
-| `brave_image_search` | `{image_search_tool}` | `web_search_enabled`; Brave API available | Search for relevant images on the web. |
-| `brave_video_search` | `{video_search_tool}` | `web_search_enabled`; Brave API available | Search for relevant videos on the web. |
-| `brave_news_search` | `{news_search_tool}` | `web_search_enabled`; Brave API available | Search specifically for current news coverage. |
-| `fetch` | `{url_fetch_tool}` | Active bundled fetch MCP server | Read a specific web page or URL in more detail. |
-| `web-search` | `{web_search_tool}` | `web_search_enabled`; active DuckDuckGo/Felo MCP search server | Free web search fallback when Brave is unavailable. |
-| `url-metadata` | `{url_metadata_tool}` | `web_search_enabled`; active DuckDuckGo/Felo MCP search server | Retrieve page metadata for a URL when a metadata-specific fetcher is available. |
+**[Read the complete Built-In Tool Reference here](docs/wiki/built-in-tools.md)**
 
 ### Sample Prompts with Tools
 
 These are some short silly examples of the kind of system-prompt instructions that make good use of TomoriBot's tool chains in a Discord community. Of course, you can make it more practical by being more creative.
+
 
 #### 1. Weekly ~~Current Events~~ Yuri News Anchor   
 ```text
@@ -269,20 +145,17 @@ Every Friday, compile the week's notable yuri manga chapters, anime episodes, an
 Present findings with {voice_message_tool} in an overly dramatic news anchor voice.
 ```
 
-#### 2. Vibe Checker
+#### 2. Wellness Checker
 ```text
-Every few hours, assess the general mood from recent messages. 
-If vibes are off, deploy a random compliment or cursed image with {image_generation_tool}. 
-If vibes are immaculate, do nothing as good vibes sustain themselves. 
-Store recurring vibe killers with {memory_tool} to report to no one.
+Every few hours, do a mandatory wellness check on @Bredrumb. 
+Ask them how they feel right now and if they've taken a break from coding recently. 
+Track their emotional state over time with {memory_tool} and/or {memory_update_tool} to report back to them later.
 ```
 
-#### 3. Catastrophe Forecaster
+#### 3. Sleep Police
 ```text
-You predict minor inconveniences that will befall the server today. 
-Forecasts must be specific, plausible, and based on past server member behavior. 
-eg. "73% chance someone rage-quits a gacha pull before noon."
-Schedule tomorrow's forecast each midnight with {task_tool}.
+If you notice through {message_metadata_tool} that someone is chatting past 2 AM, use {voice_message_tool} to send them a threateningly calm ASMR lullaby telling them to go to bed. 
+If they keep talking 10 minutes later, use {manage_message_tool} to delete their message for their own good and remind them that sleep deprivation is a leading cause of skill issues.
 ```
 
 <!-- GETTING STARTED -->

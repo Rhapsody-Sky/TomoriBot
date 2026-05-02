@@ -36,7 +36,7 @@ import {
   humanizeString,
   replaceMentionHandles,
   createSentenceSplitRegex,
-  truncateBeforeRegisteredSpeakerLine,
+  truncateBeforeGenericSpeakerLine,
   hasTrailingIncompleteMarkdownTable,
   extractMarkdownTableSegments,
   MARKDOWN_TABLE_ATTACHMENT_PREFIX,
@@ -1481,16 +1481,17 @@ export class StreamOrchestrator implements IStreamOrchestrator {
       segmentToSend = `${state.prefillTarget}${StreamOrchestrator.PREFILL_WHITESPACE_SENTINEL}${strippedSegment}`;
     }
     let shouldStopForSpeakerGuard = false;
-    const speakerGuardResult = truncateBeforeRegisteredSpeakerLine(
-      segmentToSend,
-      textConfig.registeredSpeakerNamesLower,
-    );
-    if (speakerGuardResult.stopTriggered) {
-      log.warn(
-        `Stream speaker guard: stopping before speaker label "${speakerGuardResult.matchedSpeaker ?? "unknown"}"`,
-      );
-      segmentToSend = speakerGuardResult.text;
-      shouldStopForSpeakerGuard = true;
+    if (context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false) {
+      const speakerGuardResult = truncateBeforeGenericSpeakerLine(segmentToSend, {
+        includeStart: Boolean(state.accumulatedText.trim() || state.pendingAggregatedText.trim()),
+      });
+      if (speakerGuardResult.stopTriggered) {
+        log.warn(
+          `Stream speaker guard: stopping before speaker label "${speakerGuardResult.matchedSpeaker ?? "unknown"}"`,
+        );
+        segmentToSend = speakerGuardResult.text;
+        shouldStopForSpeakerGuard = true;
+      }
     }
 
     if (!segmentToSend.trim()) {

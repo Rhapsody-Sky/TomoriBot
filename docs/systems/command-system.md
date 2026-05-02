@@ -306,7 +306,8 @@ Rules:
 ## Representative Command Groups
 
 - `bot`: respond, generate(image), kill, impersonate
-- `config`: setup, model(text/image/embedding/video/vision/speech/transcription), speech(elevenlabs/voice-add/voice-remove/voice-assign/transcripts), api-key(rotation), provider(add/remove), custom-endpoint(add/edit/remove), system-prompt(set/remove/preset), context-note(set), params(*), timezone, message-fetch-limit, bot-permissions -> tool-use(toggle/manage), notice-embeds(visibility)
+- `config`: setup, model(text/image/embedding/video/vision/speech/transcription), api-key(rotation), provider(add/remove), custom-endpoint(add/edit/remove), system-prompt(set/remove/preset), context-note(set), params(*), timezone, message-fetch-limit, bot-permissions -> tool-use(toggle/manage), notice-embeds(visibility)
+- `speech`: elevenlabs, voice-add, voice-remove, voice-assign, transcripts, chatterbox(parameters)
 - `nsfw`: jailbreaks
 - `optional-key`: brave/set/remove
 - `server`: trigger(add/delete), whitelist(channel/persona/role/remove), stm(manage), cooldown(triggers), auto-trigger(channels/threshold), matrix(link/unlink), quota(image-generation/text-generation/video-generation/reset), rp-channels, crosschannel-blocklist, welcome-channel(set/remove), private-channels, user-blacklist(add/remove), member-permissions, always-reply, thought-logs-channel

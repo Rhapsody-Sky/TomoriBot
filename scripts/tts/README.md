@@ -6,7 +6,7 @@ Each engine lives in its own subfolder with its own `.venv` to keep dependencies
 
 | Engine | Folder | Default port |
 |---|---|---|
-| Chatterbox-Turbo (English, bracket tags) | `chatterbox/` | 8011 |
+| Chatterbox (Turbo by default, English, bracket tags) | `chatterbox/` | 8011 |
 | Qwen3-TTS 12Hz 1.7B Base (10 languages, plain text) | `qwen3tts/` | 8012 |
 | Irodori-TTS 500M v2 (Japanese, emoji tags) | `irodoritts/` | 8013 |
 
@@ -54,3 +54,5 @@ After the server is running, register it with `/config custom-endpoint add`:
 
 > **ffmpeg required**: voice sample uploads are normalised to WAV via ffmpeg. Install it
 > and ensure `ffmpeg` is on your PATH before running `/config speech voice-add`.
+
+Chatterbox defaults to Turbo. Use `/speech chatterbox parameters` to disable Turbo and send standard-model `cfg_weight` and `exaggeration` values with generated voice messages.

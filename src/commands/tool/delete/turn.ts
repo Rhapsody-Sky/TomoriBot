@@ -2,10 +2,10 @@ import type { AnyThreadChannel, ButtonInteraction, ChatInputCommandInteraction, 
 import { BaseGuildTextChannel, EmbedBuilder, MessageFlags, type SlashCommandSubcommandBuilder } from "discord.js";
 import tomoriChat, { suppressNextSelfReply } from "@/events/messageCreate/tomoriChat";
 import type { TomoriState, UserRow } from "@/types/db/schema";
-import { isMatrixBridgeWebhookUsername } from "@/utils/bridge";
 import { getCachedAllPersonas, getCachedMainPersona } from "@/utils/cache/tomoriStateCache";
 import { replyInfoEmbed, replyPaginatedPersonaChoicesV2 } from "@/utils/discord/interactionHelper";
 import { normalizeMessageFetchLimit } from "@/utils/discord/messageFetchLimit";
+import { findLastPersonaTurnBlock } from "@/utils/discord/personaTurnDetection";
 import { resolveManagedWebhookForChannel } from "@/utils/discord/webhookManager";
 import { ColorCode, log } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
@@ -163,14 +163,10 @@ export async function execute(
   let activeInteraction: ChatInputCommandInteraction | ButtonInteraction = interaction;
 
   try {
-    // 6. Load all personas and build a lookup map by lowercased nickname
+    // 6. Load all personas for selection and persona-turn detection.
     const allPersonas = await getCachedAllPersonas(guildId);
-    const personaByNickname = new Map<string, TomoriState>(
-      allPersonas.map((p) => [p.tomori_nickname.toLowerCase(), p]),
-    );
 
     // Target persona tracking — null means auto-detect from message history
-    let targetPersonaKey: string | null = null;
     let resolvedPersona: TomoriState | null = null;
 
     // 7. Persona selection (conditional) — Pattern 4 when select_persona=true
@@ -207,7 +203,6 @@ export async function execute(
       activeInteraction = buttonInteraction;
 
       resolvedPersona = allPersonas[personaSelection.selectedIndex] ?? null;
-      targetPersonaKey = resolvedPersona?.tomori_nickname.toLowerCase() ?? null;
 
       // Acknowledge the button interaction ephemerally before doing async work
       await buttonInteraction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -225,79 +220,14 @@ export async function execute(
     const messages: Message[] = [...fetched.values()].reverse();
 
     // 9. Walk newest-to-oldest to find the last contiguous persona block
-    const blockMessages: Message[] = [];
-
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (!msg) continue;
-
-      if (!msg.webhookId) {
-        // Skip embed-only bot messages (e.g., error embeds) — they don't
-        // represent persona turns and shouldn't interrupt block detection
-        if (msg.author.id === client.user?.id && !msg.content.trim() && msg.embeds.length > 0) {
-          continue;
-        }
-
-        // Non-webhook message — check if it's the bot's own direct message,
-        // which represents the main persona speaking without a webhook
-        if (msg.author.id === client.user?.id) {
-          const mainPersona = allPersonas.find((p) => !p.is_alter);
-          if (mainPersona) {
-            const mainKey = mainPersona.tomori_nickname.toLowerCase();
-            if (targetPersonaKey === null) {
-              // Auto-detect: claim this as the target persona
-              targetPersonaKey = mainKey;
-              resolvedPersona = mainPersona;
-              blockMessages.push(msg);
-              continue;
-            } else if (targetPersonaKey === mainKey) {
-              // Matches target — add to block
-              blockMessages.push(msg);
-              continue;
-            }
-          }
-        }
-
-        // Not a tracked persona message; stop if we already have a block
-        if (blockMessages.length > 0) break;
-        continue;
-      }
-
-      // Matrix bridge relay webhooks represent user messages forwarded from
-      // Matrix — they are never persona messages and must stop block detection
-      if (isMatrixBridgeWebhookUsername(msg.author.username)) {
-        if (blockMessages.length > 0) break;
-        continue;
-      }
-
-      // Persona webhook — look up by raw (lowercased) username directly
-      const lookupKey = msg.author.username.toLowerCase();
-      const matchedPersona = personaByNickname.get(lookupKey);
-
-      if (!matchedPersona) {
-        // Webhook exists but username doesn't match any known persona
-        // (e.g. user impersonation, external bots) — treat as non-persona
-        if (blockMessages.length > 0) break;
-        continue;
-      }
-
-      if (targetPersonaKey === null) {
-        // Auto-detect: first persona webhook found is our target
-        targetPersonaKey = lookupKey;
-        resolvedPersona = matchedPersona;
-        blockMessages.push(msg);
-      } else if (lookupKey === targetPersonaKey) {
-        // Contiguous message from the same persona — add to block
-        blockMessages.push(msg);
-      } else if (blockMessages.length > 0) {
-        // A different persona appeared after we already collected target
-        // messages — the contiguous block has ended
-        break;
-      }
-      // else: different persona but target not yet found — keep scanning
-      // backwards (handles select_persona where newer personas sit between
-      // the command invocation and the target's last block)
-    }
+    const detectedTurn = findLastPersonaTurnBlock({
+      messages,
+      allPersonas,
+      clientUserId: client.user?.id,
+      targetPersonaId: resolvedPersona?.tomori_id,
+    });
+    const blockMessages = detectedTurn.blockMessages;
+    resolvedPersona = detectedTurn.resolvedPersona;
 
     // 10. No persona block found in recent history
     if (blockMessages.length === 0) {
@@ -312,7 +242,7 @@ export async function execute(
       return;
     }
 
-    const displayName = resolvedPersona?.tomori_nickname ?? targetPersonaKey ?? "Unknown";
+    const displayName = resolvedPersona?.tomori_nickname ?? detectedTurn.targetPersonaKey ?? "Unknown";
     const totalCount = blockMessages.length;
 
     // 11. Inform user that deletion is in progress

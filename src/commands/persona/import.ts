@@ -11,7 +11,7 @@ import { replyInfoEmbed } from "../../utils/discord/interactionHelper";
 import type { UserRow } from "../../types/db/schema";
 import { memoryGuard, IMPORT_LIMITS, reserveImportQuota } from "../../utils/security/rateLimiter";
 import { invalidateTomoriStateCache } from "../../utils/cache/tomoriStateCache";
-import { validatePresetFile, importPresetData } from "../../utils/db/presetImport";
+import { validatePresetFile, validatePresetData, importPresetData } from "../../utils/db/presetImport";
 import type { PresetExportData } from "../../types/preset/presetExport";
 import {
   convertSillyTavernJsonToPresetData,
@@ -635,9 +635,29 @@ export async function execute(
     }
 
     const additionalTriggers = additionalTriggersInput ? parseCommaSeparatedTriggers(additionalTriggersInput) : [];
-    presetDataFromFile.trigger_words = dedupeTriggers(
-      [...presetDataFromFile.trigger_words, ...additionalTriggers].map((trigger) => trigger.trim()),
-    );
+    const mergedPresetData: PresetExportData = {
+      ...presetDataFromFile,
+      trigger_words: dedupeTriggers(
+        [...presetDataFromFile.trigger_words, ...additionalTriggers].map((trigger) => trigger.trim()),
+      ),
+    };
+    const mergedPresetValidation = validatePresetData(mergedPresetData);
+    if (!mergedPresetValidation.valid || !mergedPresetValidation.data) {
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(localizer(locale, "commands.persona.import.invalid_file_title"))
+            .setDescription(
+              mergedPresetValidation.error
+                ? localizeError(locale, mergedPresetValidation.error)
+                : localizer(locale, "commands.persona.import.invalid_file_description"),
+            )
+            .setColor(ColorCode.ERROR),
+        ],
+      });
+      return;
+    }
+    const presetData = mergedPresetValidation.data;
 
     // 11. Branch logic based on import type
     const serverDiscId = interaction.guild?.id ?? interaction.user.id;
@@ -645,7 +665,7 @@ export async function execute(
 
     if (importType === "main") {
       // Main persona import: replace existing main persona
-      const importResult = await importPresetData(serverDiscId, presetDataFromFile, identityMode);
+      const importResult = await importPresetData(serverDiscId, presetData, identityMode);
 
       if (!importResult.success) {
         await interaction.editReply({
@@ -881,8 +901,6 @@ export async function execute(
       );
     } else {
       // Alter persona import: add new alter persona
-      const presetData = presetDataFromFile;
-
       // 11a. Load all existing personas and collect their trigger words
       const allPersonas = await loadAllPersonasForServer(serverDiscId);
       const personaLimits = getMemoryLimits();

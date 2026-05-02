@@ -10,11 +10,9 @@ import { sql } from "@/utils/db/client";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { replyInfoEmbed } from "@/utils/discord/interactionHelper";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { storeVoiceSample } from "@/utils/storage/voiceSampleStorage";
 import type { ErrorContext, UserRow } from "@/types/db/schema";
 import { localizer } from "@/utils/text/localizer";
-
-/** Relative base for voice sample storage (data/voice-samples/{server_id}/). */
-const VOICE_SAMPLES_BASE_DIR = path.resolve(process.cwd(), "data", "voice-samples");
 
 /** Default max upload size in MB (overridden by SPEECH_SAMPLE_MAX_MB env var). */
 const SPEECH_SAMPLE_MAX_MB = Math.max(1, Number.parseInt(process.env.SPEECH_SAMPLE_MAX_MB ?? "10", 10) || 10);
@@ -221,7 +219,7 @@ export async function execute(
 
     const durationMs = Math.round(durationSecs * 1000);
 
-    // Insert a placeholder row to reserve a sample_id, then update with the real file_path.
+    // Insert a placeholder row to reserve a sample_id, then update with the real storage reference.
     const [insertedRow] = await sql<[{ sample_id: number }]>`
       INSERT INTO voice_samples (server_id, name, file_path, ref_text, duration_ms)
       VALUES (${serverId}, ${sampleName}, '', ${refText}, ${durationMs})
@@ -237,26 +235,25 @@ export async function execute(
     }
 
     const sampleId = insertedRow.sample_id;
-    const relativeFilePath = `${serverId}/${sampleId}.wav`;
-    const absoluteDir = path.join(VOICE_SAMPLES_BASE_DIR, String(serverId));
-    const absoluteFilePath = path.join(VOICE_SAMPLES_BASE_DIR, relativeFilePath);
-
-    // Ensure the server-specific subdirectory exists.
-    await fs.mkdir(absoluteDir, { recursive: true });
-
-    // Write the WAV file to disk.
-    try {
-      await fs.writeFile(absoluteFilePath, wavBuffer);
-    } catch (writeError) {
-      // Roll back the DB row if the file write fails.
+    const storedReference = await storeVoiceSample({
+      serverId,
+      sampleId,
+      buffer: wavBuffer,
+    });
+    if (!storedReference) {
       await sql`DELETE FROM voice_samples WHERE sample_id = ${sampleId}`.catch(() => {});
-      throw writeError;
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "general.errors.update_failed_title",
+        descriptionKey: "general.errors.update_failed_description",
+        color: ColorCode.ERROR,
+      });
+      return;
     }
 
-    // Update the row with the resolved file path.
+    // Update the row with the resolved storage reference.
     await sql`
       UPDATE voice_samples
-      SET file_path = ${relativeFilePath}
+      SET file_path = ${storedReference}
       WHERE sample_id = ${sampleId}
     `;
 

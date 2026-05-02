@@ -46,6 +46,7 @@ Reminders are tied to a persona to preserve the identity that set them:
   - Matching is done by webhook `author.username` → persona nickname (case-insensitive).
   - Ensure persona nicknames are unique.
 - **Bot mention** → main persona responds.
+- Direct replies and bot mentions can combine with explicit persona trigger words in the same message. For example, replying to Tomori while mentioning `@Ren` routes the turn to Tomori and Ren.
 - **Auto-message threshold** → main persona responds.
 
 ### Trigger words
@@ -59,6 +60,12 @@ If multiple personas match, they respond in deterministic order based on where t
 ### Manual triggers
 
 Manual triggers can specify `selectedPersonaId`. In that case, **only that persona responds** (fallbacks apply if missing).
+
+`/bot respond` resolves its implicit persona from recent channel history before falling back:
+1. the last known Tomori persona that spoke in the channel;
+2. the user's personal spotlight auto-trigger persona, if configured and allowed;
+3. the channel's `/server auto-trigger channels` persona assignment, if configured;
+4. the main persona.
 
 Configured join welcomes also use the manual-trigger path:
 - `/server welcome-channel set` stores a selected persona or `Random`.
@@ -268,6 +275,7 @@ Webhook usage differs by environment:
   - `username` = persona nickname
   - `avatarURL` = public URL built from `AVATAR_PUBLIC_BASE_URL` when configured
   - otherwise TomoriBot mutates the shared webhook avatar from the local file immediately before sending
+  - if no alter avatar resolves, TomoriBot resets the shared webhook avatar before sending so a previous local avatar cannot leak onto the next persona
 - **Avatar storage**: Alter avatars are stored locally under `data/avatars/servers/{guildId}/personas/{personaId}/...`
 - **Legacy persona webhooks** (`TomoriBot Persona {id}`) are no longer part of steady-state sending. They remain recovery sources for lazy migration and may be cleaned up manually later.
 

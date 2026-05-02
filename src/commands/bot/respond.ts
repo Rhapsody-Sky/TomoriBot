@@ -15,10 +15,13 @@ import {
 } from "../../utils/db/cooldownManager";
 import { getCachedWhitelistStatus } from "../../utils/cache/channelWhitelistCache";
 import { getCachedPersonalSpotlightStatus } from "@/utils/cache/personalSpotlightCache";
+import { normalizeMessageFetchLimit } from "@/utils/discord/messageFetchLimit";
+import { findLastActivePersona } from "@/utils/discord/personaTurnDetection";
 import { filterPersonasForTrigger, isPersonaAllowedForTrigger } from "@/utils/db/personaAccess";
 import { CooldownType } from "../../types/db/schema";
 import { getCooldownTypeFooterKey } from "../../utils/db/messageCooldown";
 import { isNoticeEmbedVisible } from "@/utils/discord/toolProgressNotice";
+import type { TomoriState } from "@/types/db/schema";
 
 /**
  * Configure the respond subcommand
@@ -35,6 +38,35 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
         .setDescription(localizer("en-US", "commands.bot.respond.extra_options_description"))
         .setRequired(false),
     );
+
+function getChannelAutoTriggerPersona(
+  personas: TomoriState[],
+  effectiveChannelId: string,
+  tomoriState: TomoriState,
+  personalAutoTriggerPersonaId?: number | null,
+): TomoriState | null {
+  const resolveById = (tomoriId: number | null | undefined): TomoriState | null => {
+    if (tomoriId === null || tomoriId === undefined) return null;
+    return personas.find((persona) => persona.tomori_id === tomoriId) ?? null;
+  };
+
+  const personalAutoTriggerPersona = resolveById(personalAutoTriggerPersonaId);
+  if (personalAutoTriggerPersona) {
+    return personalAutoTriggerPersona;
+  }
+
+  if (!tomoriState.config.autoch_disc_ids.includes(effectiveChannelId)) {
+    return null;
+  }
+
+  const serverAutoTriggerPersonaId =
+    tomoriState.config.autoch_persona_overrides.find((entry) => entry.channel_disc_id === effectiveChannelId)
+      ?.tomori_id ?? null;
+
+  return serverAutoTriggerPersonaId === null
+    ? (personas.find((persona) => !persona.is_alter) ?? null)
+    : resolveById(serverAutoTriggerPersonaId);
+}
 
 /**
  * Execute the respond command - manually trigger Tomori to respond to the latest message
@@ -180,7 +212,40 @@ export async function execute(
     return;
   }
 
-  const fallbackPersona = availablePersonas[0];
+  const fetchedMessages = await interaction.channel.messages.fetch({
+    limit: normalizeMessageFetchLimit(tomoriState.config.message_fetch_limit),
+  });
+  const messages = [...fetchedMessages.values()].reverse();
+  const latestMessage = fetchedMessages.first();
+
+  if (!latestMessage) {
+    log.warn(`No messages found in channel ${interaction.channel.id} for manual respond command.`);
+    await replyInfoEmbed(interaction, locale, {
+      titleKey: "commands.bot.respond.no_messages_title",
+      descriptionKey: "commands.bot.respond.no_messages_description",
+      color: ColorCode.WARN,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const availablePersonaIds = new Set(availablePersonas.map((persona) => persona.tomori_id));
+  const lastActivePersona = findLastActivePersona({
+    messages,
+    allPersonas,
+    clientUserId: client.user?.id,
+  });
+  const allowedLastActivePersona =
+    lastActivePersona && availablePersonaIds.has(lastActivePersona.tomori_id) ? lastActivePersona : null;
+  const autoTriggerPersona = getChannelAutoTriggerPersona(
+    availablePersonas,
+    parentChannelId ?? interaction.channel.id,
+    tomoriState,
+    personalSpotlightStatus?.autoTriggerPersonaId ?? null,
+  );
+  const defaultPersona = availablePersonas.find((persona) => !persona.is_alter) ?? availablePersonas[0];
+  const fallbackPersona = allowedLastActivePersona ?? autoTriggerPersona ?? defaultPersona;
+
   if (!fallbackPersona) {
     await replyInfoEmbed(interaction, locale, {
       titleKey: "general.errors.unknown_error_title",
@@ -345,22 +410,6 @@ export async function execute(
   }
 
   try {
-    const messages = await interaction.channel.messages.fetch({ limit: 1 });
-    const latestMessage = messages.first();
-
-    if (!latestMessage) {
-      log.warn(`No messages found in channel ${interaction.channel.id} for manual respond command.`);
-      await replyInteraction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.bot.respond.no_messages_title"))
-            .setDescription(localizer(locale, "commands.bot.respond.no_messages_description"))
-            .setColor(ColorCode.WARN),
-        ],
-      });
-      return;
-    }
-
     // 6. Build success embed
     const successEmbed = new EmbedBuilder()
       .setTitle(localizer(locale, "commands.bot.respond.success_title"))

@@ -415,6 +415,7 @@ class ToolRegistryImpl implements ToolRegistryInterface {
             WHERE server_id = ${serverIdNumber}
             LIMIT 1
           `;
+        /*
         const [googleSavedProviderRow] = await sql<[{ api_key: Buffer | null }]>`
             SELECT api_key
             FROM saved_provider_configs
@@ -422,12 +423,13 @@ class ToolRegistryImpl implements ToolRegistryInterface {
               AND provider = 'google'
             LIMIT 1
           `;
+        */
         const hasStandardImageSlot =
           stateForContext.diffusion_model_id != null || toolConfigRow?.diffusion_model_id != null;
         const hasNaiImageSlot =
           stateForContext.nai_diffusion_model_id != null || toolConfigRow?.nai_diffusion_model_id != null;
         const hasVideoSlot = stateForContext.video_model_id != null || toolConfigRow?.video_model_id != null;
-        const hasGeminiAccess = !!googleSavedProviderRow?.api_key;
+        // const hasGeminiAccess = !!googleSavedProviderRow?.api_key;
 
         if (!hasNaiImageSlot) {
           const beforeCount = builtInTools.length;
@@ -453,6 +455,7 @@ class ToolRegistryImpl implements ToolRegistryInterface {
           }
         }
 
+        /* Inpainting parameters temporarily disabled
         if (!hasGeminiAccess) {
           builtInTools = builtInTools.map((tool) => {
             if (tool.name !== "generate_image_nai") return tool;
@@ -481,6 +484,7 @@ class ToolRegistryImpl implements ToolRegistryInterface {
             });
           });
         }
+        */
 
         if (
           !hasSpeechProvider ||

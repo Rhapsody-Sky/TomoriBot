@@ -49,6 +49,15 @@ Output:
 
 - `PresetExportData` compatible with Tomori import pipeline
 
+Validation:
+
+- Tomori and converted SillyTavern imports both pass through the preset Zod schema before insert.
+- The schema is the import safety boundary. Defaults are 5000 characters per imported string, 200 attributes, 200
+  NovelAI tags, 100 sample dialogue entries per side, and 100 trigger words.
+- Admins can tune those defaults with the `PRESET_MAX_*` env vars in `.env.optional.example`.
+- Runtime memory environment limits such as `MAX_ATTRIBUTE_LENGTH` and `MAX_SAMPLE_DIALOGUE_LENGTH` apply to live
+  slash-command edits, not preset imports.
+
 Name handling:
 
 - character name first letter is capitalized (e.g. `isaac` -> `Isaac`)

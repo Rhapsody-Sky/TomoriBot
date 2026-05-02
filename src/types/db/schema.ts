@@ -103,7 +103,7 @@ export type TomoriRow = z.infer<typeof tomoriSchema>;
 
 /**
  * Schema for voice_samples table — reference audio clips for local TTS voice cloning.
- * Files live in /data/voice-samples/{server_id}/; this table stores metadata only.
+ * file_path stores either a production S3/CloudFront URL or a local data/voice-samples path.
  */
 export const voiceSampleSchema = z.object({
   sample_id: z.number().optional(),
@@ -371,6 +371,23 @@ function normalizeToolNoticeHiddenKeys(value: unknown): ToolNoticeKey[] {
   return source.filter((item): item is ToolNoticeKey => typeof item === "string" && isToolNoticeKey(item));
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  let source: unknown = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      return [];
+    }
+  }
+
+  if (!Array.isArray(source)) {
+    return [];
+  }
+
+  return source.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
 function normalizeDisabledLlmParams(value: unknown): SupportedParamValue[] {
   let source: unknown = value;
   if (typeof source === "string") {
@@ -419,6 +436,7 @@ export const tomoriConfigSchema = z.object({
   llm_frequency_penalty: z.number().min(-2.0).max(2.0).default(0.0), // Added February 2026 - Frequency penalty (0.0=neutral)
   llm_presence_penalty: z.number().min(-2.0).max(2.0).default(0.0), // Added February 2026 - Presence penalty (0.0=neutral)
   llm_min_p: z.number().min(0.0).max(1.0).default(0.05), // Added February 2026 - Min-P sampling (0.05=default)
+  llm_max_output_tokens: z.number().int().min(1).nullable().optional(), // Added April 2026 - Max output tokens override (NULL = use provider default)
   llm_disabled_params: z.preprocess(
     (value) => normalizeDisabledLlmParams(value),
     z.array(supportedParamSchema).default([]),
@@ -427,6 +445,8 @@ export const tomoriConfigSchema = z.object({
     (value) => normalizeLogitBiasEntries(value),
     z.array(logitBiasEntrySchema).default([]),
   ), // Added March 2026 - Stored OpenAI-style logit bias entries (text or explicit token IDs)
+  llm_stop_strings: z.preprocess((value) => normalizeStringArray(value), z.array(z.string()).default([])), // Added April 2026 - Server-wide exact stop strings
+  llm_stop_speaker_pattern_enabled: z.boolean().default(false), // Added April 2026 - Opt-in "\n{Name}:" speaker stop pattern
   api_key: z.instanceof(Buffer).nullable(),
   key_version: z.number().int().default(1).optional(), // Added November 2025 - Encryption key version for rotation
   trigger_words: z.array(z.string()).default([]),
@@ -473,6 +493,9 @@ export const tomoriConfigSchema = z.object({
   ), // Added April 2026 - Hidden notice embed types; missing entries remain visible by default
   voice_message_enabled: z.boolean().default(true), // Added March 2026 - Allow Tomori to send ElevenLabs TTS voice messages
   voice_transcript_chat_mode: z.boolean().default(true), // Added March 2026 - Post voice transcripts as webhook chat messages instead of using internal cache
+  chatterbox_turbo_enabled: z.boolean().default(true), // Added April 2026 - Use Chatterbox-Turbo model.generate path for local Chatterbox TTS
+  chatterbox_cfg_weight: z.number().min(0.0).default(0.5), // Added April 2026 - Standard Chatterbox CFG weight; ignored by Turbo
+  chatterbox_exaggeration: z.number().min(0.0).default(0.5), // Added April 2026 - Standard Chatterbox expression strength; ignored by Turbo
   self_debug_enabled: z.boolean().default(false), // Added March 2026 - Include Tomori error embeds in context as [System: ...]
   uncensor_injection_enabled: z.boolean().default(false), // Added February 2026 - Prompt injection mitigation toggle
   uncensor_unicode_space_enabled: z.boolean().default(false), // Added February 2026 - Unicode space replacement toggle
@@ -1178,6 +1201,7 @@ export const savedProviderConfigSchema = z.object({
   llm_frequency_penalty: z.number().nullable().optional(), // Added March 2026 - Sampler snapshot
   llm_presence_penalty: z.number().nullable().optional(), // Added March 2026 - Sampler snapshot
   llm_min_p: z.number().nullable().optional(), // Added March 2026 - Sampler snapshot
+  llm_max_output_tokens: z.number().int().min(1).nullable().optional(), // Added April 2026 - Max output tokens override snapshot
   llm_disabled_params: z.preprocess(
     (value) => normalizeDisabledLlmParams(value),
     z.array(supportedParamSchema).default([]),
@@ -1254,6 +1278,7 @@ export const userSavedProviderConfigSchema = z.object({
   llm_frequency_penalty: z.number().nullable().optional(),
   llm_presence_penalty: z.number().nullable().optional(),
   llm_min_p: z.number().nullable().optional(),
+  llm_max_output_tokens: z.number().int().min(1).nullable().optional(), // Added April 2026 - Max output tokens override snapshot
   llm_disabled_params: z.preprocess(
     (value) => normalizeDisabledLlmParams(value),
     z.array(supportedParamSchema).default([]),

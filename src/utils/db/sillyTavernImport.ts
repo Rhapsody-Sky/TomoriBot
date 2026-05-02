@@ -1,6 +1,10 @@
-import { UNPAIRED_SAMPLE_DIALOGUE_SENTINEL, type PresetExportData } from "../../types/preset/presetExport";
+import {
+  PRESET_MAX_ATTRIBUTES,
+  UNPAIRED_SAMPLE_DIALOGUE_SENTINEL,
+  type PresetExportData,
+} from "../../types/preset/presetExport";
 import type { SillyTavernCardMetadata } from "../image/pngMetadata";
-import { ABSOLUTE_MAX_ATTRIBUTES, getMemoryLimits } from "./memoryLimits";
+import { getMemoryLimits } from "./memoryLimits";
 
 type JsonObject = Record<string, unknown>;
 
@@ -514,7 +518,7 @@ export function convertSillyTavernJsonToPresetData(input: unknown): SillyTavernC
 
   const attributeList = sections
     .flatMap((section) => buildAttributeSectionChunks(section.heading, section.content, maxAttributeLength))
-    .slice(0, ABSOLUTE_MAX_ATTRIBUTES);
+    .slice(0, PRESET_MAX_ATTRIBUTES);
 
   const mesExample = pickStringFromCard(cardData, rootData, "mes_example");
   const firstMessage = pickStringFromCard(cardData, rootData, "first_mes");

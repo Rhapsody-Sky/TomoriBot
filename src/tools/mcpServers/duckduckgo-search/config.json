@@ -1,7 +1,8 @@
 {
   "name": "duckduckgo-search",
   "displayName": "DuckDuckGo & Felo AI Search",
-  "npmPackage": "@oevortex/ddg_search@latest",
+  "npmPackage": "@oevortex/ddg_search@1.3.0",
+  "command": "ddg-search-mcp",
   "args": [],
   "description": "Blazing-fast web search via DuckDuckGo, AI-powered search via Felo AI, URL content extraction, and metadata retrieval (no API key required)",
   "requiredEnvVars": [],
