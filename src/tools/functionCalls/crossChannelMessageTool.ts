@@ -48,9 +48,51 @@ export interface PendingBoomerang {
     content: string;
     timestamp: string;
   }>;
+  /**
+   * Override for the opening lines of the boomerang context injection.
+   * Defaults to the cross-channel "You have just returned from channel X." narrative.
+   */
+  introText?: string;
+  /** Override for the closing instruction line of the boomerang context injection. */
+  outroText?: string;
 }
 
 const pendingBoomerangs = new Map<string, PendingBoomerang>();
+
+/**
+ * Store a pending boomerang for a given source channel.
+ * Exposed so other tools (e.g. create_thread) can register boomerangs
+ * without duplicating the map or the consume/build logic.
+ * @param boomerang - The boomerang payload to store
+ */
+export function storePendingBoomerang(boomerang: PendingBoomerang): void {
+  pendingBoomerangs.set(boomerang.sourceChannelId, boomerang);
+}
+
+function inferTargetChannelFromTask(task: unknown): string | undefined {
+  if (typeof task !== "string") {
+    return undefined;
+  }
+
+  const patterns: RegExp[] = [
+    /\b(?:channel|thread)\s+(?:named|called)\s+`([^`]{1,120})`/iu,
+    /\b(?:go|hop|move|jump|peek|check|read|look)\b.{0,80}\b(?:to|into|over\s+to)\s+`([^`]{1,120})`/iu,
+    /\b(?:send|post|say|tell|ask|message|write)\b.{0,120}\b(?:in|to|into|over\s+in)\s+`([^`]{1,120})`/iu,
+    /<#(\d{17,20})>/u,
+    /\B#([A-Za-z0-9_-]{1,100})\b/u,
+    /\b(?:channel|thread)\s+(?:named|called)\s+([A-Za-z0-9_-]{1,100})\b/iu,
+  ];
+
+  for (const pattern of patterns) {
+    const match = task.match(pattern);
+    const inferred = match?.[1]?.trim();
+    if (inferred) {
+      return inferred;
+    }
+  }
+
+  return undefined;
+}
 
 /**
  * Consume (retrieve and delete) a pending boomerang for a given channel.
@@ -82,14 +124,16 @@ export function buildBoomerangContext(boomerang: PendingBoomerang): StructuredCo
 
   const resultStr = boomerang.success ? "Success" : `Failed: ${boomerang.error ?? "unknown error"}`;
 
-  let contextText =
-    `[System: You have just returned from channel \`${boomerang.targetChannelName}\`.\n` +
-    `Report back naturally on what happened there.\n` +
-    `Outcome: ${resultStr}.`;
+  const intro =
+    boomerang.introText ??
+    `You have just returned from channel \`${boomerang.targetChannelName}\`.\nReport back naturally on what happened there.`;
+  const outro = boomerang.outroText ?? "Now continue the conversation here with a concise update.";
+
+  let contextText = `[System: ${intro}\nOutcome: ${resultStr}.`;
   if (messagesBlock) {
-    contextText += `\nHere is what was happening in channel \`${boomerang.targetChannelName}\` (last 10 messages, newest first):\n${messagesBlock}`;
+    contextText += `\nHere is what was happening in channel \`${boomerang.targetChannelName}\` (last 10 messages, oldest first):\n${messagesBlock}`;
   }
-  contextText += "\nNow continue the conversation here with a concise update.]";
+  contextText += `\n${outro}]`;
 
   return [
     {
@@ -137,7 +181,7 @@ export class CrossChannelMessageTool extends BaseTool {
           "If true, fetch and return the target channel's recent message history without sending any message there. Use this when you want to silently read what is happening in another channel to inform your response here, without making your presence known in that channel. The number of messages fetched matches the server's configured message fetch limit.",
       },
     },
-    required: ["task"],
+    required: ["target_channel", "task"],
   };
 
   /**
@@ -194,7 +238,9 @@ export class CrossChannelMessageTool extends BaseTool {
     const boomerangArg = args.boomerang as boolean | undefined;
     const peekOnlyArg = args.peek_only as boolean | undefined;
     const isPeekOnly = peekOnlyArg === true;
-    const requestedChannel = targetChannelArg?.trim() || legacyChannelNameArg?.trim() || legacyChannelIdArg?.trim();
+    const inferredChannelFromTask = inferTargetChannelFromTask(taskArg);
+    const requestedChannel =
+      targetChannelArg?.trim() || legacyChannelNameArg?.trim() || legacyChannelIdArg?.trim() || inferredChannelFromTask;
 
     // Validate: at least one channel identifier must be provided
     if (!requestedChannel) {
@@ -250,7 +296,7 @@ export class CrossChannelMessageTool extends BaseTool {
     if (channelResolution.status === "ambiguous") {
       const shownCount = channelResolution.candidates.length;
       const overflowCount = channelResolution.totalCount - shownCount;
-      const overflowNote = overflowCount > 0 ? ` (and ${overflowCount} more — use a raw channel ID for others)` : "";
+      const overflowNote = overflowCount > 0 ? ` (and ${overflowCount} more; use a raw channel ID for others)` : "";
       const candidateLabels = channelResolution.candidates.map((c) => c.label).join(", ");
       return {
         success: false,
@@ -316,8 +362,35 @@ export class CrossChannelMessageTool extends BaseTool {
     }
 
     // 5. Permission check — ViewChannel always required; send permissions only for dispatch mode
-    const botMember = guild.members.cache.get(context.client.user?.id ?? "");
-    if (botMember && "permissionsFor" in targetChannel) {
+    const botMember =
+      guild.members.me ??
+      (context.client.user ? await guild.members.fetch(context.client.user.id).catch(() => null) : null);
+    const invokingMember =
+      context.message?.member ?? (context.userId ? await guild.members.fetch(context.userId).catch(() => null) : null);
+
+    if (!invokingMember) {
+      return {
+        success: false,
+        error: `I could not verify the requesting user's permission to view channel \`${targetChannel.name}\`.`,
+        data: {
+          status: "cross_channel_failed_invoker_not_resolved",
+          reason: "Invoker guild member could not be resolved for target channel visibility check.",
+        },
+      };
+    }
+
+    if ("permissionsFor" in targetChannel) {
+      if (!botMember) {
+        return {
+          success: false,
+          error: `I could not verify my permission to view channel \`${targetChannel.name}\`.`,
+          data: {
+            status: "cross_channel_failed_bot_not_resolved",
+            reason: "Bot guild member could not be resolved for target channel permission checks.",
+          },
+        };
+      }
+
       const perms = targetChannel.permissionsFor(botMember);
 
       // Check ViewChannel permission (required for both peek and dispatch)
@@ -349,6 +422,18 @@ export class CrossChannelMessageTool extends BaseTool {
           };
         }
       }
+
+      const invokerPerms = targetChannel.permissionsFor(invokingMember);
+      if (!invokerPerms?.has(PermissionFlagsBits.ViewChannel)) {
+        return {
+          success: false,
+          error: `The requesting user does not have permission to view channel \`${targetChannel.name}\`.`,
+          data: {
+            status: "cross_channel_failed_invoker_no_view_permission",
+            reason: "Invoker is missing ViewChannel permission on the target channel.",
+          },
+        };
+      }
     }
 
     // 6. Peek-only path — fetch recent messages and return as context without dispatching
@@ -374,7 +459,7 @@ export class CrossChannelMessageTool extends BaseTool {
         };
       }
 
-      // Newest-first from Discord; truncate at refresh embed boundary
+      // Discord returns newest-first; truncate at refresh embed boundary, then reverse to chronological order
       const messagesArray = [...recentMessages.values()];
       const filteredMessages: Message[] = [];
       for (const m of messagesArray) {
@@ -386,12 +471,12 @@ export class CrossChannelMessageTool extends BaseTool {
         }
         filteredMessages.push(m);
       }
+      filteredMessages.reverse();
 
       const formattedMessages = await Promise.all(
         filteredMessages.map(async (m) => ({
           author: await resolveContextAuthorLabel(m, {
             guildId: context.guildId,
-            tomoriNickname: context.tomoriState.tomori_nickname,
             personalMemoriesEnabled: context.tomoriState.config.personal_memories_enabled,
           }),
           content: m.content
@@ -400,7 +485,7 @@ export class CrossChannelMessageTool extends BaseTool {
                 context.client,
                 context.guildId ?? "",
                 undefined,
-                context.tomoriState.tomori_nickname,
+                context.tomoriState.persona_nickname,
                 context.tomoriState.config.personal_memories_enabled,
               )
             : "(no text content)",
@@ -474,14 +559,11 @@ export class CrossChannelMessageTool extends BaseTool {
     suppressNextSelfReply(targetChannel.id);
 
     // 10. Call tomoriChat in the target channel
-    const tomoriChat = (await import("../../events/messageCreate/tomoriChat")).default;
+    const { tomoriChat } = await import("../../events/messageCreate/tomoriChat");
 
-    const sourcePersonaId = context.activePersonaId ?? context.tomoriState.tomori_id ?? undefined;
+    const sourcePersonaId = context.activePersonaId ?? context.tomoriState.persona_id ?? undefined;
     const isSourceUserImpersonation = context.isUserImpersonation === true;
     const sourceImpersonatedUserId = context.impersonatedUserId;
-    const invokingMember =
-      context.message?.member ??
-      (context.userId ? await targetChannel.guild.members.fetch(context.userId).catch(() => null) : null);
     const manualTriggerInvoker = context.userId
       ? {
           userDiscId: context.userId,
@@ -492,35 +574,22 @@ export class CrossChannelMessageTool extends BaseTool {
       : undefined;
 
     try {
-      await tomoriChat(
-        context.client,
-        lastMessage,
-        false, // isFromQueue
-        true, // isManuallyTriggered
-        false, // forceReason
-        undefined, // reasoningQuery
-        undefined, // llmOverrideCodename
-        false, // isStopResponse
-        0, // retryCount
-        false, // skipLock
-        undefined, // reminderRecipientID
-        undefined, // reminderData
-        sourcePersonaId, // selectedPersonaId — same persona visits target
-        false, // isPersonaJob
-        isSourceUserImpersonation, // isUserImpersonation
-        sourceImpersonatedUserId, // impersonatedUserId
-        "system", // textQuotaSource — system-triggered
-        undefined, // textQuotaTriggerKey
-        undefined, // textQuotaUserDiscId
-        undefined, // manualSystemPrompt
-        undefined, // manualPrefill
-        undefined, // naiContinuationPrefill
-        undefined, // emptyResponseFinishReason
-        [taskInjection], // injectedContextItems
-        undefined, // forcedMentions
-        manualTriggerInvoker, // manualTriggerInvoker
-        { disableCrossChannelMessage: true }, // manualStreamingContextOverrides
-      );
+      await tomoriChat({
+        client: context.client,
+        message: lastMessage,
+        isFromQueue: false,
+        isManuallyTriggered: true,
+        forceReason: false,
+        isStopResponse: false,
+        selectedPersonaId: sourcePersonaId,
+        isPersonaJob: false,
+        isUserImpersonation: isSourceUserImpersonation,
+        impersonatedUserId: sourceImpersonatedUserId,
+        textQuotaSource: "system",
+        injectedContextItems: [taskInjection],
+        manualTriggerInvoker,
+        manualStreamingContextOverrides: { disableCrossChannelMessage: true },
+      });
 
       log.success(
         `Cross-channel tool: Successfully dispatched to #${targetChannel.name} (task: "${(taskArg as string).trim().substring(0, 80)}...")`,
@@ -539,7 +608,7 @@ export class CrossChannelMessageTool extends BaseTool {
           const recentMessages = await targetChannel.messages.fetch({
             limit: 10,
           });
-          // Discord returns newest-first; truncate at refresh embed boundary
+          // Discord returns newest-first; truncate at refresh embed boundary, then reverse to chronological order
           const messagesArray = [...recentMessages.values()];
           const filteredMessages: Message[] = [];
           for (const m of messagesArray) {
@@ -552,11 +621,11 @@ export class CrossChannelMessageTool extends BaseTool {
             }
             filteredMessages.push(m);
           }
+          filteredMessages.reverse();
           targetMessages = await Promise.all(
             filteredMessages.map(async (m) => ({
               author: await resolveContextAuthorLabel(m, {
                 guildId: context.guildId,
-                tomoriNickname: context.tomoriState.tomori_nickname,
                 personalMemoriesEnabled: context.tomoriState.config.personal_memories_enabled,
               }),
               content: m.content
@@ -565,7 +634,7 @@ export class CrossChannelMessageTool extends BaseTool {
                     context.client,
                     context.guildId ?? "",
                     undefined,
-                    context.tomoriState.tomori_nickname,
+                    context.tomoriState.persona_nickname,
                     context.tomoriState.config.personal_memories_enabled,
                   )
                 : "(no text content)",

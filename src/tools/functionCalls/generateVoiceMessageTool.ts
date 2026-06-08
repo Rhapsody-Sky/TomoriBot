@@ -1,14 +1,27 @@
 import { AttachmentBuilder, Routes } from "discord.js";
 import type { Webhook } from "discord.js";
-import { BaseTool, type ToolContext, type ToolParameterSchema, type ToolResult } from "@/types/tool/interfaces";
+import {
+  BaseTool,
+  type Tool,
+  type ToolAssemblyContext,
+  type ToolContext,
+  type ToolParameterSchema,
+  type ToolResult,
+} from "@/types/tool/interfaces";
+import { createToolVariant } from "@/tools/assembly";
 import { synthesizeSpeechViaElevenLabsAdapter } from "@/providers/custom/styles/elevenLabsAdapter";
 import { synthesizeSpeechViaTtsClone } from "@/providers/custom/styles/ttsCloningAdapter";
+import {
+  isVoiceDesignEndpoint,
+  shouldUseVoiceDesignForPersona,
+  synthesizeSpeechViaTtsVoiceDesign,
+} from "@/providers/custom/styles/ttsVoiceDesignAdapter";
 import { ELEVENLABS_SERVICE_NAME } from "@/utils/audio/elevenLabsAccount";
 import { setCachedVoiceTranscript } from "@/utils/audio/voiceTranscriptCache";
 import { generateVoiceMessageMetadata } from "@/utils/audio/voiceMessageMetadata";
 import type { VoiceMessageMetadata } from "@/utils/audio/voiceMessageMetadata";
 import { getOptApiKey } from "@/utils/security/crypto";
-import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhookManager";
+import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/personaDispatch";
 import { resolveActiveSpeechEndpoint } from "@/utils/provider/speechEndpointResolver";
 import { log } from "@/utils/misc/logger";
 
@@ -40,11 +53,11 @@ export const VOICE_TOOL_VARIANTS = {
     toolDescription:
       "Generate a spoken Discord audio message using the active persona's configured voice. " +
       "Use this only when voice delivery materially improves the reply. " +
-      "Write the script as natural plain speech text only — do not include any bracketed tags or special markup. " +
+      "Write the script as natural plain speech text only; do not include any bracketed tags or special markup. " +
       "The tool sends the audio directly to the channel with no text caption.",
     scriptDescription:
       "The exact spoken script for the voice message. Keep it concise and natural for speech. " +
-      "Plain text only — do not write bracketed tags or any special markup.",
+      "Plain text only: do not write bracketed tags or any special markup.",
   },
   emoji: {
     toolDescription:
@@ -57,9 +70,53 @@ export const VOICE_TOOL_VARIANTS = {
       "The exact spoken script for the voice message. Keep it concise and natural for speech. " +
       "Embed emoji characters inline to convey emotion (e.g. 😊, 😢, 😮). No bracketed tags.",
   },
-} as const satisfies Record<string, { toolDescription: string; scriptDescription: string }>;
+  "voice-design": {
+    toolDescription:
+      "Generate a spoken Discord audio message using the active persona's configured voice design prompt. " +
+      "Use this only when voice delivery materially improves the reply. " +
+      "Write the script as natural plain speech text. You may optionally provide extra one-off delivery instructions " +
+      'such as "sound mad", "near tears", or "sleepy and quiet"; those instructions shape this message only and are not spoken aloud. ' +
+      "The tool sends the audio directly to the channel with no text caption.",
+    scriptDescription:
+      "The exact spoken script for the voice message. Keep it concise and natural for speech. " +
+      "Plain text only: put delivery direction in voice_instructions instead of in the spoken script.",
+    voiceInstructionsDescription:
+      "Optional one-off delivery direction for this voice message only. Examples: sound mad, about to cry, whispery and tired. " +
+      "Do not repeat the spoken script here.",
+  },
+} as const satisfies Record<
+  string,
+  { toolDescription: string; scriptDescription: string; voiceInstructionsDescription?: string }
+>;
 
 export type VoiceScriptMarkup = keyof typeof VOICE_TOOL_VARIANTS;
+
+export function buildVoiceMessageToolVariant(tool: Tool, scriptMarkup: VoiceScriptMarkup): Tool {
+  const variant = VOICE_TOOL_VARIANTS[scriptMarkup] ?? VOICE_TOOL_VARIANTS["bracket-tags"];
+  const parameters: ToolParameterSchema = {
+    ...tool.parameters,
+    properties: {
+      ...tool.parameters.properties,
+      script: {
+        ...tool.parameters.properties.script,
+        description: variant.scriptDescription,
+      },
+      ...(scriptMarkup === "voice-design"
+        ? {
+            voice_instructions: {
+              type: "string" as const,
+              description: VOICE_TOOL_VARIANTS["voice-design"].voiceInstructionsDescription,
+            },
+          }
+        : {}),
+    },
+  };
+
+  return createToolVariant(tool, {
+    description: variant.toolDescription,
+    parameters,
+  });
+}
 
 export class GenerateVoiceMessageTool extends BaseTool {
   name = "generate_voice_message";
@@ -81,6 +138,25 @@ export class GenerateVoiceMessageTool extends BaseTool {
     },
     required: ["title", "script"],
   };
+
+  async assembleForContext(context: ToolAssemblyContext): Promise<Tool | null> {
+    const serverId = Number.parseInt(context.state.server_id, 10);
+    const activeSpeechEndpoint = Number.isInteger(serverId) ? await resolveActiveSpeechEndpoint(serverId) : null;
+    const scriptMarkup =
+      (activeSpeechEndpoint?.endpoint.extra_config?.script_markup as string | undefined) ?? "bracket-tags";
+    const voiceDesign = shouldUseVoiceDesignForPersona(
+      activeSpeechEndpoint?.endpoint,
+      context.state.activePersonaVoiceDesignPrompt,
+      context.state.activePersonaVoiceName,
+    );
+    const variant = voiceDesign
+      ? "voice-design"
+      : scriptMarkup in VOICE_TOOL_VARIANTS
+        ? (scriptMarkup as VoiceScriptMarkup)
+        : "bracket-tags";
+
+    return buildVoiceMessageToolVariant(this, variant);
+  }
 
   private resolveThreadId(context: ToolContext): string | undefined {
     return "isThread" in context.channel && typeof context.channel.isThread === "function" && context.channel.isThread()
@@ -338,6 +414,7 @@ export class GenerateVoiceMessageTool extends BaseTool {
 
     const title = typeof args.title === "string" ? args.title.trim() : "voice";
     const script = typeof args.script === "string" ? args.script.trim() : "";
+    const voiceInstructions = typeof args.voice_instructions === "string" ? args.voice_instructions.trim() : "";
     if (!script) {
       return {
         success: false,
@@ -346,23 +423,105 @@ export class GenerateVoiceMessageTool extends BaseTool {
     }
 
     // Determine which synthesis path to use based on what the active persona has configured.
-    // Priority: speech_voice_sample_id (tts-clone) > speech_voice_id / elevenlabs_voice_id (ElevenLabs).
+    // Priority: speech_voice_design_prompt (instruct-capable local TTS) >
+    // speech_voice_sample_id (local clone TTS) > speech_voice_id (ElevenLabs or other provider).
+    const voiceDesignPrompt = context.tomoriState.speech_voice_design_prompt?.trim() ?? "";
     const voiceSampleId = context.tomoriState.speech_voice_sample_id ?? null;
-    const voiceId =
-      (context.tomoriState.speech_voice_id?.trim() || context.tomoriState.elevenlabs_voice_id?.trim()) ?? "";
-
-    if (!voiceSampleId && !voiceId) {
-      return {
-        success: false,
-        error:
-          "No voice is configured for the active persona. A server manager can set one with /config speech voice-assign.",
-      };
-    }
+    const voiceId = context.tomoriState.speech_voice_id?.trim() ?? "";
 
     // 1. Try the new custom-endpoint credential path (Phase 4.1+).
     // 2. Fall back to the legacy opt_api_keys entry for backward compatibility
-    //    during the transition window before seed.sql migration has run.
+    //    during the transition window before seed backfill migration has run.
     const speechEndpoint = await resolveActiveSpeechEndpoint(context.tomoriState.server_id);
+    const activeEndpointIsVoiceDesign = isVoiceDesignEndpoint(speechEndpoint?.endpoint);
+    const shouldUseVoiceDesign = shouldUseVoiceDesignForPersona(
+      speechEndpoint?.endpoint,
+      voiceDesignPrompt,
+      context.tomoriState.speech_voice_name,
+    );
+
+    if (activeEndpointIsVoiceDesign && !voiceDesignPrompt) {
+      return {
+        success: false,
+        error:
+          "The active speech endpoint is configured for VoiceDesign, but the active persona does not have a voice design prompt yet. A server manager can add one with /speech voice-design set.",
+      };
+    }
+
+    if (!voiceDesignPrompt && !voiceSampleId && !voiceId) {
+      return {
+        success: false,
+        error:
+          "No voice is configured for the active persona. A server manager can set one with /speech voice-assign or /speech voice-design set.",
+      };
+    }
+
+    // --- TTS voice-design path ---
+    //
+    // Voice-design endpoints use the same custom speech endpoint slot as clone
+    // endpoints, but they should receive the persona's voice description as a
+    // first-class `instruct` field in the JSON body. The endpoint metadata's
+    // supports_instruct flag is our guardrail: it prevents accidentally sending
+    // design prompts to older clone-only wrappers that ignore or reject instruct.
+    // Auto endpoints are for mixed deployments: clone personas keep using their
+    // stored samples, while VoiceDesign personas send `instruct` to the same URL.
+    if (voiceDesignPrompt && speechEndpoint?.endpoint.api_style === "tts-clone" && shouldUseVoiceDesign) {
+      const designResult = await synthesizeSpeechViaTtsVoiceDesign({
+        endpoint: speechEndpoint.endpoint,
+        script,
+        designPrompt: voiceDesignPrompt,
+        voiceInstructions,
+        apiKey: speechEndpoint.apiKey,
+      });
+      if (!designResult.success || !designResult.audioBuffer) {
+        return {
+          success: false,
+          error: designResult.details || "Failed to generate voice message via local voice-design TTS server.",
+        };
+      }
+
+      const attachmentName = this.buildAttachmentName(title, designResult.extension ?? "wav");
+      const threadId = this.resolveThreadId(context);
+      const captionText = designResult.cleanedCaptionText ?? "";
+      const mimeType = (designResult.contentType ?? "audio/wav").split(";")[0].trim();
+      const voiceMeta = await generateVoiceMessageMetadata(designResult.audioBuffer, mimeType);
+
+      if (!voiceMeta) {
+        log.warn(
+          "[VoiceWaveform] TTS voice-design waveform generation returned null — falling back to plain attachment",
+        );
+      }
+
+      const sentMessageId = await this.sendVoiceOrFallback({
+        context,
+        audioBuffer: designResult.audioBuffer,
+        mimeType,
+        filename: attachmentName,
+        voiceMeta,
+        threadId,
+      });
+
+      if (sentMessageId && captionText) {
+        setCachedVoiceTranscript(sentMessageId, captionText, "tts");
+        log.info(
+          `[VoiceCache] SET tts (voice-design) | msg=${sentMessageId} | chars=${captionText.length} | preview="${captionText.slice(0, 60)}${captionText.length > 60 ? "…" : ""}"`,
+        );
+      }
+
+      if (sentMessageId && captionText && context.tomoriState.config.voice_transcript_chat_mode) {
+        await this.postTranscriptCaption(context, captionText, threadId);
+      }
+
+      return { success: true, message: "Voice message generated and sent to Discord.", endTurn: true };
+    }
+
+    if (voiceDesignPrompt && !voiceSampleId && !voiceId) {
+      return {
+        success: false,
+        error:
+          "The active persona has a voice design prompt, but the active speech endpoint does not support instruct-based voice design. Select a VoiceDesign speech endpoint or assign a different voice.",
+      };
+    }
 
     // --- TTS clone path ---
     if (voiceSampleId && speechEndpoint?.endpoint.api_style === "tts-clone") {

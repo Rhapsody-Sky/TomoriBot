@@ -3,7 +3,7 @@ import { MessageFlags } from "discord.js";
 import type { ErrorContext, UserRow } from "@/types/db/schema";
 import type { SummaryEmbedOptions } from "@/types/discord/embed";
 import { commandRegistry } from "@/utils/discord/commandRegistry";
-import { replySummaryEmbed } from "@/utils/discord/interactionHelper";
+import { replySummaryEmbed } from "@/utils/discord/ui/embeds";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 
@@ -35,11 +35,12 @@ export async function execute(
 ): Promise<void> {
   try {
     const engine = (interaction.options.getString("engine") ?? "overview") as SpeechHelpEngine;
-    const customEndpointAdd = commandRegistry.getCommandMention("config", "custom-endpoint", "add");
-    const modelSpeech = commandRegistry.getCommandMention("config", "model", "speech");
-    const voiceAdd = commandRegistry.getCommandMention("config", "speech", "voice-add");
-    const voiceAssign = commandRegistry.getCommandMention("config", "speech", "voice-assign");
-    const elevenlabs = commandRegistry.getCommandMention("config", "speech", "elevenlabs");
+    const customEndpointAdd = commandRegistry.getCommandMention("provider", "custom-endpoint", "add");
+    const modelSpeech = commandRegistry.getCommandMention("model", "speech");
+    const voiceAdd = commandRegistry.getCommandMention("speech", "voice-add");
+    const voiceAssign = commandRegistry.getCommandMention("speech", "voice-assign");
+    const voiceDesignSet = commandRegistry.getCommandMention("speech", "voice-design", "set");
+    const elevenlabs = commandRegistry.getCommandMention("speech", "elevenlabs");
     const helpTranscription = commandRegistry.getCommandMention("help", "transcription");
 
     const embedOptions: SummaryEmbedOptions = {
@@ -50,6 +51,7 @@ export async function execute(
         model_speech: modelSpeech,
         voice_add: voiceAdd,
         voice_assign: voiceAssign,
+        voice_design_set: voiceDesignSet,
         elevenlabs,
         help_transcription: helpTranscription,
       },
@@ -62,6 +64,7 @@ export async function execute(
             model_speech: modelSpeech,
             voice_add: voiceAdd,
             voice_assign: voiceAssign,
+            voice_design_set: voiceDesignSet,
             elevenlabs,
           }),
           inline: false,

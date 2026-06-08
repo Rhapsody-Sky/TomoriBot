@@ -40,6 +40,15 @@ export interface ProviderFeatureSupport {
   historyExtraction: boolean;
 }
 
+export type ProviderFeatureName = keyof ProviderFeatureSupport;
+
+/**
+ * Provider-owned implementation key for shared optional features.
+ * Values are declared in each provider's providerInfo.ts so core code does not
+ * maintain a central provider-name union.
+ */
+export type ProviderFeatureImplementation = string;
+
 /**
  * Result of API key validation with structured error information
  */
@@ -69,6 +78,8 @@ export interface ThoughtLogPayload {
   /** Formatted text content fetched via the fetch MCP tool, rendered as code blocks in thought-log embeds. */
   fetchedContent?: string;
   firstReplyUrl?: string;
+  /** Total provider streaming time represented by this thought log, in milliseconds. */
+  generationDurationMs?: number;
 }
 
 /**
@@ -122,6 +133,8 @@ export interface ProviderInfo {
   supportsVideos: boolean;
   apiFamily: ProviderApiFamily;
   featureSupport: ProviderFeatureSupport;
+  featureImplementations?: Partial<Record<ProviderFeatureName, ProviderFeatureImplementation>>;
+  usageCostMode?: "metered" | "none" | "unknown";
   /** Generation parameters this provider reads from DB config and sends to its API. */
   supportedParams: readonly SupportedParam[];
 }

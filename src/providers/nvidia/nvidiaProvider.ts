@@ -63,9 +63,10 @@ import { DISCORD_STREAMING_CONSTANTS } from "@/types/stream/types";
 import type { StreamingContext } from "@/types/tool/interfaces";
 import { type ToolStateForContext, getAvailableToolsWithMCP } from "@/tools/toolRegistry";
 import { getCachedDefaultLLM, isLLMCacheReady } from "@/utils/cache/llmCache";
-import { loadAvailableModelsForProvider, loadDefaultModelForProvider } from "@/utils/db/dbRead";
+import { llmModelRepo } from "@/utils/db/repositories";
 import { log } from "@/utils/misc/logger";
 import { buildRuntimeLogitBiasMapForLlm } from "@/utils/provider/logitBiasResolver";
+import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 
 async function getDefaultNvidiaModel(): Promise<string> {
   const providerName = "nvidia";
@@ -79,7 +80,7 @@ async function getDefaultNvidiaModel(): Promise<string> {
   }
 
   try {
-    const dbDefault = await loadDefaultModelForProvider(providerName);
+    const dbDefault = await llmModelRepo.loadDefaultModel(providerName);
     if (dbDefault) {
       log.info(`Using database default ${providerName} model: ${dbDefault.llm_codename}`);
       return dbDefault.llm_codename;
@@ -91,7 +92,7 @@ async function getDefaultNvidiaModel(): Promise<string> {
   }
 
   try {
-    const availableModels = await loadAvailableModelsForProvider(providerName);
+    const availableModels = await llmModelRepo.loadAvailableModelsForProvider(providerName);
     if (availableModels && availableModels.length > 0) {
       const firstModel = availableModels[0].llm_codename;
       log.warn(`No default model found, using first available ${providerName} model: ${firstModel}`);
@@ -265,9 +266,11 @@ export class NvidiaProvider
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
           tomoriState.speech_voice_sample_id ||
-            tomoriState.speech_voice_id?.trim() ||
-            tomoriState.elevenlabs_voice_id?.trim(),
+            tomoriState.speech_voice_design_prompt?.trim() ||
+            tomoriState.speech_voice_id?.trim(),
         ),
+        activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
+        activePersonaVoiceName: tomoriState.speech_voice_name,
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -286,18 +289,19 @@ export class NvidiaProvider
           manage_message_enabled: tomoriState.config.manage_message_enabled,
           imagegen_enabled: tomoriState.config.imagegen_enabled,
           videogen_enabled: tomoriState.config.videogen_enabled,
-          nai_exclusive_imggen: tomoriState.config.nai_exclusive_imggen,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
+          thread_creation_enabled: tomoriState.config.thread_creation_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
-        mcpFunctionNames,
+        mcpFunctionNames: availableMcpFunctionNames,
         totalCount,
       } = await getAvailableToolsWithMCP("nvidia", toolStateForContext);
 
       let finalBuiltInTools = availableBuiltInTools;
+      let finalMcpFunctionNames = availableMcpFunctionNames;
       if (streamingContext) {
         const minimalContext = {
           streamContext: streamingContext,
@@ -322,15 +326,22 @@ export class NvidiaProvider
         );
       }
 
+      ({ builtInTools: finalBuiltInTools, mcpFunctionNames: finalMcpFunctionNames } = applyDeliberateToolAllowlist({
+        providerLabel: "NVIDIA provider",
+        builtInTools: finalBuiltInTools,
+        mcpFunctionNames: finalMcpFunctionNames,
+        allowedToolNames: streamingContext?.deliberateToolAllowedNames,
+      }));
+
       const adapter = getNvidiaToolAdapter();
       const allToolsConfig = await adapter.getAllToolsInOpenAICompatibleFormat(
         finalBuiltInTools,
         tomoriState.server_id,
-        mcpFunctionNames,
+        finalMcpFunctionNames,
       );
 
       log.info(
-        `NVIDIA provider tools loaded: ${finalBuiltInTools.length} built-in + ${mcpFunctionNames.length} MCP = ${totalCount} total tools`,
+        `NVIDIA provider tools loaded: ${finalBuiltInTools.length} built-in + ${finalMcpFunctionNames.length} MCP = ${totalCount} total tools`,
       );
 
       return allToolsConfig;
@@ -492,9 +503,11 @@ export class NvidiaProvider
       server_id: request.tomoriState.server_id.toString(),
       activePersonaHasElevenlabsVoice: Boolean(
         request.tomoriState.speech_voice_sample_id ||
-          request.tomoriState.speech_voice_id?.trim() ||
-          request.tomoriState.elevenlabs_voice_id?.trim(),
+          request.tomoriState.speech_voice_design_prompt?.trim() ||
+          request.tomoriState.speech_voice_id?.trim(),
       ),
+      activePersonaVoiceDesignPrompt: request.tomoriState.speech_voice_design_prompt?.trim() || null,
+      activePersonaVoiceName: request.tomoriState.speech_voice_name,
       diffusion_model_id: request.tomoriState.config.diffusion_model_id,
       nai_diffusion_model_id: request.tomoriState.config.nai_diffusion_model_id,
       video_model_id: request.tomoriState.config.video_model_id,
@@ -513,8 +526,8 @@ export class NvidiaProvider
         manage_message_enabled: false,
         imagegen_enabled: false,
         videogen_enabled: false,
-        nai_exclusive_imggen: false,
         voice_message_enabled: false,
+        thread_creation_enabled: false,
       },
     };
 

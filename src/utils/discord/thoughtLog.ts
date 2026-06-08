@@ -5,12 +5,9 @@ import { ColorCode, log } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 import type { StreamContext } from "@/types/stream/interfaces";
 import type { TomoriState } from "@/types/db/schema";
-import {
-  getOrCreateWebhook,
-  resolvePersonaWebhookIdentity,
-  sendWebhookMessagesWithIdentity,
-  type ResolvedWebhookIdentity,
-} from "@/utils/discord/webhookManager";
+import { getOrCreateWebhook } from "@/utils/discord/webhook/lifecycle";
+import { resolvePersonaWebhookIdentity, type ResolvedWebhookIdentity } from "@/utils/discord/webhook/identity";
+import { sendWebhookMessagesWithIdentity } from "@/utils/discord/webhook/personaDispatch";
 
 const EMBED_DESCRIPTION_LIMIT = 4096;
 
@@ -46,6 +43,18 @@ function takeEmbedChunk(
   };
 }
 
+function formatGenerationDuration(durationMs?: number): string | undefined {
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
+    return undefined;
+  }
+
+  if (durationMs < 1000) {
+    return `${Math.round(durationMs)}ms`;
+  }
+
+  return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+}
+
 function buildThoughtLogEmbeds(args: {
   locale: string;
   tomoriState: TomoriState;
@@ -64,10 +73,22 @@ function buildThoughtLogEmbeds(args: {
     attributionLine?.trim(),
   ].filter((line): line is string => Boolean(line?.trim()));
   const description = descriptionLines.join("\n").slice(0, EMBED_DESCRIPTION_LIMIT);
-  const footerText = localizer(locale, "genai.thought_log.footer", {
-    provider: tomoriState.llm.llm_provider,
-    model: getLlmDisplayName(tomoriState.llm, tomoriState.config.custom_model_name),
-  });
+  const provider = tomoriState.llm.llm_provider;
+  const model = getLlmDisplayName(tomoriState.llm, tomoriState.config.custom_model_name);
+  const hasThinkingContent = Boolean(
+    normalizeThoughtLogText(thoughtLog.summary) || normalizeThoughtLogText(thoughtLog.raw),
+  );
+  const generationTime = hasThinkingContent ? formatGenerationDuration(thoughtLog.generationDurationMs) : undefined;
+  const footerText = generationTime
+    ? localizer(locale, "genai.thought_log.footer_with_generation_time", {
+        provider,
+        model,
+        generation_time: generationTime,
+      })
+    : localizer(locale, "genai.thought_log.footer", {
+        provider,
+        model,
+      });
 
   const sections = [
     {
@@ -185,8 +206,12 @@ export function mergeThoughtLogPayload(
   const raw = appendThoughtSection(base?.raw, next?.raw);
   const fetchedContent = appendThoughtSection(base?.fetchedContent, next?.fetchedContent);
   const firstReplyUrl = base?.firstReplyUrl || next?.firstReplyUrl;
+  const generationDurationMs =
+    typeof base?.generationDurationMs === "number" || typeof next?.generationDurationMs === "number"
+      ? (base?.generationDurationMs ?? 0) + (next?.generationDurationMs ?? 0)
+      : undefined;
 
-  if (!summary && !raw && !fetchedContent && !firstReplyUrl) {
+  if (!summary && !raw && !fetchedContent && !firstReplyUrl && generationDurationMs === undefined) {
     return undefined;
   }
 
@@ -195,6 +220,7 @@ export function mergeThoughtLogPayload(
     raw,
     fetchedContent,
     firstReplyUrl,
+    generationDurationMs,
   };
 }
 

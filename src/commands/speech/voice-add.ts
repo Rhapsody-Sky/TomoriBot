@@ -6,11 +6,12 @@ import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder
 import { MessageFlags } from "discord.js";
 import ffmpegPath from "ffmpeg-static";
 import { parseBuffer } from "music-metadata";
-import { sql } from "@/utils/db/client";
 import { log, ColorCode } from "@/utils/misc/logger";
-import { replyInfoEmbed } from "@/utils/discord/interactionHelper";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import { safeDownload } from "@/utils/security/safeDownload";
 import { storeVoiceSample } from "@/utils/storage/voiceSampleStorage";
+import { insertVoiceSample, updateVoiceSamplePath, deleteVoiceSample } from "@/utils/db/repositories/SpeechRepository";
+import { serverRepository } from "@/utils/db/repositories/ServerRepository";
 import type { ErrorContext, UserRow } from "@/types/db/schema";
 import { localizer } from "@/utils/text/localizer";
 
@@ -37,16 +38,30 @@ const ACCEPTED_MIME_TYPES = new Set([
 ]);
 const ACCEPTED_EXTENSION_REGEX = /\.(wav|mp3|ogg|opus|flac|m4a|aac)$/i;
 
+/** Thrown when an ffmpeg binary cannot be spawned (missing, wrong architecture, no execute permission). */
+class FfmpegSpawnError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "FfmpegSpawnError";
+  }
+}
+
+async function spawnFfmpeg(binary: string, tmpIn: string, tmpOut: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(binary, ["-y", "-i", tmpIn, "-ar", "22050", "-ac", "1", "-f", "wav", tmpOut]);
+    // Wrap OS-level spawn failures separately so the caller can retry with a different binary.
+    proc.on("error", (err) => reject(new FfmpegSpawnError(err)));
+    proc.on("close", (code: number | null) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
+  });
+}
+
 /**
- * Converts an audio buffer to mono WAV at 22050 Hz using the bundled ffmpeg binary.
- * Throws if ffmpeg-static is unavailable or the conversion fails.
+ * Converts an audio buffer to mono WAV at 22050 Hz.
+ * Tries the bundled ffmpeg-static binary first; if it cannot be spawned
+ * (e.g. glibc/musl mismatch on Alpine), retries with the system `ffmpeg` command.
+ * Conversion errors (bad input audio) are NOT retried.
  */
 async function normalizeToWav(inputBuffer: Buffer): Promise<Buffer> {
-  if (!ffmpegPath) {
-    throw new Error("ffmpeg-static binary not found; WAV normalization unavailable.");
-  }
-  const ffmpegBinary = ffmpegPath;
-
   const suffix = Date.now();
   const tmpIn = path.join(os.tmpdir(), `tts-in-${suffix}`);
   const tmpOut = path.join(os.tmpdir(), `tts-out-${suffix}.wav`);
@@ -54,26 +69,32 @@ async function normalizeToWav(inputBuffer: Buffer): Promise<Buffer> {
   await fs.writeFile(tmpIn, inputBuffer);
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn(ffmpegBinary, [
-        "-y",
-        "-i",
-        tmpIn,
-        "-ar",
-        "22050", // 22050 Hz — widely compatible with TTS clone engines
-        "-ac",
-        "1", // Mono
-        "-f",
-        "wav",
-        tmpOut,
-      ]);
-      proc.on("close", (code: number | null) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
-      proc.on("error", reject);
-    });
+    const primaryBinary = ffmpegPath ?? "ffmpeg";
+    try {
+      await spawnFfmpeg(primaryBinary, tmpIn, tmpOut);
+    } catch (err) {
+      // Only retry on spawn failure (binary can't run), not on bad-input errors.
+      if (err instanceof FfmpegSpawnError && primaryBinary !== "ffmpeg") {
+        log.warn("[VoiceAdd] ffmpeg-static failed to spawn, retrying with system ffmpeg", err);
+        await spawnFfmpeg("ffmpeg", tmpIn, tmpOut);
+      } else {
+        throw err;
+      }
+    }
 
     return await fs.readFile(tmpOut);
   } finally {
-    await Promise.all([fs.unlink(tmpIn).catch(() => {}), fs.unlink(tmpOut).catch(() => {})]);
+    await Promise.all([
+      fs.unlink(tmpIn).catch((err: unknown) => {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+          log.warn("[VoiceAdd] Failed to delete temp input file", err);
+      }),
+      fs.unlink(tmpOut).catch((err: unknown) => {
+        // tmpOut may not exist if transcoding failed before producing output
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT")
+          log.warn("[VoiceAdd] Failed to delete temp output file", err);
+      }),
+    ]);
   }
 }
 
@@ -154,12 +175,8 @@ export async function execute(
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   // Resolve server context.
-  const [serverRow] = await sql<[{ server_id: number }]>`
-    SELECT server_id FROM servers
-    WHERE server_disc_id = ${interaction.guild?.id ?? interaction.user.id}
-    LIMIT 1
-  `;
-  if (!serverRow) {
+  const serverId = await serverRepository.loadServerIdByDiscId(interaction.guild?.id ?? interaction.user.id);
+  if (!serverId) {
     await replyInfoEmbed(interaction, locale, {
       titleKey: "general.errors.tomori_not_setup_title",
       descriptionKey: "general.errors.tomori_not_setup_description",
@@ -167,7 +184,6 @@ export async function execute(
     });
     return;
   }
-  const serverId = serverRow.server_id;
 
   try {
     // Download the audio attachment with the configured size limit.
@@ -213,19 +229,32 @@ export async function execute(
     try {
       wavBuffer = await normalizeToWav(rawBuffer);
     } catch (error) {
-      log.warn("[VoiceAdd] WAV normalization failed; using raw upload", error);
-      wavBuffer = rawBuffer;
+      log.warn("[VoiceAdd] WAV normalization failed", error);
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.speech.voice_add.normalization_error_title",
+        descriptionKey: "commands.speech.voice_add.normalization_error_description",
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
+    // Guard: verify the output is actually a WAV file (starts with "RIFF" magic bytes).
+    // If ffmpeg silently produced garbage, reject early rather than sending broken audio to the TTS server.
+    if (wavBuffer.length < 4 || wavBuffer.subarray(0, 4).toString("ascii") !== "RIFF") {
+      log.warn("[VoiceAdd] Post-normalization buffer is not a valid WAV file (missing RIFF header)");
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.speech.voice_add.normalization_error_title",
+        descriptionKey: "commands.speech.voice_add.normalization_error_description",
+        color: ColorCode.ERROR,
+      });
+      return;
     }
 
     const durationMs = Math.round(durationSecs * 1000);
 
     // Insert a placeholder row to reserve a sample_id, then update with the real storage reference.
-    const [insertedRow] = await sql<[{ sample_id: number }]>`
-      INSERT INTO voice_samples (server_id, name, file_path, ref_text, duration_ms)
-      VALUES (${serverId}, ${sampleName}, '', ${refText}, ${durationMs})
-      RETURNING sample_id
-    `;
-    if (!insertedRow) {
+    const sampleId = await insertVoiceSample(serverId, sampleName, refText, durationMs);
+    if (!sampleId) {
       await replyInfoEmbed(interaction, locale, {
         titleKey: "general.errors.update_failed_title",
         descriptionKey: "general.errors.update_failed_description",
@@ -233,15 +262,15 @@ export async function execute(
       });
       return;
     }
-
-    const sampleId = insertedRow.sample_id;
     const storedReference = await storeVoiceSample({
       serverId,
       sampleId,
       buffer: wavBuffer,
     });
     if (!storedReference) {
-      await sql`DELETE FROM voice_samples WHERE sample_id = ${sampleId}`.catch(() => {});
+      await deleteVoiceSample(sampleId).catch((err: unknown) =>
+        log.warn("[VoiceAdd] Failed to delete voice sample record after storage failure", err),
+      );
       await replyInfoEmbed(interaction, locale, {
         titleKey: "general.errors.update_failed_title",
         descriptionKey: "general.errors.update_failed_description",
@@ -251,11 +280,7 @@ export async function execute(
     }
 
     // Update the row with the resolved storage reference.
-    await sql`
-      UPDATE voice_samples
-      SET file_path = ${storedReference}
-      WHERE sample_id = ${sampleId}
-    `;
+    await updateVoiceSamplePath(sampleId, storedReference);
 
     const durationDisplay = durationSecs > 0 ? `${Math.floor(durationSecs)}s` : localizer(locale, "general.unknown");
 

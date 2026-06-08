@@ -4,6 +4,8 @@ import type {
 } from "@/types/provider/featureInterfaces";
 import { log } from "@/utils/misc/logger";
 import { NVIDIA_IMAGE_ASPECT_RATIO_MAP, NVIDIA_IMAGE_GENERATION_URL } from "@/providers/nvidia/nvidiaConstants";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 function normalizeAspectRatio(aspectRatio: string): string {
   return NVIDIA_IMAGE_ASPECT_RATIO_MAP[aspectRatio] ?? "1:1";
@@ -134,19 +136,21 @@ function extractMimeTypeFromResult(result: unknown): string | null {
 }
 
 async function fetchImageUrlAsBase64(imageUrl: string): Promise<ProviderNativeImageGenerationResult> {
-  const imageResponse = await fetch(imageUrl);
-  if (!imageResponse.ok) {
-    log.error("Failed to fetch NVIDIA generated image URL", new Error(`HTTP ${imageResponse.status}`), {
+  const imageResponse = await safeDownload(imageUrl, {
+    maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+    timeoutMs: 15_000,
+  });
+  if (!imageResponse.success || !imageResponse.buffer) {
+    log.error("Failed to fetch NVIDIA generated image URL", new Error(imageResponse.details ?? "download failed"), {
       errorType: "NvidiaImageFetchError",
       metadata: { imageUrl },
     });
     return { imageData: null, mimeType: null };
   }
 
-  const contentType = imageResponse.headers.get("Content-Type") ?? "image/jpeg";
+  const contentType = imageResponse.contentType ?? "image/jpeg";
   const mimeType = contentType.split(";")[0].trim();
-  const arrayBuffer = await imageResponse.arrayBuffer();
-  const imageData = Buffer.from(arrayBuffer).toString("base64");
+  const imageData = imageResponse.buffer.toString("base64");
 
   return {
     imageData,

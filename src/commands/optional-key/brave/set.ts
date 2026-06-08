@@ -4,12 +4,12 @@ import {
   type Client,
   type SlashCommandSubcommandBuilder,
 } from "discord.js";
-import { getCachedTomoriState, invalidateTomoriStateCache } from "../../../utils/cache/tomoriStateCache";
-import { localizer } from "../../../utils/text/localizer";
-import { log, ColorCode } from "../../../utils/misc/logger";
-import { replyInfoEmbed } from "../../../utils/discord/interactionHelper";
-import type { UserRow, ErrorContext, TomoriState } from "../../../types/db/schema";
-import { storeOptApiKey } from "../../../utils/security/crypto";
+import { getCachedTomoriState, invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
+import { localizer } from "@/utils/text/localizer";
+import { log, ColorCode } from "@/utils/misc/logger";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
+import type { UserRow, ErrorContext, TomoriState } from "@/types/db/schema";
+import { storeOptApiKey } from "@/utils/security/crypto";
 import { braveWebSearch } from "../../../tools/restAPIs/brave/braveSearchService";
 
 /**
@@ -116,7 +116,7 @@ export async function execute(
 
     if (!isStored) {
       const context: ErrorContext = {
-        tomoriId: tomoriState.tomori_id,
+        personaId: tomoriState.persona_id,
         serverId: tomoriState.server_id,
         userId: userData.user_id,
         errorType: "DatabaseUpdateError",
@@ -155,7 +155,7 @@ export async function execute(
     const context: ErrorContext = {
       userId: userData.user_id,
       serverId: tomoriState?.server_id ?? null,
-      tomoriId: tomoriState?.tomori_id ?? null,
+      personaId: tomoriState?.persona_id ?? null,
       errorType: "CommandExecutionError",
       metadata: {
         command: "optional-key brave set",

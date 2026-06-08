@@ -3,13 +3,13 @@ import { MessageFlags } from "discord.js";
 import { THINKING_LEVEL_VALUES, type ThinkingLevelValue, isThinkingLevelValue } from "@/constants/thinkingLevels";
 import type { ErrorContext, SavedProviderConfigRow, UserRow } from "@/types/db/schema";
 import { createStandardEmbed } from "@/utils/discord/embedHelper";
-import { replyInfoEmbed } from "@/utils/discord/interactionHelper";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { localizer } from "@/utils/text/localizer";
 import { loadUserSavedProvidersForCapability } from "@/utils/provider/savedProviderConfig";
-import { upsertUserSavedProviderConfig } from "@/utils/db/dbWrite";
-import { promptForSavedProvider } from "@/commands/config/model/providerPicker";
+import { llmProviderRepo } from "@/utils/db/repositories";
+import { promptForSavedProvider } from "@/utils/discord/providerPicker";
 
 /**
  * Formats a list of changed sampler settings into a human-readable string.
@@ -25,13 +25,13 @@ function formatChangedSettings(locale: string, settings: Array<{ label: string; 
  */
 function getChangedSettingLabel(locale: string, setting: string): string {
   const labelKeys: Record<string, string> = {
-    temperature: "commands.config.parameters.sampler_temperature_label",
-    top_p: "commands.config.parameters.sampler_top_p_label",
-    top_k: "commands.config.parameters.sampler_top_k_label",
-    frequency_penalty: "commands.config.parameters.sampler_frequency_penalty_label",
-    presence_penalty: "commands.config.parameters.sampler_presence_penalty_label",
-    min_p: "commands.config.parameters.sampler_min_p_label",
-    max_output_tokens: "commands.config.parameters.sampler_max_output_tokens_label",
+    temperature: "commands.model.parameters.sampler_temperature_label",
+    top_p: "commands.model.parameters.sampler_top_p_label",
+    top_k: "commands.model.parameters.sampler_top_k_label",
+    frequency_penalty: "commands.model.parameters.sampler_frequency_penalty_label",
+    presence_penalty: "commands.model.parameters.sampler_presence_penalty_label",
+    min_p: "commands.model.parameters.sampler_min_p_label",
+    max_output_tokens: "commands.model.parameters.sampler_max_output_tokens_label",
     thinking_level: "commands.config.thinking-level.select_label",
   };
 
@@ -45,7 +45,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("temperature")
-        .setDescription(localizer("en-US", "commands.config.parameters.temperature_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.temperature_description"))
         .setMinValue(0)
         .setMaxValue(2)
         .setRequired(false),
@@ -53,7 +53,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("top_p")
-        .setDescription(localizer("en-US", "commands.config.parameters.top_p_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.top_p_description"))
         .setMinValue(0)
         .setMaxValue(1)
         .setRequired(false),
@@ -61,7 +61,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addIntegerOption((option) =>
       option
         .setName("top_k")
-        .setDescription(localizer("en-US", "commands.config.parameters.top_k_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.top_k_description"))
         .setMinValue(0)
         .setMaxValue(40)
         .setRequired(false),
@@ -69,7 +69,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("frequency_penalty")
-        .setDescription(localizer("en-US", "commands.config.parameters.frequency_penalty_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.frequency_penalty_description"))
         .setMinValue(-2)
         .setMaxValue(2)
         .setRequired(false),
@@ -77,7 +77,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("presence_penalty")
-        .setDescription(localizer("en-US", "commands.config.parameters.presence_penalty_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.presence_penalty_description"))
         .setMinValue(-2)
         .setMaxValue(2)
         .setRequired(false),
@@ -85,7 +85,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addNumberOption((option) =>
       option
         .setName("min_p")
-        .setDescription(localizer("en-US", "commands.config.parameters.min_p_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.min_p_description"))
         .setMinValue(0)
         .setMaxValue(1)
         .setRequired(false),
@@ -93,7 +93,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addIntegerOption((option) =>
       option
         .setName("max_output_tokens")
-        .setDescription(localizer("en-US", "commands.config.parameters.max_output_tokens_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.max_output_tokens_description"))
         .setMinValue(1)
         .setMaxValue(131072)
         .setRequired(false),
@@ -101,7 +101,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
     .addStringOption((option) =>
       option
         .setName("thinking_level")
-        .setDescription(localizer("en-US", "commands.config.parameters.thinking_level_description"))
+        .setDescription(localizer("en-US", "commands.model.parameters.thinking_level_description"))
         .setRequired(false)
         .addChoices(
           ...THINKING_LEVEL_VALUES.map((value) => ({
@@ -157,8 +157,8 @@ export async function execute(
 
     if (!hasAnyChange) {
       await replyInfoEmbed(interaction, locale, {
-        titleKey: "commands.config.parameters.no_changes_title",
-        descriptionKey: "commands.config.parameters.no_changes_description",
+        titleKey: "commands.model.parameters.no_changes_title",
+        descriptionKey: "commands.model.parameters.no_changes_description",
         color: ColorCode.WARN,
         flags: MessageFlags.Ephemeral,
       });
@@ -173,7 +173,7 @@ export async function execute(
       interaction,
       locale,
       savedProviders as unknown as SavedProviderConfigRow[],
-      { descriptionKey: "commands.config.parameters.picker_description" },
+      { descriptionKey: "commands.model.parameters.picker_description" },
     );
     if (!providerSelection) return;
 
@@ -261,7 +261,7 @@ export async function execute(
     }
 
     // 7. Persist the updated personal sampler config
-    const writeOk = await upsertUserSavedProviderConfig(userData.user_id, nextConfig);
+    const writeOk = await llmProviderRepo.upsertUserSavedProviderConfig(userData.user_id, nextConfig);
     if (!writeOk) {
       await replyWithResult({
         titleKey: "general.errors.update_failed_title",

@@ -18,8 +18,7 @@ import {
 import { GoogleGenAI } from "@google/genai";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
-import { loadTomoriState } from "../../utils/db/dbRead";
-import { sql } from "../../utils/db/client";
+import { personaRepository, llmModelRepo } from "@/utils/db/repositories";
 import { replyInfoEmbed, promptWithRawModal } from "../../utils/discord/interactionHelper";
 import type { UserRow } from "../../types/db/schema";
 import { checkImageQuota, incrementImageQuota } from "../../utils/quota/imageQuotaManager";
@@ -35,6 +34,8 @@ import {
 } from "@/utils/provider/credentialResolver";
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 // Modal configuration constants
 const MODAL_CUSTOM_ID = "generate_image_modal";
@@ -54,17 +55,13 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
  * @returns The model codename string (e.g., "gemini-2.5-flash-image")
  */
 async function getDiffusionModelCodename(diffusionModelId: number): Promise<string> {
-  const result = await sql`
-		SELECT codename
-		FROM image_diffusion_models
-		WHERE diffusion_model_id = ${diffusionModelId}
-	`.values();
+  const model = await llmModelRepo.loadDiffusionModelById(diffusionModelId);
 
-  if (result.length === 0) {
+  if (!model) {
     throw new Error(`Diffusion model not found: ${diffusionModelId}`);
   }
 
-  return result[0][0] as string;
+  return model.codename;
 }
 
 /**
@@ -78,15 +75,18 @@ async function convertAttachmentToBase64(attachment: APIAttachment): Promise<{ m
     throw new Error(`Invalid image type: ${attachment.content_type}`);
   }
 
-  // 2. Fetch image from Discord CDN
-  const response = await fetch(attachment.url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+  // 2. Fetch image from Discord CDN with bounded download checks
+  const downloadResult = await safeDownload(attachment.url, {
+    maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+    timeoutMs: 10_000,
+    knownSize: attachment.size,
+  });
+  if (!downloadResult.success || !downloadResult.buffer) {
+    throw new Error(`Failed to fetch image: ${downloadResult.details ?? downloadResult.error ?? "unknown error"}`);
   }
 
   // 3. Convert to base64
-  const arrayBuffer = await response.arrayBuffer();
-  const base64Data = Buffer.from(arrayBuffer).toString("base64");
+  const base64Data = downloadResult.buffer.toString("base64");
 
   log.info(`Converted attachment ${attachment.id} (${attachment.filename}) to base64`);
 
@@ -212,12 +212,14 @@ async function generateImageWithOpenRouter(
 
     // Fallback: fetch remote URL and convert to base64.
     if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
-      const imageResponse = await fetch(imageUrl);
-      if (imageResponse.ok) {
-        const mimeType = imageResponse.headers.get("content-type")?.split(";")[0] || null;
-        const arrayBuffer = await imageResponse.arrayBuffer();
+      const imageResponse = await safeDownload(imageUrl, {
+        maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+        timeoutMs: 15_000,
+      });
+      if (imageResponse.success && imageResponse.buffer) {
+        const mimeType = imageResponse.contentType?.split(";")[0] || null;
         return {
-          imageData: Buffer.from(arrayBuffer).toString("base64"),
+          imageData: imageResponse.buffer.toString("base64"),
           mimeType,
         };
       }
@@ -253,7 +255,7 @@ export async function execute(
 
   // 2. Load TomoriState for this server/user
   const serverId = interaction.guild?.id ?? interaction.user.id;
-  const baseTomoriState = await loadTomoriState(serverId);
+  const baseTomoriState = await personaRepository.loadState(serverId);
 
   // 3. Validate TomoriState exists
   if (!baseTomoriState) {
@@ -570,30 +572,23 @@ export async function execute(
         model: modelCodename,
       });
 
-      const messagePayload: {
-        message: string;
-        media?: Array<{ mimeType: string; data: string }>;
-        config?: {
-          responseModalities: string[];
-          imageConfig: {
-            aspectRatio: string;
-          };
-        };
-      } = {
-        message: prompt,
+      // Build parts: reference images (as inlineData) followed by the text prompt.
+      // SendMessageParameters.message is PartListUnion — inline images must be
+      // passed as inlineData parts, not via a non-existent "media" field.
+      const messageParts: Array<{ inlineData: { mimeType: string; data: string } } | string> = [
+        ...referenceImages.map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } })),
+        prompt,
+      ];
+
+      const response = await chat.sendMessage({
+        message: messageParts,
         config: {
           responseModalities: ["IMAGE"],
           imageConfig: {
             aspectRatio: aspectRatio,
           },
         },
-      };
-
-      if (referenceImages.length > 0) {
-        messagePayload.media = referenceImages;
-      }
-
-      const response = await chat.sendMessage(messagePayload);
+      });
 
       // Extract generated image from response
       if (response?.candidates && response.candidates.length > 0 && response.candidates[0]?.content?.parts) {

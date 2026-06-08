@@ -17,9 +17,9 @@ import {
 } from "discord.js";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
-import { loadTomoriState } from "../../utils/db/dbRead";
-import { sql } from "../../utils/db/client";
+import { personaRepository, llmModelRepo } from "@/utils/db/repositories";
 import { replyInfoEmbed, promptWithRawModal } from "../../utils/discord/interactionHelper";
+import { safeReply } from "@/utils/discord/safeReply";
 import type { UserRow } from "../../types/db/schema";
 import { checkVideoQuota, incrementVideoQuota } from "../../utils/quota/videoQuotaManager";
 import { resolveProviderFeatureImplementation } from "@/utils/provider/providerInfoRegistry";
@@ -32,6 +32,8 @@ import {
 } from "@/utils/provider/credentialResolver";
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 // Modal configuration constants
 const MODAL_CUSTOM_ID = "generate_video_modal";
@@ -54,17 +56,13 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
  * @returns The model codename string (e.g., "veo-3.1-generate-preview")
  */
 async function getVideoModelCodename(videoModelId: number): Promise<string> {
-  const result = await sql`
-    SELECT codename
-    FROM video_generation_models
-    WHERE video_model_id = ${videoModelId}
-  `.values();
+  const model = await llmModelRepo.loadVideoGenerationModelById(videoModelId);
 
-  if (result.length === 0) {
+  if (!model) {
     throw new Error(`Video model not found: ${videoModelId}`);
   }
 
-  return result[0][0] as string;
+  return model.codename;
 }
 
 /**
@@ -77,13 +75,16 @@ async function convertAttachmentToBase64(attachment: APIAttachment): Promise<{ m
     throw new Error(`Invalid image type: ${attachment.content_type}`);
   }
 
-  const response = await fetch(attachment.url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+  const downloadResult = await safeDownload(attachment.url, {
+    maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+    timeoutMs: 10_000,
+    knownSize: attachment.size,
+  });
+  if (!downloadResult.success || !downloadResult.buffer) {
+    throw new Error(`Failed to fetch image: ${downloadResult.details ?? downloadResult.error ?? "unknown error"}`);
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  const base64Data = Buffer.from(arrayBuffer).toString("base64");
+  const base64Data = downloadResult.buffer.toString("base64");
 
   return {
     mimeType: attachment.content_type,
@@ -120,7 +121,7 @@ export async function execute(
 
   // 2. Load TomoriState
   const serverId = interaction.guild?.id ?? interaction.user.id;
-  const baseTomoriState = await loadTomoriState(serverId);
+  const baseTomoriState = await personaRepository.loadState(serverId);
 
   if (!baseTomoriState) {
     await replyInfoEmbed(interaction, locale, {
@@ -484,14 +485,17 @@ export async function execute(
       .setColor(ColorCode.ERROR);
 
     if (modalSubmitInteraction) {
-      await modalSubmitInteraction.editReply({ embeds: [errorEmbed] }).catch(() => {});
+      await safeReply(modalSubmitInteraction.editReply({ embeds: [errorEmbed] }), "video error embed");
     } else {
-      await replyInfoEmbed(interaction, locale, {
-        titleKey: "commands.generate.video.error_title",
-        descriptionKey: "commands.generate.video.generic_error_description",
-        color: ColorCode.ERROR,
-        flags: MessageFlags.Ephemeral,
-      }).catch(() => {});
+      await safeReply(
+        replyInfoEmbed(interaction, locale, {
+          titleKey: "commands.generate.video.error_title",
+          descriptionKey: "commands.generate.video.generic_error_description",
+          color: ColorCode.ERROR,
+          flags: MessageFlags.Ephemeral,
+        }),
+        "video fallback error embed",
+      );
     }
   }
 }

@@ -4,6 +4,8 @@ import type {
 } from "@/types/provider/featureInterfaces";
 import { log } from "@/utils/misc/logger";
 import { toZaiApiModelName, ZAI_GENERAL_IMAGES_GENERATIONS_URL } from "@/providers/zai/zaiShared";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 /**
  * Aspect ratio to pixel size mapping for Z.ai image generation.
@@ -90,9 +92,12 @@ export async function generateZaiNativeImage(
   }
 
   // 3. Fetch the image from the URL and convert to base64
-  const imageResponse = await fetch(imageUrl);
-  if (!imageResponse.ok) {
-    log.error("Failed to fetch generated image from Z.ai URL", new Error(`HTTP ${imageResponse.status}`), {
+  const imageResponse = await safeDownload(imageUrl, {
+    maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+    timeoutMs: 15_000,
+  });
+  if (!imageResponse.success || !imageResponse.buffer) {
+    log.error("Failed to fetch generated image from Z.ai URL", new Error(imageResponse.details ?? "download failed"), {
       errorType: "ZaiImageFetchError",
       metadata: { model: apiModel, imageUrl },
     });
@@ -100,12 +105,11 @@ export async function generateZaiNativeImage(
   }
 
   // 4. Determine MIME type from Content-Type header
-  const contentType = imageResponse.headers.get("Content-Type") ?? "image/png";
+  const contentType = imageResponse.contentType ?? "image/png";
   const mimeType = contentType.split(";")[0].trim();
 
   // 5. Convert to base64
-  const arrayBuffer = await imageResponse.arrayBuffer();
-  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  const base64 = imageResponse.buffer.toString("base64");
 
   return {
     imageData: base64,
