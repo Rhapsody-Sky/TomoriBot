@@ -176,7 +176,10 @@ const nullableString = (maxLength: number) =>
     }, z.string().max(maxLength).nullable())
     .optional();
 
-const snowflakeSchema = z.string().trim().regex(/^\d{1,32}$/);
+const snowflakeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{1,32}$/);
 const nullableSnowflake = z
   .preprocess((value) => {
     if (typeof value !== "string") {
@@ -228,15 +231,14 @@ const configUpdateSchema = z
     welcome_channel_disc_id: nullableSnowflake,
     thought_log_channel_disc_id: nullableSnowflake,
     welcome_persona_id: z.number().int().positive().nullable().optional(),
-    nai_style_tags: tagArraySchema,
-    nai_negative_tags: tagArraySchema,
+    image_default_positive_tags: tagArraySchema,
+    image_default_negative_tags: tagArraySchema,
     nai_sampler: z.enum(NAI_IMAGE_SAMPLERS).nullable().optional(),
     nai_steps: z.number().int().min(1).max(50).nullable().optional(),
     nai_scale: z.number().min(0).max(10).nullable().optional(),
     nai_noise_schedule: z.enum(NAI_IMAGE_NOISE_SCHEDULES).nullable().optional(),
     nai_cfg_rescale: z.number().min(0).max(1).nullable().optional(),
     nai_preset_name: nullableString(120),
-    nai_exclusive_imggen: z.boolean().optional(),
     server_memteaching_enabled: z.boolean().optional(),
     personal_memories_enabled: z.boolean().optional(),
     self_teaching_enabled: z.boolean().optional(),
@@ -325,7 +327,12 @@ const fallbackUpdateSchema = z
 const customEndpointSchema = z
   .object({
     scope: z.enum(["server", "personal"]).default("server"),
-    label: z.string().trim().min(1).max(48).regex(/^[a-zA-Z0-9_-]+$/),
+    label: z
+      .string()
+      .trim()
+      .min(1)
+      .max(48)
+      .regex(/^[a-zA-Z0-9_-]+$/),
     capability: z.enum(["text", "embedding", "image", "video", "speech", "transcription"]),
     apiStyle: z.enum([
       "openai-compatible",
@@ -351,8 +358,10 @@ const customEndpointSchema = z
 const customEndpointDeleteSchema = z
   .object({
     scope: z.enum(["server", "personal"]),
+    customEndpointId: z.number().int().positive(),
     label: z.string().trim().min(1).max(48),
     capability: z.enum(["text", "embedding", "image", "video", "speech", "transcription"]),
+    modelRefId: z.number().int().positive().nullable(),
   })
   .strict();
 
@@ -524,7 +533,14 @@ const CONFIG_FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
     optionsKey: "humanizerDegrees",
     valueType: "number",
   },
-  { key: "message_fetch_limit", label: "Message Fetch Limit", group: "Conversation", type: "number", min: 20, max: 100 },
+  {
+    key: "message_fetch_limit",
+    label: "Message Fetch Limit",
+    group: "Conversation",
+    type: "number",
+    min: 20,
+    max: 100,
+  },
   { key: "match_limit", label: "Persona Match Limit", group: "Conversation", type: "number", min: 1, max: 10 },
   { key: "cascade_limit", label: "Cascade Limit", group: "Conversation", type: "number", min: 0, max: 10 },
   { key: "send_message_limit", label: "Send Message Limit", group: "Conversation", type: "number", min: 0, max: 40 },
@@ -533,7 +549,14 @@ const CONFIG_FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
   { key: "hide_respond_embed", label: "Hide Respond Notices", group: "Conversation", type: "boolean" },
   { key: "hide_impersonation_embeds", label: "Hide Impersonation Notices", group: "Conversation", type: "boolean" },
   { key: "autoch_threshold", label: "Autochat Min Threshold", group: "Autochat", type: "number", min: 0, max: 10000 },
-  { key: "autoch_threshold_max", label: "Autochat Max Threshold", group: "Autochat", type: "number", min: 0, max: 10000 },
+  {
+    key: "autoch_threshold_max",
+    label: "Autochat Max Threshold",
+    group: "Autochat",
+    type: "number",
+    min: 0,
+    max: 10000,
+  },
   {
     key: "autoch_disc_ids",
     label: "Autochat Channels",
@@ -578,9 +601,8 @@ const CONFIG_FIELD_DEFINITIONS: ConfigFieldDefinition[] = [
   { key: "videogen_enabled", label: "Video Generation", group: "Media", type: "boolean" },
   { key: "voice_message_enabled", label: "Voice Messages", group: "Media", type: "boolean" },
   { key: "voice_transcript_chat_mode", label: "Voice Transcript Chat Mode", group: "Media", type: "boolean" },
-  { key: "nai_exclusive_imggen", label: "NovelAI Exclusive Image Tool", group: "NovelAI", type: "boolean" },
-  { key: "nai_style_tags", label: "NovelAI Style Tags", group: "NovelAI", type: "tags" },
-  { key: "nai_negative_tags", label: "NovelAI Negative Tags", group: "NovelAI", type: "tags" },
+  { key: "image_default_positive_tags", label: "NovelAI Style Tags", group: "NovelAI", type: "tags" },
+  { key: "image_default_negative_tags", label: "NovelAI Negative Tags", group: "NovelAI", type: "tags" },
   {
     key: "nai_preset_name",
     label: "NovelAI Text Preset",
@@ -683,7 +705,8 @@ function getSettingsWebsiteConfig(client: Client): SettingsWebsiteConfig {
   const host = process.env.WEB_SETTINGS_HOST?.trim() || "127.0.0.1";
   const port = Number.parseInt(process.env.WEB_SETTINGS_PORT || "3001", 10);
   const publicUrl = trimTrailingSlash(process.env.WEB_SETTINGS_PUBLIC_URL?.trim() || derivePublicUrl(host, port));
-  const redirectUri = process.env.WEB_SETTINGS_DISCORD_REDIRECT_URI?.trim() || `${publicUrl}${BASE_PATH}/oauth/callback`;
+  const redirectUri =
+    process.env.WEB_SETTINGS_DISCORD_REDIRECT_URI?.trim() || `${publicUrl}${BASE_PATH}/oauth/callback`;
   const clientId =
     process.env.WEB_SETTINGS_DISCORD_CLIENT_ID?.trim() ||
     process.env.DISCORD_CLIENT_ID?.trim() ||
@@ -872,7 +895,11 @@ async function getSharedGuilds(session: SessionData, client: Client): Promise<Da
   return sharedGuilds;
 }
 
-async function assertSharedGuild(session: SessionData, client: Client, guildId: string): Promise<DashboardGuild | null> {
+async function assertSharedGuild(
+  session: SessionData,
+  client: Client,
+  guildId: string,
+): Promise<DashboardGuild | null> {
   const sharedGuilds = await getSharedGuilds(session, client);
   return sharedGuilds.find((guild) => guild.id === guildId) ?? null;
 }
@@ -911,21 +938,21 @@ function dashboardPersonaAvatarUrl(persona: GuildState["personas"][number], guil
   const storedAvatar = persona.webhook_avatar_url ?? null;
   const publicUrl = resolvePersonaAvatarPublicUrl(storedAvatar);
   if (publicUrl) return publicUrl;
-  if (!storedAvatar || !guildId || !persona.tomori_id || !isLocalPersonaAvatarPath(storedAvatar)) return null;
-  return `${BASE_PATH}/api/guilds/${encodeURIComponent(guildId)}/personas/${persona.tomori_id}/avatar`;
+  if (!storedAvatar || !guildId || !persona.persona_id || !isLocalPersonaAvatarPath(storedAvatar)) return null;
+  return `${BASE_PATH}/api/guilds/${encodeURIComponent(guildId)}/personas/${persona.persona_id}/avatar`;
 }
 
 function serializePersona(persona: GuildState["personas"][number], guildId?: string) {
   return {
-    tomoriId: persona.tomori_id,
+    tomoriId: persona.persona_id,
     personaLineageId: persona.persona_lineage_id ?? 0,
-    nickname: persona.tomori_nickname,
+    nickname: persona.persona_nickname,
     isAlter: persona.is_alter,
     avatarUrl: dashboardPersonaAvatarUrl(persona, guildId),
     hasStoredAvatar: Boolean(persona.webhook_avatar_url),
     contextNote: persona.context_note ?? "",
     contextNoteDepth: persona.context_note_depth ?? 0,
-    naiTags: persona.nai_tags ?? [],
+    naiTags: persona.physical_appearance_tags ?? [],
     triggerWords: persona.trigger_words ?? [],
     personaPrompt: persona.persona_prompt ?? "",
     rewardConditioningEnabled: persona.reward_conditioning_enabled ?? true,
@@ -941,17 +968,17 @@ function serializePersona(persona: GuildState["personas"][number], guildId?: str
 function serializePersonaOption(persona: GuildState["personas"][number]) {
   return {
     personaLineageId: persona.persona_lineage_id ?? 0,
-    nickname: persona.tomori_nickname,
+    nickname: persona.persona_nickname,
     isAlter: persona.is_alter,
   };
 }
 
 async function listServerMemories(serverId: number, personaLineageId: number) {
-  return await sql`
+  return await sql<Array<Record<string, unknown>>>`
     SELECT
       sm.server_memory_id,
       sm.server_id,
-      sm.tomori_id,
+      sm.persona_id,
       sm.persona_lineage_id,
       sm.user_id,
       sm.content,
@@ -968,11 +995,11 @@ async function listServerMemories(serverId: number, personaLineageId: number) {
 }
 
 async function listUserServerMemories(serverId: number, personaLineageId: number, userId: number) {
-  return await sql`
+  return await sql<Array<Record<string, unknown>>>`
     SELECT
       sm.server_memory_id,
       sm.server_id,
-      sm.tomori_id,
+      sm.persona_id,
       sm.persona_lineage_id,
       sm.user_id,
       sm.content,
@@ -992,7 +1019,7 @@ async function listUserServerMemories(serverId: number, personaLineageId: number
 function serializeServerMemory(row: Record<string, unknown>) {
   return {
     serverMemoryId: row.server_memory_id,
-    tomoriId: row.tomori_id,
+    tomoriId: row.persona_id,
     personaLineageId: Number(row.persona_lineage_id ?? 0),
     content: row.content,
     taughtBy: row.user_nickname ?? row.user_disc_id ?? null,
@@ -1001,7 +1028,12 @@ function serializeServerMemory(row: Record<string, unknown>) {
   };
 }
 
-async function findDuplicateMemory(serverId: number, personaLineageId: number, content: string, excludeMemoryId?: number) {
+async function findDuplicateMemory(
+  serverId: number,
+  personaLineageId: number,
+  content: string,
+  excludeMemoryId?: number,
+) {
   const normalizedContent = content.trim().toLowerCase();
   const rows =
     excludeMemoryId === undefined
@@ -1057,15 +1089,24 @@ function loadGuildOptionData(client: Client, guildId: string, personas: GuildSta
     roles,
     personas: personas
       .map((persona) => ({
-        value: persona.tomori_id,
-        label: `${persona.tomori_nickname}${persona.is_alter ? " (alter)" : " (main)"}`,
+        value: persona.persona_id,
+        label: `${persona.persona_nickname}${persona.is_alter ? " (alter)" : " (main)"}`,
       }))
       .sort((left, right) => left.label.localeCompare(right.label)),
   };
 }
 
 async function listPersonalMemories(userId: number, personaLineageId: number) {
-  return await sql`
+  return await sql<
+    Array<{
+      personal_memory_id: number;
+      user_id: number;
+      persona_lineage_id: number;
+      content: string;
+      created_at: Date;
+      updated_at: Date;
+    }>
+  >`
     SELECT
       personal_memory_id,
       user_id,
@@ -1081,7 +1122,15 @@ async function listPersonalMemories(userId: number, personaLineageId: number) {
 }
 
 async function listChannelWhitelist(serverId: number) {
-  return await sql`
+  return await sql<
+    Array<{
+      channel_disc_id: string;
+      cooldown_type: number | null;
+      cooldown_length: number | null;
+      created_at: Date;
+      updated_at: Date;
+    }>
+  >`
     SELECT channel_disc_id, cooldown_type, cooldown_length, created_at, updated_at
     FROM channel_whitelist
     WHERE server_id = ${serverId}
@@ -1090,7 +1139,7 @@ async function listChannelWhitelist(serverId: number) {
 }
 
 async function listRoleWhitelist(serverId: number) {
-  return await sql`
+  return await sql<Array<{ role_disc_id: string; created_at: Date; updated_at: Date }>>`
     SELECT role_disc_id, created_at, updated_at
     FROM role_whitelist
     WHERE server_id = ${serverId}
@@ -1172,7 +1221,7 @@ async function upsertPersonaDashboardConfig(
 
   const rows = await sql`
     INSERT INTO persona_configs (
-      tomori_id,
+      persona_id,
       trigger_words,
       persona_prompt,
       reward_conditioning_enabled,
@@ -1186,14 +1235,14 @@ async function upsertPersonaDashboardConfig(
       ${config.punishConditioningEnabled},
       ${config.llmId}
     )
-    ON CONFLICT (tomori_id) DO UPDATE SET
+    ON CONFLICT (persona_id) DO UPDATE SET
       trigger_words = EXCLUDED.trigger_words,
       persona_prompt = EXCLUDED.persona_prompt,
       reward_conditioning_enabled = EXCLUDED.reward_conditioning_enabled,
       punish_conditioning_enabled = EXCLUDED.punish_conditioning_enabled,
       llm_id = EXCLUDED.llm_id,
       updated_at = CURRENT_TIMESTAMP
-    RETURNING tomori_id
+    RETURNING persona_id
   `;
 
   return rows.length > 0;
@@ -1219,28 +1268,62 @@ function serializePersonalMemory(memory: {
 
 async function loadDashboardModelOptions() {
   const [llms, embeddingModels, diffusionModels, videoModels, kayraPresets, eratoPresets] = await Promise.all([
-    sql`
+    sql<
+      Array<{
+        llm_id: number;
+        llm_provider: string;
+        llm_codename: string;
+        is_default: boolean;
+        is_free: boolean;
+        has_tools: boolean;
+        sees_images: boolean;
+      }>
+    >`
       SELECT llm_id, llm_provider, llm_codename, is_default, is_free, has_tools, sees_images
       FROM llms
       WHERE COALESCE(is_deprecated, false) = false
         AND COALESCE(is_scoped_registration, false) = false
       ORDER BY llm_provider ASC, is_default DESC, llm_codename ASC
     `,
-    sql`
+    sql<
+      Array<{
+        embedding_model_id: number;
+        provider: string;
+        codename: string;
+        model_family: string;
+        is_default: boolean;
+      }>
+    >`
       SELECT embedding_model_id, provider, codename, model_family, is_default
       FROM embedding_models
       WHERE COALESCE(is_deprecated, false) = false
         AND COALESCE(is_scoped_registration, false) = false
       ORDER BY provider ASC, is_default DESC, codename ASC
     `,
-    sql`
+    sql<
+      Array<{
+        diffusion_model_id: number;
+        provider: string;
+        codename: string;
+        is_default: boolean;
+        is_free: boolean;
+      }>
+    >`
       SELECT diffusion_model_id, provider, codename, is_default, is_free
       FROM image_diffusion_models
       WHERE COALESCE(is_deprecated, false) = false
         AND COALESCE(is_scoped_registration, false) = false
       ORDER BY provider ASC, is_default DESC, codename ASC
     `,
-    sql`
+    sql<
+      Array<{
+        video_model_id: number;
+        provider: string;
+        codename: string;
+        is_default: boolean;
+        is_free: boolean;
+      }>
+    >`
       SELECT video_model_id, provider, codename, is_default, is_free
       FROM video_generation_models
       WHERE COALESCE(is_deprecated, false) = false
@@ -1332,6 +1415,7 @@ function serializeSavedProvider(provider: Record<string, unknown>) {
 function serializeCustomEndpoint(endpoint: Record<string, unknown>) {
   return {
     customEndpointId: endpoint.custom_endpoint_id,
+    modelRefId: endpoint.model_ref_id ?? null,
     scope: endpoint.server_id ? "server" : "personal",
     label: endpoint.label,
     capability: endpoint.capability,
@@ -1357,7 +1441,7 @@ function serializePersonalSettings(user: UserRow) {
     personalDtm: user.personal_dtm ?? "follow",
     shorttermCacheCrossserverOptIn: user.shortterm_cache_crossserver_opt_in ?? false,
     impersonationPrompt: user.impersonation_prompt ?? "",
-    naiCharTags: user.nai_char_tags ?? [],
+    naiCharTags: user.physical_appearance_tags ?? [],
     naiCharRefUrl: user.nai_char_ref_url ?? "",
   };
 }
@@ -1378,6 +1462,14 @@ function serializeOpenRouterRegistration(entry: {
 
 function withoutUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
+}
+
+function toUserUpdate(data: z.infer<typeof personalSettingsUpdateSchema>): Partial<UserRow> {
+  const { nai_char_tags, ...rest } = data;
+  return withoutUndefined({
+    ...rest,
+    physical_appearance_tags: nai_char_tags,
+  }) as Partial<UserRow>;
 }
 
 function providerModelOption(value: number, label: string, provider?: string) {
@@ -1438,11 +1530,13 @@ async function loadPersonalProviderModelOptions(
       embedding:
         embeddingModels
           ?.filter((model) => model.embedding_model_id !== undefined)
-          .map((model) => providerModelOption(model.embedding_model_id as number, model.codename, model.provider)) ?? [],
+          .map((model) => providerModelOption(model.embedding_model_id as number, model.codename, model.provider)) ??
+        [],
       image:
         imageModels
           ?.filter((model) => model.diffusion_model_id !== undefined)
-          .map((model) => providerModelOption(model.diffusion_model_id as number, model.codename, model.provider)) ?? [],
+          .map((model) => providerModelOption(model.diffusion_model_id as number, model.codename, model.provider)) ??
+        [],
       video:
         videoModels
           ?.filter((model) => model.video_model_id !== undefined)
@@ -2463,7 +2557,7 @@ function renderJs(): string {
             <strong>\${escapeText(endpoint.label)}</strong>
             <div class="memory-meta">\${escapeText(endpoint.displayName)} - \${escapeText(endpoint.endpointUrl)}</div>
             <div class="item-actions">
-              <button class="danger" data-delete-endpoint data-scope="\${endpoint.scope}" data-label="\${escapeText(endpoint.label)}" data-capability="\${endpoint.capability}">Delete</button>
+              <button class="danger" data-delete-endpoint data-scope="\${endpoint.scope}" data-endpoint-id="\${endpoint.customEndpointId}" data-model-ref-id="\${endpoint.modelRefId ?? ""}" data-label="\${escapeText(endpoint.label)}" data-capability="\${endpoint.capability}">Delete</button>
             </div>
           </article>
         \`,
@@ -2600,7 +2694,13 @@ function renderJs(): string {
     document.querySelector("[data-save-fallbacks]").addEventListener("click", saveFallbacks);
     document.querySelectorAll("[data-delete-endpoint]").forEach((button) => {
       button.addEventListener("click", () =>
-        deleteCustomEndpoint(button.getAttribute("data-scope"), button.getAttribute("data-label"), button.getAttribute("data-capability")),
+        deleteCustomEndpoint(
+          button.getAttribute("data-scope"),
+          Number(button.getAttribute("data-endpoint-id")),
+          button.getAttribute("data-model-ref-id") ? Number(button.getAttribute("data-model-ref-id")) : null,
+          button.getAttribute("data-label"),
+          button.getAttribute("data-capability"),
+        ),
       );
     });
   }
@@ -2814,7 +2914,7 @@ function renderJs(): string {
             <strong>\${escapeText(endpoint.label)}</strong>
             <div class="memory-meta">\${escapeText(endpoint.displayName)} - \${escapeText(endpoint.endpointUrl)}</div>
             <div class="item-actions">
-              <button class="danger" data-delete-endpoint data-scope="personal" data-label="\${escapeText(endpoint.label)}" data-capability="\${endpoint.capability}">Delete</button>
+              <button class="danger" data-delete-endpoint data-scope="personal" data-endpoint-id="\${endpoint.customEndpointId}" data-model-ref-id="\${endpoint.modelRefId ?? ""}" data-label="\${escapeText(endpoint.label)}" data-capability="\${endpoint.capability}">Delete</button>
             </div>
           </article>
         \`,
@@ -3039,7 +3139,13 @@ function renderJs(): string {
     document.querySelector("[data-save-custom-endpoint]").addEventListener("click", saveCustomEndpoint);
     document.querySelectorAll("[data-delete-endpoint]").forEach((button) => {
       button.addEventListener("click", () =>
-        deleteCustomEndpoint(button.getAttribute("data-scope"), button.getAttribute("data-label"), button.getAttribute("data-capability")),
+        deleteCustomEndpoint(
+          button.getAttribute("data-scope"),
+          Number(button.getAttribute("data-endpoint-id")),
+          button.getAttribute("data-model-ref-id") ? Number(button.getAttribute("data-model-ref-id")) : null,
+          button.getAttribute("data-label"),
+          button.getAttribute("data-capability"),
+        ),
       );
     });
   }
@@ -3214,13 +3320,13 @@ function renderJs(): string {
     }
   }
 
-  async function deleteCustomEndpoint(scope, label, capability) {
+  async function deleteCustomEndpoint(scope, customEndpointId, modelRefId, label, capability) {
     if (!window.confirm("Delete this custom endpoint?")) return;
     try {
       setStatus("Deleting endpoint...", "warn");
       await api(\`/guilds/\${state.activeGuildId}/custom-endpoints\`, {
         method: "DELETE",
-        body: JSON.stringify({ scope, label, capability }),
+        body: JSON.stringify({ scope, customEndpointId, modelRefId, label, capability }),
       });
       await loadOverview(state.activeGuildId);
       if (state.tab === "my-providers") renderMyProviders();
@@ -4308,10 +4414,7 @@ export function startSettingsWebsite(client: Client): void {
     const parsed = personalSettingsUpdateSchema.safeParse(body);
     if (!parsed.success) return jsonError(context, 400, "invalid_personal_settings_payload");
 
-    const updated = await updateUser(
-      registeredUser.user_id,
-      withoutUndefined(parsed.data as Record<string, unknown>) as Partial<UserRow>,
-    );
+    const updated = await updateUser(registeredUser.user_id, toUserUpdate(parsed.data));
     if (!updated) return jsonError(context, 500, "personal_settings_update_failed");
 
     invalidateUserCache(session.user.id);
@@ -4359,10 +4462,7 @@ export function startSettingsWebsite(client: Client): void {
     const parsed = personalSettingsUpdateSchema.safeParse(normalized);
     if (!parsed.success) return jsonError(context, 400, "invalid_personal_settings_import");
 
-    const updated = await updateUser(
-      registeredUser.user_id,
-      withoutUndefined(parsed.data as Record<string, unknown>) as Partial<UserRow>,
-    );
+    const updated = await updateUser(registeredUser.user_id, toUserUpdate(parsed.data));
     if (!updated) return jsonError(context, 500, "personal_settings_import_failed");
 
     invalidateUserCache(session.user.id);
@@ -4386,7 +4486,7 @@ export function startSettingsWebsite(client: Client): void {
       personal_dtm: "follow",
       shortterm_cache_crossserver_opt_in: false,
       impersonation_prompt: null,
-      nai_char_tags: [],
+      physical_appearance_tags: [],
       nai_char_ref_url: null,
     });
     if (!updated) return jsonError(context, 500, "personal_settings_reset_failed");
@@ -4436,9 +4536,7 @@ export function startSettingsWebsite(client: Client): void {
     const [personalSavedProviders, personalCustomEndpoints, openRouterRegistrations] = await Promise.all([
       userId ? loadUserSavedProviderConfigs(userId) : Promise.resolve([]),
       userId ? loadCustomEndpointsForUser(userId) : Promise.resolve([]),
-      userId
-        ? loadRegisteredOpenRouterModelsForScope({ kind: "personal", ownerId: userId })
-        : Promise.resolve([]),
+      userId ? loadRegisteredOpenRouterModelsForScope({ kind: "personal", ownerId: userId }) : Promise.resolve([]),
     ]);
     const personalProviderModels = userId
       ? await loadPersonalProviderModelOptions(
@@ -4517,7 +4615,9 @@ export function startSettingsWebsite(client: Client): void {
         fallbackModels: fallbackModelOptions,
       },
       integrations: {
-        savedProviders: savedProviders.map((provider) => serializeSavedProvider(provider as unknown as Record<string, unknown>)),
+        savedProviders: savedProviders.map((provider) =>
+          serializeSavedProvider(provider as unknown as Record<string, unknown>),
+        ),
         personalSavedProviders: personalSavedProviders.map((provider) =>
           serializeSavedProvider(provider as unknown as Record<string, unknown>),
         ),
@@ -4583,17 +4683,17 @@ export function startSettingsWebsite(client: Client): void {
     if (!state) return jsonError(context, 404, "server_not_setup");
 
     const tomoriId = Number.parseInt(context.req.param("tomoriId"), 10);
-    const persona = state.personas.find((item) => item.tomori_id === tomoriId);
+    const persona = state.personas.find((item) => item.persona_id === tomoriId);
     if (!persona?.webhook_avatar_url) return jsonError(context, 404, "persona_avatar_not_found");
-    if (!isLocalPersonaAvatarPath(persona.webhook_avatar_url)) return jsonError(context, 404, "persona_avatar_not_local");
+    if (!isLocalPersonaAvatarPath(persona.webhook_avatar_url))
+      return jsonError(context, 404, "persona_avatar_not_local");
 
     const buffer = await loadStoredPersonaAvatarBuffer(persona.webhook_avatar_url);
     if (!buffer) return jsonError(context, 404, "persona_avatar_not_found");
 
     context.header("Content-Type", "image/png");
     context.header("Cache-Control", "private, max-age=300");
-    const body = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-    return context.body(body);
+    return context.body(Uint8Array.from(buffer));
   });
 
   app.patch(`${BASE_PATH}/api/guilds/:guildId/personas/:tomoriId`, async (context) => {
@@ -4609,7 +4709,7 @@ export function startSettingsWebsite(client: Client): void {
     if (!state) return jsonError(context, 404, "server_not_setup");
 
     const tomoriId = Number.parseInt(context.req.param("tomoriId"), 10);
-    const persona = state.personas.find((item) => item.tomori_id === tomoriId);
+    const persona = state.personas.find((item) => item.persona_id === tomoriId);
     if (!persona) return jsonError(context, 404, "persona_not_found");
 
     const body = await context.req.json().catch(() => null);
@@ -4623,21 +4723,19 @@ export function startSettingsWebsite(client: Client): void {
     }
 
     const tomoriUpdates = withoutUndefined({
-      tomori_nickname: parsed.data.tomori_nickname,
+      persona_nickname: parsed.data.tomori_nickname,
       context_note: parsed.data.context_note,
       context_note_depth: parsed.data.context_note_depth,
-      nai_tags: parsed.data.nai_tags,
+      physical_appearance_tags: parsed.data.nai_tags,
     }) as Partial<TomoriRow>;
-    const updatedPersona = Object.keys(tomoriUpdates).length
-      ? await updateTomori(tomoriId, tomoriUpdates)
-      : persona;
+    const updatedPersona = Object.keys(tomoriUpdates).length ? await updateTomori(tomoriId, tomoriUpdates) : persona;
     if (!updatedPersona) return jsonError(context, 500, "persona_update_failed");
 
     const personaConfigSaved = await upsertPersonaDashboardConfig(tomoriId, {
       triggerWords: parsed.data.trigger_words ?? persona.trigger_words ?? [],
-      personaPrompt: parsed.data.persona_prompt !== undefined ? parsed.data.persona_prompt : (persona.persona_prompt ?? null),
-      rewardConditioningEnabled:
-        parsed.data.reward_conditioning_enabled ?? persona.reward_conditioning_enabled ?? true,
+      personaPrompt:
+        parsed.data.persona_prompt !== undefined ? parsed.data.persona_prompt : (persona.persona_prompt ?? null),
+      rewardConditioningEnabled: parsed.data.reward_conditioning_enabled ?? persona.reward_conditioning_enabled ?? true,
       punishConditioningEnabled: parsed.data.punish_conditioning_enabled ?? persona.punish_conditioning_enabled ?? true,
       llmId: parsed.data.llm_id !== undefined ? parsed.data.llm_id : (persona.persona_llm?.llm_id ?? null),
     });
@@ -4684,8 +4782,8 @@ export function startSettingsWebsite(client: Client): void {
     const parsed = memoryCreateSchema.safeParse(body);
     if (!parsed.success) return jsonError(context, 400, "invalid_memory_payload");
 
-    const persona = state.personas.find((item) => item.tomori_id === parsed.data.tomoriId);
-    if (!persona?.tomori_id) return jsonError(context, 404, "persona_not_found");
+    const persona = state.personas.find((item) => item.persona_id === parsed.data.tomoriId);
+    if (!persona?.persona_id) return jsonError(context, 404, "persona_not_found");
 
     const contentValidation = validateMemoryContent(parsed.data.content);
     if (!contentValidation.isValid) return jsonError(context, 400, contentValidation.error ?? "invalid_memory");
@@ -4706,7 +4804,7 @@ export function startSettingsWebsite(client: Client): void {
 
     const memory = await addServerMemoryByTomori(
       state.serverId,
-      persona.tomori_id,
+      persona.persona_id,
       personaLineageId,
       registeredUser.user_id,
       parsed.data.content,
@@ -4844,7 +4942,7 @@ export function startSettingsWebsite(client: Client): void {
     if (!parsed.success) return jsonError(context, 400, "invalid_memory_payload");
 
     const persona = state.personas.find((item) => (item.persona_lineage_id ?? 0) === parsed.data.personaLineageId);
-    if (!persona?.tomori_id) return jsonError(context, 404, "persona_not_found");
+    if (!persona?.persona_id) return jsonError(context, 404, "persona_not_found");
 
     const contentValidation = validateMemoryContent(parsed.data.content);
     if (!contentValidation.isValid) return jsonError(context, 400, contentValidation.error ?? "invalid_memory");
@@ -4861,7 +4959,7 @@ export function startSettingsWebsite(client: Client): void {
 
     const memory = await addServerMemoryByTomori(
       state.serverId,
-      persona.tomori_id,
+      persona.persona_id,
       personaLineageId,
       registeredUser.user_id,
       parsed.data.content,
@@ -5294,9 +5392,6 @@ export function startSettingsWebsite(client: Client): void {
         return jsonError(context, 400, "fallback_matches_primary");
       }
       nextConfig.fallback_model_refs = parsed.data.fallbackRefs as FallbackModelRef[];
-      nextConfig.fallback_llm_ids = parsed.data.fallbackRefs
-        .filter((ref) => ref.type === "llm")
-        .map((ref) => ref.id);
     }
 
     const allProviderRows = await loadUserSavedProviderConfigs(registeredUser.user_id);
@@ -5431,8 +5526,9 @@ export function startSettingsWebsite(client: Client): void {
       return jsonError(context, 403, "admin_required");
     }
 
-    const registeredUser = parsed.data.scope === "personal" ? await ensureSessionUser(session) : null;
-    if (parsed.data.scope === "personal" && !registeredUser?.user_id) {
+    const endpointOwnerId =
+      parsed.data.scope === "server" ? state.serverId : (await ensureSessionUser(session))?.user_id;
+    if (!endpointOwnerId) {
       return jsonError(context, 500, "user_registration_failed");
     }
 
@@ -5440,7 +5536,7 @@ export function startSettingsWebsite(client: Client): void {
       scope:
         parsed.data.scope === "server"
           ? { kind: "server", ownerId: state.serverId, baseConfig: state.config }
-          : { kind: "personal", ownerId: registeredUser!.user_id, baseConfig: state.config },
+          : { kind: "personal", ownerId: endpointOwnerId, baseConfig: state.config },
       label: parsed.data.label,
       capability: parsed.data.capability as CustomEndpointCapability,
       apiStyle: parsed.data.apiStyle as CustomEndpointApiStyle,
@@ -5483,8 +5579,9 @@ export function startSettingsWebsite(client: Client): void {
       return jsonError(context, 403, "admin_required");
     }
 
-    const registeredUser = parsed.data.scope === "personal" ? await ensureSessionUser(session) : null;
-    if (parsed.data.scope === "personal" && !registeredUser?.user_id) {
+    const endpointOwnerId =
+      parsed.data.scope === "server" ? state.serverId : (await ensureSessionUser(session))?.user_id;
+    if (!endpointOwnerId) {
       return jsonError(context, 500, "user_registration_failed");
     }
 
@@ -5492,9 +5589,11 @@ export function startSettingsWebsite(client: Client): void {
       scope:
         parsed.data.scope === "server"
           ? { kind: "server", ownerId: state.serverId, baseConfig: state.config }
-          : { kind: "personal", ownerId: registeredUser!.user_id, baseConfig: state.config },
+          : { kind: "personal", ownerId: endpointOwnerId, baseConfig: state.config },
       label: parsed.data.label,
       capability: parsed.data.capability as CustomEndpointCapability,
+      customEndpointId: parsed.data.customEndpointId,
+      modelRefId: parsed.data.modelRefId,
     });
     if (!deleted) return jsonError(context, 404, "custom_endpoint_not_found");
 
@@ -5745,7 +5844,7 @@ export function startSettingsWebsite(client: Client): void {
       const persona =
         state.personas.find((item) => (item.persona_lineage_id ?? 0) === parsed.data.personaLineageId) ??
         state.personas[0];
-      if (!persona?.tomori_id) return jsonError(context, 404, "persona_not_found");
+      if (!persona?.persona_id) return jsonError(context, 404, "persona_not_found");
       const registeredUser = await ensureSessionUser(session);
       if (!registeredUser?.user_id) return jsonError(context, 500, "user_registration_failed");
 
@@ -5767,7 +5866,7 @@ export function startSettingsWebsite(client: Client): void {
         }
         const created = await addServerMemoryByTomori(
           state.serverId,
-          persona.tomori_id,
+          persona.persona_id,
           parsed.data.personaLineageId,
           registeredUser.user_id,
           memory,
@@ -5781,14 +5880,17 @@ export function startSettingsWebsite(client: Client): void {
     return context.json({ inserted, skipped });
   });
 
-  setInterval(() => {
-    const now = Date.now();
-    for (const [sessionId, session] of sessions.entries()) {
-      if (session.expiresAt <= now || session.tokenExpiresAt <= now) {
-        sessions.delete(sessionId);
+  setInterval(
+    () => {
+      const now = Date.now();
+      for (const [sessionId, session] of sessions.entries()) {
+        if (session.expiresAt <= now || session.tokenExpiresAt <= now) {
+          sessions.delete(sessionId);
+        }
       }
-    }
-  }, 10 * 60 * 1000);
+    },
+    10 * 60 * 1000,
+  );
 
   try {
     Bun.serve({

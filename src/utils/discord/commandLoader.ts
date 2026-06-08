@@ -4,7 +4,6 @@
  * Supports both flat subcommands and subcommand groups via folder structure
  */
 import path from "node:path";
-import { readdirSync } from "node:fs";
 import { log } from "../misc/logger";
 import {
   SlashCommandBuilder,
@@ -17,7 +16,6 @@ import {
 } from "discord.js";
 import type { SlashCommandSubcommandBuilder } from "discord.js";
 import type { UserRow, ErrorContext } from "../../types/db/schema";
-import getAllFiles from "../misc/ioHelper";
 import { localizer, getSupportedLocales } from "../text/localizer";
 
 /**
@@ -43,10 +41,38 @@ export type CommandExecutionMap = Map<string, Map<string, CommandExecuteFunction
  * Map for command cooldowns (category -> duration)
  */
 export type CommandCooldownMap = Map<string, number>;
+
+type LoadedCommandModule = {
+  configureSubcommand?: (subcommand: SlashCommandSubcommandBuilder) => SlashCommandSubcommandBuilder;
+  execute?: CommandExecuteFunction;
+  cooldown?: number;
+};
+
+type LoadedCommandFile = {
+  file: string;
+  module: LoadedCommandModule;
+};
+
+type DirectoryItem = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  isFile: boolean;
+};
+
 // Categories that are completely restricted to guilds only
 const GUILD_ONLY_CATEGORIES: string[] = ["server", "conditioning"];
 // Categories that require manage permissions in guild context
-const MANAGER_ONLY_CATEGORIES = ["config", "nsfw", "optional-key", "server"];
+const MANAGER_ONLY_CATEGORIES = [
+  "config",
+  "model",
+  "provider",
+  "mcp",
+  "capabilities",
+  "nsfw",
+  "optional-key",
+  "server",
+];
 
 const COMMAND_LOCALIZATION_ALIASES: Record<string, string> = {
   "commands.memory.description": "commands.teach.memory.description",
@@ -80,6 +106,10 @@ function getCommandLocalizationAliases(key: string): string[] {
     aliases.push(staticAlias);
   }
 
+  if (key.includes(".deliberate-tool-mode.")) {
+    aliases.push(key.replace(".deliberate-tool-mode.", ".deliberatetoolmode."));
+  }
+
   const systemPromptMatch = key.match(/^commands\.config\.system-prompt\.(set|remove|preset)\.description$/);
   if (systemPromptMatch) {
     const aliasByAction: Record<string, string> = {
@@ -91,24 +121,21 @@ function getCommandLocalizationAliases(key: string): string[] {
   }
 
   const configDescriptionAliases: Record<string, string> = {
-    "commands.config.tools.manage.description": "commands.config.tools.manage.description",
+    "commands.capabilities.manage.description": "commands.capabilities.manage.description",
     "commands.config.send-limit.description": "commands.config.sendlimit.description",
     "commands.server.always-reply.description": "commands.server.alwaysreply.description",
     "commands.server.deliberate-trigger-mode.description": "commands.server.deliberatetriggermode.description",
+    "commands.server.deliberate-tool-mode.description": "commands.server.deliberatetoolmode.description",
     "commands.personal.deliberate-trigger-mode.description": "commands.personal.deliberatetriggermode.description",
+    "commands.personal.deliberate-tool-mode.description": "commands.personal.deliberatetoolmode.description",
     "commands.server.quota.image-generation.description": "commands.server.quota.imagegen.description",
     "commands.server.quota.text-generation.description": "commands.server.quota.textgen.description",
     "commands.server.quota.video-generation.description": "commands.server.quota.videogen.description",
-    "commands.config.model-override.remove.description": "commands.config.remove.modeloverride.description",
+    "commands.model.override.remove.description": "commands.config.remove.modeloverride.description",
   };
   const configAlias = configDescriptionAliases[key];
   if (configAlias) {
     aliases.push(configAlias);
-  }
-
-  const novelAiImageTagsMatch = key.match(/^commands\.novelai\.image-tags\.([a-z0-9-]+)\.description$/);
-  if (novelAiImageTagsMatch) {
-    aliases.push(`commands.novelai.tags.${novelAiImageTagsMatch[1]}.description`);
   }
 
   const conditioningMatch = key.match(
@@ -133,6 +160,38 @@ function localizeWithAliases(locale: string, key: string): string {
   }
 
   return localizer(locale, key);
+}
+
+async function readVisibleDirectory(directory: string): Promise<DirectoryItem[]> {
+  const glob = new Bun.Glob("*");
+  const items: DirectoryItem[] = [];
+
+  for await (const name of glob.scan({ cwd: directory, onlyFiles: false })) {
+    if (name.startsWith(".")) continue;
+
+    const itemPath = path.join(directory, name);
+    const stat = await Bun.file(itemPath).stat();
+    items.push({
+      name,
+      path: itemPath,
+      isDirectory: stat.isDirectory(),
+      isFile: stat.isFile(),
+    });
+  }
+
+  return items;
+}
+
+async function getCommandDirectories(directory: string): Promise<string[]> {
+  const items = await readVisibleDirectory(directory);
+  return items.filter((item) => item.isDirectory).map((item) => item.path);
+}
+
+async function getCommandFiles(directory: string): Promise<string[]> {
+  const items = await readVisibleDirectory(directory);
+  return items
+    .filter((item) => item.isFile && (item.name.endsWith(".ts") || item.name.endsWith(".js")))
+    .map((item) => item.path);
 }
 
 // Note: Individual subcommand restrictions are no longer needed.
@@ -262,7 +321,7 @@ export async function loadCommandData(): Promise<{
     const availableLocales = getSupportedLocales().filter((locale) => locale !== "en-US");
     // 1. Get all command category directories
     const commandsPath = path.join(process.cwd(), "src", "commands");
-    const categoryDirs = getAllFiles(commandsPath, true);
+    const categoryDirs = await getCommandDirectories(commandsPath);
 
     // 2. Process each category directory
     for (const categoryDir of categoryDirs) {
@@ -312,21 +371,40 @@ export async function loadCommandData(): Promise<{
       }
 
       // 4. Get all items (files and directories) in this category
-      const items = readdirSync(categoryDir, { withFileTypes: true });
+      const items = await readVisibleDirectory(categoryDir);
 
       // 5. Process each item (file or directory)
       for (const item of items) {
-        // Skip hidden files/directories
-        if (item.name.startsWith(".")) continue;
-
         const itemPath = path.join(categoryDir, item.name);
 
         // 6. Handle subcommand groups (directories)
-        if (item.isDirectory()) {
+        if (item.isDirectory) {
           const groupName = item.name;
           log.info(`Processing subcommand group: ${categoryName}/${groupName}`);
 
           try {
+            // Get all command files in this group
+            const groupCommandFiles = await getCommandFiles(itemPath);
+
+            // Pre-load all command modules asynchronously to support top-level await
+            const loadedModules: LoadedCommandFile[] = [];
+            for (const commandFile of groupCommandFiles) {
+              try {
+                const commandModule = (await import(commandFile)) as LoadedCommandModule;
+                loadedModules.push({ file: commandFile, module: commandModule });
+              } catch (error) {
+                const context: ErrorContext = {
+                  errorType: "CommandLoadingError",
+                  metadata: {
+                    commandFile,
+                    categoryName,
+                    groupName,
+                  },
+                };
+                log.error(`Failed to load grouped command from ${commandFile}:`, error, context);
+              }
+            }
+
             // Add subcommand group to category
             categoryBuilder.addSubcommandGroup((group: SlashCommandSubcommandGroupBuilder) => {
               // Get group description from localizations
@@ -347,27 +425,22 @@ export async function loadCommandData(): Promise<{
                 group.setDescriptionLocalizations(groupLocalizationsMap);
               }
 
-              // Get all command files in this group
-              const groupCommandFiles = getAllFiles(itemPath);
-
-              // Process each command in the group
-              for (const commandFile of groupCommandFiles) {
+              // Process each loaded command in the group
+              for (const { file: commandFile, module: commandModule } of loadedModules) {
                 try {
-                  // Import the command module (needs to be sync for builder pattern)
-                  // We'll use dynamic import but handle it carefully
-                  const commandModule = require(commandFile);
-
                   // Validate exports
                   if (!commandModule.configureSubcommand || !commandModule.execute) {
                     log.warn(`Command at ${commandFile} is missing required exports`);
                     continue;
                   }
 
+                  const configureSubcommand = commandModule.configureSubcommand;
+                  const execute = commandModule.execute;
                   let subcommandName = "";
 
                   // Add subcommand to group
                   group.addSubcommand((subcommand: SlashCommandSubcommandBuilder) => {
-                    const configuredSubcommand = commandModule.configureSubcommand(subcommand);
+                    const configuredSubcommand = configureSubcommand(subcommand);
                     subcommandName = configuredSubcommand.name;
 
                     // Apply subcommand localizations
@@ -390,7 +463,7 @@ export async function loadCommandData(): Promise<{
 
                   // Store execute function with group.subcommand format
                   const executionKey = `${groupName}.${subcommandName}`;
-                  executionMap.get(categoryName)?.set(executionKey, commandModule.execute);
+                  executionMap.get(categoryName)?.set(executionKey, execute);
 
                   // Store cooldown if defined
                   if (commandModule.cooldown && typeof commandModule.cooldown === "number") {
@@ -426,12 +499,12 @@ export async function loadCommandData(): Promise<{
           }
         }
         // 7. Handle flat subcommands (direct .ts files)
-        else if (item.isFile() && itemPath.endsWith(".ts")) {
+        else if (item.isFile && itemPath.endsWith(".ts")) {
           const commandFile = itemPath;
 
           try {
             // Import the command module
-            const commandModule = await import(commandFile);
+            const commandModule = (await import(commandFile)) as LoadedCommandModule;
 
             // Validate exports: must have configureSubcommand and execute
             if (!commandModule.configureSubcommand || !commandModule.execute) {
@@ -439,13 +512,15 @@ export async function loadCommandData(): Promise<{
               continue;
             }
 
+            const configureSubcommand = commandModule.configureSubcommand;
+            const execute = commandModule.execute;
             // Use a temporary variable to store the subcommand name
             let subcommandName = "";
 
             // Add the subcommand to the category builder
             categoryBuilder.addSubcommand((subcommand: SlashCommandSubcommandBuilder) => {
               // Call the module's configureSubcommand function and capture its result
-              const configuredSubcommand = commandModule.configureSubcommand(subcommand);
+              const configuredSubcommand = configureSubcommand(subcommand);
               // Get the name that was set
               subcommandName = configuredSubcommand.name;
 
@@ -463,7 +538,7 @@ export async function loadCommandData(): Promise<{
             }
 
             // Store the execute function in the map
-            executionMap.get(categoryName)?.set(subcommandName, commandModule.execute);
+            executionMap.get(categoryName)?.set(subcommandName, execute);
 
             // Store cooldown if defined (optional feature)
             if (commandModule.cooldown && typeof commandModule.cooldown === "number") {

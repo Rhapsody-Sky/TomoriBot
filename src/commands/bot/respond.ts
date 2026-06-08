@@ -7,18 +7,17 @@ import { ColorCode, log } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
 import type { UserRow } from "../../types/db/schema";
 import type { ModalComponent, SelectOption } from "../../types/discord/modal";
-import tomoriChat from "../../events/messageCreate/tomoriChat";
-import { loadAllPersonasForServer, loadSmartestModel, loadTomoriState } from "../../utils/db/dbRead";
-import {
-  checkMessageTriggerCooldownWithWhitelist,
-  setMessageTriggerCooldownWithWhitelist,
-} from "../../utils/db/cooldownManager";
+import { tomoriChat } from "../../events/messageCreate/tomoriChat";
+import { llmModelRepo, personaRepository } from "@/utils/db/repositories";
 import { getCachedWhitelistStatus } from "../../utils/cache/channelWhitelistCache";
 import { getCachedPersonalSpotlightStatus } from "@/utils/cache/personalSpotlightCache";
-import { filterPersonasForTrigger, isPersonaAllowedForTrigger } from "@/utils/db/personaAccess";
+import { normalizeMessageFetchLimit } from "@/utils/discord/messageFetchLimit";
+import { findLastActivePersona } from "@/utils/discord/personaTurnDetection";
+import { filterPersonasForTrigger, isPersonaAllowedForTrigger } from "@/utils/persona/personaAccess";
 import { CooldownType } from "../../types/db/schema";
-import { getCooldownTypeFooterKey } from "../../utils/db/messageCooldown";
+import { cooldownRepository } from "@/utils/db/repositories/CooldownRepository";
 import { isNoticeEmbedVisible } from "@/utils/discord/toolProgressNotice";
+import type { TomoriState } from "@/types/db/schema";
 
 /**
  * Configure the respond subcommand
@@ -35,6 +34,35 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
         .setDescription(localizer("en-US", "commands.bot.respond.extra_options_description"))
         .setRequired(false),
     );
+
+function getChannelAutoTriggerPersona(
+  personas: TomoriState[],
+  effectiveChannelId: string,
+  tomoriState: TomoriState,
+  personalAutoTriggerPersonaId?: number | null,
+): TomoriState | null {
+  const resolveById = (personaId: number | null | undefined): TomoriState | null => {
+    if (personaId === null || personaId === undefined) return null;
+    return personas.find((persona) => persona.persona_id === personaId) ?? null;
+  };
+
+  const personalAutoTriggerPersona = resolveById(personalAutoTriggerPersonaId);
+  if (personalAutoTriggerPersona) {
+    return personalAutoTriggerPersona;
+  }
+
+  if (!tomoriState.config.autoch_disc_ids.includes(effectiveChannelId)) {
+    return null;
+  }
+
+  const serverAutoTriggerPersonaId =
+    tomoriState.config.autoch_persona_overrides.find((entry) => entry.channel_disc_id === effectiveChannelId)
+      ?.persona_id ?? null;
+
+  return serverAutoTriggerPersonaId === null
+    ? (personas.find((persona) => !persona.is_alter) ?? null)
+    : resolveById(serverAutoTriggerPersonaId);
+}
 
 /**
  * Execute the respond command - manually trigger Tomori to respond to the latest message
@@ -96,7 +124,7 @@ export async function execute(
   }
 
   // 3. Load tomori state for this server
-  const tomoriState = await loadTomoriState(interaction.guild.id);
+  const tomoriState = await personaRepository.loadState(interaction.guild.id);
   if (!tomoriState) {
     await replyInfoEmbed(interaction, locale, {
       titleKey: "general.errors.unknown_error_title",
@@ -114,7 +142,7 @@ export async function execute(
   const cooldownLength = tomoriState.config.cooldown_length ?? 5;
 
   // Uses whitelist-aware version to respect per-channel cooldown overrides
-  const cooldownResult = await checkMessageTriggerCooldownWithWhitelist(
+  const cooldownResult = await cooldownRepository.checkMessageTriggerCooldownWithWhitelist(
     interaction.guild.id,
     interaction.user.id,
     interaction.channel.id,
@@ -134,7 +162,7 @@ export async function execute(
     }
 
     // Show cooldown warning via DM (with ephemeral fallback)
-    const footerKey = getCooldownTypeFooterKey(cooldownResult.cooldownType);
+    const footerKey = cooldownRepository.getCooldownTypeFooterKey(cooldownResult.cooldownType);
     await sendCooldownDM(
       interaction.user,
       locale,
@@ -142,7 +170,7 @@ export async function execute(
       "commands.bot.respond.cooldown_active",
       {
         seconds: cooldownResult.remainingSeconds.toString(),
-        botName: tomoriState.tomori_nickname,
+        botName: tomoriState.persona_nickname,
       },
       footerKey,
       interaction,
@@ -152,7 +180,7 @@ export async function execute(
   }
 
   // 4. Load all personas and check if alters exist
-  const allPersonas = await loadAllPersonasForServer(interaction.guild.id);
+  const allPersonas = await personaRepository.loadAllForServer(interaction.guild.id);
   const isThread = "isThread" in guildChannel && typeof guildChannel.isThread === "function" && guildChannel.isThread();
   const parentChannelId = isThread && "parent" in guildChannel ? guildChannel.parent?.id : undefined;
   const whitelistStatus = await getCachedWhitelistStatus(
@@ -180,7 +208,40 @@ export async function execute(
     return;
   }
 
-  const fallbackPersona = availablePersonas[0];
+  const fetchedMessages = await interaction.channel.messages.fetch({
+    limit: normalizeMessageFetchLimit(tomoriState.config.message_fetch_limit),
+  });
+  const messages = [...fetchedMessages.values()].reverse();
+  const latestMessage = fetchedMessages.first();
+
+  if (!latestMessage) {
+    log.warn(`No messages found in channel ${interaction.channel.id} for manual respond command.`);
+    await replyInfoEmbed(interaction, locale, {
+      titleKey: "commands.bot.respond.no_messages_title",
+      descriptionKey: "commands.bot.respond.no_messages_description",
+      color: ColorCode.WARN,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const availablePersonaIds = new Set(availablePersonas.map((persona) => persona.persona_id));
+  const lastActivePersona = findLastActivePersona({
+    messages,
+    allPersonas,
+    clientUserId: client.user?.id,
+  });
+  const allowedLastActivePersona =
+    lastActivePersona && availablePersonaIds.has(lastActivePersona.persona_id) ? lastActivePersona : null;
+  const autoTriggerPersona = getChannelAutoTriggerPersona(
+    availablePersonas,
+    parentChannelId ?? interaction.channel.id,
+    tomoriState,
+    personalSpotlightStatus?.autoTriggerPersonaId ?? null,
+  );
+  const defaultPersona = availablePersonas.find((persona) => !persona.is_alter) ?? availablePersonas[0];
+  const fallbackPersona = allowedLastActivePersona ?? autoTriggerPersona ?? defaultPersona;
+
   if (!fallbackPersona) {
     await replyInfoEmbed(interaction, locale, {
       titleKey: "general.errors.unknown_error_title",
@@ -210,7 +271,7 @@ export async function execute(
     // 1. Persona select dropdown — show when multiple personas are available
     if (availablePersonas.length > 1) {
       const personaOptions: SelectOption[] = availablePersonas.map((persona, index) => ({
-        label: safeSelectOptionText(persona.tomori_nickname),
+        label: safeSelectOptionText(persona.persona_nickname),
         value: index.toString(),
         description: localizer(
           locale,
@@ -284,11 +345,11 @@ export async function execute(
     if (availablePersonas.length > 1) {
       selectedPersona = availablePersonas[selectedIndex] ?? fallbackPersona;
       log.info(
-        `User ${interaction.user.id} selected persona ${selectedPersona.tomori_nickname} (ID: ${selectedPersona.tomori_id}) for manual respond`,
+        `User ${interaction.user.id} selected persona ${selectedPersona.persona_nickname} (ID: ${selectedPersona.persona_id}) for manual respond`,
       );
     }
 
-    if (!isPersonaAllowedForTrigger(whitelistStatus, personalSpotlightStatus, selectedPersona?.tomori_id)) {
+    if (!isPersonaAllowedForTrigger(whitelistStatus, personalSpotlightStatus, selectedPersona?.persona_id)) {
       await replyInteraction.editReply({
         embeds: [
           new EmbedBuilder()
@@ -310,7 +371,7 @@ export async function execute(
     const useReasoning = modalResult.values?.use_reasoning === "true";
     if (useReasoning) {
       const currentProvider = tomoriState.llm.llm_provider;
-      const smartestModel = await loadSmartestModel(currentProvider);
+      const smartestModel = await llmModelRepo.loadSmartestModel(currentProvider);
 
       if (!smartestModel) {
         await replyInteraction.editReply({
@@ -331,7 +392,7 @@ export async function execute(
     // Direct response — skip modal, use default persona
     await interaction.deferReply({ flags: deferFlags });
 
-    if (!isPersonaAllowedForTrigger(whitelistStatus, personalSpotlightStatus, selectedPersona?.tomori_id)) {
+    if (!isPersonaAllowedForTrigger(whitelistStatus, personalSpotlightStatus, selectedPersona?.persona_id)) {
       await interaction.editReply({
         embeds: [
           new EmbedBuilder()
@@ -345,22 +406,6 @@ export async function execute(
   }
 
   try {
-    const messages = await interaction.channel.messages.fetch({ limit: 1 });
-    const latestMessage = messages.first();
-
-    if (!latestMessage) {
-      log.warn(`No messages found in channel ${interaction.channel.id} for manual respond command.`);
-      await replyInteraction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.bot.respond.no_messages_title"))
-            .setDescription(localizer(locale, "commands.bot.respond.no_messages_description"))
-            .setColor(ColorCode.WARN),
-        ],
-      });
-      return;
-    }
-
     // 6. Build success embed
     const successEmbed = new EmbedBuilder()
       .setTitle(localizer(locale, "commands.bot.respond.success_title"))
@@ -391,43 +436,31 @@ export async function execute(
       `Manual respond command triggered by ${interaction.user.id} in channel ${interaction.channel.id} for message ${latestMessage.id}`,
     );
 
-    await tomoriChat(
+    await tomoriChat({
       client,
-      passportMessage as Message,
-      false, // isFromQueue
-      true, // isManuallyTriggered - this bypasses normal trigger logic
-      forceReason, // forceReason - enabled when "Use Reasoning" is Yes
-      forceReason ? manualPrompt : undefined, // reasoningQuery - prompt doubles as reasoning query when reasoning is enabled
-      llmOverrideCodename, // llmOverrideCodename - smartest model when reasoning is enabled
-      undefined, // isStopResponse
-      0, // retryCount
-      false, // skipLock
-      undefined, // reminderRecipientID
-      undefined, // reminderData
-      selectedPersona?.tomori_id ?? undefined, // selectedPersonaId
-      undefined, // isPersonaJob
-      undefined, // isUserImpersonation
-      undefined, // impersonatedUserId
-      "user", // textQuotaSource
-      interaction.id, // textQuotaTriggerKey (one slot per /bot respond invocation)
-      interaction.user.id, // textQuotaUserDiscId
-      manualPrompt || undefined, // manualSystemPrompt
-      manualPrefill, // manualPrefill
-      undefined, // naiContinuationPrefill
-      undefined, // emptyResponseFinishReason
-      undefined, // injectedContextItems
-      undefined, // forcedMentions
-      {
+      message: passportMessage as Message,
+      isFromQueue: false,
+      isManuallyTriggered: true,
+      forceReason,
+      reasoningQuery: forceReason ? manualPrompt : undefined,
+      llmOverrideCodename,
+      selectedPersonaId: selectedPersona?.persona_id ?? undefined,
+      textQuotaSource: "user",
+      textQuotaTriggerKey: interaction.id,
+      textQuotaUserDiscId: interaction.user.id,
+      manualSystemPrompt: manualPrompt || undefined,
+      manualPrefill,
+      manualTriggerInvoker: {
         userDiscId: interaction.user.id,
         username: interaction.user.username,
         locale,
         member: interaction.member as import("discord.js").GuildMember | null,
       },
-    );
+    });
 
     // 7. Set cooldown after successful response (shares cooldown pool with message triggers)
     // Uses whitelist-aware version to respect per-channel cooldown overrides
-    await setMessageTriggerCooldownWithWhitelist(
+    await cooldownRepository.setMessageTriggerCooldownWithWhitelist(
       interaction.guild.id,
       interaction.user.id,
       interaction.channel.id,

@@ -2,11 +2,12 @@ import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder
 import { EmbedBuilder, MessageFlags } from "discord.js";
 import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
-import { replyInfoEmbed } from "@/utils/discord/interactionHelper";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import type { UserRow } from "@/types/db/schema";
-import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
-import { validateImportFile, importServerConfig } from "@/utils/db/dataImportV2";
+import { importRepository } from "@/utils/db/repositories";
 import type { ServerConfigOnlyExportData } from "@/types/db/dataExport";
+import { IMPORT_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
   subcommand
@@ -60,9 +61,22 @@ export async function execute(
     }
 
     const attachment = interaction.options.getAttachment("file", true);
-    const response = await fetch(attachment.url);
-    const jsonData = JSON.parse(await response.text());
-    const validation = validateImportFile(jsonData);
+    const response = await safeDownload(attachment.url, {
+      maxSizeMB: IMPORT_LIMITS.MAX_DATA_IMPORT_SIZE_MB,
+      timeoutMs: 10_000,
+      knownSize: attachment.size,
+    });
+    if (!response.success || !response.buffer) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.data.import.invalid_file_title",
+        descriptionKey: "commands.data.import.invalid_file_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const jsonData = JSON.parse(response.buffer.toString("utf8"));
+    const validation = importRepository.validateImportFile(jsonData);
     if (!validation.valid || !validation.type || !validation.data || validation.type !== "server_config") {
       await replyInfoEmbed(interaction, locale, {
         titleKey: "commands.data.import.invalid_file_title",
@@ -75,7 +89,7 @@ export async function execute(
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const importResult = await importServerConfig(
+    const importResult = await importRepository.importServerConfig(
       interaction.guild?.id ?? interaction.user.id,
       (validation.data as ServerConfigOnlyExportData).config,
     );
@@ -94,8 +108,6 @@ export async function execute(
       });
       return;
     }
-
-    invalidateTomoriStateCache(interaction.guild?.id ?? interaction.user.id);
 
     await interaction.editReply({
       embeds: [

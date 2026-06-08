@@ -62,12 +62,13 @@ import type {
 import { getVertexToolAdapter } from "./vertexToolAdapter";
 import { parseVertexCompositeKey, createVertexClient } from "./vertexClient";
 import { getCachedDefaultLLM, isLLMCacheReady } from "../../utils/cache/llmCache";
-import { loadDefaultModelForProvider, loadAvailableModelsForProvider } from "../../utils/db/dbRead";
+import { llmModelRepo } from "@/utils/db/repositories";
 import { vertexProviderInfo } from "./providerInfo";
 import { callGoogleStructuredJSON } from "../google/googleStructuredOutput";
 import { generateConversationSummaryGoogle, generateRoleplaySummaryGoogle } from "../google/compactGenerator";
 import { generatePresetFromPrompt } from "../google/presetGenerator";
 import { getActiveTemperature, isParamDisabled } from "@/utils/provider/samplingControl";
+import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 
 /**
  * Gets the default Vertex model with a robust fallback chain:
@@ -91,7 +92,7 @@ async function getDefaultVertexModel(): Promise<string> {
 
   // 2. Query database for is_default model
   try {
-    const dbDefault = await loadDefaultModelForProvider(providerName);
+    const dbDefault = await llmModelRepo.loadDefaultModel(providerName);
     if (dbDefault) {
       log.info(`Using database default ${providerName} model: ${dbDefault.llm_codename}`);
       return dbDefault.llm_codename;
@@ -104,7 +105,7 @@ async function getDefaultVertexModel(): Promise<string> {
 
   // 3. Fallback to first non-deprecated model
   try {
-    const availableModels = await loadAvailableModelsForProvider(providerName);
+    const availableModels = await llmModelRepo.loadAvailableModelsForProvider(providerName);
     if (availableModels && availableModels.length > 0) {
       const firstModel = availableModels[0].llm_codename;
       log.warn(`No default model found, using first available ${providerName} model: ${firstModel}`);
@@ -244,32 +245,35 @@ export class VertexProvider
       return [];
     }
 
+    // Vertex AI embedContent only processes one content per call (unlike Google AI which
+    // accepts a batch), so we call it once per input and collect results.
     const genAI = this.buildClient(request.apiKey);
-    const response = await genAI.models.embedContent({
-      model: request.model,
-      contents: request.inputs,
-      config: request.taskType ? { taskType: request.taskType } : undefined,
-    });
+    const config = request.taskType ? { taskType: request.taskType } : undefined;
 
-    // Extract embeddings from response (same format as Google)
-    const raw = response as unknown as {
-      embeddings?: Array<{ values?: number[] } | number[]>;
-      embedding?: { values?: number[] } | number[];
-    };
+    const results = await Promise.all(
+      request.inputs.map(async (input) => {
+        const response = await genAI.models.embedContent({
+          model: request.model,
+          contents: input,
+          config,
+        });
 
-    const embeddingsList = Array.isArray(raw?.embeddings) ? raw.embeddings : raw?.embedding ? [raw.embedding] : [];
+        const raw = response as unknown as {
+          embeddings?: Array<{ values?: number[] } | number[]>;
+          embedding?: { values?: number[] } | number[];
+        };
 
-    return embeddingsList
-      .map((entry) => {
-        if (Array.isArray(entry)) {
-          return entry;
-        }
-        if (entry && Array.isArray((entry as { values?: number[] }).values)) {
+        const entry = Array.isArray(raw?.embeddings) ? raw.embeddings[0] : raw?.embedding;
+        if (!entry) return [];
+        if (Array.isArray(entry)) return entry;
+        if (Array.isArray((entry as { values?: number[] }).values)) {
           return (entry as { values: number[] }).values;
         }
         return [];
-      })
-      .filter((values) => values.length > 0);
+      }),
+    );
+
+    return results.filter((values) => values.length > 0);
   }
 
   // ─── SupportsStructuredOutput ────────────────────────────────────────
@@ -322,30 +326,23 @@ export class VertexProvider
       model: request.model,
     });
 
-    const messagePayload: {
-      message: string;
-      media?: Array<{ mimeType: string; data: string }>;
-      config: {
-        responseModalities: string[];
-        imageConfig: {
-          aspectRatio: string;
-        };
-      };
-    } = {
-      message: request.prompt,
+    // Build parts: reference images (as inlineData) followed by the text prompt.
+    // SendMessageParameters.message is PartListUnion — inline images must be
+    // passed as inlineData parts, not via a non-existent "media" field.
+    const messageParts: Array<{ inlineData: { mimeType: string; data: string } } | string> = [
+      ...(request.referenceImages ?? []).map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } })),
+      request.prompt,
+    ];
+
+    const response = await chat.sendMessage({
+      message: messageParts,
       config: {
         responseModalities: ["IMAGE"],
         imageConfig: {
           aspectRatio: request.aspectRatio,
         },
       },
-    };
-
-    if (request.referenceImages && request.referenceImages.length > 0) {
-      messagePayload.media = request.referenceImages;
-    }
-
-    const response = await chat.sendMessage(messagePayload);
+    });
     if (response?.candidates && response.candidates.length > 0 && response.candidates[0]?.content?.parts) {
       for (const part of response.candidates[0].content.parts) {
         if (part.inlineData?.data) {
@@ -371,9 +368,11 @@ export class VertexProvider
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
           tomoriState.speech_voice_sample_id ||
-            tomoriState.speech_voice_id?.trim() ||
-            tomoriState.elevenlabs_voice_id?.trim(),
+            tomoriState.speech_voice_design_prompt?.trim() ||
+            tomoriState.speech_voice_id?.trim(),
         ),
+        activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
+        activePersonaVoiceName: tomoriState.speech_voice_name,
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -392,19 +391,20 @@ export class VertexProvider
           manage_message_enabled: tomoriState.config.manage_message_enabled,
           imagegen_enabled: tomoriState.config.imagegen_enabled,
           videogen_enabled: tomoriState.config.videogen_enabled,
-          nai_exclusive_imggen: tomoriState.config.nai_exclusive_imggen,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
+          thread_creation_enabled: tomoriState.config.thread_creation_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
-        mcpFunctionNames,
+        mcpFunctionNames: availableMcpFunctionNames,
         totalCount,
       } = await getAvailableToolsWithMCP("vertex", toolStateForContext);
 
       // Apply streaming context filtering if available
       let finalBuiltInTools = availableBuiltInTools;
+      let finalMcpFunctionNames = availableMcpFunctionNames;
       if (streamingContext) {
         const minimalContext = {
           streamContext: streamingContext,
@@ -429,16 +429,23 @@ export class VertexProvider
         );
       }
 
+      ({ builtInTools: finalBuiltInTools, mcpFunctionNames: finalMcpFunctionNames } = applyDeliberateToolAllowlist({
+        providerLabel: "Vertex provider",
+        builtInTools: finalBuiltInTools,
+        mcpFunctionNames: finalMcpFunctionNames,
+        allowedToolNames: streamingContext?.deliberateToolAllowedNames,
+      }));
+
       // Use the Vertex tool adapter to get all tools in Gemini format
       const vertexAdapter = getVertexToolAdapter();
       const allToolsConfig = await vertexAdapter.getAllToolsInProviderFormat(
         finalBuiltInTools,
         tomoriState.server_id,
-        mcpFunctionNames,
+        finalMcpFunctionNames,
       );
 
       log.info(
-        `Vertex provider tools loaded: ${finalBuiltInTools.length} built-in + ${mcpFunctionNames.length} MCP = ${totalCount} total tools`,
+        `Vertex provider tools loaded: ${finalBuiltInTools.length} built-in + ${finalMcpFunctionNames.length} MCP = ${totalCount} total tools`,
       );
 
       return allToolsConfig;
@@ -457,7 +464,8 @@ export class VertexProvider
   // ─── Config ─────────────────────────────────────────────────────────
 
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<VertexProviderConfig> {
-    const maxOutputTokens = Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
+    const maxOutputTokens =
+      tomoriState.config.llm_max_output_tokens ?? Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
     const disabledParams = tomoriState.config.llm_disabled_params ?? [];
     const temperature = getActiveTemperature(tomoriState.config);
     const topKDisabled = isParamDisabled(disabledParams, "topK");

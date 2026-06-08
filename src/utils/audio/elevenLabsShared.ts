@@ -1,3 +1,5 @@
+import { stripTtsUnsupportedEmojiAttempts } from "@/utils/text/emojiHelper";
+
 const DEFAULT_STT_MODEL_ID = "scribe_v2";
 const DEFAULT_STT_TIMEOUT_MS = 20_000;
 const DEFAULT_STT_MAX_SIZE_MB = 20;
@@ -119,7 +121,12 @@ export function sanitizeElevenLabsTaggedScript(
   rawScript: string;
   captionText: string;
 } {
-  const normalizedScript = clampTextLength(normalizeTaggedScript(script, stripUnsupportedTags), maxChars);
+  const normalizedScript = clampTextLength(
+    stripTtsUnsupportedEmojiAttempts(normalizeTaggedScript(script, stripUnsupportedTags), {
+      preserveUnicodeEmojis: false,
+    }),
+    maxChars,
+  );
   const captionText = clampTextLength(stripElevenLabsExpressionTags(normalizedScript), DISCORD_MESSAGE_MAX_CHARS);
 
   return {

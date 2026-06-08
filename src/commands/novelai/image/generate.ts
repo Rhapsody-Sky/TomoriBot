@@ -10,15 +10,19 @@ import {
   type SlashCommandSubcommandBuilder,
 } from "discord.js";
 import { getCachedTomoriState } from "@/utils/cache/tomoriStateCache";
+import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { decryptApiKey, getOptApiKey } from "@/utils/security/crypto";
 import { ColorCode, log } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
-import { promptWithRawModal, replyInfoEmbed } from "@/utils/discord/interactionHelper";
+import { promptWithRawModal } from "@/utils/discord/ui/modals";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import type { TomoriState, UserRow } from "@/types/db/schema";
 import { checkImageQuota, incrementImageQuota } from "@/utils/quota/imageQuotaManager";
 import { resolveNaiImageParams } from "@/utils/image/naiImageParams";
 import { resolveNaiDiffusionModel } from "@/utils/image/naiDiffusionModels";
 import { normalizeNaiReferenceImage } from "@/utils/image/imageProcessor";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 import {
   NAI_CHAR_REF_INFO_EXTRACTED,
   NAI_CHAR_REF_STRENGTH,
@@ -62,13 +66,18 @@ async function prepareCharacterReferencePayload(attachment: APIAttachment): Prom
     throw new Error("Invalid character reference image type");
   }
 
-  const response = await fetch(attachment.url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch character reference image: ${response.status} ${response.statusText}`);
+  const downloadResult = await safeDownload(attachment.url, {
+    maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+    timeoutMs: 10_000,
+    knownSize: attachment.size,
+  });
+  if (!downloadResult.success || !downloadResult.buffer) {
+    throw new Error(
+      `Failed to fetch character reference image: ${downloadResult.details ?? downloadResult.error ?? "unknown error"}`,
+    );
   }
 
-  const sourceBuffer = Buffer.from(await response.arrayBuffer());
-  const normalizedBuffer = await normalizeNaiReferenceImage(sourceBuffer);
+  const normalizedBuffer = await normalizeNaiReferenceImage(downloadResult.buffer);
 
   return {
     useCoords: false,
@@ -84,7 +93,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
 export async function execute(
   _client: Client,
   interaction: ChatInputCommandInteraction,
-  _userData: UserRow,
+  userData: UserRow,
   locale: string,
 ): Promise<void> {
   if (!interaction.channel) {
@@ -113,6 +122,10 @@ export async function execute(
       });
       return;
     }
+
+    // Overlay the invoking user's personal (BYOK) provider selections so their
+    // personal NovelAI model/key is used when configured, mirroring /generate image.
+    ({ tomoriState } = await applyPersonalProviderSelectionsToTomoriState(tomoriState, userData.user_id ?? null));
 
     if (!tomoriState.config.imagegen_enabled) {
       await replyInfoEmbed(interaction, locale, {
@@ -273,12 +286,14 @@ export async function execute(
     }
 
     const negativePromptParts =
-      (tomoriState.config.nai_negative_tags?.length ?? 0) > 0
-        ? [...(tomoriState.config.nai_negative_tags ?? [])]
+      (tomoriState.config.image_default_negative_tags?.length ?? 0) > 0
+        ? [...(tomoriState.config.image_default_negative_tags ?? [])]
         : [NAI_DEFAULT_NEGATIVE_PROMPT];
     const userNegativeTags = splitTags(negativeTagsInput);
     negativePromptParts.push(...userNegativeTags);
     const effectiveNegativePrompt = negativePromptParts.join(", ");
+    const positivePromptParts = [...(tomoriState.config.image_default_positive_tags ?? []), ...splitTags(prompt)];
+    const effectivePrompt = positivePromptParts.join(", ");
 
     let characterPayload: NaiGenerationCharacterPayload | undefined;
     if (characterReference) {
@@ -304,7 +319,7 @@ export async function execute(
     const imageBuffer = await generateNovelAiImage({
       apiKey,
       model: resolvedModel.codename,
-      prompt,
+      prompt: effectivePrompt,
       negativePrompt: effectiveNegativePrompt,
       orientation,
       imageParams: effectiveImageParams,

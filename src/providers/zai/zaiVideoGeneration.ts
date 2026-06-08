@@ -5,6 +5,7 @@ import type {
 } from "@/types/provider/featureInterfaces";
 import { log } from "@/utils/misc/logger";
 import { pollForCompletion } from "@/utils/async/pollForCompletion";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 /** Z.ai video generation API endpoint */
 const ZAI_VIDEO_GENERATIONS_URL = "https://api.z.ai/api/paas/v4/videos/generations";
@@ -17,6 +18,11 @@ const POLL_INTERVAL_MS = 10_000;
 
 /** Maximum poll attempts before timeout (~5 minutes at 10s intervals) */
 const MAX_POLL_ATTEMPTS = 30;
+
+const PROVIDER_VIDEO_DOWNLOAD_MAX_MB = Math.max(
+  1,
+  Number.parseInt(process.env.PROVIDER_VIDEO_DOWNLOAD_MAX_MB ?? "25", 10) || 25,
+);
 
 function selectClosestSupportedDuration(
   requestedDuration: number | undefined,
@@ -225,17 +231,20 @@ export async function generateZaiNativeVideo(
 
   // 6. Download the video
   log.info(`Z.ai video generation: downloading video (taskId: ${taskId}, url: ${videoUrl.slice(0, 80)})`);
-  const videoResponse = await fetch(videoUrl);
-  if (!videoResponse.ok) {
-    log.error(`Failed to download Z.ai video (taskId: ${taskId})`, new Error(`HTTP ${videoResponse.status}`));
+  const videoResponse = await safeDownload(videoUrl, {
+    maxSizeMB: PROVIDER_VIDEO_DOWNLOAD_MAX_MB,
+    timeoutMs: 30_000,
+  });
+  if (!videoResponse.success || !videoResponse.buffer) {
+    log.error(
+      `Failed to download Z.ai video (taskId: ${taskId})`,
+      new Error(videoResponse.details ?? "download failed"),
+    );
     return { videoData: null, mimeType: null };
   }
 
-  const arrayBuffer = await videoResponse.arrayBuffer();
-  const videoData = Buffer.from(arrayBuffer);
-
   return {
-    videoData,
+    videoData: videoResponse.buffer,
     mimeType: "video/mp4",
     durationSeconds: normalizedOptions.duration,
   };

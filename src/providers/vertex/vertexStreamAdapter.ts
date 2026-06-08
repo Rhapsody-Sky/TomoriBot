@@ -28,18 +28,25 @@ import type { FunctionCall, ThoughtLogEntry } from "../../types/provider/interfa
 import { ContextItemTag, type StructuredContextItem } from "../../types/misc/context";
 import { log } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
-import { isRegisteredOrReservedSpeakerLabel } from "../../utils/text/stringHelper";
-import { buildPersonaSpeakerStopString, buildProviderStopStrings } from "../utils/stopStrings";
+import { truncateBeforeGenericSpeakerLine } from "@/utils/text/processors/llmOutputProcessor";
+import { safeDownload } from "@/utils/security/safeDownload";
+import { relocateAssistantMediaContextItems } from "@/providers/utils/strictChatCompat";
+import { buildProviderStopStrings } from "../utils/stopStrings";
+import { BaseStreamAdapter } from "../../types/stream/interfaces";
 import type {
   ProcessedChunk,
   ProviderError,
   RawStreamChunk,
   StreamConfig,
   StreamContext,
-  StreamProvider,
 } from "../../types/stream/interfaces";
 import { fetchAndOptimizeImage } from "../../utils/image/imageProcessor";
 import { parseVertexCompositeKey, createVertexClient } from "./vertexClient";
+
+const VIDEO_CONTEXT_MAX_INLINE_MB = Math.max(
+  1,
+  Number.parseInt(process.env.VIDEO_CONTEXT_MAX_INLINE_MB ?? "20", 10) || 20,
+);
 
 /**
  * Vertex-specific stream configuration extending the base StreamConfig
@@ -80,12 +87,13 @@ interface VertexStreamChunk {
  * Shares the same speaker-guard, deduplication, and thought-signature
  * logic as GoogleStreamAdapter because the response format is identical.
  */
-export class VertexStreamAdapter implements StreamProvider {
+export class VertexStreamAdapter extends BaseStreamAdapter {
   private static readonly SPEAKER_GUARD_HOLDBACK_CHARS = 32;
   private static readonly STREAM_TEXT_TAIL_CHARS = 4096;
   private static readonly STREAM_TEXT_MIN_DEDUP_CHARS = 8;
-  private static readonly SYSTEM_INSTRUCTION_TAGS: ContextItemTag[] = [
+  public static readonly SYSTEM_INSTRUCTION_TAGS: ContextItemTag[] = [
     ContextItemTag.SYSTEM_HUMANIZER_RULES,
+    ContextItemTag.SYSTEM_PERSONA_PROMPT,
     ContextItemTag.SYSTEM_PERSONALITY,
     ContextItemTag.KNOWLEDGE_SERVER_INFO,
     ContextItemTag.KNOWLEDGE_SERVER_EMOJIS,
@@ -95,13 +103,17 @@ export class VertexStreamAdapter implements StreamProvider {
   private speakerGuardPendingTail = "";
   private streamedTextTail = "";
   private speakerGuardEnabled = false;
-  private activePersonaNameLower = "";
-  private knownSpeakerNamesLower = new Set<string>();
   protected readonly providerName: string;
   private readonly clientFactory: (apiKey: string) => GoogleGenAI;
 
   constructor(options: VertexStreamAdapterOptions = {}) {
-    this.providerName = options.providerName ?? "vertex";
+    const providerName = options.providerName ?? "vertex";
+    super({
+      name: providerName,
+      version: "1.0",
+      supportsFunctionCalling: true,
+    });
+    this.providerName = providerName;
     this.clientFactory =
       options.clientFactory ??
       ((apiKey: string) => {
@@ -122,6 +134,7 @@ export class VertexStreamAdapter implements StreamProvider {
     contextItems: StructuredContextItem[],
     model?: string,
     messageIdMap?: StreamContext["messageIdMap"],
+    seesImages = true,
   ): Promise<{
     systemInstruction?: string;
     contents: Content[];
@@ -131,6 +144,7 @@ export class VertexStreamAdapter implements StreamProvider {
       [],
       undefined,
       messageIdMap,
+      seesImages,
     );
 
     const contents = [...dialogueContents];
@@ -179,17 +193,15 @@ export class VertexStreamAdapter implements StreamProvider {
     // 3. Speaker guard setup (same as Google)
     this.speakerGuardPendingTail = "";
     this.streamedTextTail = "";
-    this.speakerGuardEnabled = Boolean(buildPersonaSpeakerStopString(context.tomoriState.tomori_nickname));
-    this.activePersonaNameLower = (context.tomoriState.tomori_nickname ?? "").toLowerCase();
-    this.knownSpeakerNamesLower = this.collectKnownSpeakerNames(context.contextItems);
-    if (this.activePersonaNameLower) {
-      this.knownSpeakerNamesLower.add(this.activePersonaNameLower);
-    }
+    const speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
+    this.speakerGuardEnabled = speakerStopPatternEnabled;
     const mergedStopSequences = buildProviderStopStrings({
       existingStops: requestConfig.stopSequences,
       providerName: this.providerName,
       model: config.model,
-      personaName: context.tomoriState.tomori_nickname,
+      personaName: context.tomoriState.persona_nickname,
+      configuredStops: context.tomoriState.config.llm_stop_strings,
+      includePersonaSpeakerStop: speakerStopPatternEnabled,
     });
     if (mergedStopSequences) {
       requestConfig.stopSequences = mergedStopSequences;
@@ -202,7 +214,12 @@ export class VertexStreamAdapter implements StreamProvider {
     }
 
     // 5. Assemble context (shared logic)
-    const payload = await this.buildTokenCountPayload(context.contextItems, config.model, context.messageIdMap);
+    const payload = await this.buildTokenCountPayload(
+      context.contextItems,
+      config.model,
+      context.messageIdMap,
+      context.tomoriState.llm.sees_images,
+    );
     const finalContents = [...payload.contents];
 
     if (payload.systemInstruction) {
@@ -383,16 +400,7 @@ export class VertexStreamAdapter implements StreamProvider {
         }
       }
 
-      // Convert Vertex/API errors to our format
-      const providerError = this.handleProviderError(error);
-      yield {
-        data: { error: providerError },
-        provider: this.providerName,
-        metadata: {
-          timestamp: Date.now(),
-          error: true,
-        },
-      };
+      yield this.createProviderErrorChunk(error, undefined, this.providerName);
     }
   }
 
@@ -586,7 +594,7 @@ export class VertexStreamAdapter implements StreamProvider {
   }
 
   private shouldFlushSpeakerGuardTailBeforeNonTextChunk(chunk: VertexStreamChunk): boolean {
-    if (!this.speakerGuardEnabled || this.speakerGuardPendingTail.length === 0 || Boolean(chunk.text)) {
+    if (!this.speakerGuardEnabled || this.speakerGuardPendingTail.length === 0 || chunk.text) {
       return false;
     }
 
@@ -608,32 +616,6 @@ export class VertexStreamAdapter implements StreamProvider {
     return Boolean(chunk.candidates?.[0]?.finishReason);
   }
 
-  private collectKnownSpeakerNames(contextItems: StructuredContextItem[]): Set<string> {
-    const names = new Set<string>();
-
-    for (const item of contextItems) {
-      if (item.role !== "user" && item.role !== "model") continue;
-
-      for (const part of item.parts) {
-        if (part.type !== "text") continue;
-
-        const lines = part.text.split("\n");
-        for (const line of lines) {
-          const match = line.match(/^\s*([^\n:]{1,64}):\s*/);
-          if (!match) continue;
-
-          const rawName = match[1].trim();
-          if (!rawName) continue;
-          if (rawName.startsWith("[") || rawName.startsWith("<")) continue;
-
-          names.add(rawName.toLowerCase());
-        }
-      }
-    }
-
-    return names;
-  }
-
   private applySpeakerBoundaryFallbackGuard(chunk: VertexStreamChunk): {
     chunk: VertexStreamChunk;
     stopTriggered: boolean;
@@ -649,29 +631,8 @@ export class VertexStreamAdapter implements StreamProvider {
     }
 
     const combined = `${this.speakerGuardPendingTail}${chunkText}`;
-    const speakerPattern = /\n+([^\n:]{1,64}):\s*/g;
-    let match: RegExpExecArray | null = null;
-    let matchedSpeaker: string | undefined;
-    let transitionIndex = -1;
-
-    while (true) {
-      match = speakerPattern.exec(combined);
-      if (!match) break;
-
-      const rawLabel = match[1].trim();
-      if (!isRegisteredOrReservedSpeakerLabel(rawLabel, this.knownSpeakerNamesLower)) {
-        continue;
-      }
-
-      const normalizedLabel = rawLabel.toLowerCase();
-      if (this.activePersonaNameLower && normalizedLabel === this.activePersonaNameLower) {
-        continue;
-      }
-
-      transitionIndex = match.index;
-      matchedSpeaker = rawLabel;
-      break;
-    }
+    const speakerGuardResult = truncateBeforeGenericSpeakerLine(combined);
+    const transitionIndex = speakerGuardResult.stopTriggered ? speakerGuardResult.text.length : -1;
 
     if (transitionIndex === -1) {
       const holdback = VertexStreamAdapter.SPEAKER_GUARD_HOLDBACK_CHARS;
@@ -695,7 +656,7 @@ export class VertexStreamAdapter implements StreamProvider {
     return {
       chunk: this.cloneChunkWithText(chunk, combined.slice(0, transitionIndex)),
       stopTriggered: true,
-      matchedSpeaker,
+      matchedSpeaker: speakerGuardResult.matchedSpeaker,
     };
   }
 
@@ -1049,18 +1010,6 @@ export class VertexStreamAdapter implements StreamProvider {
     return `Error Code ${errorCode}: ${apiMessage}`;
   }
 
-  /**
-   * Get provider information
-   */
-  getProviderInfo() {
-    return {
-      name: this.providerName,
-      version: "1.0",
-      supportsStreaming: true,
-      supportsFunctionCalling: true,
-    };
-  }
-
   // ─── Context assembly (shared with Google) ───────────────────────────
 
   private async assembleVertexContext(
@@ -1072,11 +1021,13 @@ export class VertexStreamAdapter implements StreamProvider {
       preToolCallTextParts?: Array<Record<string, unknown>>;
     }>,
     messageIdMap?: StreamContext["messageIdMap"],
+    seesImages = true,
   ): Promise<{ systemInstruction?: string; dialogueContents: Content[] }> {
     const systemInstructionParts: string[] = [];
     const dialogueContents: Content[] = [];
+    const relocatedContextItems = relocateAssistantMediaContextItems(contextItems);
 
-    for (const item of contextItems) {
+    for (const item of relocatedContextItems) {
       let itemTextContent = "";
       if (item.parts.some((p) => p.type === "text")) {
         itemTextContent = item.parts
@@ -1098,6 +1049,15 @@ export class VertexStreamAdapter implements StreamProvider {
         for (const part of item.parts) {
           if (part.type === "text") {
             geminiParts.push({ text: part.text });
+          } else if (part.type === "image" && !seesImages) {
+            // Defense-in-depth: an image part reached the adapter but the routed
+            // model cannot process it (context built with images for a
+            // vision-capable fallback model, then the image-blind primary runs).
+            // Emit a text placeholder instead of silently dropping it — mirrors
+            // the Google, OpenRouter, and OpenAI-compatible message builders.
+            geminiParts.push({
+              text: "[System: An image is attached to this message that this model cannot process.]",
+            });
           } else if (part.type === "image" && part.uri && part.mimeType) {
             try {
               if (part.mimeType === "image/gif") {
@@ -1132,9 +1092,22 @@ export class VertexStreamAdapter implements StreamProvider {
                 });
               }
             } catch (imgErr) {
-              log.warn(`VertexStreamAdapter: Image processing error ${part.uri}`, {
-                error: imgErr instanceof Error ? imgErr.message : String(imgErr),
-              });
+              const fallback = (part as { fallbackUri?: string }).fallbackUri;
+              if (fallback && fallback !== part.uri) {
+                try {
+                  const optimized = await fetchAndOptimizeImage(fallback, part.mimeType);
+                  geminiParts.push({ inlineData: { mimeType: optimized.mimeType, data: optimized.data } });
+                  log.info(`VertexStreamAdapter: Image loaded via fallback CDN URL ${fallback}`);
+                } catch (fallbackErr) {
+                  log.warn(`VertexStreamAdapter: Image processing error (proxy + CDN both failed) ${part.uri}`, {
+                    error: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+                  });
+                }
+              } else {
+                log.warn(`VertexStreamAdapter: Image processing error ${part.uri}`, {
+                  error: imgErr instanceof Error ? imgErr.message : String(imgErr),
+                });
+              }
             }
           } else if (part.type === "image" && "inlineData" in part && part.inlineData) {
             const inlineData = part.inlineData as {
@@ -1177,18 +1150,19 @@ export class VertexStreamAdapter implements StreamProvider {
                 }
               } else {
                 // Direct video uploads
-                const videoResponse = await fetch(part.uri);
-                if (!videoResponse.ok) {
-                  throw new Error(`Video fetch failed: ${videoResponse.status}`);
+                const videoResponse = await safeDownload(part.uri, {
+                  maxSizeMB: VIDEO_CONTEXT_MAX_INLINE_MB,
+                  timeoutMs: 20_000,
+                });
+                if (!videoResponse.success || !videoResponse.buffer) {
+                  throw new Error(`Video fetch failed: ${videoResponse.details ?? videoResponse.error}`);
                 }
 
-                const contentLength = videoResponse.headers.get("content-length");
-                const fileSizeBytes = contentLength ? Number.parseInt(contentLength, 10) : 0;
-                const maxInlineSize = 20 * 1024 * 1024;
+                const fileSizeBytes = videoResponse.buffer.byteLength;
+                const maxInlineSize = VIDEO_CONTEXT_MAX_INLINE_MB * 1024 * 1024;
 
-                if (fileSizeBytes > 0 && fileSizeBytes < maxInlineSize) {
-                  const videoArrayBuffer = await videoResponse.arrayBuffer();
-                  const base64VideoData = Buffer.from(videoArrayBuffer).toString("base64");
+                if (fileSizeBytes > 0 && fileSizeBytes <= maxInlineSize) {
+                  const base64VideoData = videoResponse.buffer.toString("base64");
 
                   geminiParts.push({
                     inlineData: {
@@ -1215,8 +1189,7 @@ export class VertexStreamAdapter implements StreamProvider {
       }
     }
 
-    const systemInstruction =
-      systemInstructionParts.length > 0 ? systemInstructionParts.join("\n\n---\n\n") : undefined;
+    const systemInstruction = systemInstructionParts.length > 0 ? systemInstructionParts.join("\n\n") : undefined;
 
     return { systemInstruction, dialogueContents };
   }

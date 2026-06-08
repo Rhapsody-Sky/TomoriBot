@@ -1,8 +1,9 @@
 import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import { MessageFlags } from "discord.js";
-import { loadAvailableEmbeddingModelsForProvider } from "@/utils/db/dbRead";
-import { promptForSavedProvider } from "@/commands/config/model/providerPicker";
-import { replyInfoEmbed, promptWithRawModal, safeSelectOptionText } from "@/utils/discord/interactionHelper";
+import { llmModelRepo } from "@/utils/db/repositories";
+import { promptForSavedProvider } from "@/utils/discord/providerPicker";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
+import { promptWithRawModal, safeSelectOptionText } from "@/utils/discord/ui/modals";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 import type { EmbeddingModelRow, ErrorContext, SavedProviderConfigRow, UserRow } from "@/types/db/schema";
@@ -67,14 +68,14 @@ export async function execute(
     if (!providerSelection) return;
 
     const availableModels =
-      (await loadAvailableEmbeddingModelsForProvider(providerSelection.provider, false, {
+      (await llmModelRepo.loadAvailableEmbeddingModels(providerSelection.provider, false, {
         kind: "personal",
         ownerId: userData.user_id,
       })) ?? [];
     if (availableModels.length === 0) {
       await replyInfoEmbed(providerSelection.interaction, locale, {
-        titleKey: "commands.config.model.embedding.no_models_title",
-        descriptionKey: "commands.config.model.embedding.no_models_description",
+        titleKey: "commands.model.embedding.no_models_title",
+        descriptionKey: "commands.model.embedding.no_models_description",
         descriptionVars: { provider: getProviderDisplayName(providerSelection.provider) },
         color: ColorCode.ERROR,
       });
@@ -94,13 +95,13 @@ export async function execute(
       locale,
       {
         modalCustomId: "personal_provider_model_embedding_modal",
-        modalTitleKey: "commands.config.model.embedding.modal_title",
+        modalTitleKey: "commands.model.embedding.modal_title",
         components: [
           {
             customId: MODEL_SELECT_ID,
-            labelKey: "commands.config.model.embedding.select_label",
-            descriptionKey: "commands.config.model.embedding.select_description",
-            placeholder: "commands.config.model.embedding.select_placeholder",
+            labelKey: "commands.model.embedding.select_label",
+            descriptionKey: "commands.model.embedding.select_description",
+            placeholder: "commands.model.embedding.select_placeholder",
             required: true,
             options: modelOptions,
           },
@@ -115,8 +116,8 @@ export async function execute(
     const selectedModel = availableModels.find((model) => model.embedding_model_id === selectedModelId) ?? null;
     if (!selectedModel?.embedding_model_id) {
       await replyInfoEmbed(modalResult.interaction, locale, {
-        titleKey: "commands.config.model.embedding.invalid_model_title",
-        descriptionKey: "commands.config.model.embedding.invalid_model_description",
+        titleKey: "commands.model.embedding.invalid_model_title",
+        descriptionKey: "commands.model.embedding.invalid_model_description",
         color: ColorCode.ERROR,
       });
       return;

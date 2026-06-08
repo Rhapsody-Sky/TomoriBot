@@ -22,10 +22,28 @@ import {
   extractImageUrls,
   addFetchCapabilityReminder,
 } from "./braveSearchService";
+import { safeDownload } from "@/utils/security/safeDownload";
+import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
 
 // =============================================
 // Helper Functions
 // =============================================
+
+const BRAVE_IMAGE_DISCORD_LIMIT_MB = Math.max(
+  1,
+  Number.parseInt(process.env.BRAVE_IMAGE_DISCORD_LIMIT_MB ?? "8", 10) || 8,
+);
+const BRAVE_IMAGE_COMPRESSION_TARGET_MB = Math.max(
+  1,
+  Number.parseInt(process.env.BRAVE_IMAGE_COMPRESSION_TARGET_MB ?? "7", 10) || 7,
+);
+const BRAVE_IMAGE_DOWNLOAD_MAX_MB = Math.max(
+  BRAVE_IMAGE_DISCORD_LIMIT_MB,
+  Number.parseInt(process.env.BRAVE_IMAGE_DOWNLOAD_MAX_MB ?? "25", 10) || 25,
+);
+// Minimum image size in bytes — rejects tiny placeholders/error images that Discord
+// renders as raw file attachments rather than inline media (default 5 KB).
+const BRAVE_IMAGE_MIN_SIZE_BYTES = Math.max(1, Number.parseInt(process.env.IMAGE_MIN_SIZE_BYTES ?? "5120", 10) || 5120);
 
 /**
  * Extract server ID from tool context
@@ -52,7 +70,7 @@ function getServerIdFromContext(context?: ToolContext): number | undefined {
  * @param searchType - Type of search that was attempted
  */
 async function sendApiKeyErrorEmbed(context?: ToolContext, searchType = "search") {
-  if (!context?.channel) return;
+  if (!context?.channel || context.suppressProgressNotices) return;
 
   try {
     await sendStandardEmbed(
@@ -156,7 +174,7 @@ export async function brave_web_search(
     log.info(`Executing brave_web_search for query: "${searchParams.q}"`);
 
     // Execute search
-    const result = await braveWebSearch(searchParams, { serverId });
+    const result = await braveWebSearch(searchParams, { serverId, signal: context?.abortSignal });
 
     if (!result.success || !result.data) {
       // Check for specific error types
@@ -239,7 +257,7 @@ export async function brave_image_search(args: Record<string, unknown>, context?
     log.info(`Executing brave_image_search for query: "${searchParams.q}"`);
 
     // Execute search
-    const result = await braveImageSearch(searchParams, { serverId });
+    const result = await braveImageSearch(searchParams, { serverId, signal: context?.abortSignal });
 
     if (!result.success || !result.data) {
       // Check for specific error types
@@ -283,32 +301,28 @@ export async function brave_image_search(args: Record<string, unknown>, context?
         imageUrl: string,
       ): Promise<{ success: boolean; buffer?: Buffer; reason?: string }> => {
         try {
-          // 1. Fetch the full image with timeout
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-          const response = await fetch(imageUrl, {
-            method: "GET",
-            signal: controller.signal,
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          const response = await safeDownload(imageUrl, {
+            maxSizeMB: BRAVE_IMAGE_DOWNLOAD_MAX_MB,
+            timeoutMs: 5000,
+            requestInit: {
+              method: "GET",
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              },
             },
           });
 
-          clearTimeout(timeoutId);
-
-          if (!response.ok) {
+          if (!response.success || !response.buffer) {
             return {
               success: false,
-              reason: `fetch_failed_${response.status}`,
+              reason: response.error ?? "fetch_failed",
             };
           }
 
-          // 2. Get image buffer
-          const imageBuffer = Buffer.from(await response.arrayBuffer());
+          const imageBuffer = response.buffer;
 
           // 3. Compress with sharp - target 7MB max to leave safety margin
-          const targetSize = 7 * 1024 * 1024; // 7MB
+          const targetSize = BRAVE_IMAGE_COMPRESSION_TARGET_MB * 1024 * 1024;
           let quality = 80; // Start with 80% quality
           let compressedBuffer: Buffer;
 
@@ -356,6 +370,7 @@ export async function brave_image_search(args: Record<string, unknown>, context?
         reason?: string;
         compressedBuffer?: Buffer;
       }> => {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
           // 1. Quick pattern filtering for known problematic domains
           const badPatterns = [/xxx\./i, /\.onion\//i, /localhost/i, /127\.0\.0\.1/i, /192\.168\./i, /10\./i];
@@ -366,9 +381,9 @@ export async function brave_image_search(args: Record<string, unknown>, context?
 
           // 2. Aggressive 2-second timeout for network validation
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          timeoutId = setTimeout(() => controller.abort(), 2000);
 
-          const response = await fetch(imageUrl, {
+          const response = await fetchUserRemoteUrl(imageUrl, {
             method: "HEAD",
             signal: controller.signal,
             headers: {
@@ -376,13 +391,15 @@ export async function brave_image_search(args: Record<string, unknown>, context?
             },
           });
 
-          clearTimeout(timeoutId);
-
           // Check if URL is accessible and is actually an image
           if (response.ok && response.headers.get("content-type")?.startsWith("image/")) {
-            // 3. Check content size - if >8MB, attempt compression
+            // 3. Check content size - reject tiny placeholders, compress if >8MB
             const contentLength = response.headers.get("content-length");
-            const discordLimit = 8 * 1024 * 1024; // 8MB Discord limit
+            const discordLimit = BRAVE_IMAGE_DISCORD_LIMIT_MB * 1024 * 1024;
+
+            if (contentLength && parseInt(contentLength, 10) < BRAVE_IMAGE_MIN_SIZE_BYTES) {
+              return { url: imageUrl, valid: false, reason: "too_small" };
+            }
 
             if (contentLength && parseInt(contentLength, 10) > discordLimit) {
               log.info(`Image ${imageUrl} is ${contentLength} bytes, attempting compression...`);
@@ -420,6 +437,10 @@ export async function brave_image_search(args: Record<string, unknown>, context?
             valid: false,
             reason: error instanceof Error ? error.name : "unknown_error",
           };
+        } finally {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
         }
       };
 
@@ -644,16 +665,18 @@ export async function brave_image_search(args: Record<string, unknown>, context?
           );
         }
       } else {
-        // No valid images after validation
+        // Soft degradation: engine succeeded but no URLs passed validation (hotlink
+        // protection, timeouts, too-small placeholders). Return success with a text
+        // listing so the dispatcher doesn't fall through to "category unavailable".
         const queryTerm = args.query || "images";
+        const formattedFallback = formatBraveSearchResults(result.data, "image");
         return createToolResult(
-          false,
-          `Found ${imageUrls.length} ${queryTerm} image URLs, but none were accessible or valid. All image links appear to be broken or inaccessible.`,
+          true,
+          `Found ${queryTerm} images via Brave but none were directly accessible. Showing result links instead.`,
           {
-            results: `No accessible ${queryTerm} images found`,
-            imagesFound: imageUrls.length,
+            results: formattedFallback,
             imagesFiltered: failedUrls.length,
-            status: "all_images_inaccessible",
+            status: "text_fallback",
           },
         );
       }
@@ -723,7 +746,7 @@ export async function brave_video_search(
     log.info(`Executing brave_video_search for query: "${searchParams.q}"`);
 
     // Execute search
-    const result = await braveVideoSearch(searchParams, { serverId });
+    const result = await braveVideoSearch(searchParams, { serverId, signal: context?.abortSignal });
 
     if (!result.success || !result.data) {
       // Check for specific error types
@@ -794,7 +817,7 @@ export async function brave_news_search(
     log.info(`Executing brave_news_search for query: "${searchParams.q}"`);
 
     // Execute search
-    const result = await braveNewsSearch(searchParams, { serverId });
+    const result = await braveNewsSearch(searchParams, { serverId, signal: context?.abortSignal });
 
     if (!result.success || !result.data) {
       // Check for specific error types

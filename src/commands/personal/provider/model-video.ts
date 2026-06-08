@@ -1,8 +1,9 @@
 import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import { MessageFlags } from "discord.js";
-import { loadAvailableVideoGenerationModelsForProvider } from "@/utils/db/dbRead";
-import { promptForSavedProvider } from "@/commands/config/model/providerPicker";
-import { replyInfoEmbed, promptWithRawModal, safeSelectOptionText } from "@/utils/discord/interactionHelper";
+import { llmModelRepo } from "@/utils/db/repositories";
+import { promptForSavedProvider } from "@/utils/discord/providerPicker";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
+import { promptWithRawModal, safeSelectOptionText } from "@/utils/discord/ui/modals";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 import type { ErrorContext, SavedProviderConfigRow, UserRow, VideoGenerationModelRow } from "@/types/db/schema";
@@ -67,14 +68,14 @@ export async function execute(
     if (!providerSelection) return;
 
     const availableModels =
-      (await loadAvailableVideoGenerationModelsForProvider(providerSelection.provider, false, {
+      (await llmModelRepo.loadAvailableVideoGenerationModels(providerSelection.provider, false, {
         kind: "personal",
         ownerId: userData.user_id,
       })) ?? [];
     if (availableModels.length === 0) {
       await replyInfoEmbed(providerSelection.interaction, locale, {
-        titleKey: "commands.config.model.video.no_models_title",
-        descriptionKey: "commands.config.model.video.no_models_description",
+        titleKey: "commands.model.video.no_models_title",
+        descriptionKey: "commands.model.video.no_models_description",
         descriptionVars: { provider: getProviderDisplayName(providerSelection.provider) },
         color: ColorCode.ERROR,
       });
@@ -92,13 +93,13 @@ export async function execute(
       locale,
       {
         modalCustomId: "personal_provider_model_video_modal",
-        modalTitleKey: "commands.config.model.video.modal_title",
+        modalTitleKey: "commands.model.video.modal_title",
         components: [
           {
             customId: MODEL_SELECT_ID,
-            labelKey: "commands.config.model.video.select_label",
-            descriptionKey: "commands.config.model.video.select_description",
-            placeholder: "commands.config.model.video.select_placeholder",
+            labelKey: "commands.model.video.select_label",
+            descriptionKey: "commands.model.video.select_description",
+            placeholder: "commands.model.video.select_placeholder",
             required: true,
             options: modelOptions,
           },
@@ -114,7 +115,7 @@ export async function execute(
     if (!selectedModel?.video_model_id) {
       await replyInfoEmbed(modalResult.interaction, locale, {
         titleKey: "general.errors.invalid_option_title",
-        descriptionKey: "commands.config.model.video.invalid_model_description",
+        descriptionKey: "commands.model.video.invalid_model_description",
         color: ColorCode.ERROR,
       });
       return;

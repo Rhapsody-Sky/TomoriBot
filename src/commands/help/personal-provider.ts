@@ -3,7 +3,7 @@ import { MessageFlags } from "discord.js";
 import type { UserRow, ErrorContext } from "@/types/db/schema";
 import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
-import { replySummaryEmbed } from "@/utils/discord/interactionHelper";
+import { replySummaryEmbed } from "@/utils/discord/ui/embeds";
 import { commandRegistry } from "@/utils/discord/commandRegistry";
 
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
@@ -21,7 +21,7 @@ export async function execute(
     const addMention = commandRegistry.getCommandMention("personal", "provider", "add");
     const textModelMention = commandRegistry.getCommandMention("personal", "provider", "model-text");
     const toggleMention = commandRegistry.getCommandMention("personal", "provider", "toggle-models");
-    const samplersMention = commandRegistry.getCommandMention("personal", "samplers");
+    const samplersMention = commandRegistry.getCommandMention("personal", "parameters");
     const fallbackMention = commandRegistry.getCommandMention("personal", "model", "fallback");
     const byokMention = commandRegistry.getCommandMention("server", "user-byok", "toggle");
 

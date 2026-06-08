@@ -37,11 +37,12 @@ import {
   type ApiKeyValidationResult,
 } from "@/types/provider/interfaces";
 import { getCachedDefaultLLM, isLLMCacheReady } from "@/utils/cache/llmCache";
-import { loadDefaultModelForProvider, loadAvailableModelsForProvider } from "@/utils/db/dbRead";
+import { llmModelRepo } from "@/utils/db/repositories";
 import { getNovelaiToolAdapter } from "./novelaiToolAdapter";
 import { usesOpenAIEndpoint, validateNovelAIApiKey } from "./novelaiService";
 import { novelaiProviderInfo } from "./providerInfo";
 import { getActiveTemperature } from "@/utils/provider/samplingControl";
+import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 
 /**
  * Gets the default NovelAI model with a robust fallback chain:
@@ -65,7 +66,7 @@ async function getDefaultNovelAIModel(): Promise<string> {
 
   // 2. Cache not ready or no default found - query database for is_default model
   try {
-    const dbDefault = await loadDefaultModelForProvider(providerName);
+    const dbDefault = await llmModelRepo.loadDefaultModel(providerName);
     if (dbDefault) {
       log.info(`Using database default ${providerName} model: ${dbDefault.llm_codename}`);
       return dbDefault.llm_codename;
@@ -78,7 +79,7 @@ async function getDefaultNovelAIModel(): Promise<string> {
 
   // 3. Fallback to first non-deprecated model from database
   try {
-    const availableModels = await loadAvailableModelsForProvider(providerName);
+    const availableModels = await llmModelRepo.loadAvailableModelsForProvider(providerName);
     if (availableModels && availableModels.length > 0) {
       const firstModel = availableModels[0].llm_codename;
       log.warn(`No default model found, using first available ${providerName} model: ${firstModel}`);
@@ -188,9 +189,11 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
           tomoriState.speech_voice_sample_id ||
-            tomoriState.speech_voice_id?.trim() ||
-            tomoriState.elevenlabs_voice_id?.trim(),
+            tomoriState.speech_voice_design_prompt?.trim() ||
+            tomoriState.speech_voice_id?.trim(),
         ),
+        activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
+        activePersonaVoiceName: tomoriState.speech_voice_name,
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -209,18 +212,19 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
           manage_message_enabled: tomoriState.config.manage_message_enabled,
           imagegen_enabled: tomoriState.config.imagegen_enabled,
           videogen_enabled: tomoriState.config.videogen_enabled,
-          nai_exclusive_imggen: tomoriState.config.nai_exclusive_imggen,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
+          thread_creation_enabled: tomoriState.config.thread_creation_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
-        mcpFunctionNames,
+        mcpFunctionNames: availableMcpFunctionNames,
         totalCount,
       } = await getAvailableToolsWithMCP("novelai", toolStateForContext);
 
       let finalBuiltInTools = availableBuiltInTools;
+      let finalMcpFunctionNames = availableMcpFunctionNames;
       if (streamingContext) {
         const minimalContext = {
           streamContext: streamingContext,
@@ -245,15 +249,22 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
         );
       }
 
+      ({ builtInTools: finalBuiltInTools, mcpFunctionNames: finalMcpFunctionNames } = applyDeliberateToolAllowlist({
+        providerLabel: "NovelAI provider",
+        builtInTools: finalBuiltInTools,
+        mcpFunctionNames: finalMcpFunctionNames,
+        allowedToolNames: streamingContext?.deliberateToolAllowedNames,
+      }));
+
       const novelaiAdapter = getNovelaiToolAdapter();
       const allToolsConfig = await novelaiAdapter.getAllToolsInProviderFormat(
         finalBuiltInTools,
         tomoriState.server_id,
-        mcpFunctionNames,
+        finalMcpFunctionNames,
       );
 
       log.info(
-        `NovelAI provider tools loaded: ${finalBuiltInTools.length} built-in + ${mcpFunctionNames.length} MCP = ${totalCount} total tools`,
+        `NovelAI provider tools loaded: ${finalBuiltInTools.length} built-in + ${finalMcpFunctionNames.length} MCP = ${totalCount} total tools`,
       );
 
       return allToolsConfig;
@@ -286,7 +297,7 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
       apiKey: apiKey,
       temperature: getActiveTemperature(tomoriState.config) ?? tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: 2048, // NovelAI's typical max length
+      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 2048,
       tools: tools,
     };
   }

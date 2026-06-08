@@ -1,24 +1,31 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import { sql } from "@/utils/db/client";
 import { log } from "@/utils/misc/logger";
-import { voiceSampleSchema } from "@/types/db/schema";
 import type { CustomEndpointRow } from "@/types/db/schema";
 import { stripElevenLabsExpressionTags } from "@/utils/audio/elevenLabsShared";
+import { loadStoredVoiceSampleBuffer } from "@/utils/storage/voiceSampleStorage";
+import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
+import { stripTtsUnsupportedEmojiAttempts } from "@/utils/text/emojiHelper";
+import { loadVoiceSampleById } from "@/utils/db/repositories/SpeechRepository";
+import { resolveTtsSynthesizeTimeoutMs } from "@/providers/custom/styles/ttsSynthesizeTimeout";
 
-/** Base directory for local voice sample files (mirrors seed.sql path). */
-const VOICE_SAMPLES_BASE_DIR = path.resolve(process.cwd(), "data", "voice-samples");
-
-/** Timeout for /synthesize requests, configurable via env. */
-const TTS_CLONE_TIMEOUT_MS =
-  Number.parseInt(process.env.TTS_CLONE_TIMEOUT_MS ?? "", 10) > 0
-    ? Number.parseInt(process.env.TTS_CLONE_TIMEOUT_MS ?? "", 10)
-    : 120_000;
+/** Timeout for local /synthesize requests, configurable via env. */
+const TTS_SYNTHESIZE_TIMEOUT_MS = resolveTtsSynthesizeTimeoutMs();
 
 /** Regex matching any bracket-tag in the form [content]. */
 const ANY_BRACKET_TAG_REGEX = /\[([^\]\r\n]{1,40})\]/g;
+const CHATTERBOX_TURBO_TAGS = new Set([
+  "clear throat",
+  "sigh",
+  "shush",
+  "cough",
+  "groan",
+  "sniff",
+  "gasp",
+  "chuckle",
+  "laugh",
+]);
 
 export type TtsCloneErrorKind =
+  | "invalid_request"
   | "missing_sample"
   | "sample_read_failed"
   | "request_failed"
@@ -43,6 +50,11 @@ export interface TtsCloneRequest {
   script: string;
   /** Empty string for local endpoints that don't require auth. */
   apiKey: string;
+  chatterbox?: {
+    turboEnabled: boolean;
+    cfgWeight: number;
+    exaggeration: number;
+  };
 }
 
 function resolveExtensionFromContentType(contentType: string): string {
@@ -65,6 +77,40 @@ function stripAllBracketTags(text: string): string {
     .trim();
 }
 
+function normalizeTtsWhitespace(text: string): string {
+  return text
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[^\S\n]+/g, " ")
+    .trim();
+}
+
+function stringifyErrorDetail(detail: unknown): string | null {
+  if (!detail) return null;
+  if (typeof detail === "string") return detail;
+
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return String(detail);
+  }
+}
+
+function stripUnsupportedChatterboxTurboTags(text: string): string {
+  return normalizeTtsWhitespace(
+    text.replace(ANY_BRACKET_TAG_REGEX, (match, rawTag: string) => {
+      const normalizedTag = rawTag.trim().toLowerCase();
+      return CHATTERBOX_TURBO_TAGS.has(normalizedTag) ? match : "";
+    }),
+  );
+}
+
+function isIrodoriTtsEndpoint(endpoint: CustomEndpointRow): boolean {
+  return [endpoint.label, endpoint.display_name, endpoint.model_name, endpoint.endpoint_url].some((value) =>
+    value?.toLowerCase().includes("irodori"),
+  );
+}
+
 /**
  * Calls a local TTS clone server that implements the /synthesize spec.
  *
@@ -75,16 +121,12 @@ function stripAllBracketTags(text: string): string {
  * 5. Returns the raw audio buffer and content-type.
  */
 export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Promise<TtsCloneResult> {
-  const { endpoint, voiceSampleId, script, apiKey } = request;
+  const { endpoint, voiceSampleId, script, apiKey, chatterbox } = request;
 
-  // 1. Load voice sample metadata from DB.
-  const rows = await sql`
-    SELECT * FROM voice_samples
-    WHERE sample_id = ${voiceSampleId}
-    LIMIT 1
-  `;
+  // 1. Load voice sample metadata from DB via repository.
+  const voiceSample = await loadVoiceSampleById(voiceSampleId);
 
-  if (!rows || rows.length === 0) {
+  if (!voiceSample) {
     log.warn(`[TtsClone] Voice sample ${voiceSampleId} not found in DB`);
     return {
       success: false,
@@ -93,45 +135,50 @@ export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Pro
     };
   }
 
-  const parsed = voiceSampleSchema.safeParse(rows[0]);
-  if (!parsed.success) {
-    log.warn(`[TtsClone] Failed to parse voice sample row for id ${voiceSampleId}`, parsed.error.message);
-    return {
-      success: false,
-      errorKind: "missing_sample",
-      details: "Failed to parse voice sample row from database.",
-    };
-  }
+  const sample = voiceSample;
 
-  const sample = parsed.data;
-
-  // 2. Read the audio file from disk and base64-encode it.
-  const samplePath = path.join(VOICE_SAMPLES_BASE_DIR, sample.file_path);
-  let refAudioBuffer: Buffer;
-  try {
-    refAudioBuffer = await fs.readFile(samplePath);
-  } catch (error) {
-    log.warn(`[TtsClone] Failed to read voice sample file at ${samplePath}`, error);
+  // 2. Read the audio from stable storage and base64-encode it.
+  const refAudioBuffer = await loadStoredVoiceSampleBuffer(sample.file_path);
+  if (!refAudioBuffer) {
+    log.warn(`[TtsClone] Failed to read voice sample ${voiceSampleId} from ${sample.file_path}`);
     return {
       success: false,
       errorKind: "sample_read_failed",
-      details: `Could not read voice sample file: ${error instanceof Error ? error.message : String(error)}`,
+      details: `Could not read voice sample ${voiceSampleId} from storage.`,
     };
   }
 
   const scriptMarkup = (endpoint.extra_config.script_markup as string | undefined) ?? "plain";
   const supportsInstruct = Boolean(endpoint.extra_config.supports_instruct);
+  const preserveUnicodeEmojis = scriptMarkup === "emoji" || isIrodoriTtsEndpoint(endpoint);
 
-  // 3. Prepare script: strip all bracket tags for "plain" endpoints.
-  //    For bracket-tags/emoji endpoints, strip only for the caption text.
+  // 3. Prepare script: strip all bracket tags for "plain" endpoints and
+  //    standard Chatterbox, because only Turbo handles bracket descriptors.
+  //    Turbo gets a conservative whitelist so unsupported bracket text is not spoken aloud.
+  //    For other bracket-tags/emoji endpoints, strip only for the caption text.
   let processedScript: string;
   let captionText: string;
-  if (scriptMarkup === "plain") {
+  const shouldStripBracketTagsForTts = scriptMarkup === "plain" || chatterbox?.turboEnabled === false;
+  if (shouldStripBracketTagsForTts) {
     processedScript = stripAllBracketTags(script);
     captionText = processedScript;
+  } else if (chatterbox?.turboEnabled === true) {
+    processedScript = stripUnsupportedChatterboxTurboTags(script);
+    captionText = stripElevenLabsExpressionTags(processedScript);
   } else {
     processedScript = script;
     captionText = stripElevenLabsExpressionTags(script);
+  }
+
+  processedScript = stripTtsUnsupportedEmojiAttempts(processedScript, { preserveUnicodeEmojis });
+  captionText = stripTtsUnsupportedEmojiAttempts(captionText, { preserveUnicodeEmojis });
+
+  if (!processedScript) {
+    return {
+      success: false,
+      errorKind: "invalid_request",
+      details: "Voice script was empty after removing unsupported emoji markup.",
+    };
   }
 
   // 4. Build the /synthesize request body per the TomoriBot TTS spec.
@@ -141,6 +188,12 @@ export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Pro
     ref_text: sample.ref_text ?? null,
     language: null,
   };
+
+  if (chatterbox) {
+    body.chatterbox_turbo = chatterbox.turboEnabled;
+    body.cfg_weight = chatterbox.cfgWeight;
+    body.exaggeration = chatterbox.exaggeration;
+  }
 
   if (supportsInstruct) {
     body.instruct = null;
@@ -156,9 +209,9 @@ export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Pro
   let response: Response;
   try {
     const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), TTS_CLONE_TIMEOUT_MS);
+    const timer = setTimeout(() => abortController.abort(), TTS_SYNTHESIZE_TIMEOUT_MS);
     try {
-      response = await fetch(`${endpointUrl}/synthesize`, {
+      response = await fetchUserRemoteUrl(`${endpointUrl}/synthesize`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -180,8 +233,9 @@ export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Pro
   if (!response.ok) {
     let errorDetails = `HTTP ${response.status}`;
     try {
-      const errorBody = (await response.json()) as { error?: string };
-      if (errorBody.error) errorDetails += `: ${errorBody.error}`;
+      const errorBody = (await response.json()) as { error?: unknown; detail?: unknown };
+      const structuredDetail = stringifyErrorDetail(errorBody.error ?? errorBody.detail);
+      if (structuredDetail) errorDetails += `: ${structuredDetail}`;
     } catch {
       // Ignore JSON parse failures on error responses.
     }

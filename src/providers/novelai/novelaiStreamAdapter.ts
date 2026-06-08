@@ -21,14 +21,15 @@ import type { FunctionCall, ThoughtLogEntry } from "@/types/provider/interfaces"
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import { log } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
-import { escapeRegExp, findMarkdownCodeRanges } from "@/utils/text/stringHelper";
+import { escapeRegExp } from "@/utils/text/processors/regexUtils";
+import { findMarkdownCodeRanges } from "@/utils/text/processors/llmOutputProcessor";
+import { BaseStreamAdapter } from "@/types/stream/interfaces";
 import type {
   ProcessedChunk,
   ProviderError,
   RawStreamChunk,
   StreamConfig,
   StreamContext,
-  StreamProvider,
 } from "@/types/stream/interfaces";
 import {
   novelaiGenerateStream,
@@ -107,7 +108,7 @@ const NAI_GLM_CONTEXT_LIMIT = Number.parseInt(process.env.NAI_GLM_CONTEXT_LIMIT 
 
 /**
  * Extracts non-schema preset parameters from a raw preset parameters record.
- * Removes the four fields that are handled via tomori_configs schema columns
+ * Removes the four fields that are handled via split server config columns
  * (temperature, top_k, top_p, min_p) so they don't double-apply.
  * The remaining fields (order, tail_free_sampling, phrase_rep_pen, mirostat_*,
  * typical_p, top_a, repetition_penalty_*, etc.) are passed as preset overrides
@@ -117,7 +118,7 @@ const NAI_GLM_CONTEXT_LIMIT = Number.parseInt(process.env.NAI_GLM_CONTEXT_LIMIT 
  * @returns Partial NovelAIParameters containing only non-schema fields
  */
 function extractNonSchemaPresetParams(params: Record<string, unknown>): Partial<NovelAIParameters> {
-  // These four keys are written to tomori_configs and applied via the existing
+  // These four keys are written to split server config tables and applied via the existing
   // override logic in getParametersForModel — exclude them here to avoid conflicts.
   const schemaKeys = new Set(["temperature", "top_k", "top_p", "min_p"]);
   const result: Record<string, unknown> = {};
@@ -174,7 +175,7 @@ export interface NovelaiStreamConfig extends StreamConfig {
  * Username2: message2
  * BotName:
  */
-export class NovelaiStreamAdapter implements StreamProvider {
+export class NovelaiStreamAdapter extends BaseStreamAdapter {
   /**
    * Tags that should be prepended as system instructions
    * Tool-related tags are conditionally included when prompt-based tool calling is enabled.
@@ -183,6 +184,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
     ContextItemTag.SYSTEM_INSTRUCTION_BLOCK,
     ContextItemTag.SYSTEM_PERSONALITY,
     ContextItemTag.SYSTEM_HUMANIZER_RULES,
+    ContextItemTag.SYSTEM_PERSONA_PROMPT,
     ContextItemTag.KNOWLEDGE_SERVER_INFO,
     ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
     // REMOVED: KNOWLEDGE_USER_MEMORIES, KNOWLEDGE_USER_STATUS, KNOWLEDGE_CURRENT_CONTEXT (now in KNOWLEDGE_USERS_IN_CONVERSATION)
@@ -210,6 +212,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
    * Contains only user/other-character names — never the bot's own name.
    */
   private knownSpeakers: Set<string> = new Set();
+  private speakerStopPatternEnabled = false;
   private static readonly TOOL_CALL_TAG = "<tool_call>";
   private static readonly TOOL_CALL_TAG_LENGTH = NovelaiStreamAdapter.TOOL_CALL_TAG.length;
 
@@ -247,6 +250,14 @@ export class NovelaiStreamAdapter implements StreamProvider {
    * Reset at the start of each startStream() call so stale values never leak across turns.
    */
   private pendingContinuationPrefill: string | undefined = undefined;
+
+  constructor() {
+    super({
+      name: "novelai",
+      version: "1.0",
+      supportsFunctionCalling: true,
+    });
+  }
 
   /**
    * Returns the incomplete trailing sentence from the most recent stream, if any.
@@ -322,7 +333,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
     let prompt: string;
     if (isGlm) {
       // GLM 4.6: Official chat template with role tags and forced thinking
-      prompt = this.assembleGlmChatPrompt(context.contextItems, context.tomoriState.tomori_nickname, {
+      prompt = this.assembleGlmChatPrompt(context.contextItems, context.tomoriState.persona_nickname, {
         toolDefinitions: this.toolDefinitions,
         functionInteractionHistory: context.functionInteractionHistory,
         messageIdMap: context.messageIdMap,
@@ -333,7 +344,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
       // Kayra: Flat text prompt with NAI prompt-convention formatting
       // Build ATTG block from persona metadata (null if not configured)
       const attgBlock = this.buildAttgBlock(context.tomoriState, config.model);
-      const basePrompt = this.assembleNovelAIPrompt(context.contextItems, context.tomoriState.tomori_nickname, {
+      const basePrompt = this.assembleNovelAIPrompt(context.contextItems, context.tomoriState.persona_nickname, {
         toolDefinitions: this.toolDefinitions,
         functionInteractionHistory: context.functionInteractionHistory,
         attgBlock,
@@ -345,7 +356,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
       // breaks true continuation for Kayra/Erato.
       const outputPrefillTail = context.outputPrefill?.trim() ?? "";
       const hasTailPrefill = outputPrefillTail.length > 0 && basePrompt.trimEnd().endsWith(outputPrefillTail);
-      prompt = hasTailPrefill ? basePrompt : `${basePrompt}\n${context.tomoriState.tomori_nickname}: `;
+      prompt = hasTailPrefill ? basePrompt : `${basePrompt}\n${context.tomoriState.persona_nickname}: `;
       if (hasTailPrefill) {
         log.info("NovelAI Kayra: Detected assistant prefill at prompt tail; skipping trailing bot-name cue");
       }
@@ -460,7 +471,8 @@ export class NovelaiStreamAdapter implements StreamProvider {
     // Passing byte values as token IDs produces garbage special tokens at generation
     // start (e.g. <|reserved5|>, <|maskend|>). Turn stopping is handled entirely by
     // the speaker-detection regex in processVisibleText() instead.
-    if (!isGlm) {
+    this.speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
+    if (!isGlm && this.speakerStopPatternEnabled) {
       const speakerSet = new Set<string>();
       for (const item of context.contextItems) {
         if (item.metadataTag !== ContextItemTag.DIALOGUE_HISTORY) continue;
@@ -477,7 +489,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
       }
       // Exclude the bot's own name — it may legitimately appear on new lines
       // as it continues its own turn across multiple sentences.
-      speakerSet.delete(context.tomoriState.tomori_nickname);
+      speakerSet.delete(context.tomoriState.persona_nickname);
       this.knownSpeakers = speakerSet;
     } else {
       this.knownSpeakers = new Set();
@@ -487,7 +499,9 @@ export class NovelaiStreamAdapter implements StreamProvider {
     const openAIStopStrings = buildProviderStopStrings({
       providerName: "novelai",
       model: config.model,
-      personaName: context.tomoriState.tomori_nickname,
+      personaName: context.tomoriState.persona_nickname,
+      configuredStops: context.tomoriState.config.llm_stop_strings,
+      includePersonaSpeakerStop: this.speakerStopPatternEnabled,
     });
     const request: NovelAIGenerationRequest = {
       input: prompt,
@@ -506,15 +520,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
       yield* this.streamSinglePass(request, config);
     } catch (error) {
       // Convert NovelAI errors to our format
-      const providerError = this.handleProviderError(error);
-      yield {
-        data: { error: providerError },
-        provider: "novelai",
-        metadata: {
-          timestamp: Date.now(),
-          error: true,
-        },
-      };
+      yield this.createProviderErrorChunk(error);
     }
   }
 
@@ -778,74 +784,83 @@ export class NovelaiStreamAdapter implements StreamProvider {
     // Add to buffer for speaker detection
     this.generationBuffer += text;
 
-    // Detect speaker transitions — the model is generating another character's turn.
-    // Both Kayra and GLM 4.6 need this: Kayra has no API stop sequences, and GLM
-    // doesn't emit <|user|> tokens in completions mode (it just starts "Username: ...")
-    //
-    // Three stop conditions checked in order:
-    // 1. Dinkus (\n***): Kayra uses *** as a scene break between narrative zones.
-    //    When the model generates \n*** it considers its turn complete. Only triggered
-    //    after \n so ****-style censored words at response start are not clipped.
-    // 2. Generic colon-form (\nName:): any speaker label with a colon.
-    // 3. Known-name no-colon (\nName<space>): story-format turns where the model
-    //    writes "Name text" instead of "Name: text". Only fires for known speakers
-    //    from this.knownSpeakers to avoid false positives on mid-sentence proper nouns.
-    const markdownCodeRanges = findMarkdownCodeRanges(this.generationBuffer);
-    let speakerMatch =
-      this.findFirstMarkdownSafeMatch(
-        this.generationBuffer,
-        /\n\*\*\*/g,
-        markdownCodeRanges,
-        (match) => match.index + 1,
-      ) ??
-      this.findFirstMarkdownSafeMatch(this.generationBuffer, /\n+([^\n:]+):\s*/g, markdownCodeRanges, (match) => {
-        const rawLabel = match[1] ?? "";
-        return match.index + match[0].indexOf(rawLabel);
-      });
-
-    if (!speakerMatch && this.knownSpeakers.size > 0) {
-      const escaped = [...this.knownSpeakers].map(escapeRegExp).join("|");
-      speakerMatch = this.findFirstMarkdownSafeMatch(
-        this.generationBuffer,
-        new RegExp(`\\n+(${escaped})\\s`, "g"),
-        markdownCodeRanges,
-        (match) => {
+    if (!this.speakerStopPatternEnabled) {
+      if (!this.isGlmModel) {
+        this.generationBuffer = "";
+        if (text.trim()) this.hasEmittedVisibleText = true;
+        return { type: "text", content: text };
+      }
+      this.generationBuffer = "";
+    } else {
+      // Detect speaker transitions — the model is generating another character's turn.
+      // Both Kayra and GLM 4.6 need this: Kayra has no API stop sequences, and GLM
+      // doesn't emit <|user|> tokens in completions mode (it just starts "Username: ...")
+      //
+      // Three stop conditions checked in order:
+      // 1. Dinkus (\n***): Kayra uses *** as a scene break between narrative zones.
+      //    When the model generates \n*** it considers its turn complete. Only triggered
+      //    after \n so ****-style censored words at response start are not clipped.
+      // 2. Generic colon-form (\nName:): any speaker label with a colon.
+      // 3. Known-name no-colon (\nName<space>): story-format turns where the model
+      //    writes "Name text" instead of "Name: text". Only fires for known speakers
+      //    from this.knownSpeakers to avoid false positives on mid-sentence proper nouns.
+      const markdownCodeRanges = findMarkdownCodeRanges(this.generationBuffer);
+      let speakerMatch =
+        this.findFirstMarkdownSafeMatch(
+          this.generationBuffer,
+          /\n\*\*\*/g,
+          markdownCodeRanges,
+          (match) => match.index + 1,
+        ) ??
+        this.findFirstMarkdownSafeMatch(this.generationBuffer, /\n+([^\n:]+):\s*/g, markdownCodeRanges, (match) => {
           const rawLabel = match[1] ?? "";
           return match.index + match[0].indexOf(rawLabel);
-        },
-      );
-    }
+        });
 
-    if (speakerMatch) {
-      // Found a turn boundary — stop generation here
-      this.generationBuffer = "";
-      this.sentenceTrailingBuffer = "";
-      this.kayraHoldBuffer = "";
-      // Stream orchestrator continues reading until provider final;
-      // latch stop so subsequent Kayra/Erato tokens are ignored.
-      this.kayraSpeakerBoundaryStopPending = !this.isGlmModel;
-      return {
-        type: "done",
-      };
-    }
+      if (!speakerMatch && this.knownSpeakers.size > 0) {
+        const escaped = [...this.knownSpeakers].map(escapeRegExp).join("|");
+        speakerMatch = this.findFirstMarkdownSafeMatch(
+          this.generationBuffer,
+          new RegExp(`\\n+(${escaped})\\s`, "g"),
+          markdownCodeRanges,
+          (match) => {
+            const rawLabel = match[1] ?? "";
+            return match.index + match[0].indexOf(rawLabel);
+          },
+        );
+      }
 
-    // Kayra/Erato: also treat sentence-colon boundaries as turn transitions.
-    // Example: "... It is not healthy.: Please, don't say that..."
-    // We stop on either:
-    // 1) A complete boundary with following speaker text in-buffer.
-    // 2) A trailing boundary ending in ":" (next token would start the other turn).
-    if (!this.isGlmModel) {
-      const sentenceColonBoundary = /[.!?…]["')\]]?\s*:\s+(?=[A-Z*"])/;
-      const trailingSentenceColonBoundary = /[.!?…]["')\]]?\s*:\s*$/;
-      if (
-        sentenceColonBoundary.test(this.generationBuffer) ||
-        trailingSentenceColonBoundary.test(this.generationBuffer)
-      ) {
+      if (speakerMatch) {
+        // Found a turn boundary — stop generation here
         this.generationBuffer = "";
         this.sentenceTrailingBuffer = "";
         this.kayraHoldBuffer = "";
-        this.kayraSpeakerBoundaryStopPending = true;
-        return { type: "done" };
+        // Stream orchestrator continues reading until provider final;
+        // latch stop so subsequent Kayra/Erato tokens are ignored.
+        this.kayraSpeakerBoundaryStopPending = !this.isGlmModel;
+        return {
+          type: "done",
+        };
+      }
+
+      // Kayra/Erato: also treat sentence-colon boundaries as turn transitions.
+      // Example: "... It is not healthy.: Please, don't say that..."
+      // We stop on either:
+      // 1) A complete boundary with following speaker text in-buffer.
+      // 2) A trailing boundary ending in ":" (next token would start the other turn).
+      if (!this.isGlmModel) {
+        const sentenceColonBoundary = /[.!?…]["')\]]?\s*:\s+(?=[A-Z*"])/;
+        const trailingSentenceColonBoundary = /[.!?…]["')\]]?\s*:\s*$/;
+        if (
+          sentenceColonBoundary.test(this.generationBuffer) ||
+          trailingSentenceColonBoundary.test(this.generationBuffer)
+        ) {
+          this.generationBuffer = "";
+          this.sentenceTrailingBuffer = "";
+          this.kayraHoldBuffer = "";
+          this.kayraSpeakerBoundaryStopPending = true;
+          return { type: "done" };
+        }
       }
     }
 
@@ -863,6 +878,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
         const safeToEmit = combined.slice(0, lastNewlineIdx);
         const trailingLine = combined.slice(lastNewlineIdx + 1);
         const trailingLineStartIndex = this.generationBuffer.length - trailingLine.length;
+        const markdownCodeRanges = findMarkdownCodeRanges(this.generationBuffer);
 
         // Line-aware speaker boundary stop:
         // keep one trailing line held; if it starts with another speaker,
@@ -1299,10 +1315,10 @@ export class NovelaiStreamAdapter implements StreamProvider {
 
       // 4. Unwrapped tool call — model outputs function name directly without <tool_call> tag.
       //    GLM 4.6 sometimes omits the wrapper tag and generates:
-      //      brave_web_search\n<arg_key>query</arg_key>\n<arg_value>...</arg_value>
+      //      web_search\n<arg_key>query</arg_key>\n<arg_value>...</arg_value>
       //    Detect this by checking if the first line matches a known tool name.
       //    Uses normalizeToolName() to handle underscore/hyphen variations
-      //    (model outputs "brave_web_search" but tool is registered as "brave-web-search").
+      //    (model may output "web-search" but tool is registered as "web_search").
       const firstLine = trimmedStart.split("\n")[0].trim();
       if (firstLine) {
         const normalizedName = this.normalizeToolName(firstLine);
@@ -1534,8 +1550,8 @@ export class NovelaiStreamAdapter implements StreamProvider {
    * Normalize a tool name from model output to match a registered tool definition.
    *
    * GLM 4.6 frequently outputs tool names that don't exactly match the registration:
-   * - Underscore/hyphen swaps: "brave_web_search" vs "brave-web-search"
-   * - Truncated prefixes: "ave_web_search" instead of "brave_web_search" (high-temp sampling drops tokens)
+   * - Underscore/hyphen swaps: "web_search" vs "web-search"
+   * - Truncated prefixes: "eb_search" instead of "web_search" (high-temp sampling drops tokens)
    *
    * Matching strategy (in priority order):
    * 1. Exact match
@@ -1565,7 +1581,7 @@ export class NovelaiStreamAdapter implements StreamProvider {
     }
 
     // 4. Suffix match — handles dropped prefix tokens from high-temperature sampling.
-    //    e.g., model outputs "ave_web_search" (missing "br"), match "brave_web_search".
+    //    e.g., model outputs "eb_search" (missing "w"), match "web_search".
     //    Also try with underscore/hyphen normalization on both sides.
     const candidates = [rawName, hyphenName, underscoreName];
     const suffixMatches = this.toolDefinitions.filter((tool) =>
@@ -2231,18 +2247,6 @@ export class NovelaiStreamAdapter implements StreamProvider {
   }
 
   /**
-   * Get provider information
-   */
-  getProviderInfo() {
-    return {
-      name: "novelai",
-      version: "1.0",
-      supportsStreaming: true,
-      supportsFunctionCalling: true, // Prompt-based tool calling for GLM-4.6
-    };
-  }
-
-  /**
    * Assemble context items into NovelAI's expected flat text format
    *
    * Format:
@@ -2295,13 +2299,12 @@ export class NovelaiStreamAdapter implements StreamProvider {
    * ```
    * [ Tags: X; Genre: Y ][ S: N ]   ← ATTG block (if configured)
    *
-   * ----
    * Characters:
    * {botName}
    * {SYSTEM_PERSONALITY text}
-   * ----
+   *
    * {SYSTEM_INSTRUCTION_BLOCK / SYSTEM_HUMANIZER_RULES / KNOWLEDGE_SERVER_INFO text}
-   * ----
+   *
    * Server Notes:
    * {KNOWLEDGE_SERVER_MEMORIES text}   ← only if non-empty
    * ***
@@ -2428,18 +2431,18 @@ export class NovelaiStreamAdapter implements StreamProvider {
 
     // 5a. Characters block (personality + bot name header)
     if (personalityText) {
-      systemBlocks.push(`----\nCharacters:\n${botName}\n${personalityText}`);
+      systemBlocks.push(`Characters:\n${botName}\n${personalityText}`);
     }
 
     // 5b. General instruction block (may span multiple sub-sections)
-    const instructionText = instructionParts.join("\n----\n");
+    const instructionText = instructionParts.join("\n\n");
     if (instructionText) {
-      systemBlocks.push(`----\n${instructionText}`);
+      systemBlocks.push(`${instructionText}`);
     }
 
     // 5c. Server Notes block (only when there are memories to show)
     if (memoriesText) {
-      systemBlocks.push(`----\nServer Notes:\n${memoriesText}`);
+      systemBlocks.push(`Server Notes:\n${memoriesText}`);
     }
 
     // 6. Build the full system header: ATTG block + formatted sections

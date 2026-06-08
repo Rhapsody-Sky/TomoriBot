@@ -10,21 +10,27 @@
 
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, EmbedBuilder, MessageFlags } from "discord.js";
 import type { ButtonInteraction, ChatInputCommandInteraction, ModalSubmitInteraction } from "discord.js";
-import type { CustomEndpointCapability, CustomEndpointRow, TomoriConfigRow } from "@/types/db/schema";
+import type { CustomEndpointCapability, CustomEndpointRow, AssembledServerConfig } from "@/types/db/schema";
+import type { ModalComponent } from "@/types/discord/modal";
 import type { SelectOption } from "@/types/discord/modal";
-import {
-  promptWithPaginatedModal,
-  promptWithRawModal,
-  replyInfoEmbed,
-  safeSelectOptionText,
-} from "@/utils/discord/interactionHelper";
+import { promptWithPaginatedModal, promptWithRawModal, safeSelectOptionText } from "@/utils/discord/ui/modals";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { validateRemoteMcpUrl } from "@/utils/mcp/mcpUrlSecurity";
 import {
   buildCapabilityEditModalComponents,
   parseCapabilityModalFields,
+  WORKFLOW_UPLOAD_ID,
 } from "@/utils/provider/customEndpointCapabilityModal";
 import { registerCustomEndpoint, validateCustomEndpointReachability } from "@/utils/provider/customEndpointService";
+import {
+  buildImageEndpointSupportsComponent,
+  IMAGE_ENDPOINT_SUPPORTS_ID,
+  imageEndpointSupportsFromSubmittedValues,
+  readImageEndpointSupports,
+} from "@/utils/provider/customImageEndpointSupport";
+import { IMPORT_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 import { localizer } from "@/utils/text/localizer";
 
 const SELECT_MODAL_CUSTOM_ID = "custom_endpoint_edit_select_modal";
@@ -33,8 +39,8 @@ const EDIT_BUTTON_ID = "edit_fields";
 const CANCEL_BUTTON_ID = "cancel_edit";
 
 type RegistrationScope =
-  | { kind: "server"; ownerId: number; baseConfig: TomoriConfigRow }
-  | { kind: "personal"; ownerId: number; baseConfig: TomoriConfigRow };
+  | { kind: "server"; ownerId: number; baseConfig: AssembledServerConfig }
+  | { kind: "personal"; ownerId: number; baseConfig: AssembledServerConfig };
 
 export interface ExecuteCustomEndpointEditOptions {
   interaction: ChatInputCommandInteraction;
@@ -102,6 +108,26 @@ function buildEndpointSelectOptions(
   });
 }
 
+async function loadWorkflowJson(url: string | null): Promise<Record<string, unknown> | null> {
+  if (!url) {
+    return null;
+  }
+
+  const downloadResult = await safeDownload(url, {
+    maxSizeMB: IMPORT_LIMITS.MAX_DATA_IMPORT_SIZE_MB,
+    timeoutMs: 10_000,
+  });
+  if (!downloadResult.success || !downloadResult.buffer) {
+    throw new Error(`Workflow download failed: ${downloadResult.details ?? downloadResult.error ?? "unknown error"}`);
+  }
+
+  return JSON.parse(downloadResult.buffer.toString("utf8")) as Record<string, unknown>;
+}
+
+function isComfyUiMediaEndpoint(endpoint: CustomEndpointRow): boolean {
+  return (endpoint.capability === "image" || endpoint.capability === "video") && endpoint.api_style === "comfyui";
+}
+
 /** Build a concise embed summarising the selected endpoint's current configuration. */
 function buildEndpointSummaryEmbed(locale: string, endpoint: CustomEndpointRow): EmbedBuilder {
   const extra = endpoint.extra_config as Record<string, unknown>;
@@ -128,6 +154,8 @@ function buildEndpointSummaryEmbed(locale: string, endpoint: CustomEndpointRow):
     if (endpoint.has_tools) caps.push("tools");
     if (endpoint.sees_images) caps.push("vision");
     if (endpoint.supports_structoutput) caps.push("structoutput");
+    if (endpoint.strict_role_alternation) caps.push("rolealt");
+    if (endpoint.supports_prefix_completion) caps.push("prefixcompletion");
     if (caps.length > 0) {
       lines.push(
         `**${localizer(locale, "commands.config.custom_models.capability_modal.text_capabilities_label")}:** ${caps.join(", ")}`,
@@ -142,7 +170,13 @@ function buildEndpointSummaryEmbed(locale: string, endpoint: CustomEndpointRow):
 
   if (endpoint.capability === "speech") {
     const scriptMarkup = extra.script_markup as string | undefined;
+    const voiceMode = extra.voice_mode as string | undefined;
     const supportsInstruct = extra.supports_instruct as boolean | undefined;
+    if (voiceMode) {
+      lines.push(
+        `**${localizer(locale, "commands.config.custom_models.capability_modal.voice_mode_label")}:** ${voiceMode}`,
+      );
+    }
     if (scriptMarkup) {
       lines.push(
         `**${localizer(locale, "commands.config.custom_models.capability_modal.script_markup_label")}:** ${scriptMarkup}`,
@@ -168,6 +202,27 @@ function buildEndpointSummaryEmbed(locale: string, endpoint: CustomEndpointRow):
         `**${localizer(locale, "commands.config.custom_models.capability_modal.transcription_language_label")}:** ${language}`,
       );
     }
+  }
+
+  if (endpoint.capability === "image") {
+    const supports = readImageEndpointSupports(endpoint);
+    const enabled = [
+      supports.txt2img
+        ? localizer(locale, "commands.config.custom_models.capability_modal.workflow_support_txt2img")
+        : null,
+      supports.img2img
+        ? localizer(locale, "commands.config.custom_models.capability_modal.workflow_support_img2img")
+        : null,
+      supports.inpaint
+        ? localizer(locale, "commands.config.custom_models.capability_modal.workflow_support_inpaint")
+        : null,
+      supports.negative_prompt
+        ? localizer(locale, "commands.config.custom_models.capability_modal.workflow_support_negative_prompt")
+        : null,
+    ].filter((item): item is string => !!item);
+    lines.push(
+      `**${localizer(locale, "commands.config.custom_models.capability_modal.workflow_supports_label")}:** ${enabled.join(", ")}`,
+    );
   }
 
   return new EmbedBuilder()
@@ -265,10 +320,10 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
   // Step 4: from the button click, show the capability-specific edit modal (pre-filled).
   const extra = existingEndpoint.extra_config as Record<string, unknown>;
   const editModalCustomId = `custom_endpoint_edit_fields_${interaction.id}`;
-  const editModalResult = await promptWithRawModal(buttonInteraction, locale, {
-    modalCustomId: editModalCustomId,
-    modalTitleKey: `commands.config.custom_models.capability_modal.${existingEndpoint.capability}_edit_title`,
-    components: buildCapabilityEditModalComponents(existingEndpoint.capability, locale, {
+  const editModalComponents: ModalComponent[] = buildCapabilityEditModalComponents(
+    existingEndpoint.capability,
+    locale,
+    {
       modelName: existingEndpoint.model_name,
       displayName: existingEndpoint.display_name,
       endpointUrl: existingEndpoint.endpoint_url,
@@ -276,11 +331,30 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
       hasTools: existingEndpoint.has_tools,
       seesImages: existingEndpoint.sees_images,
       supportsStructOutput: existingEndpoint.supports_structoutput,
+      strictRoleAlternation: existingEndpoint.strict_role_alternation,
+      supportsPrefixCompletion: existingEndpoint.supports_prefix_completion,
+      voiceMode: extra.voice_mode as string | null,
       scriptMarkup: extra.script_markup as string | null,
       supportsInstruct: extra.supports_instruct as boolean | undefined,
       transcriptionModel: extra.model as string | null,
       transcriptionLanguage: extra.language as string | null,
-    }),
+    },
+    isComfyUiMediaEndpoint(existingEndpoint),
+  );
+  if (existingEndpoint.capability === "image") {
+    editModalComponents.push(
+      buildImageEndpointSupportsComponent(
+        locale,
+        existingEndpoint.api_style,
+        readImageEndpointSupports(existingEndpoint),
+      ),
+    );
+  }
+
+  const editModalResult = await promptWithRawModal(buttonInteraction, locale, {
+    modalCustomId: editModalCustomId,
+    modalTitleKey: `commands.config.custom_models.capability_modal.${existingEndpoint.capability}_edit_title`,
+    components: editModalComponents,
   });
 
   if (editModalResult.outcome !== "submit") {
@@ -311,6 +385,8 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
     const hasTools = parsed.hasTools;
     const seesImages = parsed.seesImages;
     const supportsStructOutput = parsed.supportsStructOutput;
+    const strictRoleAlternation = parsed.strictRoleAlternation;
+    const supportsPrefixCompletion = parsed.supportsPrefixCompletion;
     const authTokenProvided = Boolean(parsed.authToken);
     const authToken = authTokenProvided ? parsed.authToken : undefined;
 
@@ -319,6 +395,7 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
     if (existingEndpoint.capability === "speech") {
       extraConfig = {
         ...extraConfig,
+        voice_mode: parsed.voiceMode,
         script_markup: parsed.scriptMarkup,
         supports_instruct: parsed.supportsInstruct,
       };
@@ -327,6 +404,14 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
         ...extraConfig,
         model: parsed.transcriptionModel || (extra.model as string | null) || "whisper-1",
         language: parsed.transcriptionLanguage ?? (extra.language as string | null) ?? null,
+      };
+    } else if (existingEndpoint.capability === "image") {
+      extraConfig = {
+        ...extraConfig,
+        workflow_supports: imageEndpointSupportsFromSubmittedValues(
+          editModalResult.multiValues?.[IMAGE_ENDPOINT_SUPPORTS_ID],
+          existingEndpoint.api_style,
+        ),
       };
     }
 
@@ -366,6 +451,22 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
       }
     }
 
+    if (isComfyUiMediaEndpoint(existingEndpoint)) {
+      const workflowAttachment = editModalResult.attachments?.[WORKFLOW_UPLOAD_ID];
+      if (workflowAttachment) {
+        const workflow = await loadWorkflowJson(workflowAttachment.url);
+        extraConfig = { ...extraConfig, workflow };
+      } else if (!extraConfig.workflow) {
+        await selectInteraction.editReply({
+          embeds: [],
+          components: [],
+          content: localizer(locale, "commands.config.custom_models.validation.workflow_required"),
+        });
+        return;
+      }
+      // No attachment + existing workflow → keep existing workflow as-is.
+    }
+
     const registered = await registerCustomEndpoint({
       scope,
       label: existingEndpoint.label,
@@ -380,7 +481,12 @@ export async function executeCustomEndpointEditCommand(options: ExecuteCustomEnd
       seesImages,
       seesVideos: existingEndpoint.sees_videos,
       supportsStructOutput,
+      strictRoleAlternation,
+      supportsPrefixCompletion,
       extraConfig,
+      // Edit the exact selected row in place (update its model + row by id) so a renamed model_name
+      // does not collide with — or orphan — sibling models under the same label+capability.
+      editingEndpointId: existingEndpoint.custom_endpoint_id,
     });
 
     if (!registered) {

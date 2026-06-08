@@ -2,6 +2,8 @@ import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { log } from "@/utils/misc/logger";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 export type CharRefEntityType = "personas" | "users";
 
@@ -220,16 +222,16 @@ export async function loadCharRefAsBase64(urlOrPath: string): Promise<string | n
 
   if (/^https?:\/\//i.test(target)) {
     try {
-      const response = await fetch(target);
-      if (!response.ok) {
-        log.warn(
-          `[CharRef Storage] Failed to fetch remote character reference (${response.status} ${response.statusText})`,
-        );
+      const downloadResult = await safeDownload(target, {
+        maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+        timeoutMs: 15_000,
+      });
+      if (!downloadResult.success || !downloadResult.buffer) {
+        log.warn(`[CharRef Storage] Failed to fetch remote character reference (${downloadResult.details})`);
         return null;
       }
 
-      const buffer = Buffer.from(await response.arrayBuffer());
-      return buffer.toString("base64");
+      return downloadResult.buffer.toString("base64");
     } catch (error) {
       log.warn(`[CharRef Storage] Failed to load remote character reference ${target}`, error);
       return null;

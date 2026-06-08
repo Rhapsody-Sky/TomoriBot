@@ -7,12 +7,18 @@ import type {
 } from "@/types/provider/featureInterfaces";
 import { log } from "@/utils/misc/logger";
 import { pollForCompletion } from "@/utils/async/pollForCompletion";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 /** Polling interval for Google Veo operations (10 seconds, per Google docs) */
 const POLL_INTERVAL_MS = 10_000;
 
 /** Maximum poll attempts before timeout (~5 minutes at 10s intervals) */
 const MAX_POLL_ATTEMPTS = 30;
+
+const PROVIDER_VIDEO_DOWNLOAD_MAX_MB = Math.max(
+  1,
+  Number.parseInt(process.env.PROVIDER_VIDEO_DOWNLOAD_MAX_MB ?? "25", 10) || 25,
+);
 
 /** Aspect ratios supported by Google Veo — "1:1" and others are rejected by the API */
 const GOOGLE_SUPPORTED_ASPECT_RATIOS = new Set(["16:9", "9:16"]);
@@ -141,17 +147,19 @@ export async function generateGoogleNativeVideo(
     log.info(`Google video generation: downloading from URI (model: ${request.model}, uri: ${video.uri.slice(0, 80)})`);
 
     try {
-      const downloadResponse = await fetch(video.uri, {
-        headers: { "x-goog-api-key": request.apiKey },
+      const downloadResponse = await safeDownload(video.uri, {
+        maxSizeMB: PROVIDER_VIDEO_DOWNLOAD_MAX_MB,
+        timeoutMs: 30_000,
+        requestInit: {
+          headers: { "x-goog-api-key": request.apiKey },
+        },
       });
 
-      if (!downloadResponse.ok) {
-        throw new Error(`HTTP ${downloadResponse.status}`);
+      if (!downloadResponse.success || !downloadResponse.buffer) {
+        throw new Error(downloadResponse.details ?? "download failed");
       }
 
-      const arrayBuffer = await downloadResponse.arrayBuffer();
-      const videoData = Buffer.from(arrayBuffer);
-      return { videoData, mimeType: "video/mp4", durationSeconds: normalizedDurationSeconds };
+      return { videoData: downloadResponse.buffer, mimeType: "video/mp4", durationSeconds: normalizedDurationSeconds };
     } catch (downloadError) {
       log.error("Failed to download Google video", downloadError as Error, {
         errorType: "GoogleVideoDownloadError",

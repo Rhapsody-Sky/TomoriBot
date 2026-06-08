@@ -1,8 +1,9 @@
 import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import { MessageFlags } from "discord.js";
-import { loadAvailableDiffusionModelsForProvider } from "@/utils/db/dbRead";
-import { promptForSavedProvider } from "@/commands/config/model/providerPicker";
-import { replyInfoEmbed, promptWithRawModal, safeSelectOptionText } from "@/utils/discord/interactionHelper";
+import { llmModelRepo } from "@/utils/db/repositories";
+import { promptForSavedProvider } from "@/utils/discord/providerPicker";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
+import { promptWithRawModal, safeSelectOptionText } from "@/utils/discord/ui/modals";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 import type { DiffusionModelRow, ErrorContext, SavedProviderConfigRow, UserRow } from "@/types/db/schema";
@@ -71,14 +72,14 @@ export async function execute(
     if (!providerSelection) return;
 
     const availableModels =
-      (await loadAvailableDiffusionModelsForProvider(providerSelection.provider, false, {
+      (await llmModelRepo.loadAvailableDiffusionModels(providerSelection.provider, false, {
         kind: "personal",
         ownerId: userData.user_id,
       })) ?? [];
     if (availableModels.length === 0) {
       await replyInfoEmbed(providerSelection.interaction, locale, {
-        titleKey: "commands.config.model.image.no_models_title",
-        descriptionKey: "commands.config.model.image.no_models_description",
+        titleKey: "commands.model.image.no_models_title",
+        descriptionKey: "commands.model.image.no_models_description",
         descriptionVars: { provider: getProviderDisplayName(providerSelection.provider) },
         color: ColorCode.ERROR,
       });
@@ -98,13 +99,13 @@ export async function execute(
       locale,
       {
         modalCustomId: "personal_provider_model_image_modal",
-        modalTitleKey: "commands.config.model.image.modal_title",
+        modalTitleKey: "commands.model.image.modal_title",
         components: [
           {
             customId: MODEL_SELECT_ID,
-            labelKey: "commands.config.model.image.select_label",
-            descriptionKey: "commands.config.model.image.select_description",
-            placeholder: "commands.config.model.image.select_placeholder",
+            labelKey: "commands.model.image.select_label",
+            descriptionKey: "commands.model.image.select_description",
+            placeholder: "commands.model.image.select_placeholder",
             required: true,
             options: modelOptions,
           },
@@ -120,7 +121,7 @@ export async function execute(
     if (!selectedModel?.diffusion_model_id) {
       await replyInfoEmbed(modalResult.interaction, locale, {
         titleKey: "general.errors.invalid_option_title",
-        descriptionKey: "commands.config.model.image.invalid_model_description",
+        descriptionKey: "commands.model.image.invalid_model_description",
         color: ColorCode.ERROR,
       });
       return;

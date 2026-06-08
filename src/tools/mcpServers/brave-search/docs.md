@@ -145,7 +145,7 @@ Add this to your `claude_desktop_config.json`:
   "mcpServers": {
     "brave-search": {
       "command": "npx",
-      "args": ["-y", "@brave/brave-search-mcp-server"],
+      "args": ["-y", "@brave/brave-search-mcp-server@2.0.80"],
       "env": {
         "BRAVE_API_KEY": "YOUR_API_KEY_HERE"
       }
@@ -202,7 +202,7 @@ For manual installation, add the following to your User Settings (JSON) or `.vsc
   "servers": {
     "brave-search-mcp-server": {
       "command": "npx",
-      "args": ["-y", "@brave/brave-search-mcp-server"],
+      "args": ["-y", "@brave/brave-search-mcp-server@2.0.80"],
       "env": {
         "BRAVE_API_KEY": "${input:brave-api-key}"
       }

@@ -1,15 +1,12 @@
 import type { ChatInputCommandInteraction, ButtonInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } from "discord.js";
 import { createStandardEmbed } from "@/utils/discord/embedHelper";
-import { replyInfoEmbed, promptWithRawModal, safeSelectOptionText } from "@/utils/discord/interactionHelper";
+import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
+import { safeReply } from "@/utils/discord/safeReply";
+import { promptWithRawModal, safeSelectOptionText } from "@/utils/discord/ui/modals";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
-import {
-  loadAvailableModelsForProvider,
-  loadCustomEndpointsForUser,
-  getLlmsByIds,
-  loadCustomEndpointsByIds,
-} from "@/utils/db/dbRead";
+import { llmModelRepo, llmProviderRepo } from "@/utils/db/repositories";
 import type {
   ErrorContext,
   LlmRow,
@@ -20,11 +17,11 @@ import type {
   CustomEndpointRow,
 } from "@/types/db/schema";
 import type { SelectOption } from "@/types/discord/modal";
-import { upsertUserSavedProviderConfig } from "@/utils/db/dbWrite";
+
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { replyLegacyOpenRouterOtherModelMoved } from "@/utils/discord/openrouterModelMigrationNotice";
 import { loadUserSavedProvidersForCapability } from "@/utils/provider/savedProviderConfig";
-import { promptForSavedProvider } from "@/commands/config/model/providerPicker";
+import { promptForSavedProvider } from "@/utils/discord/providerPicker";
 import { isCustomProvider, parseCustomProvider } from "@/utils/provider/customProviderUtils";
 
 const SLOT_IDS = [
@@ -35,11 +32,11 @@ const SLOT_IDS = [
   "fallback_slot_5",
 ] as const;
 const SLOT_LABEL_KEYS = [
-  "commands.config.model.fallback.slot_1_label",
-  "commands.config.model.fallback.slot_2_label",
-  "commands.config.model.fallback.slot_3_label",
-  "commands.config.model.fallback.slot_4_label",
-  "commands.config.model.fallback.slot_5_label",
+  "commands.model.fallback.slot_1_label",
+  "commands.model.fallback.slot_2_label",
+  "commands.model.fallback.slot_3_label",
+  "commands.model.fallback.slot_4_label",
+  "commands.model.fallback.slot_5_label",
 ] as const;
 const CLEAR_SLOT_VALUE = "__none__";
 const CUSTOM_ENDPOINT_VALUE_PREFIX = "ce:";
@@ -79,11 +76,11 @@ function buildSlotPlaceholder(
 ): string {
   if (!entry) {
     if (rawRef !== null) {
-      return localizer(locale, "commands.config.model.fallback.current_placeholder", {
+      return localizer(locale, "commands.model.fallback.current_placeholder", {
         model: truncatePlaceholderValue(`${localizer(locale, "general.unknown")} (#${rawRef.id})`),
       });
     }
-    return localizer(locale, "commands.config.model.fallback.current_placeholder", {
+    return localizer(locale, "commands.model.fallback.current_placeholder", {
       model: localizer(locale, "general.none"),
     });
   }
@@ -92,12 +89,12 @@ function buildSlotPlaceholder(
     const modelLabel = entry.model.llm_codename;
     const entryProvider = entry.model.llm_provider.toLowerCase();
     if (!isCustomProvider(selectedProvider) && entryProvider !== selectedProvider.toLowerCase()) {
-      return localizer(locale, "commands.config.model.fallback.current_placeholder_with_provider", {
+      return localizer(locale, "commands.model.fallback.current_placeholder_with_provider", {
         model: truncatePlaceholderValue(modelLabel),
         provider: getProviderDisplayName(entryProvider),
       });
     }
-    return localizer(locale, "commands.config.model.fallback.current_placeholder", {
+    return localizer(locale, "commands.model.fallback.current_placeholder", {
       model: truncatePlaceholderValue(modelLabel),
     });
   }
@@ -107,12 +104,12 @@ function buildSlotPlaceholder(
   const parsed = parseCustomProvider(selectedProvider);
   const selectedLabel = parsed?.label ?? null;
   if (selectedLabel !== entry.endpoint.label) {
-    return localizer(locale, "commands.config.model.fallback.current_placeholder_with_provider", {
+    return localizer(locale, "commands.model.fallback.current_placeholder_with_provider", {
       model: truncatePlaceholderValue(epLabel),
-      provider: localizer(locale, "commands.config.model.fallback.custom_provider_label"),
+      provider: localizer(locale, "commands.model.fallback.custom_provider_label"),
     });
   }
-  return localizer(locale, "commands.config.model.fallback.current_placeholder", {
+  return localizer(locale, "commands.model.fallback.current_placeholder", {
     model: truncatePlaceholderValue(epLabel),
   });
 }
@@ -172,8 +169,8 @@ export async function execute(
     const llmRefIds = existingRefs.filter((r) => r.type === "llm").map((r) => r.id);
     const epRefIds = existingRefs.filter((r) => r.type === "custom_endpoint").map((r) => r.id);
     const [refLlms, refEndpoints] = await Promise.all([
-      llmRefIds.length > 0 ? getLlmsByIds(llmRefIds) : Promise.resolve([]),
-      epRefIds.length > 0 ? loadCustomEndpointsByIds(epRefIds) : Promise.resolve([]),
+      llmRefIds.length > 0 ? llmModelRepo.getLlmsByIds(llmRefIds) : Promise.resolve([]),
+      epRefIds.length > 0 ? llmProviderRepo.loadCustomEndpointsByIds(epRefIds) : Promise.resolve([]),
     ]);
     const llmMap = new Map(refLlms.map((m) => [m.llm_id as number, m]));
     const epMap = new Map(refEndpoints.map((e) => [e.custom_endpoint_id as number, e]));
@@ -196,13 +193,13 @@ export async function execute(
     if (isCustomProvider(selectedProvider)) {
       const parsed = parseCustomProvider(selectedProvider);
       const label = parsed?.label ?? null;
-      const allEndpoints = await loadCustomEndpointsForUser(userData.user_id);
+      const allEndpoints = await llmProviderRepo.loadCustomEndpointsForUser(userData.user_id);
       availableEndpoints = label ? allEndpoints.filter((ep) => ep.label === label && ep.capability === "text") : [];
 
       if (availableEndpoints.length === 0) {
         await replyInfoEmbed(responseInteraction, locale, {
-          titleKey: "commands.config.model.fallback.no_models_title",
-          descriptionKey: "commands.config.model.fallback.no_models_description",
+          titleKey: "commands.model.fallback.no_models_title",
+          descriptionKey: "commands.model.fallback.no_models_description",
           color: ColorCode.ERROR,
           flags: MessageFlags.Ephemeral,
         });
@@ -216,15 +213,15 @@ export async function execute(
       }));
     } else {
       availableModels =
-        (await loadAvailableModelsForProvider(selectedProvider, false, {
+        (await llmModelRepo.loadAvailableModelsForProvider(selectedProvider, false, {
           kind: "personal",
           ownerId: userData.user_id,
         })) ?? [];
 
       if (availableModels.length === 0) {
         await replyInfoEmbed(responseInteraction, locale, {
-          titleKey: "commands.config.model.fallback.no_models_title",
-          descriptionKey: "commands.config.model.fallback.no_models_description",
+          titleKey: "commands.model.fallback.no_models_title",
+          descriptionKey: "commands.model.fallback.no_models_description",
           color: ColorCode.ERROR,
           flags: MessageFlags.Ephemeral,
         });
@@ -249,9 +246,9 @@ export async function execute(
     );
 
     const clearOption: SelectOption = {
-      label: safeSelectOptionText(localizer(locale, "commands.config.model.fallback.clear_option_label")),
+      label: safeSelectOptionText(localizer(locale, "commands.model.fallback.clear_option_label")),
       value: CLEAR_SLOT_VALUE,
-      description: safeSelectOptionText(localizer(locale, "commands.config.model.fallback.clear_option_description")),
+      description: safeSelectOptionText(localizer(locale, "commands.model.fallback.clear_option_description")),
     };
 
     // 6. Pagination if needed
@@ -297,7 +294,10 @@ export async function execute(
         optionsForModal = [clearOption, ...allModelOptions.slice(startIndex, startIndex + ITEMS_PER_PAGE)];
         modalInteraction = pageButtonInteraction as ButtonInteraction;
       } catch {
-        await interaction.editReply({ embeds: [], components: [] }).catch(() => {});
+        await safeReply(
+          interaction.editReply({ embeds: [], components: [] }),
+          "personal fallback model timeout cleanup",
+        );
         return;
       }
     }
@@ -311,7 +311,7 @@ export async function execute(
       locale,
       {
         modalCustomId: `personal_model_fallback_modal_${interaction.id}`,
-        modalTitleKey: "commands.config.model.fallback.modal_title",
+        modalTitleKey: "commands.model.fallback.modal_title",
         components: SLOT_IDS.map((customId, index) => ({
           customId,
           labelKey: SLOT_LABEL_KEYS[index],
@@ -387,8 +387,8 @@ export async function execute(
     if (primaryLlmId && finalRefs.some((r) => r.type === "llm" && r.id === primaryLlmId)) {
       const primaryModel = resolvedModelMap.get(primaryLlmId);
       await replyInfoEmbed(modalResult.interaction, locale, {
-        titleKey: "commands.config.model.fallback.primary_conflict_title",
-        descriptionKey: "commands.config.model.fallback.primary_conflict_description",
+        titleKey: "commands.model.fallback.primary_conflict_title",
+        descriptionKey: "commands.model.fallback.primary_conflict_description",
         descriptionVars: { model: primaryModel?.llm_codename ?? `#${primaryLlmId}` },
         color: ColorCode.ERROR,
       });
@@ -405,11 +405,9 @@ export async function execute(
     }
 
     // 11. Write — update only fallback refs on the selected provider config
-    const llmOnlyIds = finalRefs.filter((r) => r.type === "llm").map((r) => r.id);
-    const writeOk = await upsertUserSavedProviderConfig(userData.user_id, {
+    const writeOk = await llmProviderRepo.upsertUserSavedProviderConfig(userData.user_id, {
       ...selectedConfig,
       fallback_model_refs: finalRefs,
-      fallback_llm_ids: llmOnlyIds,
     });
     if (!writeOk) {
       await replyInfoEmbed(modalResult.interaction, locale, {

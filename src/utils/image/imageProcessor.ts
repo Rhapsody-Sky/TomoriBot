@@ -6,6 +6,8 @@
 
 import sharp from "sharp";
 import { log } from "../misc/logger";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
+import { safeDownload } from "@/utils/security/safeDownload";
 
 // ── LLM context image optimization thresholds ────────────────────────
 // Images exceeding these limits are downscaled before being sent to providers
@@ -19,6 +21,9 @@ const IMAGE_CONTEXT_MAX_DIMENSION = Number.parseInt(process.env.IMAGE_CONTEXT_MA
 
 /** JPEG quality used when an image is downscaled (default 85) */
 const IMAGE_CONTEXT_JPEG_QUALITY = Number.parseInt(process.env.IMAGE_CONTEXT_JPEG_QUALITY ?? "85", 10);
+
+/** Timeout in milliseconds for fetching images for LLM context (default 20 s) */
+const IMAGE_FETCH_TIMEOUT_MS = Number.parseInt(process.env.IMAGE_FETCH_TIMEOUT_MS ?? "20000", 10);
 
 /** Result of fetching and optionally optimizing an image for LLM context */
 export interface OptimizedImage {
@@ -47,15 +52,17 @@ export interface OptimizedImage {
  */
 export async function fetchAndOptimizeImage(url: string, sourceMimeType?: string): Promise<OptimizedImage> {
   // 1. Fetch the raw image bytes
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Image fetch failed: ${response.status} ${response.statusText}`);
+  const downloadResult = await safeDownload(url, {
+    maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
+    timeoutMs: IMAGE_FETCH_TIMEOUT_MS,
+  });
+  if (!downloadResult.success || !downloadResult.buffer) {
+    throw new Error(`Image fetch failed: ${downloadResult.details ?? downloadResult.error ?? "unknown error"}`);
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const buffer = downloadResult.buffer;
   const rawSize = buffer.byteLength;
-  const finalMimeType = sourceMimeType || response.headers.get("content-type") || "image/jpeg";
+  const finalMimeType = sourceMimeType || downloadResult.contentType || "image/jpeg";
 
   // 2. Fast path — small images pass through unchanged
   if (rawSize <= IMAGE_CONTEXT_MAX_BYTES) {

@@ -4,12 +4,6 @@
  */
 
 import { z } from "zod";
-import {
-  ABSOLUTE_MAX_STRING_LENGTH,
-  ABSOLUTE_MAX_ATTRIBUTES,
-  ABSOLUTE_MAX_SAMPLE_DIALOGUES,
-  ABSOLUTE_MAX_TRIGGER_WORDS,
-} from "@/utils/db/memoryLimits";
 
 /**
  * Current version of the preset export format
@@ -23,28 +17,54 @@ export const PRESET_EXPORT_VERSION = "1.0.0";
  */
 export const UNPAIRED_SAMPLE_DIALOGUE_SENTINEL = "__UNPAIRED_SAMPLE_DIALOGUE__";
 
+function parsePositiveIntegerEnv(name: string, defaultValue: number): number {
+  const parsedValue = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : defaultValue;
+}
+
 /**
- * Maximum array sizes for validation (prevent DoS attacks)
- * These use the absolute maximum values to ensure cross-server compatibility
- * and prevent token waste from AI-generated presets that slightly exceed defaults
+ * Preset import/export schema limits.
+ * Admins can raise these with env vars, but doing so affects untrusted import files
+ * and cross-instance preset portability.
  */
-export const MAX_ARRAY_SIZE = ABSOLUTE_MAX_ATTRIBUTES; // 200 attributes max
-export const MAX_STRING_LENGTH = ABSOLUTE_MAX_STRING_LENGTH; // 5000 chars per item
+export const PRESET_MAX_STRING_LENGTH = parsePositiveIntegerEnv("PRESET_MAX_STRING_LENGTH", 5000);
+export const PRESET_MAX_ATTRIBUTES = parsePositiveIntegerEnv("PRESET_MAX_ATTRIBUTES", 200);
+export const PRESET_MAX_SAMPLE_DIALOGUES = parsePositiveIntegerEnv("PRESET_MAX_SAMPLE_DIALOGUES", 100);
+export const PRESET_MAX_TRIGGER_WORDS = parsePositiveIntegerEnv("PRESET_MAX_TRIGGER_WORDS", 100);
+export const PRESET_MAX_IMAGE_TAGS = parsePositiveIntegerEnv("PRESET_MAX_IMAGE_TAGS", 200);
+
+/**
+ * Generated presets use the canonical 6-attribute layout from presetCommon.ts:
+ * Description, Appearance, Personality, Likes, Dislikes, Behavioral Quirks.
+ */
+const GENERATED_PRESET_APPEARANCE_ATTRIBUTE_INDEX = 1;
+
+export function buildPrivateAttributePublicFlags(attributeList: readonly string[]): boolean[] {
+  return attributeList.map(() => false);
+}
+
+export function buildGeneratedPresetAttributePublicFlags(attributeList: readonly string[]): boolean[] {
+  return attributeList.map((_attribute, index) => index === GENERATED_PRESET_APPEARANCE_ATTRIBUTE_INDEX);
+}
 
 /**
  * Preset personality data structure
- * Contains all personality-related fields from tomoris and tomori_configs tables
+ * Contains all personality-related fields from personas and persona-scoped config tables.
  */
 export interface PresetExportData {
   tomori_nickname: string;
   attribute_list: string[];
+  /** Visibility flags aligned to attribute_list; true exposes the attribute to other triggered personas */
+  attribute_public_flags?: boolean[];
   sample_dialogues_in: string[];
   sample_dialogues_out: string[];
   trigger_words: string[];
   persona_prompt?: string | null;
   persona_lineage_id?: number;
-  /** Imageboard-style persona appearance tags for NovelAI character rendering */
-  nai_tags?: string[];
+  /** Official preset lineage, when this export was materialized from a preset pointer */
+  preset_lineage_id?: number;
+  /** Public imageboard-style persona physical appearance tags for image generation */
+  physical_appearance_tags?: string[];
   /** Persona-specific NovelAI character reference image URL */
   nai_char_ref_url?: string | null;
   /** ATTG: Story author name */
@@ -115,11 +135,12 @@ export interface ValidationResult {
  */
 export const presetExportDataSchema = z.object({
   tomori_nickname: z.string().min(1, "Nickname cannot be empty").max(100, "Nickname too long"),
-  attribute_list: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_ATTRIBUTES),
-  sample_dialogues_in: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_SAMPLE_DIALOGUES),
-  sample_dialogues_out: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_SAMPLE_DIALOGUES),
-  trigger_words: z.array(z.string().max(MAX_STRING_LENGTH)).max(ABSOLUTE_MAX_TRIGGER_WORDS),
-  persona_prompt: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
+  attribute_list: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_ATTRIBUTES),
+  attribute_public_flags: z.array(z.boolean()).max(PRESET_MAX_ATTRIBUTES).optional(),
+  sample_dialogues_in: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_SAMPLE_DIALOGUES),
+  sample_dialogues_out: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_SAMPLE_DIALOGUES),
+  trigger_words: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_TRIGGER_WORDS),
+  persona_prompt: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
   persona_lineage_id: z
     .preprocess((value) => {
       if (typeof value === "bigint") {
@@ -131,12 +152,23 @@ export const presetExportDataSchema = z.object({
       return value;
     }, z.number().int().nonnegative())
     .optional(),
-  nai_tags: z.array(z.string().max(MAX_STRING_LENGTH)).optional(),
-  nai_char_ref_url: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_author: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_title: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_tags: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
-  nai_attg_genre: z.string().max(MAX_STRING_LENGTH).nullable().optional(),
+  preset_lineage_id: z
+    .preprocess((value) => {
+      if (typeof value === "bigint") {
+        return Number(value);
+      }
+      if (typeof value === "string" && value.trim() !== "") {
+        return Number(value);
+      }
+      return value;
+    }, z.number().int().nonnegative())
+    .optional(),
+  physical_appearance_tags: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_IMAGE_TAGS).optional(),
+  nai_char_ref_url: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_author: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_title: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_tags: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  nai_attg_genre: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
   nai_attg_stars: z.number().int().min(1).max(5).nullable().optional(),
 });
 
