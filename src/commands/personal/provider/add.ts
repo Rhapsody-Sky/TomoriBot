@@ -12,7 +12,11 @@ import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import { promptWithRawModal } from "@/utils/discord/ui/modals";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { ProviderFactory } from "@/utils/provider/providerFactory";
-import { getAllProviderChoices, getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
+import {
+  getAllProviderChoices,
+  getProviderAddChoiceDescriptionKey,
+  getProviderDisplayName,
+} from "@/utils/provider/providerInfoRegistry";
 import { encryptApiKey } from "@/utils/security/crypto";
 import { localizer } from "@/utils/text/localizer";
 import type { ErrorContext, UserRow } from "@/types/db/schema";
@@ -20,6 +24,7 @@ import type { ModalComponent, SelectOption } from "@/types/discord/modal";
 import { buildUserSavedProviderConfigFromExistingOrDefaults } from "@/utils/provider/savedProviderConfig";
 import { isCustomProvider } from "@/utils/discord/customProviderModal";
 import { commandRegistry } from "@/utils/discord/commandRegistry";
+import { activatePersonalProviderTextModel } from "@/utils/provider/providerActivation";
 
 const MODAL_CUSTOM_ID = "personal_provider_add_modal";
 const PROVIDER_SELECT_ID = "provider_select";
@@ -72,10 +77,14 @@ export async function execute(
     (await llmProviderRepo.loadUserSavedProviderConfigs(userData.user_id)).map((row) => row.provider),
   );
   const existingSuffix = localizer(locale, "commands.personal.provider.add.already_existing_suffix");
-  const providerOptions: SelectOption[] = providerChoices.map((choice) => ({
-    label: existingProviders.has(choice.value) ? `${choice.name} (${existingSuffix})` : choice.name,
-    value: choice.value,
-  }));
+  const providerOptions: SelectOption[] = providerChoices.map((choice) => {
+    const descriptionKey = getProviderAddChoiceDescriptionKey(choice.value);
+    return {
+      label: existingProviders.has(choice.value) ? `${choice.name} (${existingSuffix})` : choice.name,
+      value: choice.value,
+      description: descriptionKey ? localizer(locale, descriptionKey) : undefined,
+    };
+  });
   providerOptions.push({
     label: getProviderDisplayName("custom"),
     value: "custom",
@@ -187,6 +196,29 @@ export async function execute(
       return;
     }
 
+    const activationResult = await activatePersonalProviderTextModel({
+      userId: userData.user_id,
+      provider: selectedProvider,
+      llmId: savedConfig.llm_id,
+    });
+    if (activationResult.status !== "activated") {
+      await replyInfoEmbed(modalResult.interaction, locale, {
+        titleKey:
+          activationResult.status === "missing_model"
+            ? "commands.provider.api-key.set.no_default_model_title"
+            : "general.errors.update_failed_title",
+        descriptionKey:
+          activationResult.status === "missing_model"
+            ? "commands.provider.api-key.set.no_default_model_description"
+            : "general.errors.update_failed_description",
+        descriptionVars: {
+          provider: getProviderDisplayName(selectedProvider),
+        },
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
     await replyInfoEmbed(modalResult.interaction, locale, {
       titleKey: "commands.personal.provider.add.success_title",
       descriptionKey: existingConfig
@@ -194,6 +226,7 @@ export async function execute(
         : "commands.personal.provider.add.success_description",
       descriptionVars: {
         provider: getProviderDisplayName(selectedProvider),
+        model_name: activationResult.modelName ?? localizer(locale, "general.unknown"),
       },
       color: ColorCode.SUCCESS,
     });

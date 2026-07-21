@@ -2,8 +2,13 @@ import { MessageFlags, type Client, type Interaction } from "discord.js";
 import { replyInfoEmbed } from "../../utils/discord/interactionHelper";
 import { ColorCode, log } from "../../utils/misc/logger";
 import type { UserRow, ErrorContext } from "../../types/db/schema";
-import { cooldownRepository, userRepository } from "@/utils/db/repositories";
-import { loadCommandData, type CommandExecutionMap, type CommandCooldownMap } from "../../utils/discord/commandLoader";
+import { cooldownRepository, serverRepository, statRepository, userRepository } from "@/utils/db/repositories";
+import {
+  loadCommandData,
+  ROOT_COMMAND_EXECUTION_KEY,
+  type CommandExecutionMap,
+  type CommandCooldownMap,
+} from "../../utils/discord/commandLoader";
 import { resolvePreferredDiscordDisplayName } from "../../utils/discord/displayName";
 
 // Define constants at the top (Rule #20)
@@ -66,21 +71,45 @@ const handler = async (client: Client, interaction: Interaction): Promise<void> 
   const initialLocale = interaction.locale ?? interaction.guildLocale ?? "en-US";
 
   try {
-    // 1. Load command data on first run if cache is empty
+    // 1. Load command data on first run if cache is empty.
+    //    loadCommandData() is single-flight: if startup registration is still
+    //    loading, this awaits that same shared evaluation instead of racing a
+    //    second concurrent load (which previously caused command modules to be
+    //    skipped via a Temporal Dead Zone error, leaving the bot "dead").
     if (!executionMap || !cooldownMap) {
       log.info("Initializing command execution maps...");
       const loadedData = await loadCommandData();
-      executionMap = loadedData.executionMap;
-      cooldownMap = loadedData.cooldownMap;
 
-      // Use our existing cooldown values if none were provided from commands
-      if (cooldownMap.size === 0) {
-        for (const [category, duration] of COOLDOWN_MAP.entries()) {
-          cooldownMap.set(category, duration);
+      // Only commit the maps to the module-level cache when the load actually
+      // produced commands. An empty execution map signals a catastrophic load
+      // failure; caching it would permanently brick every command, so we leave
+      // the cache empty and let a subsequent interaction retry the load.
+      if (loadedData.executionMap.size > 0) {
+        executionMap = loadedData.executionMap;
+        cooldownMap = loadedData.cooldownMap;
+
+        // Use our existing cooldown values if none were provided from commands
+        if (cooldownMap.size === 0) {
+          for (const [category, duration] of COOLDOWN_MAP.entries()) {
+            cooldownMap.set(category, duration);
+          }
         }
-      }
 
-      log.success("Command execution maps initialized.");
+        log.success("Command execution maps initialized.");
+      } else {
+        log.warn("Command load produced no commands; will retry on next interaction.");
+        await replyInfoEmbed(
+          interaction,
+          initialLocale,
+          {
+            titleKey: "general.errors.unknown_error_title",
+            descriptionKey: "general.errors.unknown_error_description",
+            color: ColorCode.ERROR,
+          },
+          MessageFlags.Ephemeral,
+        );
+        return;
+      }
     }
 
     // 2. Get command, group, and subcommand names
@@ -109,31 +138,21 @@ const handler = async (client: Client, interaction: Interaction): Promise<void> 
       return;
     }
 
-    // If no subcommand was specified but we require one
-    if (!subcommandName) {
-      log.warn(`No subcommand specified for category: ${commandName}`);
-      await replyInfoEmbed(
-        interaction,
-        initialLocale,
-        {
-          titleKey: "general.errors.unknown_error_title",
-          descriptionKey: "general.errors.unknown_error_description",
-          color: ColorCode.ERROR,
-        },
-        MessageFlags.Ephemeral,
-      );
-      return;
-    }
-
     // Build execution key based on whether command is grouped or flat
-    const executionKey = groupName ? `${groupName}.${subcommandName}` : subcommandName;
+    const executionKey = subcommandName
+      ? groupName
+        ? `${groupName}.${subcommandName}`
+        : subcommandName
+      : ROOT_COMMAND_EXECUTION_KEY;
 
     // Get the execute function for this subcommand
     const executeFunction = subcommandMap.get(executionKey);
     if (!executeFunction) {
       const fullCommandPath = groupName
         ? `${commandName} ${groupName} ${subcommandName}`
-        : `${commandName} ${subcommandName}`;
+        : subcommandName
+          ? `${commandName} ${subcommandName}`
+          : commandName;
       log.warn(`Subcommand not found: ${fullCommandPath}`);
       await replyInfoEmbed(
         interaction,
@@ -219,13 +238,47 @@ const handler = async (client: Client, interaction: Interaction): Promise<void> 
       // 6. Execute command
       if (userData) {
         await executeFunction(client, interaction, userData, finalLocale);
+
+        // 6a. Record command usage (fire-and-forget so stat tracking never adds
+        // latency to the command response). command_used is persona-agnostic, so
+        // it buffers under the lineage-0 sentinel. DM commands have no guild and
+        // are skipped (stat_counters.server_id is a NOT NULL FK). The single
+        // commandLoader dispatch path covers every slash command for free.
+        const statUserId = userData.user_id;
+        if (interaction.guildId && statUserId) {
+          const guildId = interaction.guildId;
+          // Record the full command path (category + optional group + subcommand,
+          // space-joined) so stats distinguish subcommands like "config humanizer"
+          // from "config message-fetch-limit" — top-level alone is too coarse for
+          // underused-command detection.
+          const fullCommandName = groupName
+            ? `${commandName} ${groupName} ${subcommandName}`
+            : subcommandName
+              ? `${commandName} ${subcommandName}`
+              : commandName;
+          void (async () => {
+            try {
+              const internalServerId = await serverRepository.loadServerIdByDiscId(guildId);
+              if (internalServerId) {
+                statRepository.recordStat({
+                  serverId: internalServerId,
+                  userId: statUserId,
+                  metric: "command_used",
+                  metricKey: fullCommandName,
+                });
+              }
+            } catch (statError) {
+              log.warn(`Failed to record command_used stat for ${fullCommandName}: ${statError}`);
+            }
+          })();
+        }
       } else {
         // Handle case where user data couldn't be obtained
         const context: ErrorContext = {
           errorType: "UserDataError",
           metadata: {
             userDiscordId: interaction.user.id,
-            command: `${commandName} ${subcommandName}`,
+            command: subcommandName ? `${commandName} ${subcommandName}` : commandName,
           },
         };
         await log.error("User data unavailable for command execution", undefined, context);

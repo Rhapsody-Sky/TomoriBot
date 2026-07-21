@@ -6,6 +6,7 @@ import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { replySummaryEmbed } from "@/utils/discord/ui/embeds";
 import { commandRegistry } from "@/utils/discord/commandRegistry";
+import { DOCS_PATHS } from "@/utils/discord/docsLinks";
 
 /**
  * Configure the /help setup subcommand
@@ -45,8 +46,7 @@ export async function execute(
     const helpMemoryMention = commandRegistry.getCommandMention("help", "memory");
     const helpCustomizationMention = commandRegistry.getCommandMention("help", "customization");
     const supportServerMention = commandRegistry.getCommandMention("support", "discord");
-    const configApiKeySetMention = commandRegistry.getCommandMention("config", "provider", "add");
-    const configProviderSwitchMention = commandRegistry.getCommandMention("config", "provider", "switch");
+    const configApiKeySetMention = commandRegistry.getCommandMention("provider", "add");
 
     // Use replySummaryEmbed to show structured setup guide
     await replySummaryEmbed(
@@ -55,6 +55,7 @@ export async function execute(
       {
         titleKey: "commands.help.setup.title",
         descriptionKey: "commands.help.setup.embed_description",
+        docsPath: DOCS_PATHS.QUICKSTART,
         color: ColorCode.SUCCESS,
         fields: [
           {
@@ -62,7 +63,6 @@ export async function execute(
             value: localizer(locale, "commands.help.setup.step1_description", {
               helpApikey: helpApikeyMention,
               configApiKeySet: configApiKeySetMention,
-              configProviderSwitch: configProviderSwitchMention,
             }),
             inline: false,
           },

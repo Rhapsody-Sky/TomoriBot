@@ -21,7 +21,12 @@ import { userRepository } from "@/utils/db/repositories/UserRepository";
 import { sql } from "@/utils/db/client";
 import { log } from "@/utils/misc/logger";
 import { keyManager } from "@/utils/security/keyManager";
-import { DEFAULT_SYSTEM_PROMPT } from "@/utils/text/contextBuilder";
+// Import the constant directly from its leaf module rather than the
+// `contextBuilder` barrel: the barrel also re-exports `buildContext`, whose
+// transitive graph (tools, webhooks, providers, tomoriStateCache) would
+// otherwise be pulled into the repositories barrel and create deep import
+// cycles. See docs/subsystems/command-system.md (single-flight loading).
+import { DEFAULT_SYSTEM_PROMPT } from "@/utils/text/context/templates";
 import { getBaseTriggerWords } from "@/utils/text/localizer";
 import { dedupeTriggerWords } from "@/utils/text/triggerWords";
 import type { IRepository } from "./IRepository";
@@ -42,6 +47,14 @@ export type ManagedDiscordWebhookRow = {
   created_at?: Date;
   updated_at?: Date;
 };
+
+/** Sync freshness for a server's emoji or sticker set (lazy-sync cache input). */
+export interface ServerAssetSyncStatus {
+  /** Most recent `updated_at` across the rows, or null when none exist. */
+  lastUpdated: Date | null;
+  /** Number of synced rows for the server. */
+  count: number;
+}
 
 // ── Emoji/sticker sync private types ──────────────────────────────────────────
 
@@ -75,6 +88,7 @@ export type ServerChatConfigsRow = {
   cascade_limit: number;
   timezone_offset: number;
   self_debug_enabled: boolean;
+  model_randomizer_enabled: boolean;
   system_prompt: string | null;
   context_note: string | null;
   context_note_depth: number;
@@ -263,6 +277,46 @@ export class ServerRepository implements IRepository<ServerExportShape> {
     } catch (error) {
       log.error(`Error loading stickers for server ID ${internalServerId}:`, error);
       return [];
+    }
+  }
+
+  /**
+   * Returns how many emojis are synced for a server and when they were last
+   * updated. Used by the lazy-sync cache to decide whether a Discord refetch is
+   * due. A server with no synced emojis yields `{ lastUpdated: null, count: 0 }`.
+   *
+   * @param serverId - Internal server DB ID
+   */
+  async getEmojiSyncStatus(serverId: number): Promise<ServerAssetSyncStatus> {
+    try {
+      const [row] = await sql<Array<{ last_updated: Date | null; asset_count: number | string }>>`
+        SELECT MAX(updated_at) AS last_updated, COUNT(*) AS asset_count
+        FROM server_emojis
+        WHERE server_id = ${serverId}
+      `;
+      return { lastUpdated: row?.last_updated ?? null, count: Number(row?.asset_count ?? 0) };
+    } catch (error) {
+      log.error(`Error loading emoji sync status for server ${serverId}:`, error);
+      return { lastUpdated: null, count: 0 };
+    }
+  }
+
+  /**
+   * Sticker counterpart of {@link getEmojiSyncStatus}.
+   *
+   * @param serverId - Internal server DB ID
+   */
+  async getStickerSyncStatus(serverId: number): Promise<ServerAssetSyncStatus> {
+    try {
+      const [row] = await sql<Array<{ last_updated: Date | null; asset_count: number | string }>>`
+        SELECT MAX(updated_at) AS last_updated, COUNT(*) AS asset_count
+        FROM server_stickers
+        WHERE server_id = ${serverId}
+      `;
+      return { lastUpdated: row?.last_updated ?? null, count: Number(row?.asset_count ?? 0) };
+    } catch (error) {
+      log.error(`Error loading sticker sync status for server ${serverId}:`, error);
+      return { lastUpdated: null, count: 0 };
     }
   }
 
@@ -1373,7 +1427,8 @@ export class ServerRepository implements IRepository<ServerExportShape> {
     try {
       const [row] = await sql`
         SELECT humanizer_degree, message_fetch_limit, send_message_limit, match_limit,
-               cascade_limit, timezone_offset, self_debug_enabled, system_prompt,
+               cascade_limit, timezone_offset, self_debug_enabled, model_randomizer_enabled,
+               system_prompt,
                context_note, context_note_depth, llm_stop_strings,
                llm_stop_speaker_pattern_enabled, llm_max_output_tokens,
                llm_top_p, llm_top_k, llm_frequency_penalty, llm_presence_penalty,
@@ -1454,6 +1509,7 @@ export class ServerRepository implements IRepository<ServerExportShape> {
       INSERT INTO server_chat_configs (
         server_id, humanizer_degree, message_fetch_limit, send_message_limit,
         match_limit, cascade_limit, timezone_offset, self_debug_enabled,
+        model_randomizer_enabled,
         system_prompt, context_note, context_note_depth, llm_stop_strings,
         llm_stop_speaker_pattern_enabled, llm_max_output_tokens,
         llm_top_p, llm_top_k, llm_frequency_penalty, llm_presence_penalty,
@@ -1461,7 +1517,8 @@ export class ServerRepository implements IRepository<ServerExportShape> {
       ) VALUES (
         ${serverId}, ${row.humanizer_degree}, ${row.message_fetch_limit},
         ${row.send_message_limit}, ${row.match_limit}, ${row.cascade_limit},
-        ${row.timezone_offset}, ${row.self_debug_enabled}, ${row.system_prompt},
+        ${row.timezone_offset}, ${row.self_debug_enabled}, ${row.model_randomizer_enabled},
+        ${row.system_prompt},
         ${row.context_note}, ${row.context_note_depth},
         ${sql.array(row.llm_stop_strings, "TEXT")}, ${row.llm_stop_speaker_pattern_enabled},
         ${row.llm_max_output_tokens}, ${row.llm_top_p}, ${row.llm_top_k},
@@ -1476,6 +1533,7 @@ export class ServerRepository implements IRepository<ServerExportShape> {
         cascade_limit                    = EXCLUDED.cascade_limit,
         timezone_offset                  = EXCLUDED.timezone_offset,
         self_debug_enabled               = EXCLUDED.self_debug_enabled,
+        model_randomizer_enabled         = EXCLUDED.model_randomizer_enabled,
         system_prompt                    = EXCLUDED.system_prompt,
         context_note                     = EXCLUDED.context_note,
         context_note_depth               = EXCLUDED.context_note_depth,
@@ -1689,14 +1747,75 @@ export class ServerRepository implements IRepository<ServerExportShape> {
     return { emojiCount, stickerCount };
   }
 
+  /**
+   * Manually overwrite a single emoji's emotion classification and usage description.
+   * Used by `/server expressions edit`. Unlike {@link initializeExpressions}, this
+   * writes unconditionally (no "still uninitialized" guard) because the invoking user
+   * is deliberately correcting an existing classification.
+   *
+   * @param serverId - Internal server DB ID
+   * @param emojiDiscId - Discord emoji snowflake identifying the row to update
+   * @param emotionKey - New emotion key (must be one of the 28 valid EmotionKey values)
+   * @param description - New usage/description text surfaced to the model
+   * @returns True if a matching emoji row was updated, false otherwise
+   */
+  async updateEmojiExpression(
+    serverId: number,
+    emojiDiscId: string,
+    emotionKey: string,
+    description: string,
+  ): Promise<boolean> {
+    const rows = await sql<Array<{ emoji_disc_id: string }>>`
+      UPDATE server_emojis
+      SET
+        emotion_key = ${emotionKey},
+        emoji_desc  = ${description},
+        updated_at  = CURRENT_TIMESTAMP
+      WHERE server_id = ${serverId} AND emoji_disc_id = ${emojiDiscId}
+      RETURNING emoji_disc_id
+    `;
+    return rows.length > 0;
+  }
+
+  /**
+   * Manually overwrite a single sticker's emotion classification and usage description.
+   * Sibling of {@link updateEmojiExpression} for the server_stickers table.
+   *
+   * @param serverId - Internal server DB ID
+   * @param stickerDiscId - Discord sticker snowflake identifying the row to update
+   * @param emotionKey - New emotion key (must be one of the 28 valid EmotionKey values)
+   * @param description - New usage/description text surfaced to the model
+   * @returns True if a matching sticker row was updated, false otherwise
+   */
+  async updateStickerExpression(
+    serverId: number,
+    stickerDiscId: string,
+    emotionKey: string,
+    description: string,
+  ): Promise<boolean> {
+    const rows = await sql<Array<{ sticker_disc_id: string }>>`
+      UPDATE server_stickers
+      SET
+        emotion_key  = ${emotionKey},
+        sticker_desc = ${description},
+        updated_at   = CURRENT_TIMESTAMP
+      WHERE server_id = ${serverId} AND sticker_disc_id = ${stickerDiscId}
+      RETURNING sticker_disc_id
+    `;
+    return rows.length > 0;
+  }
+
   // ── Nuke (full or persona-preserving wipe) ───────────────────────────────────
 
   /**
    * Server-scoped tables wiped in preserve-personas mode.
    *
-   * Maintenance rule: when a new table is added with a
-   * `REFERENCES servers(server_id)` FK that is NOT inside the persona subtree
-   * AND is not intentionally preserved (like `server_memories`), add it here.
+   * Maintenance rule: only add a table here if it has a real `server_id`
+   * column referencing `servers(server_id)` AND is not inside the persona
+   * subtree AND is not intentionally preserved (like `server_memories`).
+   * Every entry is wiped with `DELETE FROM <table> WHERE server_id = $1`, so a
+   * table WITHOUT a `server_id` column raises a Postgres
+   * `column "server_id" does not exist` error and aborts the whole transaction.
    *
    * Excluded by design:
    *  - `personas` and the persona subtree (`persona_*` tables) — preserved
@@ -1704,6 +1823,8 @@ export class ServerRepository implements IRepository<ServerExportShape> {
    *  - `error_logs` — uses ON DELETE SET NULL; nuke leaves history intact
    *  - `discord_managed_webhooks` — keyed by `guild_disc_id` (handled separately)
    *  - `documents` — has nullable `persona_id`; serverwide rows handled separately
+   *  - Global seed catalogs (`nai_presets`, `system_prompt_presets`) — shared
+   *    across all servers, have NO `server_id` column; never wipe these.
    */
   private static readonly PRESERVE_MODE_WIPE_TABLES: readonly string[] = [
     // Server config tables
@@ -1741,7 +1862,6 @@ export class ServerRepository implements IRepository<ServerExportShape> {
     "opt_api_keys",
     "api_key_rotation",
     "saved_provider_configs",
-    "nai_presets",
     // History / triggers / scheduling
     "conditioning_history",
     "reminders",
@@ -1757,7 +1877,6 @@ export class ServerRepository implements IRepository<ServerExportShape> {
     "openrouter_image_model_registrations",
     "openrouter_video_model_registrations",
     // Misc server-scoped
-    "system_prompt_presets",
     "server_emojis",
     "server_stickers",
     "voice_samples",

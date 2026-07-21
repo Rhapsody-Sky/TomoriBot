@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+// Captured BEFORE the `mock.module` calls below run. Static imports are
+// evaluated at link time, ahead of any top-level statement, so this binds the
+// REAL deliberateToolMode module; we re-register it in afterAll to undo the
+// simplified stub for files loaded later in the monolithic run.
+import * as realDeliberateToolMode from "@/utils/tools/deliberateToolMode";
 import type { LLMProvider, ProviderConfig, StreamResult } from "@/types/provider/interfaces";
 import type { ChatTurnContext } from "@/utils/chat/types";
 import type { TomoriState } from "@/types/db/schema";
@@ -7,19 +12,38 @@ import type { ToolLoopParams } from "@/utils/chat/toolLoop";
 
 // Set env vars before any lazy import so module-level constants pick them up.
 process.env.BOT_MAX_FUNCTION_CALL_ITERATIONS = "10";
-process.env.BOT_MAX_CONSECUTIVE_TOOL_ERRORS = "3";
+process.env.BOT_MAX_CONSECUTIVE_TOOL_ERRORS = "5";
+process.env.NAI_TOOL_FAILURE_RETRY_THRESHOLD = "3";
 
 // --- per-test mutable state -----------------------------------------------
 
 let toolExecuteCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 let toolExecuteQueue: ToolResult[] = [];
+let requiresFollowUp = false;
+let requiresFollowUpCalls: Array<{ name: string; provider: string; serverId?: number }> = [];
+let hasStopRequest = false;
+let isFollowUpRequest = false;
+let clearStopRequestCalls = 0;
+let standardEmbedCalls: Array<{ titleKey?: string; descriptionKey?: string }> = [];
 
 // --------------------------------------------------------------------------
 // Module mocks — all must appear before the first lazy import of toolLoop.ts
 // --------------------------------------------------------------------------
 
 mock.module("@/utils/misc/logger", () => ({
-  ColorCode: { WARN: "WARN", ERROR: "ERROR", INFO: "INFO" },
+  // Values must stay hex STRINGS mirroring the real enum: modules evaluated
+  // while this global mock is in effect call string methods on them at load
+  // time (e.g. contextEmbeds.ts does ColorCode.ERROR.replace("#", "")).
+  ColorCode: {
+    INFO: "#3498DB",
+    SUCCESS: "#2ECC71",
+    MEMORY_UPDATE: "#25d4da",
+    WARN: "#F1C40F",
+    ERROR: "#E74C3C",
+    SECTION: "#E066FF",
+    AFFECTION: "#ff10cb",
+    RATE_LIMIT: "#FFA500",
+  },
   log: {
     error: () => undefined,
     info: () => undefined,
@@ -30,7 +54,13 @@ mock.module("@/utils/misc/logger", () => ({
 }));
 
 mock.module("@/utils/discord/embedHelper", () => ({
-  sendStandardEmbed: async () => undefined,
+  sendStandardEmbed: async (
+    _channel: unknown,
+    _locale: string,
+    options: { titleKey?: string; descriptionKey?: string },
+  ) => {
+    standardEmbedCalls.push(options);
+  },
   // Stub additional exports so modules imported by other test files can satisfy
   // their static import bindings when this mock is in effect globally.
   createStandardEmbed: () => ({ setTitle: () => ({}), setDescription: () => ({}) }),
@@ -44,7 +74,12 @@ mock.module("@/utils/discord/toolProgressNotice", () => ({
 
 mock.module("@/utils/discord/streamOrchestrator", () => ({
   StreamOrchestrator: {
-    hasStopRequest: (_channelId: string) => false,
+    hasStopRequest: (_channelId: string) => hasStopRequest,
+    isFollowUpRequest: (_channelId: string) => isFollowUpRequest,
+    clearStopRequest: (_channelId: string) => {
+      clearStopRequestCalls += 1;
+      hasStopRequest = false;
+    },
     getAndClearStopContext: (_channelId: string) => null,
   },
 }));
@@ -60,60 +95,15 @@ mock.module("@/utils/provider/providerInfoRegistry", () => ({
   },
 }));
 
-mock.module("@/utils/tools/deliberateToolMode", () => ({
-  getDeliberateToolAllowedNames: (
-    content: string | null | undefined,
-    customTriggers?: Record<string, Array<string | { type: "literal" | "regex"; value: string }>> | null,
-  ) => {
-    const text = content ?? "";
-    const allowedNames: string[] = [];
-    const toolNamesByTriggerKey: Record<string, string[]> = {
-      image: ["generate_image"],
-      reminder: ["create_task", "update_task"],
-    };
-    if (/\b(search|look\s+up|latest|today|current|news)\b/i.test(text)) {
-      allowedNames.push("web_search");
-    }
-    if (
-      /\b(?:edit|update|change|modify|reschedule|move|delay|postpone|cancel|delete|remove|clear|stop)\b.{0,100}\b(?:reminder|timer|alarm|task|scheduled\s+task|task\s+reminder)\b/i.test(
-        text,
-      )
-    ) {
-      allowedNames.push("update_task");
-    }
-
-    for (const [triggerKey, triggers] of Object.entries(customTriggers ?? {})) {
-      const toolNames = toolNamesByTriggerKey[triggerKey] ?? [triggerKey];
-      if (
-        triggers.some((trigger) => {
-          if (typeof trigger === "string") return trigger === "^" || text.toLowerCase().includes(trigger.toLowerCase());
-          return trigger.type === "regex"
-            ? new RegExp(trigger.value, "i").test(text)
-            : text.toLowerCase().includes(trigger.value.toLowerCase());
-        })
-      ) {
-        allowedNames.push(...toolNames);
-      }
-    }
-
-    return [...new Set(allowedNames)];
-  },
-  applyDeliberateToolAllowlist: <T extends { name: string }>(params: {
-    builtInTools: T[];
-    mcpFunctionNames: string[];
-    allowedToolNames?: string[] | null;
-  }) => {
-    if (!params.allowedToolNames?.length) {
-      return { builtInTools: params.builtInTools, mcpFunctionNames: params.mcpFunctionNames };
-    }
-    const allowed = new Set(params.allowedToolNames);
-    return {
-      builtInTools: params.builtInTools.filter((tool) => allowed.has(tool.name)),
-      mcpFunctionNames: params.mcpFunctionNames.filter((name) => allowed.has(name)),
-    };
-  },
-  retainSuccessfulToolAffordance: () => undefined,
-}));
+// Pass through to the REAL deliberateToolMode (captured at link time above).
+// toolLoop.ts never calls these functions — it reads deliberate-mode data from
+// `context` — so the loop tests don't need a behavioral stub here; the mock
+// exists only to satisfy transitive linking. Returning the real exports keeps
+// the mock harmless if it leaks into a later file in the monolithic `bun test`
+// (e.g. deliberateToolMode.test.ts, which asserts the real behavior). Spreading
+// a statically-captured namespace is safe — unlike `await import()` inside a
+// factory, it was evaluated before any mock.module call took effect.
+mock.module("@/utils/tools/deliberateToolMode", () => ({ ...realDeliberateToolMode }));
 
 mock.module("@/utils/chat/channelQueue", () => ({
   channelLocks: new Map(),
@@ -125,10 +115,29 @@ mock.module("@/utils/chat/channelQueue", () => ({
   queueStopResponseAtFront: () => undefined,
 }));
 
+// This mock must stub the module's COMPLETE export surface: bun module mocks
+// are process-wide for the rest of the test run, so any test file loaded later
+// that imports an omitted named export (e.g. contextMedia ->
+// formatInlineSystemContent) fails module linking. Only the first three stubs
+// carry behavior this test depends on; the rest exist to satisfy linking and
+// mirror the real signatures inertly.
 mock.module("@/utils/chat/contextAnnotations", () => ({
   annotateRecentMessageMetadataInContext: () => ({ annotatedCount: 0, patchedReplyReferenceCount: 0 }),
   buildTailDirectiveMessage: () => null,
   buildRevealedMessageMetadataTailDirective: () => "",
+  buildCombinedTailDirectiveMessage: () => null,
+  buildSpeakerGuardRetryDirective: () => null,
+  buildReplyReferenceContextAnnotation: async () => null,
+  buildReactionContextAnnotation: async () => null,
+  createReactionContextBudgetState: () => ({}),
+  findReplyContextTargetInMessage: () => null,
+  mergeForcedMentions: () => [],
+  mergeInjectedContextItems: (items: unknown) => items,
+  appendInjectedContextItems: () => undefined,
+  insertBeforeLatestDialoguePair: () => undefined,
+  stripAtPersonaTriggers: (content: string) => content,
+  formatInlineSystemContent: (content: string | null | undefined) =>
+    content?.replace(/\s+/g, " ").trim() || "[System: No text content was included]",
 }));
 
 // The ToolRegistry singleton — executeTool drains toolExecuteQueue.
@@ -138,6 +147,10 @@ mock.module("@/tools/toolRegistry", () => ({
       toolExecuteCalls.push({ name, args });
       const next = toolExecuteQueue.shift();
       return next ?? { success: true, data: { result: "ok" } };
+    },
+    requiresFollowUp: async (name: string, provider: string, serverId?: number) => {
+      requiresFollowUpCalls.push({ name, provider, serverId });
+      return requiresFollowUp;
     },
   },
 }));
@@ -233,8 +246,12 @@ function makeProviderConfig(): ProviderConfig {
 }
 
 /** Function-call stream result — simulates the provider requesting a tool. */
-function makeFunctionCallResult(name: string, args: Record<string, unknown> = {}): StreamResult {
-  return { status: "function_call", data: { name, args } };
+function makeFunctionCallResult(
+  name: string,
+  args: Record<string, unknown> = {},
+  accumulatedText?: string,
+): StreamResult {
+  return { status: "function_call", data: { name, args }, accumulatedText };
 }
 
 /**
@@ -242,16 +259,22 @@ function makeFunctionCallResult(name: string, args: Record<string, unknown> = {}
  * Returns the provider and an array that accumulates every functionInteractionHistory
  * array passed to each call, so tests can verify what the provider sees.
  */
-function makeProvider(results: StreamResult[]): {
+function makeProvider(
+  results: StreamResult[],
+  providerName = "test-provider",
+  simulateBufferedTextParts = false,
+): {
   provider: LLMProvider;
   capturedHistories: Array<unknown[]>;
+  capturedModelParts: Array<Array<Record<string, unknown>>>;
 } {
   const capturedHistories: Array<unknown[]> = [];
+  const capturedModelParts: Array<Array<Record<string, unknown>>> = [];
   const queue = [...results];
 
   const provider = {
     getInfo: () => ({
-      name: "test-provider",
+      name: providerName,
       displayName: "Test Provider",
       supportedModels: ["test-model"],
       requiresApiKey: false,
@@ -279,13 +302,18 @@ function makeProvider(results: StreamResult[]): {
       _ts: unknown,
       _cfg: unknown,
       _ctx: unknown,
-      _parts: unknown,
+      modelPartsInput: unknown,
       _emoji: unknown,
       functionHistory: unknown[] | undefined,
     ) => {
       capturedHistories.push(functionHistory ? [...functionHistory] : []);
+      const modelParts = modelPartsInput as Array<Record<string, unknown>>;
+      capturedModelParts.push([...modelParts]);
       const next = queue.shift();
       if (!next) throw new Error("Fake provider: no more queued stream results");
+      if (simulateBufferedTextParts && next.accumulatedText?.trim()) {
+        modelParts.push({ text: next.accumulatedText });
+      }
       return next;
     },
     validateApiKey: async () => ({ valid: true }),
@@ -295,7 +323,7 @@ function makeProvider(results: StreamResult[]): {
     createConfig: async () => makeProviderConfig(),
   } as unknown as LLMProvider;
 
-  return { provider, capturedHistories };
+  return { provider, capturedHistories, capturedModelParts };
 }
 
 /** Convenience: build ToolLoopParams from a context and provider. */
@@ -311,6 +339,12 @@ describe("runToolLoop — contract tests", () => {
   beforeEach(() => {
     toolExecuteCalls = [];
     toolExecuteQueue = [];
+    requiresFollowUp = false;
+    requiresFollowUpCalls = [];
+    hasStopRequest = false;
+    isFollowUpRequest = false;
+    clearStopRequestCalls = 0;
+    standardEmbedCalls = [];
   });
 
   // -------------------------------------------------------------------------
@@ -418,9 +452,9 @@ describe("runToolLoop — contract tests", () => {
     const context = makeContext();
     const result = await runToolLoop(makeParams(context, provider));
 
-    // Cap is BOT_MAX_CONSECUTIVE_TOOL_ERRORS = 3 (set at the top of this file).
+    // Cap is BOT_MAX_CONSECUTIVE_TOOL_ERRORS = 5 (set at the top of this file).
     expect(result.status).toBe("error");
-    expect(toolExecuteCalls).toHaveLength(3);
+    expect(toolExecuteCalls).toHaveLength(5);
 
     // No user-visible text (shouldSurfaceUserErrors is false in makeContext).
     expect(result.personaResponses).toHaveLength(0);
@@ -554,5 +588,341 @@ describe("runToolLoop — contract tests", () => {
     // passed to the second provider call (restart replaces it with enriched context).
     expect(capturedHistories).toHaveLength(2);
     expect(capturedHistories[1]).toHaveLength(0); // no history entry for the restart call
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Pre-tool text preservation (post-tool-call amnesia regression)
+  // -------------------------------------------------------------------------
+
+  it("pre-tool text is preserved in the history entry passed to the follow-up provider call", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+
+    const { provider, capturedHistories } = makeProvider([
+      // Model streams visible text, THEN calls a tool that continues after its result.
+      makeFunctionCallResult("create_long_term_memory", { content: "likes cats" }, "Yeah, let me remember that."),
+      { status: "completed", accumulatedText: "Saved! Anything else?" },
+    ]);
+    toolExecuteQueue.push({ success: true, data: { saved: true } });
+
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
+
+    // The loop continued to a follow-up provider call — long-term memory
+    // must NOT behave as an end-turn tool.
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(2);
+    expect(result.personaResponses[0]?.text).toBe("Saved! Anything else?");
+
+    // The follow-up call's history entry carries the already-sent text so the
+    // model knows not to repeat it (the amnesia fix contract).
+    const secondHistory = capturedHistories[1] as Array<{
+      functionCall: { name: string };
+      preToolCallTextParts?: Array<Record<string, unknown>>;
+    }>;
+    expect(secondHistory).toHaveLength(1);
+    expect(secondHistory[0]?.preToolCallTextParts).toEqual([{ type: "text", text: "Yeah, let me remember that." }]);
+  });
+
+  it("removes pre-tool text from trailing model prefill after moving it into tool history", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const { provider, capturedModelParts } = makeProvider(
+      [
+        makeFunctionCallResult("echo_tool", {}, "Let me check that."),
+        { status: "completed", accumulatedText: "Here is the result." },
+      ],
+      "openrouter",
+      true,
+    );
+    toolExecuteQueue.push({ success: true, data: { summary: "Tool result" } });
+
+    const result = await runToolLoop(makeParams(makeContext(), provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedModelParts).toEqual([[], []]);
+  });
+
+  it("no pre-tool text: history entry omits preToolCallTextParts", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+
+    const { provider, capturedHistories } = makeProvider([
+      // Whitespace-only accumulated text must not produce text parts.
+      makeFunctionCallResult("echo_tool", {}, "   "),
+      { status: "completed", accumulatedText: "done" },
+    ]);
+    toolExecuteQueue.push({ success: true, data: { ok: true } });
+
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    const secondHistory = capturedHistories[1] as Array<{
+      preToolCallTextParts?: Array<Record<string, unknown>>;
+    }>;
+    expect(secondHistory).toHaveLength(1);
+    expect(secondHistory[0]?.preToolCallTextParts).toBeUndefined();
+  });
+
+  it("multi-tool chain: each history entry carries only its own iteration's pre-tool text", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+
+    const { provider, capturedHistories } = makeProvider([
+      makeFunctionCallResult("tool_one", {}, "First, let me check something."),
+      makeFunctionCallResult("tool_two", {}, "Now one more thing."),
+      { status: "completed", accumulatedText: "All done!" },
+    ]);
+    toolExecuteQueue.push({ success: true, data: { ok: 1 } });
+    toolExecuteQueue.push({ success: true, data: { ok: 2 } });
+
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(3);
+
+    // The third provider call sees both entries, each with its own text —
+    // no duplication across iterations (fresh stream state per streamOnce).
+    const thirdHistory = capturedHistories[2] as Array<{
+      functionCall: { name: string };
+      preToolCallTextParts?: Array<Record<string, unknown>>;
+    }>;
+    expect(thirdHistory).toHaveLength(2);
+    expect(thirdHistory[0]?.preToolCallTextParts).toEqual([{ type: "text", text: "First, let me check something." }]);
+    expect(thirdHistory[1]?.preToolCallTextParts).toEqual([{ type: "text", text: "Now one more thing." }]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. Pre-tool text early-exit policy is unchanged
+  // -------------------------------------------------------------------------
+
+  it("update_short_term_memory with pre-tool text still ends the turn without a follow-up call", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+
+    const { provider, capturedHistories } = makeProvider([
+      makeFunctionCallResult("update_short_term_memory", { content: "note" }, "Got it, noting that down."),
+      // No second result queued — a follow-up call would throw in the fake provider.
+    ]);
+    toolExecuteQueue.push({ success: true, data: { saved: true } });
+
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
+
+    // Suppress-set tool ends the turn after pre-tool text; the visible text is the response.
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(1);
+    expect(result.personaResponses[0]?.text).toBe("Got it, noting that down.");
+    expect(requiresFollowUpCalls).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. Sticker selection is carried only through completed turns
+  // -------------------------------------------------------------------------
+
+  it("successful sticker selection is carried on the completed result", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const sticker = { id: "sticker_1", name: "Wave", url: "https://cdn.example/sticker.png" };
+    const { provider } = makeProvider([
+      makeFunctionCallResult("select_sticker_for_response", { sticker_name: "Wave" }),
+      { status: "completed", accumulatedText: "Hello!" },
+    ]);
+    toolExecuteQueue.push({
+      success: true,
+      data: { status: "sticker_selected_successfully", sticker_id: sticker.id, sticker_name: sticker.name },
+    });
+
+    const context = makeContext();
+    context.guild = { stickers: { cache: new Map([[sticker.id, sticker]]) } } as unknown as ChatTurnContext["guild"];
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    expect(result.selectedSticker).toBe(sticker);
+  });
+
+  it("a later failed sticker selection clears an earlier selection", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const sticker = { id: "sticker_1", name: "Wave", url: "https://cdn.example/sticker.png" };
+    const { provider } = makeProvider([
+      makeFunctionCallResult("select_sticker_for_response", { sticker_name: "Wave" }),
+      makeFunctionCallResult("select_sticker_for_response", { sticker_name: "Missing" }),
+      { status: "completed", accumulatedText: "No sticker this time." },
+    ]);
+    toolExecuteQueue.push({
+      success: true,
+      data: { status: "sticker_selected_successfully", sticker_id: sticker.id, sticker_name: sticker.name },
+    });
+    toolExecuteQueue.push({ success: false, data: { status: "sticker_not_found" }, error: "not found" });
+
+    const context = makeContext();
+    context.guild = { stickers: { cache: new Map([[sticker.id, sticker]]) } } as unknown as ChatTurnContext["guild"];
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    expect(result.selectedSticker).toBeUndefined();
+  });
+
+  it("max-iterations timeout clears a selected sticker", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const sticker = { id: "sticker_1", name: "Wave", url: "https://cdn.example/sticker.png" };
+    const { provider } = makeProvider([
+      makeFunctionCallResult("select_sticker_for_response", { sticker_name: "Wave" }),
+      ...Array.from({ length: 9 }, () => makeFunctionCallResult("infinite_tool")),
+    ]);
+    toolExecuteQueue.push({
+      success: true,
+      data: { status: "sticker_selected_successfully", sticker_id: sticker.id, sticker_name: sticker.name },
+    });
+    for (let i = 0; i < 9; i++) {
+      toolExecuteQueue.push({ success: true, data: { ok: true } });
+    }
+
+    const context = makeContext();
+    context.guild = { stickers: { cache: new Map([[sticker.id, sticker]]) } } as unknown as ChatTurnContext["guild"];
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("timeout");
+    expect(result.selectedSticker).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // 11. NovelAI follow-up policy
+  // -------------------------------------------------------------------------
+
+  it("NovelAI continues after pre-tool text when the successful tool requires follow-up", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    requiresFollowUp = true;
+    const { provider, capturedHistories } = makeProvider(
+      [
+        makeFunctionCallResult("web_search", { query: "news" }, "Let me check."),
+        { status: "completed", accumulatedText: "Here is what I found." },
+      ],
+      "novelai",
+    );
+    toolExecuteQueue.push({ success: true, data: { results: ["result"] } });
+
+    const context = makeContext();
+    context.streamingContext.suppressTextOutput = true;
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(2);
+    expect(result.personaResponses[0]?.text).toBe("Here is what I found.");
+    expect(context.streamingContext.suppressTextOutput).toBe(false);
+    expect(requiresFollowUpCalls).toEqual([{ name: "web_search", provider: "novelai", serverId: 1 }]);
+  });
+
+  it("NovelAI ends after pre-tool text when the successful tool does not require follow-up", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const { provider, capturedHistories } = makeProvider(
+      [makeFunctionCallResult("non_follow_up_tool", {}, "That is done.")],
+      "novelai",
+    );
+    toolExecuteQueue.push({ success: true, data: { ok: true } });
+
+    const result = await runToolLoop(makeParams(makeContext(), provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(1);
+    expect(result.personaResponses[0]?.text).toBe("That is done.");
+    expect(requiresFollowUpCalls).toEqual([{ name: "non_follow_up_tool", provider: "novelai", serverId: 1 }]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 12. NovelAI tool-failure retry
+  // -------------------------------------------------------------------------
+
+  it("NovelAI suppresses repeated text and retries a tool failure after pre-tool text", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const { provider, capturedHistories } = makeProvider(
+      [
+        makeFunctionCallResult("web_search", {}, "Let me try that."),
+        { status: "completed", accumulatedText: "Recovered." },
+      ],
+      "novelai",
+    );
+    toolExecuteQueue.push({ success: false, error: "temporary failure" });
+
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(2);
+    expect(context.streamingContext.suppressTextOutput).toBe(true);
+    expect(standardEmbedCalls).toHaveLength(0);
+  });
+
+  it("NovelAI ends with the localized retry-exhausted embed at the configured threshold", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const { provider, capturedHistories } = makeProvider(
+      Array.from({ length: 4 }, () => makeFunctionCallResult("web_search", {}, "Still trying.")),
+      "novelai",
+    );
+    for (let i = 0; i < 4; i++) {
+      toolExecuteQueue.push({ success: false, error: "always fails" });
+    }
+
+    const result = await runToolLoop(makeParams(makeContext(), provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(3);
+    expect(toolExecuteCalls).toHaveLength(3);
+    expect(standardEmbedCalls).toContainEqual({
+      titleKey: "genai.nai_tool_retry_exhausted_title",
+      descriptionKey: "genai.nai_tool_retry_exhausted_description",
+      color: "#E74C3C",
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 13. STM single-update guard
+  // -------------------------------------------------------------------------
+
+  it("successful STM update without pre-tool text disables further STM calls and continues", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const { provider, capturedHistories } = makeProvider([
+      makeFunctionCallResult("update_short_term_memory", { content: "note" }),
+      { status: "completed", accumulatedText: "Done." },
+    ]);
+    toolExecuteQueue.push({ success: true, data: { saved: true } });
+
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
+
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(2);
+    expect(context.streamingContext.disableShortTermMemoryUpdate).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // 14. Follow-up interrupts do not kill an active tool chain
+  // -------------------------------------------------------------------------
+
+  it("clears a stale follow-up interrupt and lets the tool chain continue", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    hasStopRequest = true;
+    isFollowUpRequest = true;
+    const { provider, capturedHistories } = makeProvider([
+      makeFunctionCallResult("echo_tool"),
+      { status: "completed", accumulatedText: "Done." },
+    ]);
+    toolExecuteQueue.push({ success: true, data: { ok: true } });
+
+    const result = await runToolLoop(makeParams(makeContext(), provider));
+
+    expect(result.status).toBe("completed");
+    expect(toolExecuteCalls).toHaveLength(1);
+    expect(capturedHistories).toHaveLength(2);
+    expect(clearStopRequestCalls).toBe(1);
+  });
+
+  it("a plain stop request still aborts before tool execution", async () => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    hasStopRequest = true;
+    isFollowUpRequest = false;
+    const { provider } = makeProvider([makeFunctionCallResult("echo_tool")]);
+
+    const result = await runToolLoop(makeParams(makeContext(), provider));
+
+    expect(result.status).toBe("stopped_by_user");
+    expect(toolExecuteCalls).toHaveLength(0);
+    expect(clearStopRequestCalls).toBe(0);
   });
 });

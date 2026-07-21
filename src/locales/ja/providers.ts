@@ -4,7 +4,6 @@ export default {
   genai: {
     generic_error_title: `生成エラー`,
     generic_error_description: `申し訳ありません、応答を生成中にエラーが発生しました ({error_message})。`,
-    generic_error_footer: `\`/tool refresh\`を実行してからもう一度お試しください。問題が解決しない場合は、\`/support discord\`で報告してください。`,
     error_stream_timeout_title: `接続タイムアウト`,
     error_stream_timeout_description: `この問題が続く場合、選択したAIプロバイダーに一時的な問題がある可能性があります。後でもう一度お試しいただくか、\`/tool refresh\`を使用してコンテキスト履歴をリフレッシュしてください。`,
     empty_response_title: `空の応答`,
@@ -21,7 +20,7 @@ export default {
     fallback_used_description: `{chain} の代わりに \`{success_model}\` が使用されました`,
     fallback_used_details_description: `次のモデルが先に失敗したため、フォールバック枠 {slot} の \`{success_model}\` で応答しました:
 {failure_list}`,
-    fallback_used_failure_line: `{index}. {model} は {error_code} で失敗しました`,
+    fallback_used_failure_line: `{index}. {model} は {error_detail} で失敗しました`,
     fallback_used_details_button: `Fallback Used`,
     fallback_used_hide_footer: `\`/config notice-embeds visibility\` でこれを非表示にし、詳細を思考ログへ回せます`,
     no_response_title: `応答なし`,
@@ -36,6 +35,7 @@ export default {
       fetched_content_field: `取得コンテンツ`,
       footer: `プロバイダー: {provider} | モデル: {model}`,
       footer_with_generation_time: `プロバイダー: {provider} | モデル: {model} | 生成時間: {generation_time}`,
+      provider_with_serving: `{provider}（{serving_provider}経由）`,
     },
     message_interaction: {
       reply_context_author: `返信先: {user}`,
@@ -55,21 +55,39 @@ export default {
       streaming_failed_description: `応答をストリーミング中に問題が発生しました。`,
       provider_error_interaction: `ストリーム応答がブロック/停止されました。理由: {reason}。`,
       api_error_title: `🔴 プロバイダーAPIエラー`,
-      api_error_tip: `APIキーを確認して再度お試しください。このエラーが解決しない場合は、\`/support discord\`で報告してください。`,
+      model_error_title: `🔴 モデル設定エラー`,
+      model_error_description: `選択されたモデルがプロバイダーに拒否されました。設定されているモデル名を確認し、プロバイダーが対応しているモデルIDに変更してください。`,
       rate_limit_title: `🟡 プロバイダーレート制限を超過`,
       rate_limit_title_all_rotation_keys: `🟡 全ローテーションキーがレート制限中`,
-      rate_limit_tip: `数分お待ちいただいてから再度お試しください。複数の個人キーをお持ちなら、\`/config api-key rotation\` の利用も検討してください。`,
-      model_fallback_hint: `耐障害性を高めるには、\`/model fallback\` でモデルのフェイルオーバーを設定できます。`,
       content_blocked_title: `🔴️ プロバイダーコンテンツフィルター`,
-      content_blocked_tip: `ヒント: \`/nsfw jailbreaks\` でこのエラーの回避を試すか、メッセージ(\`/tool refresh\`)、記憶/設定(\`/memory personal export\`、\`/memory server export\`、\`/server config export\`)、問題のあるメンバーをブラックリスト(\`/server user-blacklist add\`)、またはプロバイダを変更(\`/model\`)を確認してください。`,
       timeout_title: `🟡️ プロバイダーリクエストタイムアウト`,
-      timeout_tip: `メッセージを短くするか再度お試しください`,
       provider_overloaded_title: `🔴 プロバイダーの過負荷`,
-      provider_overloaded_tip: `プロバイダーが現在過負荷状態です。しばらく後に再度お試しいただくか、別のプロバイダーに変更してください`,
       flush_limit_title: `🟡️ 応答の長さ制限に達しました`,
       flush_limit_description: `この応答はメッセージの最大長制限に達したため停止されました。必要に応じて \`/bot respond\` を使用して手動で応答を続けることができます。`,
       inactivity_timeout_title: `🟡️ 応答がタイムアウトしました`,
       inactivity_timeout_description: `AIプロバイダーからの応答が停止し、接続がタイムアウトしました。プロバイダーが過負荷状態にあるか、問題が発生している可能性があります。もう一度お試しください。`,
+    },
+    // createTipEmbed() が緑色の「ヒント」埋め込み内にダッシュ付き箇条書きとして表示する、
+    // 個別のヒント項目文字列。各キーが1つの箇条書きで、呼び出し側が（条件付き項目も含めて）
+    // 組み合わせます。説明文なのでマークダウンとハイパーリンクが表示されます。
+    tips: {
+      title: `💡 できること`,
+      wait_and_retry: `数分お待ちいただいてから、もう一度お試しください。`,
+      api_key_rotation: `複数の個人キーをお持ちの場合は、\`/config api-key rotation\` を設定してキーを順番に使用できます。`,
+      model_fallback: `耐障害性を高めるには、\`/model fallback\` でバックアップモデルを追加してください。`,
+      openrouter_free_models: `[OpenRouterの無料モデル一覧](https://openrouter.ai/models?max_price=0&output_modalities=text)から \`/openrouter model add\` で無料モデルを追加できます。`,
+      openrouter_models: `[OpenRouterのモデル一覧](https://openrouter.ai/models)を確認し、\`/openrouter model add\` でモデルを切り替えてください。`,
+      choose_supported_model: `\`/model text\`、\`/personal provider model-text\`、またはカスタムエンドポイント設定で対応モデルIDを選んでください。`,
+      verify_api_key: `APIキーを再確認してから、もう一度お試しください。`,
+      switch_model_provider: `\`/model\` で別のモデルまたはプロバイダーに切り替えてください。`,
+      report_support: `問題が解決しない場合は、\`/support discord\` で報告してください。`,
+      shorten_message: `メッセージを短くしてから、もう一度送信してください。`,
+      refresh_context: `\`/tool refresh\` で会話コンテキストをクリアしてください。`,
+      provider_overloaded_wait: `プロバイダーが現在高負荷状態です。しばらくしてから再試行するか、別のプロバイダーに切り替えてください。`,
+      nsfw_jailbreaks: `\`/nsfw jailbreaks\` を有効にすると、このフィルターを回避しやすくなります。`,
+      review_messages: `最近のメッセージを確認するか、\`/tool refresh\` でクリアしてください。`,
+      review_memories: `記憶と設定を確認してください（\`/memory personal export\`、\`/memory server export\`、\`/server config export\`）。`,
+      blacklist_member: `問題のあるメンバーを \`/server user-blacklist add\` でブラックリストに追加してください。`,
     },
     google: {
       "400_default_message": `リクエスト形式にエラーがありました`,
@@ -84,9 +102,10 @@ export default {
     },
     vertexexpress: {
       "403_predict_permission_message": `このキーでは Vertex AI Express モデルを呼び出せません。Express Mode のキーを使うか、フル Google Cloud プロジェクトなら別プロバイダーの \`vertex\` を使ってください。`,
+      unknown_default_message: `予期しないエラーが発生しました`,
     },
     novelai: {
-      "400_default_message": `無効なリクエスト形式またはパラメータ`,
+      "400_default_message": `無効なリクエスト形式またはパラメータです。正しいAPIキーを入力したか確認してください。`,
       "400_trial_message": `トライアルアカウントでは生成にrecaptcha認証が必要です。API経由のアクセスには有料のNovelAIサブスクリプションが必要です。https://novelai.net/ でアカウントをアップグレードしてください`,
       "401_default_message": `NovelAIのAPIキーが無効または期限切れです`,
       "402_default_message": `Anlasクレジットが不足しています`,
@@ -109,6 +128,7 @@ export default {
       "403_default_message": `アクセスが拒否されました。OpenRouterアカウントの設定を確認してください`,
       "408_default_message": `OpenRouterリクエストがタイムアウトしました`,
       "429_default_message": `OpenRouterのレート制限を超えました。しばらく待ってから再試行してください`,
+      "429_free_models_message": `無料モデルのOpenRouterレート制限を超過しました。1日1000回の無料モデルリクエストを解放するには、OpenRouterアカウントに最低10クレジットを追加してください。`,
       "500_default_message": `OpenRouterで内部サーバーエラーが発生しました`,
       "502_default_message": `上流のAIプロバイダーが一時的に利用できません`,
       "503_default_message": `上流のAIモデルが現在過負荷状態です`,
@@ -125,6 +145,20 @@ export default {
       "503_default_message": `Anthropicは現在利用できないか、過負荷状態です。`,
       temperature_top_p_conflict_message: `Anthropic は Temperature と Top-P を同時に受け付けません。\`/config parameters\` を使って、そのプロバイダーの **Temperature** か **Top P** のどちらかを調整してください。`,
       unknown_default_message: `Anthropicとの通信中に予期しないエラーが発生しました。`,
+    },
+    custom: {
+      unknown_default_message: `予期しないエラーが発生しました`,
+    },
+    deepseek: {
+      unknown_default_message: `予期しないエラーが発生しました`,
+    },
+    zai: {
+      unknown_default_message: `予期しないエラーが発生しました`,
+    },
+    nvidia: {
+      "404_default_message": `リクエストされた NVIDIA NIM モデルが見つかりません。NVIDIAによって非推奨にされた可能性があります。\`/model text\` で別のモデルに切り替えてください。`,
+      "500_default_message": `NVIDIA はこのモデルで一部のリクエストパラメータを拒否しました。詳細に \`min_p\` などの未対応サンプラーパラメータが表示されている場合は、\`/model parameters\` で \`0\` に設定して無効にしてください。詳細に \`logit_bias\` が表示されている場合は、\`/model logit-bias remove\` で保存済みエントリを削除してください。`,
+      unknown_default_message: `予期しないエラーが発生しました`,
     },
     self_teach: {
       server_memory_learned_title: `🧠 {persona_nickname}が新しいことを学びました！`,

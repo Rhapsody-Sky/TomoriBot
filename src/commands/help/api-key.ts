@@ -7,6 +7,7 @@ import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { replySummaryEmbed } from "@/utils/discord/ui/embeds";
 import { commandRegistry } from "@/utils/discord/commandRegistry";
+import { DOCS_PATHS } from "@/utils/discord/docsLinks";
 
 /**
  * Configure the /help api-key subcommand
@@ -87,19 +88,19 @@ export async function execute(
     const provider = interaction.options.getString("provider", true);
 
     // Get command mentions for cross-references
-    const configBraveapiSetMention = commandRegistry.getCommandMention("config", "braveapi", "set");
+    const configBraveapiSetMention = commandRegistry.getCommandMention("optional-key", "brave", "set");
     const configSetupMention = commandRegistry.getCommandMention("config", "setup");
-    const configApikeySetMention = commandRegistry.getCommandMention("config", "provider", "add");
-    const configModelMention = commandRegistry.getCommandMention("config", "model", "text");
-    const configModelEmbeddingMention = commandRegistry.getCommandMention("config", "model", "embedding");
-    const configModelImageMention = commandRegistry.getCommandMention("config", "model", "image");
-    const configCustomModelsAddMention = commandRegistry.getCommandMention("config", "custom-endpoint", "add");
+    const configApikeySetMention = commandRegistry.getCommandMention("provider", "add");
+    const configModelMention = commandRegistry.getCommandMention("model", "text");
+    const configModelEmbeddingMention = commandRegistry.getCommandMention("model", "embedding");
+    const configModelImageMention = commandRegistry.getCommandMention("model", "image");
+    const configCustomModelsAddMention = commandRegistry.getCommandMention("provider", "custom-endpoint", "add");
     const personalCustomModelsAddMention = commandRegistry.getCommandMention("personal", "custom-endpoint", "add");
     const helpCustomModelsMention = commandRegistry.getCommandMention("help", "custom-endpoint");
     const supportServerMention = commandRegistry.getCommandMention("support", "discord");
-    const configSpeechElevenlabsMention = commandRegistry.getCommandMention("config", "speech", "elevenlabs");
-    const configSpeechVoiceAssignMention = commandRegistry.getCommandMention("config", "speech", "voice-assign");
-    const configSpeechTranscriptsMention = commandRegistry.getCommandMention("config", "speech", "transcripts");
+    const configSpeechElevenlabsMention = commandRegistry.getCommandMention("speech", "elevenlabs");
+    const configSpeechVoiceAssignMention = commandRegistry.getCommandMention("speech", "voice-assign");
+    const configSpeechTranscriptsMention = commandRegistry.getCommandMention("speech", "transcripts");
 
     // AC-2 allowlist rationale: /help api-key is provider-specific UI copy,
     // not orchestration. Each case selects localized instructions for where a
@@ -400,6 +401,13 @@ export async function execute(
         // Should never happen due to choices validation
         throw new Error(`Unknown provider: ${provider}`);
     }
+
+    embedOptions.docsPath =
+      provider === "custom"
+        ? DOCS_PATHS.CUSTOM_ENDPOINTS
+        : provider === "elevenlabs"
+          ? DOCS_PATHS.TTS
+          : DOCS_PATHS.API_KEYS;
 
     // Use replySummaryEmbed to show provider-specific guide
     await replySummaryEmbed(interaction, locale, embedOptions, MessageFlags.Ephemeral);

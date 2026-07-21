@@ -17,9 +17,10 @@ import type { ErrorContext, UserRow } from "@/types/db/schema";
 import type { ModalComponent, SelectOption } from "@/types/discord/modal";
 import { ProviderFactory } from "@/utils/provider/providerFactory";
 import { isCustomProvider } from "@/utils/provider/customProviderUtils";
-import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
+import { getProviderAddChoiceDescriptionKey, getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { encryptApiKey } from "@/utils/security/crypto";
 import { buildSavedProviderConfigFromExistingOrDefaults } from "@/utils/provider/savedProviderConfig";
+import { activateServerTextModelFromSavedConfig } from "@/utils/provider/providerActivation";
 
 const MODAL_CUSTOM_ID = "config_provider_add_modal";
 const PROVIDER_SELECT_ID = "provider_select";
@@ -81,16 +82,22 @@ export async function execute(
   const alreadyExistingSuffix = localizer(locale, "commands.provider.add.already_existing_suffix");
 
   const providerSelectOptions: SelectOption[] = uniqueProviders.map((provider) => {
+    const normalizedProvider = provider.toLowerCase();
     const isExisting = savedProviderNames.has(provider.toLowerCase());
-    const isFree = freeProviders.has(provider.toLowerCase());
+    const isFree = freeProviders.has(normalizedProvider);
     const baseName = getProviderDisplayName(provider);
     const label = [baseName, isFree && `(${freeSuffix})`, isExisting && `(${alreadyExistingSuffix})`]
       .filter(Boolean)
       .join(" ");
+    const descriptionKey = getProviderAddChoiceDescriptionKey(normalizedProvider);
     return {
       label,
-      value: provider.toLowerCase(),
-      description: isExisting ? localizer(locale, "commands.provider.add.already_existing_description") : undefined,
+      value: normalizedProvider,
+      description: isExisting
+        ? localizer(locale, "commands.provider.add.already_existing_description")
+        : descriptionKey
+          ? localizer(locale, descriptionKey)
+          : undefined,
     };
   });
   providerSelectOptions.push({
@@ -152,8 +159,8 @@ export async function execute(
         titleKey: "commands.provider.add.custom_moved_title",
         descriptionKey: "commands.provider.add.custom_moved_description",
         descriptionVars: {
-          custom_models_add_command: commandRegistry.getCommandMention("config", "custom-endpoint", "add"),
-          model_text_command: commandRegistry.getCommandMention("config", "model", "text"),
+          custom_models_add_command: commandRegistry.getCommandMention("provider", "custom-endpoint", "add"),
+          model_text_command: commandRegistry.getCommandMention("model", "text"),
           help_custom_models_command: commandRegistry.getCommandMention("help", "custom-endpoint"),
         },
         color: ColorCode.WARN,
@@ -251,11 +258,35 @@ export async function execute(
       return;
     }
 
+    const activationResult = await activateServerTextModelFromSavedConfig({
+      serverDiscId: serverId,
+      tomoriState,
+      savedConfig,
+    });
+    if (activationResult.status !== "activated") {
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey:
+          activationResult.status === "missing_model"
+            ? "commands.provider.api-key.set.no_default_model_title"
+            : "general.errors.update_failed_title",
+        descriptionKey:
+          activationResult.status === "missing_model"
+            ? "commands.provider.api-key.set.no_default_model_description"
+            : "general.errors.update_failed_description",
+        descriptionVars: {
+          provider: getProviderDisplayName(selectedProvider),
+        },
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
     await replyInfoEmbed(modalSubmitInteraction, locale, {
       titleKey: "commands.provider.add.success_title",
       descriptionKey: existingConfig ? "commands.provider.add.updated_existing" : "commands.provider.add.success",
       descriptionVars: {
         provider: getProviderDisplayName(selectedProvider),
+        model_name: activationResult.modelName ?? localizer(locale, "general.unknown"),
       },
       color: ColorCode.SUCCESS,
     });
@@ -266,12 +297,12 @@ export async function execute(
       personaId: tomoriState.persona_id,
       errorType: "CommandExecutionError",
       metadata: {
-        command: "config provider add",
+        command: "provider add",
         guildId: interaction.guild?.id,
         executorDiscordId: interaction.user.id,
       },
     };
-    await log.error(`Error executing /config provider add for user ${userData.user_disc_id}`, error as Error, context);
+    await log.error(`Error executing /provider add for user ${userData.user_disc_id}`, error as Error, context);
 
     await replyInfoEmbed(modalSubmitInteraction ?? interaction, locale, {
       titleKey: "general.errors.unknown_error_title",

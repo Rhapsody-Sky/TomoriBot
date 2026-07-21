@@ -1,5 +1,6 @@
 import { log } from "@/utils/misc/logger";
 import { applyUncensorOutputTransforms } from "@/utils/text/uncensor";
+import { REASONING_TAG_GLOBAL_RE } from "@/providers/utils/reasoningTags";
 import { escapeRegExp } from "./regexUtils";
 import { replaceMentionHandles } from "./mentionProcessor";
 
@@ -82,7 +83,7 @@ export function isGenericSpeakerStopLabel(rawLabel: string): boolean {
  */
 export function truncateBeforeGenericSpeakerLine(
   text: string,
-  options: { includeStart?: boolean } = {},
+  options: { includeStart?: boolean; isAllowedSpeakerLabel?: (label: string) => boolean } = {},
 ): {
   text: string;
   stopTriggered: boolean;
@@ -104,6 +105,7 @@ export function truncateBeforeGenericSpeakerLine(
 
     const trimmedLabel = rawLabel.trim();
     if (!isGenericSpeakerStopLabel(trimmedLabel)) continue;
+    if (options.isAllowedSpeakerLabel?.(trimmedLabel)) continue;
 
     return { text: text.slice(0, match.index), stopTriggered: true, matchedSpeaker: trimmedLabel };
   }
@@ -318,6 +320,7 @@ function stripBoundaryOwnNameLabels(text: string, labelAlternation: string): str
  * @param uncensorOptions - Optional uncensor cleanup flags (output side)
  * @param botNameAliases - Additional names the active persona answers to (e.g. lore/default name),
  *   used to strip a leaked multi-name opening label chain ("Tomori: Lilya: ...")
+ * @param personaMentionMap - Map of known persona handles to canonical trigger words
  * @returns Cleaned text suitable for Discord messages
  */
 export function cleanLLMOutput(
@@ -332,6 +335,7 @@ export function cleanLLMOutput(
     sanitizeEnabled?: boolean;
   },
   botNameAliases: string[] = [],
+  personaMentionMap?: ReadonlyMap<string, string>,
 ): string {
   const preserveUnresolvedEmojiShortcodes = shouldPreserveUnresolvedEmojiShortcodes();
   let cleanedText = applyUncensorOutputTransforms(text, uncensorOptions)
@@ -345,7 +349,7 @@ export function cleanLLMOutput(
     .replace(/(^|\n)-#[ \t]*\n+/g, "$1-# ")
     .replace(/<\|im_end\|>(\s*)$/, "")
     .replace(/<\|file_separator\|>(\s*)$/, "")
-    .replace(/<\/?think>/g, "")
+    .replace(REASONING_TAG_GLOBAL_RE, "")
     .replace(/\*\*<(.*?)>\*\*/g, "<$1>")
     .replace(/\*<(.*?)>\*/g, "<$1>")
     .replace(/<([a-zA-Z0-9_]+)>[\s\S]*?<\/\1>/g, "")
@@ -430,7 +434,7 @@ export function cleanLLMOutput(
     cleanedText = cleanedText.trim();
   }
 
-  cleanedText = replaceMentionHandles(cleanedText, mentionMap, mentionIdSet);
+  cleanedText = replaceMentionHandles(cleanedText, mentionMap, mentionIdSet, personaMentionMap);
 
   return cleanedText.replace(/\n([^:]+):$/, "");
 }

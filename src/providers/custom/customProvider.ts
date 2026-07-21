@@ -36,6 +36,7 @@ import { getEffectiveLlmModelName } from "@/utils/provider/modelDisplay";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
 import { StreamOrchestrator } from "../../utils/discord/streamOrchestrator";
+import { buildStreamContext } from "@/utils/provider/streamContext";
 import { CustomStreamAdapter, type CustomStreamConfig } from "./customStreamAdapter";
 import type { ProviderError, StreamContext } from "../../types/stream/interfaces";
 import { DISCORD_STREAMING_CONSTANTS } from "../../types/stream/types";
@@ -243,6 +244,7 @@ export class CustomProvider
           imagegen_enabled: tomoriState.config.imagegen_enabled,
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
+          user_blocking_enabled: tomoriState.config.user_blocking_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
         },
       };
@@ -387,6 +389,7 @@ export class CustomProvider
         imagegen_enabled: false,
         videogen_enabled: false,
         voice_message_enabled: false,
+        user_blocking_enabled: false,
         thread_creation_enabled: false,
       },
     };
@@ -452,13 +455,13 @@ export class CustomProvider
 
     if (!endpointUrl) {
       throw new Error(
-        "Custom endpoint URL not configured. Register it with /config custom-endpoint add or /personal custom-endpoint add, then select it again.",
+        "Custom endpoint URL not configured. Register it with /provider custom-endpoint add or /personal custom-endpoint add, then select it again.",
       );
     }
 
     // Determine which model name to use:
     // 1. If custom_model_name is set, use it (for Ollama, etc. that require exact model names)
-    // 2. Fall back to the endpoint's registered model_name hint (set during /config custom-endpoint add)
+    // 2. Fall back to the endpoint's registered model_name hint (set during /provider custom-endpoint add)
     // 3. Last resort: llm_codename (for KoboldCpp, etc. that don't care about model selection)
     const modelName = tomoriState.config.custom_model_name || endpointModelNameHint || tomoriState.llm.llm_codename;
 
@@ -556,7 +559,8 @@ export class CustomProvider
       }
 
       // Create streaming context
-      const streamContext: StreamContext = {
+      const streamContext: StreamContext = buildStreamContext({
+        provider: "custom",
         channel,
         client,
         initialInteraction,
@@ -566,30 +570,13 @@ export class CustomProvider
         currentTurnModelParts,
         emojiStrings,
         functionInteractionHistory,
-        provider: "custom",
-        locale: userLocale ?? "en-US",
-        suppressUserErrors: streamingContext?.suppressUserErrors,
-        suppressTextOutput: streamingContext?.suppressTextOutput,
-        rotationKeyRetriesUsed: streamingContext?.rotationKeyRetriesUsed,
-        outputPrefill: streamingContext?.outputPrefill,
-        outputPrefillState: streamingContext?.outputPrefillState,
-        replyNoticeState: streamingContext?.replyNoticeState,
-
-        // Multi-persona webhook support
+        userLocale,
+        streamingContext,
         webhook,
         personaAvatarUrl,
         personaUsername,
         prefixStrippingName,
-
-        // Forced mentions (e.g., reminder recipients)
-        forcedMentions: streamingContext?.forcedMentions,
-
-        // External abort signal for SDK call timeout cancellation
-        abortSignal: streamingContext?.abortSignal,
-
-        // Opaque message ID map for snowflake ID abstraction in LLM-visible text
-        messageIdMap: streamingContext?.messageIdMap,
-      };
+      });
 
       // Create the modular streaming components
       const orchestrator = new StreamOrchestrator();

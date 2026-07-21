@@ -162,6 +162,14 @@ variable "secret_name" {
 variable "container_image" {
   description = "Full Artifact Registry image URI for TomoriBot (e.g. us-central1-docker.pkg.dev/PROJECT/tomoribot/tomoribot:v1.0.0)"
   type        = string
+
+  # Fail at plan time with a clear message if the URI arrives empty (e.g. a
+  # secret-scrubbed CI output), instead of letting an empty image reach the
+  # Cloud Run API and failing late at apply with "must provide an image name".
+  validation {
+    condition     = length(trimspace(var.container_image)) > 0
+    error_message = "container_image must be a non-empty image URI (TF_VAR_container_image was empty)."
+  }
 }
 
 variable "container_name" {
@@ -185,7 +193,7 @@ variable "cloud_run_cpu" {
 variable "cloud_run_memory" {
   description = "Memory allocation for the Cloud Run container (e.g. '512Mi', '1Gi')"
   type        = string
-  default     = "1Gi"
+  default     = "2Gi"
 }
 
 variable "cloud_run_max_instances" {
@@ -206,7 +214,13 @@ variable "run_env" {
   default     = "production"
 }
 
-# --- SearXNG sidecar (Phase 2) ---
+# --- SearXNG sidecar (optional) ---
+
+variable "enable_searxng_sidecar" {
+  description = "Run SearXNG as a Cloud Run sidecar and expose it to TomoriBot through SEARXNG_BASE_URL"
+  type        = bool
+  default     = false
+}
 
 variable "searxng_image" {
   description = "Pinned SearXNG image (digest recommended, e.g. searxng/searxng@sha256:<DIGEST>)"
@@ -225,4 +239,3 @@ variable "searxng_memory" {
   type        = string
   default     = "512Mi"
 }
-

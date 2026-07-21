@@ -10,6 +10,7 @@ import { localizer } from "@/utils/text/localizer";
 import { loadUserSavedProvidersForCapability } from "@/utils/provider/savedProviderConfig";
 import { llmProviderRepo } from "@/utils/db/repositories";
 import { promptForSavedProvider } from "@/utils/discord/providerPicker";
+import { resolveActivePersonalProviderModelSelections } from "@/utils/provider/personalProviderHelpers";
 
 /**
  * Formats a list of changed sampler settings into a human-readable string.
@@ -63,7 +64,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
         .setName("top_k")
         .setDescription(localizer("en-US", "commands.model.parameters.top_k_description"))
         .setMinValue(0)
-        .setMaxValue(40)
+        .setMaxValue(256)
         .setRequired(false),
     )
     .addNumberOption((option) =>
@@ -173,7 +174,10 @@ export async function execute(
       interaction,
       locale,
       savedProviders as unknown as SavedProviderConfigRow[],
-      { descriptionKey: "commands.model.parameters.picker_description" },
+      {
+        descriptionKey: "commands.model.parameters.picker_description",
+        currentSelections: await resolveActivePersonalProviderModelSelections(savedProviders, "text"),
+      },
     );
     if (!providerSelection) return;
 

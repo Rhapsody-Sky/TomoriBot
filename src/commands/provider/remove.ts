@@ -89,7 +89,7 @@ export async function execute(
   try {
     // 3. Load all saved provider configs
     const rawSavedConfigs = await llmProviderRepo.loadSavedProviderConfigs(tomoriState.server_id);
-    // Custom providers with live endpoints are managed via /config custom-endpoint remove.
+    // Custom providers with live endpoints are managed via /provider custom-endpoint remove.
     // Orphaned custom provider rows (no matching custom_endpoints) are kept here as a
     // cleanup path — they have no other way to be removed.
     const visibleSavedConfigs = (
@@ -124,6 +124,12 @@ export async function execute(
       disabledProviders: tomoriState.config.user_byok_mode ? [] : [currentProvider],
       titleKey: "commands.provider.remove.picker_title",
       descriptionKey: "commands.provider.remove.picker_description",
+      currentSelections: [
+        {
+          model: tomoriState.llm.llm_codename,
+          provider: tomoriState.llm.llm_provider,
+        },
+      ],
       additionalDescription: [
         localizer(locale, "commands.provider.remove.active_provider_note", {
           provider: getProviderDisplayName(currentProvider),
@@ -307,16 +313,12 @@ export async function execute(
       personaId: personaIdForError,
       errorType: "CommandExecutionError",
       metadata: {
-        command: "config provider remove",
+        command: "provider remove",
         guildId: interaction.guild?.id,
         executorDiscordId: interaction.user.id,
       },
     };
-    await log.error(
-      `Error executing /config provider remove for user ${userData.user_disc_id}`,
-      error as Error,
-      context,
-    );
+    await log.error(`Error executing /provider remove for user ${userData.user_disc_id}`, error as Error, context);
 
     await replyInfoEmbed(resultTarget, locale, {
       titleKey: "general.errors.unknown_error_title",

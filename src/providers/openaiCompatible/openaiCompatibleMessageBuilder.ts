@@ -126,7 +126,8 @@ export async function buildOpenAICompatibleMessages(
       continue;
     }
 
-    const content = contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text : contentParts;
+    const allText = contentParts.every((part) => part.type === "text");
+    const content = allText ? contentParts.map((part) => String(part.text)).join("\n") : contentParts;
 
     messages.push({
       role,
@@ -205,13 +206,10 @@ export async function buildOpenAICompatibleMessages(
         content: JSON.stringify(interaction.functionResponse),
       });
 
+      // The function response is already serialized in the role=tool message.
+      // A synthetic user turn is needed only when image metadata must be moved
+      // onto a role that supports image inputs.
       const responseParts: Array<Record<string, unknown>> = [];
-      if (interaction.functionResponse) {
-        responseParts.push({
-          type: "text",
-          text: JSON.stringify(interaction.functionResponse),
-        });
-      }
 
       if (
         options.seesImages &&
@@ -229,9 +227,12 @@ export async function buildOpenAICompatibleMessages(
       }
 
       if (responseParts.length > 0) {
+        const allText = responseParts.every((part) => part.type === "text");
+        const content = allText ? responseParts.map((part) => String(part.text)).join("\n") : responseParts;
+
         messages.push({
           role: "user",
-          content: responseParts,
+          content,
         });
       }
     }

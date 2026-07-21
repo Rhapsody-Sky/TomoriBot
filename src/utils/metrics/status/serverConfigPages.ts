@@ -296,6 +296,11 @@ export async function showServerConfigStatus(
         inline: true,
       },
       {
+        nameKey: "commands.tool.status.field_model_randomizer",
+        value: formatBooleanLocalized(config.model_randomizer_enabled, locale),
+        inline: true,
+      },
+      {
         nameKey: "commands.tool.status.field_uncensor_injection",
         value: formatBooleanLocalized(config.uncensor_injection_enabled, locale),
         inline: true,
@@ -313,6 +318,11 @@ export async function showServerConfigStatus(
       {
         nameKey: "commands.tool.status.field_tool_use",
         value: formatBooleanLocalized(config.tool_use_enabled ?? true, locale),
+        inline: true,
+      },
+      {
+        nameKey: "commands.tool.status.field_verbatim_tool_calling",
+        value: formatBooleanLocalized(config.verbatim_tool_calling_enabled ?? false, locale),
         inline: true,
       },
       {

@@ -8,11 +8,15 @@ import { appendDialogueHistoryContext } from "./dialogueHistory";
 import { convertMentions } from "./mentionNormalizer";
 import { buildServerMemoryContextItem, buildShortTermMemoryContext } from "./memories";
 import { buildUsersInConversationContextItem } from "./participants";
+import { buildPersonaUserBlocksContextItem } from "./personaUserBlocks";
+import { buildPersonaSpriteContextItem } from "./personaSprites";
 import { buildServerDocumentContextItem } from "./rag";
 import { buildServerEmojiContextItem, buildServerStickerContextItem } from "./serverAssets";
 import { buildServerInfoContextItem } from "./serverInfo";
 import { buildConditioningContextItem, buildPromptContextItems, buildSampleDialogueContextItems } from "./templates";
+import { buildVerbatimToolDefinitionsContextItem } from "./toolDefinitions";
 import type { BuildContextParams } from "./types";
+import { SPACER_TEMPLATE } from "./timeAwareness";
 
 export type NativeBuildContextResult = {
   contextItems: StructuredContextItem[];
@@ -41,6 +45,8 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     publicPersonaAttributes,
     tomoriConfig,
     channelPromptOverride,
+    channelContextNote,
+    reunionNote,
     personaPrompt,
     personaLineageId,
     triggererUserId,
@@ -55,6 +61,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     impersonatedUserPrompt,
     matrixUsers,
     syntheticUsers,
+    personaUserBlocks,
     includeTimestamps = false,
     explicitLongTermMemoryIntent: explicitLongTermMemoryIntentOverride,
     suppressDefaultSystemPrompt = false,
@@ -97,11 +104,14 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
               imagegen_enabled: tomoriConfig.imagegen_enabled,
               videogen_enabled: tomoriConfig.videogen_enabled,
               voice_message_enabled: tomoriConfig.voice_message_enabled,
+              user_blocking_enabled: tomoriConfig.user_blocking_enabled,
               thread_creation_enabled: tomoriConfig.thread_creation_enabled,
             },
           }
         : undefined,
   });
+  const dateSpacerTemplate =
+    tomoriConfig.time_awareness_enabled !== false ? await toolPromptMacroResolver.expand(SPACER_TEMPLATE) : null;
   const explicitLongTermMemoryIntent =
     explicitLongTermMemoryIntentOverride ??
     hasExplicitLongTermMemoryIntent(
@@ -140,6 +150,16 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       tomoriConfig,
       snapshot,
       convertMentions,
+    }),
+  );
+  await appendOptionalItem(
+    contextItems,
+    buildPersonaUserBlocksContextItem({
+      client,
+      guildId,
+      botName,
+      tomoriConfig,
+      personaUserBlocks,
     }),
   );
 
@@ -201,6 +221,14 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
   );
   await appendOptionalItem(
     contextItems,
+    buildPersonaSpriteContextItem({
+      tomoriState,
+      botName,
+      isUserImpersonation,
+    }),
+  );
+  await appendOptionalItem(
+    contextItems,
     buildUsersInConversationContextItem({
       client,
       guildId,
@@ -251,6 +279,11 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     log.warn("Failed to build short-term memory context", error);
   }
 
+  // Verbatim tool-calling workaround: when enabled, embed the resolved tool
+  // schemas as JSON in-band so endpoints that ignore the native `tools` field
+  // still expose them to the model. Placed in the stable reference zone (right
+  // before server documents) to stay inside the prompt-cache-friendly prefix.
+  await appendOptionalItem(contextItems, buildVerbatimToolDefinitionsContextItem({ tomoriConfig, tomoriState }));
   await appendOptionalItem(
     contextItems,
     buildServerDocumentContextItem({ tomoriState, simplifiedMessageHistory, triggererUserId, channelName }),
@@ -286,6 +319,9 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     botName,
     tomoriConfig,
     tomoriState,
+    channelContextNote,
+    reunionNote,
+    dateSpacerTemplate,
     mediaContextWindow,
     includeTimestamps,
     isUserImpersonation,

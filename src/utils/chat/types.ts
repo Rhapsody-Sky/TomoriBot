@@ -1,4 +1,4 @@
-import type { BaseGuildTextChannel, Client, Guild, GuildMember, Message, Webhook } from "discord.js";
+import type { BaseGuildTextChannel, Client, Guild, GuildMember, Message, Sticker, Webhook } from "discord.js";
 import type { ForcedMention } from "@/types/discord/mentions";
 import type { ServerEmojiRow, ServerStickerRow, TomoriState, UserRow } from "@/types/db/schema";
 import type { RequestSnapshot, StructuredContextItem } from "@/types/misc/context";
@@ -23,11 +23,35 @@ export interface ChatReminderData {
   self_reminder?: boolean;
 }
 
+export type QueuedMessageDiscardReason =
+  | "admission_rejected"
+  | "channel_queue_cleared"
+  | "queued_processing_failed"
+  | "stale_lock_release"
+  | "superseded_follow_up"
+  | "self_reply_work_cleared";
+
+export type ChatGenerationResultHandler = (result: GenerationTurnResult) => void | Promise<void>;
+export type QueuedMessageDiscardHandler = (reason: QueuedMessageDiscardReason) => void | Promise<void>;
+
 export interface ManualTriggerInvoker {
   userDiscId: string;
   username: string;
   locale?: string;
   member?: GuildMember | null;
+}
+
+export interface SceneTurnSpeaker {
+  personaId: number;
+  personaName: string;
+}
+
+export interface SceneTurnMetadata {
+  commandId: string;
+  sequence: SceneTurnSpeaker[];
+  turnIndex: number;
+  totalTurns: number;
+  additionalInstructions?: string;
 }
 
 /** Public input to tomoriChat() — optional fields apply defaults in normalizeChatInvocation. */
@@ -61,6 +85,9 @@ export interface TomoriChatInput {
   forcedMentions?: ForcedMention[];
   manualTriggerInvoker?: ManualTriggerInvoker;
   manualStreamingContextOverrides?: Partial<StreamingContext>;
+  sceneTurn?: SceneTurnMetadata;
+  onGenerationResult?: ChatGenerationResultHandler;
+  onQueueDiscard?: QueuedMessageDiscardHandler;
 }
 
 export interface ChatIncoming {
@@ -93,6 +120,9 @@ export interface ChatIncoming {
   forcedMentions?: ForcedMention[];
   manualTriggerInvoker?: ManualTriggerInvoker;
   manualStreamingContextOverrides?: Partial<StreamingContext>;
+  sceneTurn?: SceneTurnMetadata;
+  onGenerationResult?: ChatGenerationResultHandler;
+  onQueueDiscard?: QueuedMessageDiscardHandler;
 }
 
 export type ChatAdmissionDisposition = "run" | "ignore" | "queued" | "blocked" | "error";
@@ -186,6 +216,8 @@ export interface ChatTurnContext {
   locale: string;
   serverDiscId: string;
   userDiscId: string;
+  /** Internal users FK of the triggerer, resolved once at turn planning (no per-turn lookup). */
+  triggererUserId: number | undefined;
   isDMChannel: boolean;
   isFromQueue: boolean;
   isStopResponse: boolean;
@@ -261,4 +293,5 @@ export interface GenerationTurnResult {
   personaResponses: ChatPersonaResponse[];
   thoughtLog?: ThoughtLogPayload;
   thoughtLogOwner?: ThoughtLogOwner;
+  selectedSticker?: Sticker;
 }

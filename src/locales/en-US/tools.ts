@@ -19,9 +19,11 @@ export default {
       quota_resets_in_days: `Quota resets in {days} day(s).`,
       quota_remaining: `You have {remaining} video(s) remaining for today.`,
       file_too_large: `The generated video ({size_mb} MB) exceeds Discord's 25 MB file size limit.`,
+      reference_unsupported: `The selected OpenRouter model \`{model}\` cannot use an image as the exact first frame. Remove the reference image or choose a compatible video model.`,
+      loop_unsupported: `The selected OpenRouter model \`{model}\` cannot use a last frame for looping video. Disable looping or choose a compatible video model.`,
     },
     generate_image_nai: {
-      no_google_api_key: `Inpainting requires saved Google provider credentials for image segmentation. Add them with \`/config provider add\`, or switch to the Google provider.`,
+      no_google_api_key: `Inpainting requires saved Google provider credentials for image segmentation. Add them with \`/provider add\`, or switch to the Google provider.`,
       model_not_configured: `NovelAI image generation is disabled right now. Select a NovelAI image model with \`/model image\` first.`,
       provider_quota_exceeded: `NovelAI image generation quota is exhausted for this account. Recharge Anlas or wait for the quota to refresh, then try again.`,
       characters_require_v4: `Character positioning requires a NovelAI V4 diffusion model or newer.`,
@@ -57,6 +59,20 @@ export default {
       hide_footer: `Hide this using \`/config notice-embeds visibility\``,
       hide_footer_with_kill: `Hide this using \`/config notice-embeds visibility\` · Use \`/bot kill\` if you think I'm stuck`,
     },
+    user_block: {
+      type_mute: `mute`,
+      type_block: `block`,
+      effect_mute: `The target cannot trigger this persona.`,
+      effect_block: `The target cannot trigger this persona, and their recent messages/media are hidden from this persona's context.`,
+      block_mute_title: `🔇 {persona_name} Muted {user_name} for {duration_hours} hour(s)`,
+      block_block_title: `❌ {persona_name} Blocked {user_name} for {duration_hours} hour(s)`,
+      block_success_description: `{user_name} cannot trigger {persona_name} and their messages/media are now hidden until {expires_at}.`,
+      mute_success_description: `{user_name} cannot trigger {persona_name} until {expires_at}.`,
+      block_footer: `Server managers may remove this with /server user-blacklist remove. Disable blocking through /capabilities manage`,
+      unmute_success_title: `🔊 {persona_name} Unmuted {user_name}`,
+      unblock_success_title: `✅ {persona_name} Unblocked {user_name}`,
+      unblock_success_description: `Removed the active {block_type} for {user_name} from {persona_name}.`,
+    },
     video: {
       youtube_processing_title: `👁️  Watching YouTube Video...`,
       youtube_processing_description: `I'm currently watching the YouTube video: {video_url}`,
@@ -69,6 +85,7 @@ export default {
       notice_reference_line: `Reference: {message_url}`,
       notice_reference_count_line: `Using {count} reference image(s).`,
       generating_footer: `This may take 1-3 minutes.`,
+      generated_after_seconds_line: `Generated in {seconds} seconds`,
     },
     document: {
       reading_title: `📄 Reading File Contents...`,
@@ -101,7 +118,7 @@ export default {
     },
     vision: {
       analyzing_title: `🖼️  Analyzing Image...`,
-      analyzing_description: `Current model is non-vision; using configured vision model to analyze images.`,
+      analyzing_description: `Current model is non-vision; using configured \`/model vision\` ({model}) to analyze images.`,
       analyzing_footer: `This may take a moment depending on image count`,
     },
     gif: {
@@ -112,7 +129,7 @@ export default {
     fetch: {
       fetch_url_title: `🌐  Reading Webpage...`,
       fetch_failed_description: `I couldn't fetch that page: {error}`,
-      private_network_blocked_description: `I couldn't fetch that page because it points to a private or internal network address. TomoriBot blocks those by default with \`FETCH_URL_ALLOW_PRIVATE_NETWORK=false\`. {error}`,
+      private_network_blocked_description: `I couldn't fetch that page because it points to a private or internal network address. TomoriBot blocks those in production unless the host sets \`FETCH_URL_ALLOW_PRIVATE_NETWORK=true\`. {error}`,
       reading_title: `🌐  Reading Webpage...`,
       reading_title_page: `🌐  Reading Webpage (Page {page})...`,
       reading_description: `Fetching and reading: {url}`,

@@ -38,6 +38,8 @@ export interface ProcessedChunk {
   functionCall?: FunctionCall;
   error?: ProviderError;
   thoughts?: ThoughtLogEntry[];
+  /** OpenRouter-only: the upstream backend that served this chunk (e.g. "minimax-cn"). */
+  servingProvider?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -45,7 +47,7 @@ export interface ProcessedChunk {
  * Provider-specific error with normalized format
  */
 export interface ProviderError {
-  type: "api_error" | "rate_limit" | "content_blocked" | "timeout" | "provider_overloaded" | "unknown";
+  type: "api_error" | "rate_limit" | "content_blocked" | "timeout" | "provider_overloaded" | "model_error" | "unknown";
   message: string;
   code?: string;
   retryable: boolean;
@@ -140,6 +142,10 @@ export interface StreamContext {
 
   // External abort signal — allows the SDK call timeout to cancel the underlying HTTP request
   abortSignal?: AbortSignal;
+
+  // Empty-response retry count of the current chat turn — lets the opening-label leak guard
+  // discard-and-retry while budget remains, then strip-and-deliver on the final attempt
+  emptyResponseRetryCount?: number;
 
   // Progress callback for outer watchdog timers (provider chunk received or Discord send succeeded)
   onStreamProgress?: () => void;

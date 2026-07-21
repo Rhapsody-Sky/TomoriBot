@@ -18,6 +18,7 @@ import type {
 } from "discord.js";
 import type { ZodType } from "zod";
 import { StreamOrchestrator } from "../../utils/discord/streamOrchestrator";
+import { buildStreamContext } from "@/utils/provider/streamContext";
 import { OpenrouterStreamAdapter, type OpenrouterStreamConfig } from "./openrouterStreamAdapter";
 import { generateConversationSummaryOpenrouter, generateRoleplaySummaryOpenrouter } from "./compactGenerator";
 import { generatePresetFromPromptOpenrouter } from "./presetGenerator";
@@ -67,6 +68,7 @@ import { isBraveSearchAvailable } from "../../tools/restAPIs/brave/braveSearchSe
 import { openrouterProviderInfo } from "./providerInfo";
 import { buildRuntimeLogitBiasMapForLlm } from "@/utils/provider/logitBiasResolver";
 import { resolveEffectiveOpenRouterSeesYouTube } from "@/utils/provider/openrouterModelCapabilities";
+import { buildOpenRouterAttributionHeaders } from "@/utils/provider/openrouterAttribution";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 
@@ -188,6 +190,7 @@ export class OpenrouterProvider
         method: "GET",
         headers: {
           Authorization: `Bearer ${apiKey}`,
+          ...buildOpenRouterAttributionHeaders(),
         },
       });
 
@@ -272,15 +275,21 @@ export class OpenrouterProvider
       const openrouterAdapter = new OpenrouterStreamAdapter();
       const providerError = openrouterAdapter.handleProviderError(error);
 
-      // Log the specific error during validation failure
-      await log.error("API key validation failed", error, {
-        errorType: "APIKeyValidationError",
-        metadata: {
-          provider: "openrouter",
-          errorCode: providerError.code,
-          errorType: providerError.type,
-        },
-      });
+      const isUserError = providerError.type === "api_error";
+
+      if (!isUserError) {
+        // Log the specific error during validation failure
+        await log.error("API key validation failed", error, {
+          errorType: "APIKeyValidationError",
+          metadata: {
+            provider: "openrouter",
+            errorCode: providerError.code,
+            errorType: providerError.type,
+          },
+        });
+      } else {
+        log.warn(`OpenRouter API key validation failed (user input error): ${providerError.message}`);
+      }
       return { valid: false, error: providerError };
     }
   }
@@ -301,10 +310,15 @@ export class OpenrouterProvider
 
     try {
       const openRouter = new OpenRouter({ apiKey: request.apiKey });
-      const response = await openRouter.embeddings.generate({
-        model: request.model,
-        input: request.inputs,
-      });
+      const response = await openRouter.embeddings.generate(
+        {
+          model: request.model,
+          input: request.inputs,
+        },
+        {
+          headers: buildOpenRouterAttributionHeaders(),
+        },
+      );
 
       return extractOpenRouterEmbeddings(response);
     } catch (error: unknown) {
@@ -396,6 +410,7 @@ export class OpenrouterProvider
         imagegen_enabled: false,
         videogen_enabled: false,
         voice_message_enabled: false,
+        user_blocking_enabled: false,
         thread_creation_enabled: false,
       },
     };
@@ -475,6 +490,7 @@ export class OpenrouterProvider
           imagegen_enabled: tomoriState.config.imagegen_enabled,
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
+          user_blocking_enabled: tomoriState.config.user_blocking_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
         },
       };
@@ -782,45 +798,24 @@ export class OpenrouterProvider
       }
 
       // Create streaming context
-      const streamContext: StreamContext = {
-        // Discord context
+      const streamContext: StreamContext = buildStreamContext({
+        provider: "openrouter",
         channel,
         client,
         initialInteraction,
         replyToMessage,
-
-        // Application context
         tomoriState,
         contextItems,
         currentTurnModelParts,
         emojiStrings,
         functionInteractionHistory,
-
-        // Provider context
-        provider: "openrouter",
-        locale: userLocale ?? "en-US", // Use user's preferred locale, fallback to en-US
-        suppressUserErrors: streamingContext?.suppressUserErrors,
-        suppressTextOutput: streamingContext?.suppressTextOutput,
-        rotationKeyRetriesUsed: streamingContext?.rotationKeyRetriesUsed,
-        outputPrefill: streamingContext?.outputPrefill,
-        outputPrefillState: streamingContext?.outputPrefillState,
-        replyNoticeState: streamingContext?.replyNoticeState,
-
-        // Multi-persona webhook support
+        userLocale,
+        streamingContext,
         webhook,
         personaAvatarUrl,
         personaUsername,
         prefixStrippingName,
-
-        // Forced mentions (e.g., reminder recipients)
-        forcedMentions: streamingContext?.forcedMentions,
-
-        // External abort signal for SDK call timeout cancellation
-        abortSignal: streamingContext?.abortSignal,
-
-        // Opaque message ID map for snowflake ID abstraction in LLM-visible text
-        messageIdMap: streamingContext?.messageIdMap,
-      };
+      });
 
       // Create the modular streaming components
       const orchestrator = new StreamOrchestrator();

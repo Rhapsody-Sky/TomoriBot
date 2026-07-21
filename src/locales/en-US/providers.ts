@@ -4,7 +4,6 @@ export default {
   genai: {
     generic_error_title: `Generation Error`,
     generic_error_description: `{error_message}`,
-    generic_error_footer: `Please run \`/tool refresh\` and then try again. If the issue persists, please report it through \`/support discord\`.`,
     error_stream_timeout_title: `Connection Timeout`,
     error_stream_timeout_description: `If this keeps happening, there might be a temporary issue with your chosen AI provider. Please try again later or use \`/tool refresh\` to refresh the context history.`,
     empty_response_title: `Empty Response`,
@@ -21,7 +20,7 @@ export default {
     fallback_used_description: `\`{success_model}\` was used instead of {chain}`,
     fallback_used_details_description: `Fallback slot {slot} answered with \`{success_model}\` after these earlier failures:
 {failure_list}`,
-    fallback_used_failure_line: `{index}. {model} errored with {error_code}`,
+    fallback_used_failure_line: `{index}. {model} errored with {error_detail}`,
     fallback_used_details_button: `Fallback Used`,
     fallback_used_hide_footer: `Hide this and reroute details to thought logs with \`/config notice-embeds visibility\``,
     no_response_title: `No Response`,
@@ -36,6 +35,7 @@ export default {
       fetched_content_field: `Fetched Content`,
       footer: `Provider: {provider} | Model: {model}`,
       footer_with_generation_time: `Provider: {provider} | Model: {model} | Generation time: {generation_time}`,
+      provider_with_serving: `{provider} via {serving_provider}`,
     },
     message_interaction: {
       reply_context_author: `Replying to {user}`,
@@ -55,21 +55,39 @@ export default {
       streaming_failed_description: `An issue while trying to stream the response.`,
       provider_error_interaction: `Stream response blocked/stopped. Reason: {reason}.`,
       api_error_title: `🔴 Provider API Error`,
-      api_error_tip: `Please verify your API key and try again. If this error persists, report through \`/support discord\``,
+      model_error_title: `🔴 Model Configuration Error`,
+      model_error_description: `The selected model was rejected by the provider. Check the configured model name and switch to one of the provider's supported model IDs.`,
       rate_limit_title: `🟡 Provider Rate Limit Exceeded`,
       rate_limit_title_all_rotation_keys: `🟡 Provider Rate Limit Exceeded (All Rotation Keys)`,
-      rate_limit_tip: `Please wait a few minutes before trying again. If you have multiple personal keys, consider \`/config api-key rotation\`.`,
-      model_fallback_hint: `For better resilience, you can configure model failover with \`/model fallback\`.`,
       content_blocked_title: `🔴️ Provider Content Filter`,
-      content_blocked_tip: `Tip: You can turn on \`/nsfw jailbreaks\` to help prevent this error. You may also check messages (\`/tool refresh\`), memories/config (\`/memory personal export\`, \`/memory server export\`, \`/server config export\`), blacklist problematic members (\`/server user-blacklist add\`), or switch provider (\`/model\`)`,
       timeout_title: `🟡️ Provider Request Timeout`,
-      timeout_tip: `Try shortening your message or try again`,
       provider_overloaded_title: `🔴 Provider Overloaded`,
-      provider_overloaded_tip: `Provider is currently experiencing unexpectedly high usage, please try again later or swap to a different provider`,
       flush_limit_title: `🟡️ Response Length Limit Reached`,
       flush_limit_description: `This response has reached the maximum message length limit and has been stopped. You can use \`/bot respond\` to manually continue the response if needed.`,
       inactivity_timeout_title: `🟡️ Response Timed Out`,
       inactivity_timeout_description: `The AI provider stopped responding and the connection timed out. This can happen when the provider is overloaded or experiencing issues. Please try again.`,
+    },
+    // Atomic tip-item strings rendered by createTipEmbed() as a dashed bullet list in a separate
+    // green "Tip" embed. Each key is one bullet; callers compose them (including conditional items)
+    // instead of maintaining whole-paragraph tip strings. Descriptions render markdown + hyperlinks.
+    tips: {
+      title: `💡 What you can do`,
+      wait_and_retry: `Please wait a few minutes before trying again.`,
+      api_key_rotation: `If you have multiple personal keys, set up \`/config api-key rotation\` to cycle through them.`,
+      model_fallback: `Add backup models with \`/model fallback\` for better resilience.`,
+      openrouter_free_models: `Add more free models from the [OpenRouter free model list](https://openrouter.ai/models?max_price=0&output_modalities=text) with \`/openrouter model add\`.`,
+      openrouter_models: `Browse the [OpenRouter model list](https://openrouter.ai/models) and switch models with \`/openrouter model add\`.`,
+      choose_supported_model: `Choose a supported model ID with \`/model text\`, \`/personal provider model-text\`, or your custom endpoint settings.`,
+      verify_api_key: `Double-check your API key, then try again.`,
+      switch_model_provider: `Switch to a different model or provider with \`/model\`.`,
+      report_support: `If this keeps happening, report it through \`/support discord\`.`,
+      shorten_message: `Try shortening your message, then send it again.`,
+      refresh_context: `Clear the conversation context with \`/tool refresh\`.`,
+      provider_overloaded_wait: `The provider is under heavy load right now. Try again shortly or switch providers.`,
+      nsfw_jailbreaks: `Turn on \`/nsfw jailbreaks\` to help prevent this filter.`,
+      review_messages: `Review recent messages, or clear them with \`/tool refresh\`.`,
+      review_memories: `Check your memories and config (\`/memory personal export\`, \`/memory server export\`, \`/server config export\`).`,
+      blacklist_member: `Blacklist a problematic member with \`/server user-blacklist add\`.`,
     },
     google: {
       "400_default_message": `There was an error in your request format`,
@@ -84,9 +102,10 @@ export default {
     },
     vertexexpress: {
       "403_predict_permission_message": `This key can't call Vertex AI Express models. Use an Express-mode key, or use the separate \`vertex\` provider for full Google Cloud projects.`,
+      unknown_default_message: `An unexpected error occurred`,
     },
     novelai: {
-      "400_default_message": `Invalid request format or parameters`,
+      "400_default_message": `Invalid request format or parameters. Please ensure you inputted the correct API key.`,
       "400_trial_message": `Your trial account requires recaptcha verification for generations. API access requires a paid NovelAI subscription. Please upgrade your account at https://novelai.net/`,
       "401_default_message": `Your NovelAI API key is invalid or expired`,
       "402_default_message": `You don't have enough Anlas credits`,
@@ -109,6 +128,7 @@ The selected model requires allowing data for paid model training, but your Open
       "403_default_message": `Access denied: check your OpenRouter account settings`,
       "408_default_message": `The OpenRouter request timed out`,
       "429_default_message": `OpenRouter rate limit exceeded, please wait before retrying`,
+      "429_free_models_message": `OpenRouter rate limit exceeded for free models. Add atleast 10 credits to your OpenRouter account to unlock 1000 free model requests per day.`,
       "500_default_message": `OpenRouter encountered an internal server error`,
       "502_default_message": `The upstream AI provider is temporarily unavailable`,
       "503_default_message": `The upstream AI model is currently overloaded`,
@@ -125,6 +145,20 @@ The selected model requires allowing data for paid model training, but your Open
       "503_default_message": `Anthropic is currently unavailable or overloaded.`,
       temperature_top_p_conflict_message: `Anthropic rejected this request because both Temperature and Top-P were sent. Use \`/config parameters\` and adjust either **Temperature** or **Top P** for that provider.`,
       unknown_default_message: `An unexpected error occurred while communicating with Anthropic.`,
+    },
+    custom: {
+      unknown_default_message: `An unexpected error occurred`,
+    },
+    deepseek: {
+      unknown_default_message: `An unexpected error occurred`,
+    },
+    zai: {
+      unknown_default_message: `An unexpected error occurred`,
+    },
+    nvidia: {
+      "404_default_message": `The requested NVIDIA NIM model could not be found. It may be deprecated by NVIDIA. Try switching models with \`/model text\`.`,
+      "500_default_message": `NVIDIA rejected one or more request parameters for this model. If the details name unsupported sampler parameters such as \`min_p\`, set them to \`0\` with \`/model parameters\` to turn them off. If the details name \`logit_bias\`, clear saved entries with \`/model logit-bias remove\`.`,
+      unknown_default_message: `An unexpected error occurred`,
     },
     self_teach: {
       server_memory_learned_title: `🧠 {persona_nickname} Learned Something New!`,

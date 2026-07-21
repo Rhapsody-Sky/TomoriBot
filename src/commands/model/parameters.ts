@@ -65,7 +65,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
         .setName("top_k")
         .setDescription(localizer("en-US", "commands.model.parameters.top_k_description"))
         .setMinValue(0)
-        .setMaxValue(40)
+        .setMaxValue(256)
         .setRequired(false),
     )
     .addNumberOption((option) =>
@@ -180,6 +180,12 @@ export async function execute(
     const savedProviders = await loadSavedProvidersForCapability(tomoriState.server_id, "text");
     const providerSelection = await promptForSavedProvider(interaction, locale, savedProviders, {
       descriptionKey: "commands.model.parameters.picker_description",
+      currentSelections: [
+        {
+          model: tomoriState.llm.llm_codename,
+          provider: tomoriState.llm.llm_provider,
+        },
+      ],
     });
     if (!providerSelection) return;
 

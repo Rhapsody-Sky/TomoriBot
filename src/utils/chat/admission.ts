@@ -54,6 +54,9 @@ export function normalizeChatInvocation(input: TomoriChatInput): ChatIncoming {
     forcedMentions: input.forcedMentions,
     manualTriggerInvoker: input.manualTriggerInvoker,
     manualStreamingContextOverrides: input.manualStreamingContextOverrides,
+    sceneTurn: input.sceneTurn,
+    onGenerationResult: input.onGenerationResult,
+    onQueueDiscard: input.onQueueDiscard,
   };
 }
 
@@ -537,7 +540,8 @@ async function loadEarlyTomoriState(
   }
 }
 
-async function shouldBlockReplyToOtherBot(args: {
+/** @internal Exported for focused admission regression tests. */
+export async function shouldBlockReplyToOtherBot(args: {
   incoming: ChatIncoming;
   earlyAllPersonas: TomoriState[];
   isBotAuthor: boolean;
@@ -551,7 +555,9 @@ async function shouldBlockReplyToOtherBot(args: {
 
   let referencedMessage = message.channel.messages.cache.get(message.reference.messageId);
 
-  if (!referencedMessage && "messages" in message.channel) {
+  // Cached reply targets may be partial messages with a null author. Let
+  // MessageManager#fetch hydrate partials before making the bot-author check.
+  if ((!referencedMessage || referencedMessage.partial) && "messages" in message.channel) {
     try {
       referencedMessage = await message.channel.messages.fetch(message.reference.messageId);
     } catch {
@@ -559,11 +565,8 @@ async function shouldBlockReplyToOtherBot(args: {
     }
   }
 
-  if (
-    !referencedMessage?.author.bot ||
-    referencedMessage.author.id === client.user?.id ||
-    referencedMessage.webhookId
-  ) {
+  const referencedAuthor = referencedMessage?.author;
+  if (!referencedAuthor?.bot || referencedAuthor.id === client.user?.id || referencedMessage?.webhookId) {
     return null;
   }
 

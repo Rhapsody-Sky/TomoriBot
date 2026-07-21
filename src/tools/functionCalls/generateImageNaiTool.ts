@@ -26,6 +26,7 @@ import { BaseTool, type ToolContext, type ToolResult, type ToolParameterSchema }
 import { sql } from "../../utils/db/client";
 import { decryptApiKey } from "../../utils/security/crypto";
 import { checkImageQuota, incrementImageQuota, type QuotaCheckResult } from "../../utils/quota/imageQuotaManager";
+import { llmProviderRepo, statRepository, userRepository } from "@/utils/db/repositories";
 import { extractImagesFromMessage } from "../../utils/image/imageExtractor";
 import { segmentImage } from "../../utils/image/segmentationService";
 import { resolveNaiImageParams, type EffectiveNaiImageParams } from "@/utils/image/naiImageParams";
@@ -41,7 +42,6 @@ import {
   type NaiGenerationCharacterPayload,
 } from "@/utils/image/naiImageGeneration";
 import { loadCharRefAsBase64 } from "@/utils/storage/charrefStorage";
-import { llmProviderRepo } from "@/utils/db/repositories";
 import {
   CredentialUnavailableError,
   getResolvedCapabilityModelId,
@@ -97,6 +97,18 @@ interface GenerateImageNaiCharacterArg {
 interface NAIIdentityProfile {
   tags: string[];
   refUrl: string | null;
+}
+
+export async function loadUserNaiProfileByDiscordId(userDiscId: string): Promise<NAIIdentityProfile | null> {
+  const user = await userRepository.loadByDiscordId(userDiscId);
+  if (!user) {
+    return null;
+  }
+
+  return {
+    tags: user.physical_appearance_tags ?? [],
+    refUrl: user.nai_char_ref_url ?? null,
+  };
 }
 
 function buildCharacterNoticeLines(locale: string, characters: GenerateImageNaiCharacterArg[]): string[] {
@@ -438,30 +450,6 @@ export class GenerateImageNaiTool extends BaseTool {
     };
   }
 
-  private async loadUserNaiProfileByDiscordId(userDiscId: string): Promise<NAIIdentityProfile | null> {
-    const rows = await sql<
-      Array<{
-        physical_appearance_tags: string[] | null;
-        nai_char_ref_url: string | null;
-      }>
-    >`
-			SELECT physical_appearance_tags, nai_char_ref_url
-			FROM users
-			WHERE user_disc_id = ${userDiscId}
-			LIMIT 1
-		`;
-
-    const row = rows[0];
-    if (!row) {
-      return null;
-    }
-
-    return {
-      tags: row.physical_appearance_tags ?? [],
-      refUrl: row.nai_char_ref_url,
-    };
-  }
-
   private validateCharacterArgs(characters: GenerateImageNaiCharacterArg[], context: ToolContext): string | null {
     for (const [index, character] of characters.entries()) {
       const hasId = typeof character.id === "string" && character.id.trim().length > 0;
@@ -554,7 +542,7 @@ export class GenerateImageNaiTool extends BaseTool {
             }
           }
         } else if (DISCORD_SNOWFLAKE_PATTERN.test(normalizedId)) {
-          const userProfile = await this.loadUserNaiProfileByDiscordId(normalizedId);
+          const userProfile = await loadUserNaiProfileByDiscordId(normalizedId);
           foundProfile = userProfile !== null;
           resolvedTags = userProfile?.tags ?? [];
 
@@ -1303,6 +1291,18 @@ export class GenerateImageNaiTool extends BaseTool {
       // 8. Increment quota after successful generation (server providers only)
       if (creds.source === "server") {
         await incrementImageQuota(context.tomoriState.server_id, userDiscId);
+      }
+      // Record canonical generation telemetry for all providers; quotas enforce limits only.
+      if (context.internalUserId) {
+        statRepository.recordStat({
+          serverId: context.tomoriState.server_id,
+          userId: context.internalUserId,
+          lineageId: context.tomoriState.persona_lineage_id ?? 0,
+          metric: "image_generated",
+          // Key by the base NAI model codename (inpaint variants collapse into their
+          // base model) for a per-model breakdown at read time.
+          metricKey: baseModelCodename,
+        });
       }
 
       // Build success message with remaining quota info
