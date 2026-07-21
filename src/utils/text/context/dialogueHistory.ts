@@ -11,6 +11,11 @@ import { log } from "@/utils/misc/logger";
 import { memoryGuard } from "@/utils/security/rateLimiter";
 import { humanizeString } from "@/utils/text/processors/formatters";
 import { applyUncensorInputTransforms } from "@/utils/text/uncensor";
+import {
+  VERBATIM_TOOL_CALLING_CONTEXT_DEPTH,
+  VERBATIM_TOOL_CALLING_NUDGE,
+  shouldInjectVerbatimToolCallingNudge,
+} from "@/utils/tools/verbatimToolCalling";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
 import {
   buildMediaAttributionText,
@@ -24,6 +29,7 @@ import {
 import { normalizeCustomEmojisForLlm, splitLeadingSystemBlocks } from "./mentionNormalizer";
 import type { MentionConverter } from "./templates";
 import type { SimplifiedMessageForContext } from "./types";
+import { buildDateSpacer } from "./timeAwareness";
 
 export async function appendDialogueHistoryContext(params: {
   contextItems: StructuredContextItem[];
@@ -33,6 +39,9 @@ export async function appendDialogueHistoryContext(params: {
   botName: string;
   tomoriConfig: AssembledServerConfig;
   tomoriState: TomoriState | null;
+  channelContextNote?: { note: string; depth: number } | null;
+  reunionNote?: { note: string } | null;
+  dateSpacerTemplate?: string | null;
   mediaContextWindow?: number;
   includeTimestamps: boolean;
   isUserImpersonation: boolean;
@@ -57,17 +66,48 @@ export async function appendDialogueHistoryContext(params: {
     mediaWindowCutoff,
   );
 
-  const effectiveContextNote =
-    params.tomoriState?.context_note?.trim() || params.tomoriConfig.context_note?.trim() || null;
-  const effectiveContextNoteDepth = effectiveContextNote
-    ? params.tomoriState?.context_note?.trim()
-      ? (params.tomoriState.context_note_depth ?? 0)
-      : (params.tomoriConfig.context_note_depth ?? 0)
-    : 0;
-  const contextNoteTargetIndex = effectiveContextNote ? Math.max(0, totalMessages - effectiveContextNoteDepth) : -1;
-  let contextNoteEmitted = false;
+  // Build the ordered list of active context notes.
+  // Persona and channel notes are additive (both injected when set).
+  // Global note is a fallback used only when neither persona nor channel has one.
+  const personaNoteText = params.tomoriState?.context_note?.trim() || null;
+  const channelNoteText = params.channelContextNote?.note?.trim() || null;
+
+  const activeNotes: Array<{ text: string; targetIndex: number; emitted: boolean; isSystemBlock?: boolean }> = [];
+
+  if (personaNoteText) {
+    const depth = params.tomoriState?.context_note_depth ?? 0;
+    activeNotes.push({ text: personaNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
+  }
+  if (channelNoteText) {
+    const depth = params.channelContextNote?.depth ?? 0;
+    activeNotes.push({ text: channelNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
+  }
+  if (activeNotes.length === 0) {
+    const globalNoteText = params.tomoriConfig.context_note?.trim() || null;
+    if (globalNoteText) {
+      const depth = params.tomoriConfig.context_note_depth ?? 0;
+      activeNotes.push({ text: globalNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
+    }
+  }
+  if (shouldInjectVerbatimToolCallingNudge(params.tomoriConfig, params.tomoriState)) {
+    activeNotes.push({
+      text: VERBATIM_TOOL_CALLING_NUDGE,
+      targetIndex: Math.max(0, totalMessages - VERBATIM_TOOL_CALLING_CONTEXT_DEPTH),
+      emitted: false,
+    });
+  }
+  const reunionNoteText = params.reunionNote?.note?.trim();
+  if (reunionNoteText) {
+    activeNotes.push({
+      text: reunionNoteText,
+      targetIndex: Math.max(0, totalMessages - 1),
+      emitted: false,
+      isSystemBlock: true,
+    });
+  }
 
   const botNameLower = params.botName.toLowerCase();
+  let previousCreatedAt: number | undefined;
   for (const [index, msg] of params.simplifiedMessageHistory.entries()) {
     const isPersonaMessage = msg.authorType === "persona" && !!msg.personaName;
     const isCurrentPersonaMessage = isPersonaMessage && msg.personaName?.toLowerCase() === botNameLower;
@@ -82,15 +122,35 @@ export async function appendDialogueHistoryContext(params: {
       type: msg.authorType,
     };
 
-    if (!contextNoteEmitted && effectiveContextNote && index === contextNoteTargetIndex) {
-      pushDialogueHistoryContextItem(
-        params.contextItems,
-        "user",
-        [{ type: "text", text: `[System: ${effectiveContextNote}]` }],
-        "context_note_injection",
-        ContextItemTag.CONTEXT_NOTE_INJECTION,
+    if (params.dateSpacerTemplate && previousCreatedAt !== undefined && msg.createdAt !== undefined) {
+      const spacer = buildDateSpacer(
+        previousCreatedAt,
+        msg.createdAt,
+        params.tomoriConfig.timezone_offset,
+        params.dateSpacerTemplate,
       );
-      contextNoteEmitted = true;
+      if (spacer) {
+        pushDialogueHistoryContextItem(
+          params.contextItems,
+          "user",
+          [{ type: "text", text: spacer }],
+          `date_spacer_${msg.id}`,
+        );
+      }
+    }
+    if (msg.createdAt !== undefined) previousCreatedAt = msg.createdAt;
+
+    for (const note of activeNotes) {
+      if (!note.emitted && index === note.targetIndex) {
+        pushDialogueHistoryContextItem(
+          params.contextItems,
+          "user",
+          [{ type: "text", text: note.isSystemBlock ? note.text : `[System: ${note.text}]` }],
+          "context_note_injection",
+          ContextItemTag.CONTEXT_NOTE_INJECTION,
+        );
+        note.emitted = true;
+      }
     }
 
     const parts: ContextPart[] = [];
@@ -147,14 +207,16 @@ export async function appendDialogueHistoryContext(params: {
     }
   }
 
-  if (!contextNoteEmitted && effectiveContextNote) {
-    pushDialogueHistoryContextItem(
-      params.contextItems,
-      "user",
-      [{ type: "text", text: `[System: ${effectiveContextNote}]` }],
-      "context_note_injection",
-      ContextItemTag.CONTEXT_NOTE_INJECTION,
-    );
+  for (const note of activeNotes) {
+    if (!note.emitted) {
+      pushDialogueHistoryContextItem(
+        params.contextItems,
+        "user",
+        [{ type: "text", text: note.isSystemBlock ? note.text : `[System: ${note.text}]` }],
+        "context_note_injection",
+        ContextItemTag.CONTEXT_NOTE_INJECTION,
+      );
+    }
   }
 }
 
@@ -304,10 +366,15 @@ async function buildMediaAttributionHint(
   const thisOrThese = totalMediaCount === 1 ? "This" : "These";
   const wasSent = totalMediaCount === 1 ? "was" : "were";
 
+  // Forwarded media registers the wrapper message's own id (so tools can resolve
+  // it in the current channel), so it would pass the includes() check below —
+  // branch on the source kind first to keep the forwarded attribution wording.
+  if (params.msg.remoteMediaSourceKind === "forwarded") {
+    return `[System: ${thisOrThese} ${mediaWord} (${idLabel}: ${idList}) ${wasSent} attached to the forwarded message described above]`;
+  }
+
   if (!mediaMessageIds.includes(params.msg.id)) {
-    return params.msg.remoteMediaSourceKind === "forwarded"
-      ? `[System: ${thisOrThese} ${mediaWord} (${idLabel}: ${idList}) ${wasSent} attached to the forwarded message described above]`
-      : `[System: ${thisOrThese} ${mediaWord} (${idLabel}: ${idList}) ${wasSent} included in the message being replied to]`;
+    return `[System: ${thisOrThese} ${mediaWord} (${idLabel}: ${idList}) ${wasSent} included in the message being replied to]`;
   }
 
   const resolvedHintAuthorName = await params.convertMentions(

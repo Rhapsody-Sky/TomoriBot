@@ -80,6 +80,11 @@ export type PersonaTextgenConfigsRow = {
   nai_attg_stars: number | null;
 };
 
+type PersonaScopedConfigFields = Omit<PersonaContextNoteConfigsRow, "persona_id"> &
+  Omit<PersonaVoiceConfigsRow, "persona_id"> &
+  Omit<PersonaImagegenConfigsRow, "persona_id"> &
+  Omit<PersonaTextgenConfigsRow, "persona_id">;
+
 /** Per-persona config bundle (Stage A). */
 export type PersonaConfigBundle = {
   persona_id: number;
@@ -142,19 +147,6 @@ const TOMORI_POINTER_CONTENT_FIELDS = new Set<string>([
   "attribute_list",
   "sample_dialogues_in",
   "sample_dialogues_out",
-  "context_note",
-  "context_note_depth",
-  "physical_appearance_tags",
-  "nai_char_ref_url",
-  "nai_attg_author",
-  "nai_attg_title",
-  "nai_attg_tags",
-  "nai_attg_genre",
-  "nai_attg_stars",
-  "speech_voice_sample_id",
-  "speech_voice_id",
-  "speech_voice_name",
-  "speech_voice_design_prompt",
 ]);
 
 /** Fields where SQL NULL carries semantic meaning ("not configured") and must not be coerced to undefined. */
@@ -186,6 +178,17 @@ const MEANINGFULLY_NULLABLE_CONFIG_FIELDS = new Set([
   "welcome_persona_id",
   "thought_log_channel_disc_id",
 ]);
+
+/**
+ * A main persona whose Discord guild avatar is out of date with its preset —
+ * the unit of work consumed by the background preset-avatar fan-out reconciler.
+ */
+export type UnsyncedMainPointer = {
+  server_disc_id: string;
+  persona_id: number;
+  preset_avatar_shared_url: string;
+  preset_avatar_hash: string;
+};
 
 export class PersonaRepository implements IRepository<PersonaExportShape> {
   private static readonly FALLBACK_DEBUG_ENABLED = new Set(["1", "true", "yes", "on"]).has(
@@ -641,9 +644,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
   }
 
   /**
-   * Set the context note (and depth) for a persona. Writes to both the new
-   * `persona_context_note_configs` table and the persona mirror columns
-   * (dual-write expand-then-contract pattern, mirrors fromExportShape).
+   * Set the context note (and depth) for a persona.
    *
    * @param personaId - Internal persona DB ID
    * @param contextNote - Note text, or null to clear
@@ -661,7 +662,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         context_note: contextNote,
         context_note_depth: contextNoteDepth,
       };
-      await Promise.all([this.sqlUpsertPersonaContextNoteConfigs(row), this.sqlDualWriteContextNoteToTomoris(row)]);
+      await this.sqlUpsertPersonaContextNoteConfigs(row);
       return true;
     } catch (e) {
       log.error(`Error setting context note for persona ${personaId}:`, e);
@@ -670,9 +671,33 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
   }
 
   /**
+   * Sets or clears the per-persona humanizer degree override in persona_configs.
+   * Operational setting (like the persona LLM override): does NOT materialize
+   * pointer-preset personas, since no preset content is edited.
+   * Upserts so the write is self-healing if the persona_configs row is missing.
+   *
+   * @param personaId - Internal persona DB ID
+   * @param humanizerDegree - Override value 0-3, or null to inherit the server-wide setting
+   * @returns True when the write succeeded
+   */
+  async setHumanizerOverride(personaId: number, humanizerDegree: number | null): Promise<boolean> {
+    try {
+      const result = await sql`
+        INSERT INTO persona_configs (persona_id, humanizer_degree)
+        VALUES (${personaId}, ${humanizerDegree})
+        ON CONFLICT (persona_id) DO UPDATE
+        SET humanizer_degree = EXCLUDED.humanizer_degree
+        RETURNING *
+      `;
+      return result.length > 0;
+    } catch (e) {
+      log.error(`Error setting humanizer override for persona ${personaId}:`, e);
+      return false;
+    }
+  }
+
+  /**
    * Set the NovelAI ATTG (Author/Title/Tags/Genre/Stars) metadata for a persona.
-   * Writes to both the new `persona_textgen_configs` table and the legacy
-   * `personas` columns (dual-write expand-then-contract pattern).
    *
    * @param personaId - Internal persona DB ID
    * @param attg     - ATTG fields; any subset may be null to clear that field
@@ -694,7 +719,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
       }
 
       const row: PersonaTextgenConfigsRow = { persona_id: personaId, ...attg };
-      await Promise.all([this.sqlUpsertPersonaTextgenConfigs(row), this.sqlDualWriteTextgenToTomoris(row)]);
+      await this.sqlUpsertPersonaTextgenConfigs(row);
       return true;
     } catch (e) {
       log.error(`Error setting NAI ATTG for persona ${personaId}:`, e);
@@ -703,9 +728,29 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
   }
 
   /**
+   * Replace the full voice assignment config for a persona.
+   *
+   * @param personaId - Internal persona DB ID
+   * @param voice - Complete voice config row excluding persona_id
+   */
+  async setVoiceConfig(personaId: number, voice: Omit<PersonaVoiceConfigsRow, "persona_id">): Promise<boolean> {
+    try {
+      const materialized = await this.materializeIfPointer(personaId);
+      if (!materialized) {
+        return false;
+      }
+
+      await this.sqlUpsertPersonaVoiceConfigs({ persona_id: personaId, ...voice });
+      return true;
+    } catch (e) {
+      log.error(`Error setting voice config for persona ${personaId}:`, e);
+      return false;
+    }
+  }
+
+  /**
    * Replace the persona's physical appearance image tags.
-   * Writes only `physical_appearance_tags` to both the split imagegen table
-   * and the `personas.physical_appearance_tags` mirror, preserving `nai_char_ref_url`.
+   * Writes only `physical_appearance_tags`, preserving `nai_char_ref_url`.
    *
    * @param personaId - Internal persona DB ID
    * @param tags - Full replacement tag array (use [] to clear)
@@ -717,20 +762,13 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         return false;
       }
 
-      await Promise.all([
-        sql`
-          INSERT INTO persona_imagegen_configs (persona_id, physical_appearance_tags)
-          VALUES (${personaId}, ${sql.array(tags, "TEXT")})
-          ON CONFLICT (persona_id) DO UPDATE SET
-            physical_appearance_tags   = EXCLUDED.physical_appearance_tags,
-            updated_at = NOW()
-        `,
-        sql`
-          UPDATE personas
-          SET physical_appearance_tags = ${sql.array(tags, "TEXT")}, updated_at = NOW()
-          WHERE persona_id = ${personaId}
-        `,
-      ]);
+      await sql`
+        INSERT INTO persona_imagegen_configs (persona_id, physical_appearance_tags)
+        VALUES (${personaId}, ${sql.array(tags, "TEXT")})
+        ON CONFLICT (persona_id) DO UPDATE SET
+          physical_appearance_tags = EXCLUDED.physical_appearance_tags,
+          updated_at = NOW()
+      `;
       return true;
     } catch (e) {
       log.error(`Error setting physical appearance tags for persona ${personaId}:`, e);
@@ -740,7 +778,6 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
 
   /**
    * Replace the persona's NovelAI character reference image URL.
-   * Writes both the split imagegen config row and the legacy personas column.
    *
    * @param personaId - Internal persona DB ID
    * @param refUrl    - Stored reference URL/path, or null to clear
@@ -752,20 +789,13 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         return false;
       }
 
-      await Promise.all([
-        sql`
-          INSERT INTO persona_imagegen_configs (persona_id, nai_char_ref_url)
-          VALUES (${personaId}, ${refUrl})
-          ON CONFLICT (persona_id) DO UPDATE SET
-            nai_char_ref_url = EXCLUDED.nai_char_ref_url,
-            updated_at       = NOW()
-        `,
-        sql`
-          UPDATE personas
-          SET nai_char_ref_url = ${refUrl}, updated_at = NOW()
-          WHERE persona_id = ${personaId}
-        `,
-      ]);
+      await sql`
+        INSERT INTO persona_imagegen_configs (persona_id, nai_char_ref_url)
+        VALUES (${personaId}, ${refUrl})
+        ON CONFLICT (persona_id) DO UPDATE SET
+          nai_char_ref_url = EXCLUDED.nai_char_ref_url,
+          updated_at = NOW()
+      `;
       return true;
     } catch (e) {
       log.error(`Error setting NAI character reference for persona ${personaId}:`, e);
@@ -1041,14 +1071,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
           sample_dialogues_in,
           sample_dialogues_out,
           is_alter,
-          persona_lineage_id,
-          physical_appearance_tags,
-          nai_char_ref_url,
-          nai_attg_author,
-          nai_attg_title,
-          nai_attg_tags,
-          nai_attg_genre,
-          nai_attg_stars
+          persona_lineage_id
         )
         VALUES (
           ${params.serverId},
@@ -1057,26 +1080,50 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
           ${sql.array(params.sampleDialoguesIn, "TEXT")},
           ${sql.array(params.sampleDialoguesOut, "TEXT")},
           true,
-          COALESCE(${params.personaLineageId ?? null}::bigint, nextval('persona_lineage_id_seq')),
-          ${sql.array(params.physicalAppearanceTags ?? [], "TEXT")},
-          ${params.naiCharRefUrl ?? null},
-          ${params.naiAttgAuthor ?? null},
-          ${params.naiAttgTitle ?? null},
-          ${params.naiAttgTags ?? null},
-          ${params.naiAttgGenre ?? null},
-          ${params.naiAttgStars ?? null}
+          COALESCE(${params.personaLineageId ?? null}::bigint, nextval('persona_lineage_id_seq'))
         )
         RETURNING *
       `;
       if (!insertedRow?.persona_id) {
         return null;
       }
+      const personaId = insertedRow.persona_id as number;
+
+      await tx`
+        INSERT INTO persona_imagegen_configs (persona_id, physical_appearance_tags, nai_char_ref_url)
+        VALUES (${personaId}, ${sql.array(params.physicalAppearanceTags ?? [], "TEXT")}, ${params.naiCharRefUrl ?? null})
+        ON CONFLICT (persona_id) DO UPDATE SET
+          physical_appearance_tags = EXCLUDED.physical_appearance_tags,
+          nai_char_ref_url = EXCLUDED.nai_char_ref_url,
+          updated_at = NOW()
+      `;
+
+      await tx`
+        INSERT INTO persona_textgen_configs (
+          persona_id, nai_attg_author, nai_attg_title, nai_attg_tags, nai_attg_genre, nai_attg_stars
+        )
+        VALUES (
+          ${personaId},
+          ${params.naiAttgAuthor ?? null},
+          ${params.naiAttgTitle ?? null},
+          ${params.naiAttgTags ?? null},
+          ${params.naiAttgGenre ?? null},
+          ${params.naiAttgStars ?? null}
+        )
+        ON CONFLICT (persona_id) DO UPDATE SET
+          nai_attg_author = EXCLUDED.nai_attg_author,
+          nai_attg_title = EXCLUDED.nai_attg_title,
+          nai_attg_tags = EXCLUDED.nai_attg_tags,
+          nai_attg_genre = EXCLUDED.nai_attg_genre,
+          nai_attg_stars = EXCLUDED.nai_attg_stars,
+          updated_at = NOW()
+      `;
 
       const flags = normalizeAttributePublicFlags(params.attributes, params.attributePublicFlags);
       for (let index = 0; index < params.attributes.length; index++) {
         await tx`
           INSERT INTO persona_attributes (persona_id, attribute_order, attribute_text, is_public)
-          VALUES (${insertedRow.persona_id}, ${index + 1}, ${params.attributes[index]}, ${flags[index]})
+          VALUES (${personaId}, ${index + 1}, ${params.attributes[index]}, ${flags[index]})
         `;
       }
 
@@ -1112,6 +1159,12 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
             is_pointer = true,
             preset_lineage_id = ${pointerLineageId},
             preset_language = ${params.preset.preset_language},
+            -- Re-pointing is a fresh pointer: drop any stored avatar so the persona
+            -- resolves the official preset avatar again (alters live-resolve the
+            -- shared image; mains re-receive it via the guild-avatar reconciler).
+            -- The caller deletes the old server-owned image (shared presets/ images
+            -- are immutable and skipped by the delete guard).
+            webhook_avatar_url = NULL,
             updated_at = NOW()
           WHERE persona_id = ${params.personaId}
           RETURNING *
@@ -1127,6 +1180,10 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
           params.triggerWords ?? resolvePresetTriggerWords(params.preset),
           params.personaPrompt ?? resolvePresetPersonaPrompt(params.preset),
         );
+        // Re-pointing resets sprites: drop the persona's own rows so it resolves
+        // the official preset sprite set live again. Server-owned sprite IMAGES
+        // are cleaned up by the caller (the shared preset images are immutable).
+        await tx`DELETE FROM persona_sprites WHERE persona_id = ${params.personaId}`;
 
         return updatedRow;
       });
@@ -1136,6 +1193,108 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
       log.error(`Error applying preset pointer to persona ${params.personaId}:`, error);
       return null;
     }
+  }
+
+  /**
+   * Records that a server's main persona guild avatar is now in sync with its
+   * preset — call this immediately after a SUCCESSFUL guild-avatar PATCH at an
+   * apply site (`/config setup`, `/persona default`). It stamps
+   * `applied_avatar_hash = preset_avatar_hash` so the background fan-out
+   * reconciler skips this persona until the catalog art actually changes again
+   * (preventing a redundant re-PATCH on the next boot).
+   *
+   * Only stamps an unforked **main pointer** whose preset carries a seeded avatar
+   * hash; materialized/non-pointer mains and avatar-less presets are no-ops (the
+   * reconciler ignores them anyway), so this is safe to call unconditionally on
+   * any successful guild-avatar apply.
+   *
+   * @param serverDiscId - The Discord guild id whose main avatar was just applied
+   */
+  async markServerMainAvatarSynced(serverDiscId: string): Promise<void> {
+    try {
+      await sql`
+        UPDATE personas p
+        SET applied_avatar_hash = pp.preset_avatar_hash
+        FROM servers s, persona_presets pp
+        WHERE s.server_disc_id = ${serverDiscId}
+          AND p.server_id = s.server_id
+          AND p.is_alter = false
+          AND p.is_pointer = true
+          AND pp.preset_lineage_id = p.preset_lineage_id
+          AND pp.preset_language = p.preset_language
+          AND pp.preset_avatar_hash IS NOT NULL
+          AND p.applied_avatar_hash IS DISTINCT FROM pp.preset_avatar_hash
+      `;
+    } catch (error) {
+      // Non-fatal: a missed stamp only costs one redundant reconciler PATCH later.
+      log.warn(`Failed to stamp applied_avatar_hash for server ${serverDiscId} (non-fatal)`, error);
+    }
+  }
+
+  /**
+   * Loads every server whose active main persona is an unforked preset pointer
+   * and whose last-applied avatar hash differs from its preset's current avatar
+   * hash — exactly the work set for the background preset-avatar fan-out
+   * reconciler. Materialized personas (`is_pointer = false`) and presets without
+   * a seeded avatar are excluded by the join/predicates.
+   *
+   * Errors propagate to the caller, which owns the "skip this run" semantics.
+   */
+  async loadUnsyncedMainPointers(): Promise<UnsyncedMainPointer[]> {
+    return await sql<UnsyncedMainPointer[]>`
+      SELECT
+        s.server_disc_id,
+        p.persona_id,
+        pp.preset_avatar_shared_url,
+        pp.preset_avatar_hash
+      FROM personas p
+      JOIN servers s ON s.server_id = p.server_id
+      JOIN persona_presets pp
+        ON pp.preset_lineage_id = p.preset_lineage_id
+        AND pp.preset_language = p.preset_language
+      WHERE p.is_alter = false
+        AND p.is_pointer = true
+        AND pp.preset_avatar_hash IS NOT NULL
+        AND pp.preset_avatar_shared_url IS NOT NULL
+        AND p.applied_avatar_hash IS DISTINCT FROM pp.preset_avatar_hash
+    `;
+  }
+
+  /**
+   * Returns whether a persona is still an unforked pointer, or `null` when the
+   * row no longer exists. The avatar reconciler uses this to skip a persona the
+   * user customized (materialized) while it waited in the reconciler queue.
+   *
+   * Errors propagate so the caller can decide to skip the persona to be safe.
+   *
+   * @param personaId - Internal persona DB ID
+   */
+  async isPersonaPointer(personaId: number): Promise<boolean | null> {
+    const [row] = await sql<Array<{ is_pointer: boolean | null }>>`
+      SELECT is_pointer FROM personas WHERE persona_id = ${personaId}
+    `;
+    if (!row) return null;
+    return row.is_pointer ?? false;
+  }
+
+  /**
+   * Stamps a single main pointer's `applied_avatar_hash` after a SUCCESSFUL
+   * guild-avatar PATCH so the reconciler skips it until the preset art changes
+   * again. Unlike {@link markServerMainAvatarSynced} (which resolves the hash via
+   * the preset join for an apply-site), this writes a hash the caller already
+   * holds for one specific persona.
+   *
+   * Errors propagate so the caller can log and retry on the next boot.
+   *
+   * @param personaId        - Internal persona DB ID
+   * @param presetAvatarHash - The preset avatar hash to record as applied
+   */
+  async stampPointerAvatarHash(personaId: number, presetAvatarHash: string): Promise<void> {
+    await sql`
+      UPDATE personas
+      SET applied_avatar_hash = ${presetAvatarHash}
+      WHERE persona_id = ${personaId}
+    `;
   }
 
   async createPresetPointerAlterPersona(params: {
@@ -1494,7 +1653,6 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
 
   /**
    * Restores persona config table rows for all personas in a server.
-   * Dual-writes: upserts into each config table AND back into personas.
    *
    * @param ownerId - Discord server snowflake
    * @param data    - Previously exported PersonaExportShape
@@ -1508,19 +1666,15 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
 
         if (bundle.context_note_configs) {
           ops.push(this.sqlUpsertPersonaContextNoteConfigs(bundle.context_note_configs));
-          ops.push(this.sqlDualWriteContextNoteToTomoris(bundle.context_note_configs));
         }
         if (bundle.voice_configs) {
           ops.push(this.sqlUpsertPersonaVoiceConfigs(bundle.voice_configs));
-          ops.push(this.sqlDualWriteVoiceToTomoris(bundle.voice_configs));
         }
         if (bundle.imagegen_configs) {
           ops.push(this.sqlUpsertPersonaImagegenConfigs(bundle.imagegen_configs));
-          ops.push(this.sqlDualWriteImagegenToTomoris(bundle.imagegen_configs));
         }
         if (bundle.textgen_configs) {
           ops.push(this.sqlUpsertPersonaTextgenConfigs(bundle.textgen_configs));
-          ops.push(this.sqlDualWriteTextgenToTomoris(bundle.textgen_configs));
         }
 
         await Promise.all(ops);
@@ -1671,54 +1825,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         nai_attg_genre  = EXCLUDED.nai_attg_genre,
         nai_attg_stars  = EXCLUDED.nai_attg_stars,
         updated_at      = NOW()
-    `;
-  }
-
-  // ── dual-write back to personas ─────────────────────────────────
-
-  private async sqlDualWriteContextNoteToTomoris(row: PersonaContextNoteConfigsRow): Promise<void> {
-    await sql`
-      UPDATE personas SET
-        context_note       = ${row.context_note},
-        context_note_depth = ${row.context_note_depth},
-        updated_at         = NOW()
-      WHERE persona_id = ${row.persona_id}
-    `;
-  }
-
-  private async sqlDualWriteVoiceToTomoris(row: PersonaVoiceConfigsRow): Promise<void> {
-    await sql`
-      UPDATE personas SET
-        speech_voice_sample_id    = ${row.speech_voice_sample_id},
-        speech_voice_id           = ${row.speech_voice_id},
-        speech_voice_name         = ${row.speech_voice_name},
-        speech_voice_design_prompt = ${row.speech_voice_design_prompt},
-        updated_at                = NOW()
-      WHERE persona_id = ${row.persona_id}
-    `;
-  }
-
-  private async sqlDualWriteImagegenToTomoris(row: PersonaImagegenConfigsRow): Promise<void> {
-    await sql`
-      UPDATE personas SET
-        physical_appearance_tags         = ${sql.array(row.physical_appearance_tags, "TEXT")},
-        nai_char_ref_url = ${row.nai_char_ref_url},
-        updated_at       = NOW()
-      WHERE persona_id = ${row.persona_id}
-    `;
-  }
-
-  private async sqlDualWriteTextgenToTomoris(row: PersonaTextgenConfigsRow): Promise<void> {
-    await sql`
-      UPDATE personas SET
-        nai_attg_author = ${row.nai_attg_author},
-        nai_attg_title  = ${row.nai_attg_title},
-        nai_attg_tags   = ${row.nai_attg_tags},
-        nai_attg_genre  = ${row.nai_attg_genre},
-        nai_attg_stars  = ${row.nai_attg_stars},
-        updated_at      = NOW()
-      WHERE persona_id = ${row.persona_id}
-    `;
+      `;
   }
 
   // ── private helpers: row normalization ────────────────────────────────────
@@ -1835,6 +1942,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         -- 2. server_chat_configs
         scc.humanizer_degree, scc.message_fetch_limit, scc.send_message_limit,
         scc.match_limit, scc.cascade_limit, scc.timezone_offset, scc.self_debug_enabled,
+        scc.model_randomizer_enabled,
         scc.system_prompt, scc.context_note, scc.context_note_depth,
         scc.llm_stop_strings, scc.llm_stop_speaker_pattern_enabled,
         scc.llm_max_output_tokens, scc.llm_top_p, scc.llm_top_k,
@@ -1848,7 +1956,9 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         -- 4. server_capabilities_configs
         scaps.emoji_usage_enabled, scaps.sticker_usage_enabled, scaps.web_search_enabled,
         scaps.manage_message_enabled, scaps.thread_creation_enabled, scaps.imagegen_enabled,
-        scaps.videogen_enabled, scaps.voice_message_enabled, scaps.tool_use_enabled,
+        scaps.videogen_enabled, scaps.voice_message_enabled, scaps.user_blocking_enabled,
+        scaps.time_awareness_enabled,
+        scaps.tool_use_enabled, scaps.verbatim_tool_calling_enabled,
         -- 5. server_notice_embeds_configs
         snec.tool_notice_hidden_keys,
         -- 6. server_nsfw_configs
@@ -1936,6 +2046,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         -- 2. server_chat_configs
         scc.humanizer_degree, scc.message_fetch_limit, scc.send_message_limit,
         scc.match_limit, scc.cascade_limit, scc.timezone_offset, scc.self_debug_enabled,
+        scc.model_randomizer_enabled,
         scc.system_prompt, scc.context_note, scc.context_note_depth,
         scc.llm_stop_strings, scc.llm_stop_speaker_pattern_enabled,
         scc.llm_max_output_tokens, scc.llm_top_p, scc.llm_top_k,
@@ -1949,7 +2060,9 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         -- 4. server_capabilities_configs
         scaps.emoji_usage_enabled, scaps.sticker_usage_enabled, scaps.web_search_enabled,
         scaps.manage_message_enabled, scaps.thread_creation_enabled, scaps.imagegen_enabled,
-        scaps.videogen_enabled, scaps.voice_message_enabled, scaps.tool_use_enabled,
+        scaps.videogen_enabled, scaps.voice_message_enabled, scaps.user_blocking_enabled,
+        scaps.time_awareness_enabled,
+        scaps.tool_use_enabled, scaps.verbatim_tool_calling_enabled,
         -- 5. server_notice_embeds_configs
         snec.tool_notice_hidden_keys,
         -- 6. server_nsfw_configs
@@ -2086,8 +2199,48 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
       resolvePresetTriggerWords(preset),
       resolvePresetPersonaPrompt(preset),
     );
+    // Copy the shared preset sprites into this persona's own rows, reusing the
+    // shared image URL (no byte duplication). The persona stops resolving sprites
+    // live once materialized, so this freezes its current default sprite set.
+    await this.copyPresetSpritesWithClient(client, personaId, pointerLineageId, pointerLanguage);
+    // Freeze the alter avatar by reference too: a pointer alter live-resolves the
+    // shared preset avatar, so once it materializes it must keep that exact
+    // reference (still the immutable presets/ URL — no byte duplication, and the
+    // delete guard still protects it). Mains deliver via the guild avatar, so
+    // only fill this for alters that have no avatar of their own.
+    if (preset.preset_avatar_shared_url) {
+      await client`
+        UPDATE personas
+        SET webhook_avatar_url = ${preset.preset_avatar_shared_url}
+        WHERE persona_id = ${personaId}
+          AND is_alter = true
+          AND webhook_avatar_url IS NULL
+      `;
+    }
 
     return true;
+  }
+
+  /**
+   * Copies a preset's shared sprites into `persona_sprites` for a persona being
+   * materialized. The `avatar_url` is the shared `presets/` reference, so the
+   * per-persona delete guard later refuses to delete it (other servers rely on it).
+   * Existing keys are left untouched (a re-materialization is a no-op).
+   */
+  private async copyPresetSpritesWithClient(
+    client: SQL,
+    personaId: number,
+    presetLineageId: number,
+    presetLanguage: string,
+  ): Promise<void> {
+    await client`
+      INSERT INTO persona_sprites (persona_id, sprite_name, sprite_key, avatar_url, usage_instructions, is_identity)
+      SELECT ${personaId}, sprite_name, sprite_key, avatar_url, usage_instructions, is_identity
+      FROM preset_sprites
+      WHERE preset_lineage_id = ${presetLineageId}
+        AND preset_language = ${presetLanguage}
+      ON CONFLICT (persona_id, sprite_key) DO NOTHING
+    `;
   }
 
   private async loadPresetForPointer(
@@ -2154,6 +2307,32 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
     }
 
     return presetsByPersonaId;
+  }
+
+  /**
+   * Resolves a persona's effective webhook avatar reference for the cached state.
+   *
+   * An unforked pointer ALTER with no avatar of its own live-resolves the shared
+   * preset avatar (`preset_avatar_shared_url`), so catalog avatar edits fan out
+   * to it on the next reseed — exactly like preset sprites/triggers/prompt. The
+   * resolution happens once at load time, so every downstream avatar consumer
+   * reads it from the cache with no hot-path query, and the existing pointer
+   * cache invalidation refreshes it after a seed update. Main personas deliver
+   * via the bot's guild member avatar, so their stored reference is untouched
+   * here (the main-avatar fan-out reconciler owns that channel).
+   *
+   * @param row - The raw persona row
+   * @param pointerPreset - The live preset backing this row, or undefined when forked
+   * @returns The avatar reference to store on the cached state
+   */
+  private resolvePointerAlterAvatarUrl(
+    row: TomoriRow,
+    pointerPreset: TomoriPresetRow | undefined,
+  ): string | null | undefined {
+    if (pointerPreset && row.is_alter === true && !row.webhook_avatar_url && pointerPreset.preset_avatar_shared_url) {
+      return pointerPreset.preset_avatar_shared_url;
+    }
+    return row.webhook_avatar_url;
   }
 
   private buildPresetAttributeRows(personaId: number, preset: TomoriPresetRow): PersonaAttributeRow[] {
@@ -2238,13 +2417,52 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
 
   // ── private SQL: persona reads ────────────────────────────────────────────
 
+  private withPersonaSplitConfigFields(row: Record<string, unknown>): TomoriRow & PersonaScopedConfigFields {
+    return {
+      ...row,
+      context_note: (row.split_context_note as string | null | undefined) ?? null,
+      context_note_depth: (row.split_context_note_depth as number | null | undefined) ?? 0,
+      speech_voice_sample_id: (row.split_speech_voice_sample_id as number | null | undefined) ?? null,
+      speech_voice_id: (row.split_speech_voice_id as string | null | undefined) ?? null,
+      speech_voice_name: (row.split_speech_voice_name as string | null | undefined) ?? null,
+      speech_voice_design_prompt: (row.split_speech_voice_design_prompt as string | null | undefined) ?? null,
+      physical_appearance_tags: Array.isArray(row.split_physical_appearance_tags)
+        ? (row.split_physical_appearance_tags as string[])
+        : [],
+      nai_char_ref_url: (row.split_nai_char_ref_url as string | null | undefined) ?? null,
+      nai_attg_author: (row.split_nai_attg_author as string | null | undefined) ?? null,
+      nai_attg_title: (row.split_nai_attg_title as string | null | undefined) ?? null,
+      nai_attg_tags: (row.split_nai_attg_tags as string | null | undefined) ?? null,
+      nai_attg_genre: (row.split_nai_attg_genre as string | null | undefined) ?? null,
+      nai_attg_stars: (row.split_nai_attg_stars as number | null | undefined) ?? null,
+    } as TomoriRow & PersonaScopedConfigFields;
+  }
+
   private async loadTomoriState(serverDiscId: string): Promise<TomoriState | null> {
     try {
       // 1. Load main persona row using server Discord ID
       const tomoriRows = await sql`
-        SELECT t.*
+        SELECT
+          t.*,
+          pcnc.context_note AS split_context_note,
+          pcnc.context_note_depth AS split_context_note_depth,
+          pvc.speech_voice_sample_id AS split_speech_voice_sample_id,
+          pvc.speech_voice_id AS split_speech_voice_id,
+          pvc.speech_voice_name AS split_speech_voice_name,
+          pvc.speech_voice_design_prompt AS split_speech_voice_design_prompt,
+          pic.physical_appearance_tags AS split_physical_appearance_tags,
+          pic.nai_char_ref_url AS split_nai_char_ref_url,
+          ptc.nai_attg_author AS split_nai_attg_author,
+          ptc.nai_attg_title AS split_nai_attg_title,
+          ptc.nai_attg_tags AS split_nai_attg_tags,
+          ptc.nai_attg_genre AS split_nai_attg_genre,
+          ptc.nai_attg_stars AS split_nai_attg_stars
         FROM personas t
         JOIN servers s ON t.server_id = s.server_id
+        LEFT JOIN persona_context_note_configs pcnc ON pcnc.persona_id = t.persona_id
+        LEFT JOIN persona_voice_configs pvc ON pvc.persona_id = t.persona_id
+        LEFT JOIN persona_imagegen_configs pic ON pic.persona_id = t.persona_id
+        LEFT JOIN persona_textgen_configs ptc ON ptc.persona_id = t.persona_id
         WHERE s.server_disc_id = ${serverDiscId}
         ORDER BY t.is_alter ASC, t.updated_at DESC NULLS LAST, t.persona_id DESC
         LIMIT 1
@@ -2254,7 +2472,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         log.warn(`No Tomori instance found for server ${serverDiscId}`);
         return null;
       }
-      const tomoriData = tomoriRows[0] as TomoriRow;
+      const tomoriData = this.withPersonaSplitConfigFields(tomoriRows[0] as Record<string, unknown>);
 
       // 2. Load associated config using server_id (server-scoped config)
       // biome-ignore lint/style/noNonNullAssertion: Row existence checked above, ID is guaranteed by DB schema.
@@ -2473,19 +2691,27 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         ? resolvePresetPersonaPrompt(pointerPreset)
         : (personaConfig?.persona_prompt ?? null);
 
+      // Per-persona humanizer override: overlay onto a copy of the server config at
+      // load time so every runtime consumer of config.humanizer_degree (providers,
+      // stream buffer, context templates) sees the persona-scoped value unchanged.
+      const humanizerOverride = personaConfig?.humanizer_degree ?? null;
+
       // 11. Combine and validate the full state
       const combinedState = {
         ...tomoriData,
+        // Pointer alters live-resolve the shared preset avatar (see helper).
+        webhook_avatar_url: this.resolvePointerAlterAvatarUrl(tomoriData, pointerPreset),
         attribute_list: attributeList,
         sample_dialogues_in: sampleDialoguesIn,
         sample_dialogues_out: sampleDialoguesOut,
         persona_attributes: personaAttributes,
-        config: configData,
+        config: humanizerOverride !== null ? { ...configData, humanizer_degree: humanizerOverride } : configData,
         llm: llmData,
         trigger_words: triggerWords,
         persona_prompt: personaPrompt,
         reward_conditioning_enabled: personaConfig?.reward_conditioning_enabled ?? true,
         punish_conditioning_enabled: personaConfig?.punish_conditioning_enabled ?? true,
+        humanizer_degree_override: humanizerOverride,
         ...autochRuntime,
         server_memories: serverMemories,
         rotation_keys: rotationKeys.length > 0 ? rotationKeys : undefined,
@@ -2515,9 +2741,27 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
         try {
           // 1. Load all Tomori persona rows for this server (main first, then alters)
           const tomoriRows = await sql`
-            SELECT t.*
+            SELECT
+              t.*,
+              pcnc.context_note AS split_context_note,
+              pcnc.context_note_depth AS split_context_note_depth,
+              pvc.speech_voice_sample_id AS split_speech_voice_sample_id,
+              pvc.speech_voice_id AS split_speech_voice_id,
+              pvc.speech_voice_name AS split_speech_voice_name,
+              pvc.speech_voice_design_prompt AS split_speech_voice_design_prompt,
+              pic.physical_appearance_tags AS split_physical_appearance_tags,
+              pic.nai_char_ref_url AS split_nai_char_ref_url,
+              ptc.nai_attg_author AS split_nai_attg_author,
+              ptc.nai_attg_title AS split_nai_attg_title,
+              ptc.nai_attg_tags AS split_nai_attg_tags,
+              ptc.nai_attg_genre AS split_nai_attg_genre,
+              ptc.nai_attg_stars AS split_nai_attg_stars
             FROM personas t
             JOIN servers s ON t.server_id = s.server_id
+            LEFT JOIN persona_context_note_configs pcnc ON pcnc.persona_id = t.persona_id
+            LEFT JOIN persona_voice_configs pvc ON pvc.persona_id = t.persona_id
+            LEFT JOIN persona_imagegen_configs pic ON pic.persona_id = t.persona_id
+            LEFT JOIN persona_textgen_configs ptc ON ptc.persona_id = t.persona_id
             WHERE s.server_disc_id = ${serverDiscId}
             ORDER BY t.is_alter ASC, t.updated_at DESC NULLS LAST, t.persona_id DESC
           `;
@@ -2527,7 +2771,9 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
             return [];
           }
 
-          const typedTomoriRows = tomoriRows as TomoriRow[];
+          const typedTomoriRows: Array<TomoriRow & PersonaScopedConfigFields> = tomoriRows.map((row: unknown) =>
+            this.withPersonaSplitConfigFields(row as Record<string, unknown>),
+          );
           const serverId = typedTomoriRows[0].server_id;
           const pointerPresetsByPersonaId = await this.loadPointerPresetsForRows(typedTomoriRows);
 
@@ -2689,7 +2935,7 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
 
           // 8. Batch-load autochat runtime counters for all personas in this server.
           const personaIds: number[] = typedTomoriRows
-            .map((r) => r.persona_id)
+            .map((r: TomoriRow & PersonaScopedConfigFields) => r.persona_id)
             .filter((id): id is number => typeof id === "number");
           const personaAttributeRows =
             personaIds.length > 0
@@ -2805,6 +3051,10 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
             const sampleDialoguesOut = pointerPreset
               ? pointerPreset.preset_sample_dialogues_out
               : ((tomoriRow.sample_dialogues_out as string[] | undefined) ?? []);
+            // A live pointer resolves trigger_words from its preset (mirrors
+            // persona_prompt below), so preset edits propagate until the first
+            // content edit forks the persona. Once forked, `pointerPreset` is
+            // undefined and the persona's own persona_configs triggers are used.
             const triggerWords = pointerPreset
               ? resolvePresetTriggerWords(pointerPreset)
               : (personaConfig?.trigger_words ?? []);
@@ -2812,18 +3062,26 @@ export class PersonaRepository implements IRepository<PersonaExportShape> {
               ? resolvePresetPersonaPrompt(pointerPreset)
               : (personaConfig?.persona_prompt ?? null);
 
+            // Per-persona humanizer override: overlay onto a copy of the shared server
+            // config so only this persona's state sees the overridden degree. Each
+            // state is Zod-parsed below, so the shared configData base stays untouched.
+            const humanizerOverride = personaConfig?.humanizer_degree ?? null;
+
             const combinedState = {
               ...tomoriRow,
+              // Pointer alters live-resolve the shared preset avatar (see helper).
+              webhook_avatar_url: this.resolvePointerAlterAvatarUrl(tomoriRow, pointerPreset),
               attribute_list: attributeList,
               sample_dialogues_in: sampleDialoguesIn,
               sample_dialogues_out: sampleDialoguesOut,
               persona_attributes: personaAttributes,
-              config: configData,
+              config: humanizerOverride !== null ? { ...configData, humanizer_degree: humanizerOverride } : configData,
               llm: llmData,
               trigger_words: triggerWords,
               persona_prompt: personaPrompt,
               reward_conditioning_enabled: personaConfig?.reward_conditioning_enabled ?? true,
               punish_conditioning_enabled: personaConfig?.punish_conditioning_enabled ?? true,
+              humanizer_degree_override: humanizerOverride,
               server_memories: serverMemories,
               rotation_keys: rotationKeys.length > 0 ? rotationKeys : undefined,
               ...autochRuntime,

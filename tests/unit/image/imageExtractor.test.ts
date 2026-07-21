@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Collection, ComponentType, type Message } from "discord.js";
-import { collectImageUrlsFromMessage } from "@/utils/image/imageExtractor";
+import type { ToolContext } from "@/types/tool/interfaces";
+import { collectImageUrlsFromMessage, resolveMessageImageUrls } from "@/utils/image/imageExtractor";
 
 /**
  * Build a minimal Message-like object for discovery tests. Only the fields read
@@ -13,6 +14,9 @@ function makeMessage(overrides: {
   stickers?: Array<{ id: string; name: string; url: string }>;
   content?: string;
   components?: unknown[];
+  /** Forwarded message snapshots, each built with the same shape as a message. */
+  snapshots?: Message[];
+  reference?: { messageId: string };
 }): Message {
   const attachments = new Collection<string, unknown>();
   for (const attachment of overrides.attachments ?? []) {
@@ -24,12 +28,19 @@ function makeMessage(overrides: {
     stickers.set(sticker.id, sticker);
   }
 
+  const messageSnapshots = new Collection<string, unknown>();
+  for (const [index, snapshot] of (overrides.snapshots ?? []).entries()) {
+    messageSnapshots.set(String(index), snapshot);
+  }
+
   return {
     attachments,
     stickers,
     embeds: overrides.embeds ?? [],
     content: overrides.content ?? "",
     components: overrides.components ?? [],
+    messageSnapshots,
+    reference: overrides.reference ?? null,
   } as unknown as Message;
 }
 
@@ -84,6 +95,33 @@ describe("collectImageUrlsFromMessage", () => {
     expect(urls[0]?.source).toContain("attachment:");
   });
 
+  test("discovers images inside forwarded message snapshots", () => {
+    // Regression: a forward wrapper has EMPTY top-level content/attachments — all
+    // media lives in messageSnapshots. Discovery must scan the snapshots, or every
+    // media-ID tool (image analysis, reference images) fails on forwarded images.
+    const message = makeMessage({
+      snapshots: [
+        makeMessage({
+          attachments: [
+            {
+              id: "30",
+              name: "forwarded.png",
+              url: "https://cdn.discordapp.com/attachments/3/4/forwarded.png",
+              proxyURL: "https://media.discordapp.net/attachments/3/4/forwarded.png",
+              contentType: "image/png",
+            },
+          ],
+        }),
+      ],
+    });
+
+    const urls = collectImageUrlsFromMessage(message);
+
+    expect(urls).toHaveLength(1);
+    expect(urls[0]?.url).toBe("https://cdn.discordapp.com/attachments/3/4/forwarded.png");
+    expect(urls[0]?.source).toBe("forwarded attachment: forwarded.png");
+  });
+
   test("does not double-count media present as both an attachment and a component reference", () => {
     // A Components V2 message uploads the file (attachment) AND references it in a
     // gallery. The component scanner resolves the candidate back to the same
@@ -104,5 +142,81 @@ describe("collectImageUrlsFromMessage", () => {
 
     const urls = collectImageUrlsFromMessage(message);
     expect(urls).toHaveLength(1);
+  });
+});
+
+describe("resolveMessageImageUrls", () => {
+  test("falls back to the image in a text-only reply target", async () => {
+    const replyId = "1528787855952973834";
+    const imageMessageId = "1528787855952973833";
+    const reply = makeMessage({ content: "What is this?", reference: { messageId: imageMessageId } });
+    const imageMessage = makeMessage({
+      attachments: [
+        {
+          id: "40",
+          name: "referenced.png",
+          url: "https://cdn.discordapp.com/attachments/5/6/referenced.png",
+          proxyURL: "https://media.discordapp.net/attachments/5/6/referenced.png",
+          contentType: "image/png",
+        },
+      ],
+    });
+    const messages = new Map<string, Message>([
+      [replyId, reply],
+      [imageMessageId, imageMessage],
+    ]);
+    const fetchedIds: string[] = [];
+    const context = {
+      channel: {
+        messages: {
+          fetch: async (messageId: string): Promise<Message> => {
+            fetchedIds.push(messageId);
+            const message = messages.get(messageId);
+            if (!message) throw new Error("Unknown message");
+            return message;
+          },
+        },
+      },
+    } as unknown as ToolContext;
+
+    const resolved = await resolveMessageImageUrls(replyId, context);
+
+    expect(fetchedIds).toEqual([replyId, imageMessageId]);
+    expect(resolved.sourceMessageId).toBe(imageMessageId);
+    expect(resolved.imageUrls).toHaveLength(1);
+    expect(resolved.imageUrls[0]?.url).toBe("https://cdn.discordapp.com/attachments/5/6/referenced.png");
+  });
+
+  test("prefers images directly attached to the requested reply", async () => {
+    const replyId = "1528787855952973834";
+    const reply = makeMessage({
+      reference: { messageId: "1528787855952973833" },
+      attachments: [
+        {
+          id: "50",
+          name: "direct.png",
+          url: "https://cdn.discordapp.com/attachments/7/8/direct.png",
+          proxyURL: "https://media.discordapp.net/attachments/7/8/direct.png",
+          contentType: "image/png",
+        },
+      ],
+    });
+    const fetchedIds: string[] = [];
+    const context = {
+      channel: {
+        messages: {
+          fetch: async (messageId: string): Promise<Message> => {
+            fetchedIds.push(messageId);
+            return reply;
+          },
+        },
+      },
+    } as unknown as ToolContext;
+
+    const resolved = await resolveMessageImageUrls(replyId, context);
+
+    expect(fetchedIds).toEqual([replyId]);
+    expect(resolved.sourceMessageId).toBe(replyId);
+    expect(resolved.imageUrls[0]?.source).toContain("attachment:");
   });
 });

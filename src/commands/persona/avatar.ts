@@ -13,7 +13,7 @@ import { replyInfoEmbed, promptWithPaginatedModal, safeSelectOptionText } from "
 import type { UserRow, ErrorContext, TomoriState } from "../../types/db/schema";
 import type { SelectOption } from "../../types/discord/modal";
 import { safeDownload } from "../../utils/security/safeDownload";
-import { memoryGuard, reserveAvatarQuota } from "../../utils/security/rateLimiter";
+import { memoryGuard, PERSONA_LIMITS, reserveAvatarQuota } from "../../utils/security/rateLimiter";
 import { personaRepository } from "@/utils/db/repositories";
 import { convertToPNG } from "../../utils/image/imageProcessor";
 import { deletePersonaAvatarFromStorage, uploadPersonaAvatarToStorage } from "../../utils/storage/avatarStorage";
@@ -59,8 +59,8 @@ function validateImage(attachment: AvatarAttachment): {
   const contentType = "contentType" in attachment ? attachment.contentType : attachment.content_type;
   const filename = "name" in attachment ? attachment.name : attachment.filename;
 
-  // 1. Check file size (Discord's limit is 8MB for bots)
-  const maxSize = 8 * 1024 * 1024; // 8MB in bytes
+  // 1. Check file size against the shared persona/avatar upload limit.
+  const maxSize = PERSONA_LIMITS.MAX_AVATAR_SIZE_MB * 1024 * 1024;
   if (attachment.size > maxSize) {
     return {
       isValid: false,
@@ -91,22 +91,19 @@ function validateImage(attachment: AvatarAttachment): {
 }
 
 /**
- * Converts an image attachment to a base64 data URI with timeout protection
- * @param attachment - Discord attachment to convert
- * @returns Promise resolving to SafeDownloadResult-like object with dataUri or error
+ * Downloads an image attachment into a buffer with timeout protection
+ * @param attachment - Discord attachment to download
+ * @returns Promise resolving to SafeDownloadResult-like object with buffer or error
  */
-async function attachmentToBase64DataUri(attachment: AvatarAttachment): Promise<{
+async function downloadAttachmentBuffer(attachment: AvatarAttachment): Promise<{
   success: boolean;
-  dataUri?: string;
   buffer?: Buffer;
   error?: "size_exceeded" | "timeout" | "network_error" | "invalid_response";
   details?: string;
 }> {
-  const contentType = "contentType" in attachment ? attachment.contentType : attachment.content_type;
-
-  // 1. Use safeDownload with 15s timeout and 8MB size limit
+  // 1. Use safeDownload with the shared persona/avatar upload limit.
   const downloadResult = await safeDownload(attachment.url, {
-    maxSizeMB: 8,
+    maxSizeMB: PERSONA_LIMITS.MAX_AVATAR_SIZE_MB,
     timeoutMs: 15000, // 15 seconds
     knownSize: attachment.size,
   });
@@ -120,14 +117,8 @@ async function attachmentToBase64DataUri(attachment: AvatarAttachment): Promise<
     };
   }
 
-  // 3. Convert buffer to base64 data URI
-  const base64 = downloadResult.buffer?.toString("base64");
-  const mimeType = contentType || "image/png";
-  const dataUri = `data:${mimeType};base64,${base64}`;
-
   return {
     success: true,
-    dataUri,
     buffer: downloadResult.buffer,
   };
 }
@@ -438,13 +429,14 @@ export async function execute(
       await replyInfoEmbed(responseInteraction, locale, {
         titleKey: "commands.persona.avatar.invalid_image_title",
         descriptionKey: `commands.persona.avatar.${errorKey}`,
+        descriptionVars: { max_size: PERSONA_LIMITS.MAX_AVATAR_SIZE_MB.toString() },
         color: ColorCode.ERROR,
       });
       return;
     }
 
-    // 10. Convert image to base64 data URI with timeout protection
-    const downloadResult = await attachmentToBase64DataUri(imageAttachment);
+    // 10. Download the image into a buffer with timeout protection
+    const downloadResult = await downloadAttachmentBuffer(imageAttachment);
     if (!downloadResult.success) {
       let errorKey: string;
       if (downloadResult.error === "size_exceeded") {
@@ -458,6 +450,7 @@ export async function execute(
       await replyInfoEmbed(responseInteraction, locale, {
         titleKey: "commands.persona.avatar.invalid_image_title",
         descriptionKey: errorKey,
+        descriptionVars: { max_size: PERSONA_LIMITS.MAX_AVATAR_SIZE_MB.toString() },
         color: ColorCode.ERROR,
       });
       return;
@@ -465,9 +458,28 @@ export async function execute(
 
     if (isMainPersona) {
       // biome-ignore lint/style/noNonNullAssertion: Download result is checked in success condition
-      const avatarDataUri = downloadResult.dataUri!;
+      const downloadedBuffer = downloadResult.buffer!;
 
-      // 11. Update guild avatar for main persona via Discord API with timeout protection
+      // 11. Re-encode to PNG before uploading. Discord returns 200 OK for
+      // structurally corrupt files (e.g. exported preset PNGs with a bad tEXt
+      // chunk length) but stores an unservable asset — the CDN 415s and clients
+      // silently keep the old avatar. Re-encoding guarantees a clean PNG, same
+      // as the alter path below.
+      let pngBuffer: Buffer;
+      try {
+        pngBuffer = await convertToPNG(downloadedBuffer);
+      } catch (error) {
+        log.warn("Failed to convert selected main avatar image to PNG", error);
+        await replyInfoEmbed(responseInteraction, locale, {
+          titleKey: "commands.persona.avatar.conversion_error_title",
+          descriptionKey: "commands.persona.avatar.conversion_error_description",
+          color: ColorCode.ERROR,
+        });
+        return;
+      }
+      const avatarDataUri = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+
+      // 12. Update guild avatar for main persona via Discord API with timeout protection
       const updateResult = await updateGuildAvatar(interaction.guild.id, avatarDataUri);
 
       if (updateResult.success) {

@@ -28,6 +28,11 @@ import { ContextItemTag, type StructuredContextItem } from "../../types/misc/con
 import { log } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
 import { truncateBeforeGenericSpeakerLine } from "@/utils/text/processors/llmOutputProcessor";
+import {
+  collectRenderModifierSourceNames,
+  isAllowedRenderModifierSpeakerLabel,
+} from "@/utils/discord/renderModifierParser";
+import { collectPersonaNameAliases } from "@/utils/discord/stream/textConfig";
 import { safeDownload } from "@/utils/security/safeDownload";
 import { relocateAssistantMediaContextItems } from "@/providers/utils/strictChatCompat";
 import { buildProviderStopStrings } from "../utils/stopStrings";
@@ -105,6 +110,13 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
   private speakerGuardPendingTail = "";
   private streamedTextTail = "";
   private speakerGuardEnabled = false;
+  private speakerGuardAllowedSourceNames: string[] = [];
+  /**
+   * Latest `usageMetadata` seen on a raw Gemini stream chunk (kept in its native
+   * shape; the orchestrator normalizes it). Gemini reports cumulative usage and
+   * the authoritative totals on the final chunk, so latest-wins is correct.
+   */
+  private pendingUsage: Record<string, unknown> | undefined;
 
   constructor() {
     super({
@@ -165,6 +177,12 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
 
     this.speakerGuardPendingTail = "";
     this.streamedTextTail = "";
+    this.pendingUsage = undefined;
+    const botName = context.prefixStrippingName ?? context.personaUsername ?? context.tomoriState.persona_nickname;
+    this.speakerGuardAllowedSourceNames = collectRenderModifierSourceNames(
+      botName,
+      collectPersonaNameAliases(context.tomoriState, botName),
+    );
     const speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
     this.speakerGuardEnabled = speakerStopPatternEnabled;
     const mergedStopSequences = buildProviderStopStrings({
@@ -309,6 +327,12 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
         if (context.abortSignal?.aborted) {
           log.warn(`Google stream aborting for channel ${context.channel.id}: external abort signal received.`);
           return;
+        }
+        // Capture token usage off the raw SDK chunk (dropped by normalization).
+        // processChunk attaches it to metadata so the orchestrator can record it.
+        const usageMetadata = (chunkResponse as { usageMetadata?: Record<string, unknown> }).usageMetadata;
+        if (usageMetadata) {
+          this.pendingUsage = usageMetadata;
         }
         const normalizedChunk = this.normalizeGoogleStreamChunk(chunkResponse);
         const chunksToEmit = this.splitChunkWithTextAndFunctionCalls(normalizedChunk);
@@ -476,10 +500,32 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
     return parts
       .map((part) => {
         if (!part || typeof part !== "object") return "";
-        const text = (part as { text?: unknown }).text;
+        const partObj = part as { text?: unknown; thought?: unknown };
+        if (partObj.thought === true) return "";
+        const text = partObj.text;
         return typeof text === "string" ? text : "";
       })
       .join("");
+  }
+
+  private extractThoughtsFromParts(parts: unknown[]): ThoughtLogEntry[] {
+    const thoughts: ThoughtLogEntry[] = [];
+
+    for (const part of parts) {
+      if (!part || typeof part !== "object") continue;
+
+      const partObj = part as { text?: unknown; thought?: unknown };
+      if (partObj.thought !== true || typeof partObj.text !== "string" || partObj.text.length === 0) {
+        continue;
+      }
+
+      thoughts.push({
+        kind: "raw",
+        content: partObj.text,
+      });
+    }
+
+    return thoughts;
   }
 
   private extractFunctionCallsFromParts(parts: unknown[]): GoogleFunctionCall[] {
@@ -614,7 +660,9 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
     }
 
     const combined = `${this.speakerGuardPendingTail}${chunkText}`;
-    const speakerGuardResult = truncateBeforeGenericSpeakerLine(combined);
+    const speakerGuardResult = truncateBeforeGenericSpeakerLine(combined, {
+      isAllowedSpeakerLabel: (label) => isAllowedRenderModifierSpeakerLabel(label, this.speakerGuardAllowedSourceNames),
+    });
     const transitionIndex = speakerGuardResult.stopTriggered ? speakerGuardResult.text.length : -1;
 
     if (transitionIndex === -1) {
@@ -707,6 +755,12 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
 
     // Check for thought signatures and thought summaries
     const metadata: Record<string, unknown> = {};
+    // Attach the latest captured token usage (Gemini reports it on the raw
+    // chunk, which normalization strips). The orchestrator captures usage from
+    // any chunk's metadata, so emitting it here on every chunk is sufficient.
+    if (this.pendingUsage) {
+      metadata.usage = this.pendingUsage;
+    }
     const thoughtSignature = this.extractThoughtSignature(googleChunk);
     if (thoughtSignature) {
       metadata.thoughtSignature = thoughtSignature;
@@ -719,6 +773,11 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
         content: googleChunk.thoughtSummary,
       });
       log.info("GoogleStreamAdapter: Received thought summary");
+    }
+    const partThoughts = this.extractThoughtsFromParts(this.getCandidateParts(googleChunk));
+    if (partThoughts.length > 0) {
+      thoughts.push(...partThoughts);
+      log.info(`GoogleStreamAdapter: Received ${partThoughts.length} thought part(s)`);
     }
 
     // Check for function calls
@@ -1195,6 +1254,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
                   geminiParts.push({
                     fileData: {
                       fileUri: part.uri,
+                      mimeType: "video/mp4",
                     },
                   });
                 } else {

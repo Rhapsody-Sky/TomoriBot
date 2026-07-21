@@ -21,6 +21,8 @@ export type CapabilitiesManageCapabilityColumn = Extract<
   | "imagegen_enabled"
   | "videogen_enabled"
   | "voice_message_enabled"
+  | "user_blocking_enabled"
+  | "time_awareness_enabled"
 >;
 
 export type CapabilitiesManageMemberPermissionColumn = Extract<
@@ -164,6 +166,22 @@ export const CAPABILITIES_MANAGE_PERMISSION_DEFINITIONS: readonly CapabilitiesMa
     descKey: "commands.capabilities.manage.voicemessage_desc",
     getState: (c) => c.voice_message_enabled ?? true,
     requiresElevenLabs: true,
+  },
+  {
+    value: "userblocking",
+    table: "capabilities",
+    dbColumn: "user_blocking_enabled",
+    labelKey: "commands.capabilities.manage.userblocking_option",
+    descKey: "commands.capabilities.manage.userblocking_desc",
+    getState: (c) => c.user_blocking_enabled ?? true,
+  },
+  {
+    value: "timeawareness",
+    table: "capabilities",
+    dbColumn: "time_awareness_enabled",
+    labelKey: "commands.capabilities.manage.timeawareness_option",
+    descKey: "commands.capabilities.manage.timeawareness_desc",
+    getState: (c) => c.time_awareness_enabled ?? true,
   },
 ];
 

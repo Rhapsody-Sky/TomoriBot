@@ -1,6 +1,7 @@
 import type { FallbackEntry, LlmRow, TomoriState } from "@/types/db/schema";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import type { LLMProvider, ProviderConfig, StreamResult } from "@/types/provider/interfaces";
+import type { ProviderError } from "@/types/stream/interfaces";
 import type { ToolContext } from "@/types/tool/interfaces";
 import { getCachedChannelLlm } from "@/utils/cache/channelLlmCache";
 import { getGeminiTokenLimits } from "@/utils/cache/geminiCapabilityCache";
@@ -12,6 +13,7 @@ import { type FallbackNoticeAttempt, sendFallbackModelUsageNotice } from "@/util
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
 import { log } from "@/utils/misc/logger";
 import { getProviderForTomori, ProviderFactory } from "@/utils/provider/providerFactory";
+import { getProviderErrorDetail } from "@/utils/provider/providerErrorClassification";
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { decryptApiKey } from "@/utils/security/crypto";
 import { resolveMediaForModel } from "@/utils/text/context/mediaResolver";
@@ -25,6 +27,7 @@ import {
 import { truncateDialogueHistory } from "@/utils/text/contextTruncator";
 import type { ChatResponseSink, ChatTurnContext, GenerationTurnResult } from "@/utils/chat/types";
 import { providerIsApiFamily, runToolLoop } from "@/utils/chat/toolLoop";
+import { VERBATIM_TOOL_CALLING_NUDGE, shouldInjectVerbatimToolCallingNudge } from "@/utils/tools/verbatimToolCalling";
 
 interface GenerationAttempt {
   label: string;
@@ -138,7 +141,7 @@ export async function runGenerationTurn(
 
       failures.push({
         modelCodename: attempt.tomoriState.llm.llm_codename,
-        errorCode: extractErrorCode(result.streamResults.at(-1)),
+        errorDetail: extractErrorDetail(result.streamResults.at(-1)),
       });
     }
 
@@ -172,18 +175,41 @@ function setStreamUserErrorSuppression(context: ChatTurnContext, temporarySuppre
 async function buildGenerationAttempts(context: ChatTurnContext): Promise<GenerationAttempt[]> {
   const disableAllTools = !!context.streamingContext.disableAllTools;
   const primaryState = await resolvePrimaryTomoriState(context);
-  const attempts: GenerationAttempt[] = [await createAttempt("primary", primaryState, undefined, disableAllTools)];
   const fallbackEntries =
     primaryState.fallback_chain ?? primaryState.fallback_llms?.map((model) => ({ kind: "llm" as const, model })) ?? [];
 
-  for (const [index, entry] of fallbackEntries.entries()) {
+  // 1. Build a unified pool: the primary model leads at index 0, then the existing failover chain.
+  const pool: FallbackEntry[] = [{ kind: "llm", model: primaryState.llm }, ...fallbackEntries];
+
+  // 2. Model randomizer: when enabled, splice a random pool member to the front so a different model
+  //    leads each turn. The remainder keeps its relative order as the failover tail. This is a pure
+  //    reordering — every model (including the original primary) stays in the chain, so failover
+  //    semantics are preserved. When disabled, the pool order is unchanged from the legacy behavior.
+  if (primaryState.config.model_randomizer_enabled && pool.length > 1) {
+    const leadIdx = Math.floor(Math.random() * pool.length);
+    pool.unshift(...pool.splice(leadIdx, 1));
+  }
+
+  // 3. Materialize attempts from the (possibly reordered) pool. Reusing createFallbackAttempt for the
+  //    primary's own llm entry yields a state equivalent to primaryState (provider matches, no config
+  //    swap), so index 0 stays semantically identical to the old dedicated "primary" attempt.
+  const attempts: GenerationAttempt[] = [];
+  for (const [index, entry] of pool.entries()) {
     try {
-      const fallback = await createFallbackAttempt(primaryState, entry, index + 1, disableAllTools);
-      if (fallback) {
-        attempts.push(fallback);
+      const attempt = await createFallbackAttempt(primaryState, entry, index, disableAllTools);
+      if (!attempt) {
+        // Only an unusable custom-endpoint lead resolves to null; the primary llm entry never does,
+        // so at least one valid attempt always remains in the chain.
+        continue;
       }
+      // 4. Keep logs readable: the lead is always labelled "primary" regardless of the random draw.
+      //    The true model still surfaces via successModel for log verification.
+      if (index === 0) {
+        attempt.label = "primary";
+      }
+      attempts.push(attempt);
     } catch (error) {
-      log.warn(`Skipping fallback ${index + 1}: failed to prepare provider config.`, error as Error);
+      log.warn(`Skipping pool entry ${index}: failed to prepare provider config.`, error as Error);
     }
   }
 
@@ -407,6 +433,48 @@ function extractErrorCode(streamResult: StreamResult | undefined): string {
   return String(record.code ?? record.type ?? record.message ?? streamResult?.status ?? "unknown");
 }
 
+// Per-line readability cap for a single failure detail in the fallback notice summary. This keeps
+// one verbose provider message from crowding out the others; the authoritative Discord embed
+// description limit is enforced on the joined list in `buildFailureList` (fallbackModelNotice.ts).
+const MAX_FALLBACK_DETAIL_LENGTH = 600;
+
+/**
+ * Resolves a human-readable failure detail for the "Fallback Model Used" notice. Unlike
+ * {@link extractErrorCode} (which prefers terse codes for key-rotation bookkeeping), this prefers
+ * the provider's verbose message — e.g. "Unsupported model X. Supported IDs: ..." — so users see
+ * the actionable reason instead of an opaque error code.
+ * @param streamResult - The last stream result recorded for the failed attempt.
+ * @returns A trimmed, length-capped detail string.
+ */
+function extractErrorDetail(streamResult: StreamResult | undefined): string {
+  const data = streamResult?.data;
+  if (!data || typeof data !== "object") {
+    return streamResult?.status ?? "unknown";
+  }
+  if (data instanceof Error) {
+    return truncateFallbackDetail(data.message || "error");
+  }
+
+  // 1. Prefer the normalized provider detail (userMessage/message/originalError) used by the error embed.
+  const providerDetail = getProviderErrorDetail(data as ProviderError);
+  if (providerDetail) {
+    return truncateFallbackDetail(providerDetail);
+  }
+
+  // 2. Fall back to whatever identifying field is present on the raw result.
+  const record = data as Record<string, unknown>;
+  return truncateFallbackDetail(
+    String(record.message ?? record.code ?? record.type ?? streamResult?.status ?? "unknown"),
+  );
+}
+
+function truncateFallbackDetail(detail: string): string {
+  const normalized = detail.replace(/\s+/g, " ").trim();
+  return normalized.length > MAX_FALLBACK_DETAIL_LENGTH
+    ? `${normalized.substring(0, MAX_FALLBACK_DETAIL_LENGTH)}...`
+    : normalized;
+}
+
 async function prepareProviderContextItems(args: {
   contextItems: StructuredContextItem[];
   tomoriState: TomoriState;
@@ -415,6 +483,16 @@ async function prepareProviderContextItems(args: {
   retryCount: number;
 }): Promise<StructuredContextItem[]> {
   let contextItems = await resolveMediaForModel(args.contextItems, args.tomoriState);
+
+  // The verbatim tool-calling nudge is baked into the base context from the PRIMARY
+  // model. On a fallback to an attempt that will not run the verbatim parser (any
+  // non-custom provider, or a custom endpoint without tools), strip it: the nudge is
+  // useless noise there and can steer native tool-callers toward unparseable
+  // text-form calls. `filter` produces a new array, leaving the shared base intact.
+  if (!shouldInjectVerbatimToolCallingNudge(args.tomoriState.config, args.tomoriState)) {
+    contextItems = stripVerbatimNudgeItems(contextItems);
+  }
+
   contextItems = await applyProviderContextTruncation(contextItems, args.tomoriState, args.serverDiscId);
   if (
     shouldApplyLengthEmptyRetryTrim(args.tomoriState.llm.llm_provider, args.emptyResponseFinishReason, args.retryCount)
@@ -429,6 +507,25 @@ async function prepareProviderContextItems(args: {
     }
   }
   return contextItems;
+}
+
+/**
+ * The exact text the verbatim nudge is rendered as inside a context-note item
+ * (see `appendDialogueHistoryContext`). Matching on the text rather than the tag
+ * is required because the user's global context note shares
+ * `ContextItemTag.CONTEXT_NOTE_INJECTION`.
+ */
+const VERBATIM_NUDGE_CONTEXT_TEXT = `[System: ${VERBATIM_TOOL_CALLING_NUDGE}]`;
+
+/** Returns a new array with the verbatim tool-calling nudge note removed, if present. */
+function stripVerbatimNudgeItems(items: StructuredContextItem[]): StructuredContextItem[] {
+  return items.filter((item) => {
+    if (item.metadataTag !== ContextItemTag.CONTEXT_NOTE_INJECTION) {
+      return true;
+    }
+    const text = item.parts.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("");
+    return text !== VERBATIM_NUDGE_CONTEXT_TEXT;
+  });
 }
 
 function dropOldestHistoryExchangePairs(

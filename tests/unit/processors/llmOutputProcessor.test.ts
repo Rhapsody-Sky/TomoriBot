@@ -6,6 +6,8 @@ import {
   stripLeakedOwnNameLabels,
   truncateBeforeGenericSpeakerLine,
 } from "@/utils/text/processors/llmOutputProcessor";
+import { isAllowedRenderModifierSpeakerLabel } from "@/utils/discord/renderModifierParser";
+import { buildPersonaMentionMap } from "@/utils/text/personaMentionHandles";
 
 // ─── cleanLLMOutput ─────────────────────────────────────────────────────────
 
@@ -93,6 +95,23 @@ describe("cleanLLMOutput", () => {
     expect(cleaned).not.toContain("Tsukushi:");
     expect(cleaned).toContain("<:NagatoroSmug:1382568815900098660>");
     expect(cleaned).toContain("Staying up late.");
+  });
+
+  it("preserves known persona @trigger text after normal output cleanup", () => {
+    const personaMentionMap = buildPersonaMentionMap([{ persona_nickname: "Shy Tomori", trigger_words: ["lilya"] }]);
+    const cleaned = cleanLLMOutput(
+      "Tomori: I should ask @(Shy Tomori).",
+      "Tomori",
+      [],
+      true,
+      new Map(),
+      new Set(),
+      undefined,
+      [],
+      personaMentionMap,
+    );
+
+    expect(cleaned).toBe("I should ask @lilya.");
   });
 });
 
@@ -447,6 +466,30 @@ describe("truncateBeforeGenericSpeakerLine", () => {
     it("does NOT trigger on first-line speaker when includeStart is false (default)", () => {
       const result = truncateBeforeGenericSpeakerLine("User: starts here");
       expect(result.stopTriggered).toBe(false);
+    });
+  });
+
+  describe("allowed speaker labels", () => {
+    it("does not stop on active render-modifier syntax", () => {
+      const text = "Ren (bredrumb): hi\nOther: stop here";
+      const result = truncateBeforeGenericSpeakerLine(text, {
+        includeStart: true,
+        isAllowedSpeakerLabel: (label) => isAllowedRenderModifierSpeakerLabel(label, ["Ren"]),
+      });
+
+      expect(result.stopTriggered).toBe(true);
+      expect(result.matchedSpeaker).toBe("Other");
+      expect(result.text).toBe("Ren (bredrumb): hi");
+    });
+
+    it("still stops on render-modifier syntax from another speaker", () => {
+      const result = truncateBeforeGenericSpeakerLine("Other (bredrumb): hi", {
+        includeStart: true,
+        isAllowedSpeakerLabel: (label) => isAllowedRenderModifierSpeakerLabel(label, ["Ren"]),
+      });
+
+      expect(result.stopTriggered).toBe(true);
+      expect(result.matchedSpeaker).toBe("Other (bredrumb)");
     });
   });
 });

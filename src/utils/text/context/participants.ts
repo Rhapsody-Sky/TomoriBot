@@ -20,6 +20,7 @@ type UserConversationEntry = {
   displayName: string;
   detailLines: string[];
   imageAppearanceTags?: string[];
+  personalTimezoneOffset?: number | null;
   isBot: boolean;
   mentionAliases: string[];
   primaryAlias: string | null;
@@ -232,6 +233,7 @@ export async function buildUsersInConversationContextItem(params: {
       imageAppearanceTags: !params.isUserImpersonation
         ? normalizeImageAppearanceTags(userRow.physical_appearance_tags)
         : undefined,
+      personalTimezoneOffset: !params.isUserImpersonation ? (userRow.timezone_offset ?? null) : undefined,
       isBot: false,
       mentionAliases: Array.from(aliasSet),
       primaryAlias,
@@ -339,9 +341,11 @@ async function buildUserDetailLines(
         if (!channelAllowed) return false;
       }
 
-      // Content tags: if corpus filtering is active, memories must have a matching content tag
-      if (params.conversationCorpus) {
-        if (contentTags.length === 0) return false;
+      // Content tags: if corpus filtering is active and the memory has content tags,
+      // at least one must appear in the corpus. Memories with no content tags are
+      // unfiltered by keyword (per /help memory-tagging: "memories without keyword
+      // tags will always be active").
+      if (params.conversationCorpus != null && contentTags.length > 0) {
         return contentTags.some((tag) => params.conversationCorpus?.includes(tag.toLowerCase()));
       }
 
@@ -531,7 +535,10 @@ function renderUserEntries(
     }
 
     if (entry.imageAppearanceTags && entry.imageAppearanceTags.length > 0) {
-      text += `- Physical Appearance: ${entry.imageAppearanceTags.join(", ")}\n`;
+      text += `- ${entry.displayName}'s Physical Appearance: ${entry.imageAppearanceTags.join(", ")}\n`;
+    }
+    if (entry.personalTimezoneOffset != null) {
+      text += `- ${entry.displayName}'s timezone: ${formatUTCOffset(entry.personalTimezoneOffset)} (their local time: ${getCurrentTimeWithOffset(entry.personalTimezoneOffset)})\n`;
     }
     for (const line of entry.detailLines) text += `${line}\n`;
     text += "\n";

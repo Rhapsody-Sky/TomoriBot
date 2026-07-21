@@ -38,6 +38,7 @@ import {
 } from "@/utils/discord/stream/stopRequests";
 import { isUserImpersonationStreamContext, StreamUiUpdater } from "@/utils/discord/stream/uiUpdater";
 import { createStreamTextProcessingConfig } from "@/utils/discord/stream/textConfig";
+import { normalizeProviderUsage } from "@/utils/text/tokenEstimate";
 import { appendChunkThoughts, buildThoughtLogPayload, wasEmptyStreamResponse } from "@/utils/discord/stream/thoughtLog";
 import { ColorCode, log } from "@/utils/misc/logger";
 
@@ -161,8 +162,22 @@ export class StreamOrchestrator implements IStreamOrchestrator {
 
         const processedChunk = provider.processChunk(rawChunk);
         appendChunkThoughts(state, processedChunk.thoughts);
+        // Record the OpenRouter serving backend (first non-empty wins) for the thought log.
+        if (processedChunk.servingProvider && !state.servingProvider) {
+          state.servingProvider = processedChunk.servingProvider;
+        }
         if (processedChunk.type === "done" && processedChunk.metadata) {
           terminalDoneMetadata = processedChunk.metadata;
+        }
+        // Capture real provider usage from whichever chunk carries it — not only
+        // the terminal `done`. OpenAI `include_usage` emits usage on a separate
+        // trailing chunk and Anthropic clobbers its done metadata, so relying on
+        // terminalDoneMetadata alone would miss both. Latest non-null wins.
+        if (processedChunk.metadata?.usage) {
+          const normalizedUsage = normalizeProviderUsage(processedChunk.metadata.usage);
+          if (normalizedUsage) {
+            state.usage = normalizedUsage;
+          }
         }
 
         const result = await this.handleProcessedChunk(
@@ -312,6 +327,8 @@ export class StreamOrchestrator implements IStreamOrchestrator {
             accumulatedText: state.accumulatedText,
             detailsContent: state.detailsSegments.length > 0 ? state.detailsSegments.join("\n\n") : undefined,
             thoughtLog: buildThoughtLogPayload(state, Date.now() - metrics.startTime),
+            spritesShown: state.spritesShown.length > 0 ? [...state.spritesShown] : undefined,
+            usage: state.usage,
           };
         }
         break;
@@ -420,6 +437,8 @@ export class StreamOrchestrator implements IStreamOrchestrator {
       detailsContent: state.detailsSegments.length > 0 ? state.detailsSegments.join("\n\n") : undefined,
       thoughtLog: buildThoughtLogPayload(state, metrics.endTime - metrics.startTime),
       data: terminalDoneMetadata,
+      spritesShown: state.spritesShown.length > 0 ? [...state.spritesShown] : undefined,
+      usage: state.usage,
     };
   }
 

@@ -17,7 +17,7 @@ import {
 } from "discord.js";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
-import { personaRepository, llmModelRepo } from "@/utils/db/repositories";
+import { personaRepository, llmModelRepo, statRepository } from "@/utils/db/repositories";
 import { replyInfoEmbed, promptWithRawModal } from "../../utils/discord/interactionHelper";
 import { safeReply } from "@/utils/discord/safeReply";
 import type { UserRow } from "../../types/db/schema";
@@ -34,15 +34,64 @@ import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/p
 import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { isOpenRouterVideoCapabilityError } from "@/providers/openrouter/openrouterVideoRequest";
 
 // Modal configuration constants
 const MODAL_CUSTOM_ID = "generate_video_modal";
 const PROMPT_INPUT_ID = "prompt_input";
 const ASPECT_RATIO_SELECT_ID = "aspect_ratio_select";
 const REFERENCE_IMAGE_INPUT_ID = "image_upload_1";
+const DURATION_INPUT_ID = "duration_input";
+const FPS_INPUT_ID = "fps_input";
 
 /** Discord file size limit for non-boosted servers (25 MB) */
 const DISCORD_FILE_SIZE_LIMIT = 25 * 1024 * 1024;
+
+/**
+ * Parse a positive integer from an environment variable, falling back to a default.
+ * @param name - Environment variable name
+ * @param fallback - Value to use when unset or invalid
+ * @returns A finite positive integer
+ */
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+// Duration/FPS bounds for the modal inputs. Kept env-configurable so operators can tune
+// limits without code changes; providers still normalize values to their own supported ranges.
+const DEFAULT_VIDEO_DURATION_SECONDS = parsePositiveIntEnv("VIDEO_GEN_DEFAULT_DURATION_SECONDS", 5);
+const MAX_VIDEO_DURATION_SECONDS = parsePositiveIntEnv("VIDEO_GEN_MAX_DURATION_SECONDS", 20);
+const MAX_VIDEO_FPS = parsePositiveIntEnv("VIDEO_GEN_MAX_FPS", 60);
+
+/**
+ * Parse and validate an integer entered into a modal text field.
+ * @param raw - Raw string value from the modal submission (may be undefined/empty)
+ * @param min - Inclusive minimum allowed value
+ * @param max - Inclusive maximum allowed value
+ * @returns `{ value }` on success (value is `undefined` when the optional field is blank),
+ *          or `{ error: true }` when the entry is non-numeric or out of range.
+ */
+function parseModalInteger(raw: string | undefined, min: number, max: number): { value?: number; error?: true } {
+  const trimmed = raw?.trim();
+  // 1. Blank input is treated as "not provided" — callers decide if that's allowed.
+  if (!trimmed) {
+    return { value: undefined };
+  }
+
+  // 2. Reject anything that isn't a clean integer (no decimals, units, or letters).
+  if (!/^\d+$/.test(trimmed)) {
+    return { error: true };
+  }
+
+  // 3. Range check against the configured bounds.
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    return { error: true };
+  }
+
+  return { value: parsed };
+}
 
 /**
  * Configure the subcommand
@@ -210,41 +259,43 @@ export async function execute(
   const apiKey = videoCreds.apiKey;
   const executionProvider = videoCreds.provider;
 
-  // 7. Check video quota before showing modal
-  const quotaCheck = await checkVideoQuota(tomoriState.server_id, interaction.user.id);
-  if (!quotaCheck.allowed) {
-    const descriptionVars: Record<string, string> = {};
+  // 7. Check video quota before showing modal (personal-provider users bypass quota)
+  if (videoCreds.source === "server") {
+    const quotaCheck = await checkVideoQuota(tomoriState.server_id, interaction.user.id);
+    if (!quotaCheck.allowed) {
+      const descriptionVars: Record<string, string> = {};
 
-    if (quotaCheck.resetTime) {
-      const now = new Date();
-      const hoursUntilReset = Math.ceil((quotaCheck.resetTime.getTime() - now.getTime()) / (1000 * 60 * 60));
+      if (quotaCheck.resetTime) {
+        const now = new Date();
+        const hoursUntilReset = Math.ceil((quotaCheck.resetTime.getTime() - now.getTime()) / (1000 * 60 * 60));
 
-      if (hoursUntilReset < 24) {
-        descriptionVars.reset_info = localizer(locale, "commands.generate.video.quota_resets_in_hours", {
-          hours: hoursUntilReset.toString(),
-        });
-      } else {
-        const daysUntilReset = Math.ceil(hoursUntilReset / 24);
-        descriptionVars.reset_info = localizer(locale, "commands.generate.video.quota_resets_in_days", {
-          days: daysUntilReset.toString(),
-        });
+        if (hoursUntilReset < 24) {
+          descriptionVars.reset_info = localizer(locale, "commands.generate.video.quota_resets_in_hours", {
+            hours: hoursUntilReset.toString(),
+          });
+        } else {
+          const daysUntilReset = Math.ceil(hoursUntilReset / 24);
+          descriptionVars.reset_info = localizer(locale, "commands.generate.video.quota_resets_in_days", {
+            days: daysUntilReset.toString(),
+          });
+        }
       }
-    }
 
-    await replyInfoEmbed(interaction, locale, {
-      titleKey: "commands.generate.video.quota_exceeded_title",
-      descriptionKey:
-        quotaCheck.reason === "user_quota_exceeded"
-          ? "commands.generate.video.user_quota_exceeded_description"
-          : quotaCheck.reason === "serverwide_quota_exceeded"
-            ? "commands.generate.video.serverwide_quota_exceeded_description"
-            : "commands.generate.video.quota_exceeded_description",
-      descriptionVars,
-      footerKey: "commands.generate.video.quota_exceeded_footer",
-      color: ColorCode.ERROR,
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.generate.video.quota_exceeded_title",
+        descriptionKey:
+          quotaCheck.reason === "user_quota_exceeded"
+            ? "commands.generate.video.user_quota_exceeded_description"
+            : quotaCheck.reason === "serverwide_quota_exceeded"
+              ? "commands.generate.video.serverwide_quota_exceeded_description"
+              : "commands.generate.video.quota_exceeded_description",
+        descriptionVars,
+        footerKey: "commands.generate.video.quota_exceeded_footer",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
   }
 
   let modalSubmitInteraction: import("discord.js").ModalSubmitInteraction | undefined;
@@ -281,6 +332,26 @@ export async function execute(
           { label: "1:1 (Square)", value: "1:1" },
         ],
       },
+      {
+        customId: DURATION_INPUT_ID,
+        labelKey: "commands.generate.video.modal.duration_label",
+        descriptionKey: "commands.generate.video.modal.duration_description",
+        placeholder: "commands.generate.video.modal.duration_placeholder",
+        required: true,
+        style: TextInputStyle.Short,
+        // Prefill the default so the required field is one keystroke away from valid.
+        value: String(DEFAULT_VIDEO_DURATION_SECONDS),
+        maxLength: 3,
+      },
+      {
+        customId: FPS_INPUT_ID,
+        labelKey: "commands.generate.video.modal.fps_label",
+        descriptionKey: "commands.generate.video.modal.fps_description",
+        placeholder: "commands.generate.video.modal.fps_placeholder",
+        required: false,
+        style: TextInputStyle.Short,
+        maxLength: 3,
+      },
     ];
 
     // 9. Show modal and wait for submission (auto-defer with public reply)
@@ -309,6 +380,45 @@ export async function execute(
       log.error("Modal result unexpectedly missing required values");
       return;
     }
+
+    // 9a. Parse and validate duration (required) and FPS (optional).
+    //     Providers normalize these to their own supported ranges, so we only guard
+    //     against clearly invalid entries here (non-numeric or out of configured bounds).
+    const durationResult = parseModalInteger(modalResult.values?.[DURATION_INPUT_ID], 1, MAX_VIDEO_DURATION_SECONDS);
+    if (durationResult.error || durationResult.value === undefined) {
+      await modalSubmitInteraction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(localizer(locale, "commands.generate.video.invalid_duration_title"))
+            .setDescription(
+              localizer(locale, "commands.generate.video.invalid_duration_description", {
+                max: MAX_VIDEO_DURATION_SECONDS.toString(),
+              }),
+            )
+            .setColor(ColorCode.ERROR),
+        ],
+      });
+      return;
+    }
+    const durationSeconds = durationResult.value;
+
+    const fpsResult = parseModalInteger(modalResult.values?.[FPS_INPUT_ID], 1, MAX_VIDEO_FPS);
+    if (fpsResult.error) {
+      await modalSubmitInteraction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(localizer(locale, "commands.generate.video.invalid_fps_title"))
+            .setDescription(
+              localizer(locale, "commands.generate.video.invalid_fps_description", {
+                max: MAX_VIDEO_FPS.toString(),
+              }),
+            )
+            .setColor(ColorCode.ERROR),
+        ],
+      });
+      return;
+    }
+    const fps = fpsResult.value;
 
     // 10. Process reference image (if provided)
     let referenceImages: Array<{ mimeType: string; data: string }> | undefined;
@@ -339,7 +449,7 @@ export async function execute(
       : modelCodename;
 
     log.info(
-      `Generating video with ${executionProvider} via ${displayModelName}: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}" (aspect ratio: ${aspectRatio}, reference: ${referenceImages ? "yes" : "no"})`,
+      `Generating video with ${executionProvider} via ${displayModelName}: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}" (aspect ratio: ${aspectRatio}, duration: ${durationSeconds}s, fps: ${fps ?? "default"}, reference: ${referenceImages ? "yes" : "no"})`,
     );
 
     // 12. Show "generating" embed while we poll for completion
@@ -356,6 +466,7 @@ export async function execute(
 
     // 13. Route to provider and generate video
     let videoData: Buffer | null = null;
+    let videoFilename = `generated_${Date.now()}.mp4`;
     const videoImplementation = resolveProviderFeatureImplementation(executionProvider, "videoGeneration");
 
     if (videoCreds.customEndpoint) {
@@ -364,9 +475,12 @@ export async function execute(
         apiKey,
         prompt,
         aspectRatio,
+        durationSeconds,
+        fps,
         referenceImages,
       });
       videoData = result.videoData;
+      videoFilename = result.filename ?? videoFilename;
     } else if (videoImplementation === "google") {
       const { generateGoogleNativeVideo } = await import("@/providers/google/googleVideoGeneration");
       const result = await generateGoogleNativeVideo({
@@ -374,9 +488,12 @@ export async function execute(
         model: modelCodename,
         prompt,
         aspectRatio,
+        durationSeconds,
+        fps,
         referenceImages,
       });
       videoData = result.videoData;
+      videoFilename = result.filename ?? videoFilename;
     } else if (videoImplementation === "openrouter") {
       const { generateOpenRouterNativeVideo } = await import("@/providers/openrouter/openrouterVideoGeneration");
       const result = await generateOpenRouterNativeVideo({
@@ -384,9 +501,12 @@ export async function execute(
         model: modelCodename,
         prompt,
         aspectRatio,
+        durationSeconds,
+        fps,
         referenceImages,
       });
       videoData = result.videoData;
+      videoFilename = result.filename ?? videoFilename;
     } else if (videoImplementation === "zai") {
       const { generateZaiNativeVideo } = await import("@/providers/zai/zaiVideoGeneration");
       const result = await generateZaiNativeVideo({
@@ -394,9 +514,12 @@ export async function execute(
         model: modelCodename,
         prompt,
         aspectRatio,
+        durationSeconds,
+        fps,
         referenceImages,
       });
       videoData = result.videoData;
+      videoFilename = result.filename ?? videoFilename;
     } else {
       await modalSubmitInteraction.editReply({
         embeds: [
@@ -446,8 +569,15 @@ export async function execute(
     const elapsedMs = performance.now() - startTime;
     const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
+    log.info(
+      `Sending generated video to Discord ${JSON.stringify({
+        filename: videoFilename,
+        bytes: videoData.length,
+      })}`,
+    );
+
     const attachment = new AttachmentBuilder(videoData, {
-      name: `generated_${Date.now()}.mp4`,
+      name: videoFilename,
     });
 
     await modalSubmitInteraction.editReply({
@@ -466,8 +596,21 @@ export async function execute(
       files: [attachment],
     });
 
-    // 17. Increment quota
-    await incrementVideoQuota(tomoriState.server_id, interaction.user.id);
+    // 17. Increment quota (server providers only)
+    if (videoCreds.source === "server") {
+      await incrementVideoQuota(tomoriState.server_id, interaction.user.id);
+    }
+    // Record canonical generation telemetry; quota tables enforce limits only.
+    if (userData.user_id) {
+      statRepository.recordStat({
+        serverId: tomoriState.server_id,
+        userId: userData.user_id,
+        lineageId: tomoriState.persona_lineage_id ?? 0,
+        metric: "video_generated",
+        // Key by model codename for a per-model generation breakdown at read time.
+        metricKey: modelCodename,
+      });
+    }
     log.success(`Video generated in ${elapsedSec}s via ${displayModelName}`);
   } catch (error) {
     log.error("Video generation command failed:", error as Error);
@@ -476,11 +619,19 @@ export async function execute(
     const errorEmbed = new EmbedBuilder()
       .setTitle(localizer(locale, "commands.generate.video.error_title"))
       .setDescription(
-        errorMessage.includes("timed out")
-          ? localizer(locale, "commands.generate.video.timeout_description")
-          : errorMessage.includes("content") || errorMessage.includes("safety") || errorMessage.includes("blocked")
-            ? localizer(locale, "commands.generate.video.blocked_description")
-            : localizer(locale, "commands.generate.video.generic_error_description"),
+        isOpenRouterVideoCapabilityError(error)
+          ? localizer(
+              locale,
+              error.code === "last_frame_unsupported"
+                ? "commands.generate.video.loop_unsupported_description"
+                : "commands.generate.video.reference_unsupported_description",
+              { model: error.model },
+            )
+          : errorMessage.includes("timed out")
+            ? localizer(locale, "commands.generate.video.timeout_description")
+            : errorMessage.includes("content") || errorMessage.includes("safety") || errorMessage.includes("blocked")
+              ? localizer(locale, "commands.generate.video.blocked_description")
+              : localizer(locale, "commands.generate.video.generic_error_description"),
       )
       .setColor(ColorCode.ERROR);
 

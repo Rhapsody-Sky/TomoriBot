@@ -29,11 +29,18 @@ mock.module("@/utils/misc/logger", () => ({
   // ColorCode must be included so that command modules imported by other test
   // files can satisfy their static `import { ColorCode }` bindings even when
   // this file's mock is the one in effect (bun applies mocks globally).
+  // Values must stay hex STRINGS mirroring the real enum: modules evaluated
+  // under this mock call string methods on them at load time (e.g.
+  // contextEmbeds.ts does ColorCode.ERROR.replace("#", "")).
   ColorCode: {
-    SUCCESS: 0x57f287,
-    WARN: 0xfee75c,
-    ERROR: 0xed4245,
-    INFO: 0x5865f2,
+    INFO: "#3498DB",
+    SUCCESS: "#2ECC71",
+    MEMORY_UPDATE: "#25d4da",
+    WARN: "#F1C40F",
+    ERROR: "#E74C3C",
+    SECTION: "#E066FF",
+    AFFECTION: "#ff10cb",
+    RATE_LIMIT: "#FFA500",
   },
   log: {
     error: () => undefined,
@@ -154,8 +161,20 @@ mock.module("@/utils/provider/providerFactory", () => ({
   },
 }));
 
+// Stub the FULL export surface of crypto. `mock.module` is process-wide and is
+// never restored, so it replaces crypto.ts for every test file loaded after
+// this one. If any real export is omitted here, later files that import it fail
+// to link ("Export named X not found"), and which files become victims depends
+// on module load order — making the suite fragile to unrelated import changes.
 mock.module("@/utils/security/crypto", () => ({
+  encryptApiKey: async () => ({ encrypted: Buffer.from(""), version: 1 }),
   decryptApiKey: async () => "decrypted-key",
+  reencryptApiKey: async () => ({ encrypted: Buffer.from(""), version: 1 }),
+  storeOptApiKey: async () => true,
+  getOptApiKey: async () => null,
+  getAllOptApiKeysForServer: async () => ({}),
+  deleteOptApiKey: async () => true,
+  hasOptApiKey: async () => false,
 }));
 
 mock.module("@/utils/security/keyRotation", () => ({
@@ -520,7 +539,7 @@ describe("runGenerationTurn fallback behavior", () => {
     expect(emittedErrors).toHaveLength(0);
     expect(finalizedResults).toEqual([fallbackSuccess]);
     expect(fallbackNoticeCalls).toHaveLength(1);
-    expect(fallbackNoticeCalls[0]?.failures).toEqual([{ modelCodename: "primary-model", errorCode: "429" }]);
+    expect(fallbackNoticeCalls[0]?.failures).toEqual([{ modelCodename: "primary-model", errorDetail: "rate limited" }]);
     expect(fallbackNoticeCalls[0]?.successModel.llm_codename).toBe("fallback-model");
     expect(context.streamingContext.suppressUserErrors).toBe(false);
     expect(context.streamingContext.forceModelFallback).toBe(false);

@@ -8,6 +8,7 @@ import type {
   Message,
 } from "discord.js";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
+import { buildStreamContext } from "@/utils/provider/streamContext";
 import { nvidiaProviderInfo } from "@/providers/nvidia/providerInfo";
 import { NvidiaStreamAdapter, type NvidiaStreamConfig } from "@/providers/nvidia/nvidiaStreamAdapter";
 import { getNvidiaToolAdapter } from "@/providers/nvidia/nvidiaToolAdapter";
@@ -16,6 +17,8 @@ import {
   NVIDIA_DEFAULT_EMBEDDING_MODEL,
   NVIDIA_DEFAULT_TEXT_MODEL,
   NVIDIA_EMBEDDINGS_URL,
+  NVIDIA_MIN_P_UNSUPPORTED_MODELS,
+  NVIDIA_MODELS_URL,
 } from "@/providers/nvidia/nvidiaConstants";
 import {
   createOpenAICompatibleHttpError,
@@ -173,19 +176,12 @@ export class NvidiaProvider
 
   async validateApiKey(apiKey: string): Promise<ApiKeyValidationResult> {
     try {
-      const validationModel = (await getDefaultNvidiaModel().catch(() => null)) || NVIDIA_DEFAULT_TEXT_MODEL;
-      const response = await fetch(NVIDIA_CHAT_COMPLETIONS_URL, {
-        method: "POST",
+      // Use the models list endpoint — no model needed, no tokens consumed
+      const response = await fetch(NVIDIA_MODELS_URL, {
+        method: "GET",
         headers: {
           Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: validationModel,
-          messages: [{ role: "user", content: "ping" }],
-          max_tokens: 1,
-          stream: false,
-        }),
       });
 
       if (!response.ok) {
@@ -290,6 +286,7 @@ export class NvidiaProvider
           imagegen_enabled: tomoriState.config.imagegen_enabled,
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
+          user_blocking_enabled: tomoriState.config.user_blocking_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
         },
       };
@@ -357,6 +354,10 @@ export class NvidiaProvider
 
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<NvidiaProviderConfig> {
     const samplingParams = buildActiveSamplingParams(tomoriState.config);
+    if (NVIDIA_MIN_P_UNSUPPORTED_MODELS.has(tomoriState.llm.llm_codename)) {
+      delete samplingParams.minP;
+    }
+
     const config: NvidiaProviderConfig = {
       model: tomoriState.llm.llm_codename,
       apiKey,
@@ -430,7 +431,8 @@ export class NvidiaProvider
         streamConfig.tools = await this.getTools(tomoriState, streamingContext);
       }
 
-      const streamContext: StreamContext = {
+      const streamContext: StreamContext = buildStreamContext({
+        provider: "nvidia",
         channel,
         client,
         initialInteraction,
@@ -440,23 +442,13 @@ export class NvidiaProvider
         currentTurnModelParts,
         emojiStrings,
         functionInteractionHistory,
-        provider: "nvidia",
-        locale: userLocale ?? "en-US",
-        suppressUserErrors: streamingContext?.suppressUserErrors,
-        rotationKeyRetriesUsed: streamingContext?.rotationKeyRetriesUsed,
-        outputPrefill: streamingContext?.outputPrefill,
-        outputPrefillState: streamingContext?.outputPrefillState,
-        replyNoticeState: streamingContext?.replyNoticeState,
+        userLocale,
+        streamingContext,
         webhook,
         personaAvatarUrl,
         personaUsername,
         prefixStrippingName,
-        forcedMentions: streamingContext?.forcedMentions,
-        abortSignal: streamingContext?.abortSignal,
-
-        // Opaque message ID map for snowflake ID abstraction in LLM-visible text
-        messageIdMap: streamingContext?.messageIdMap,
-      };
+      });
 
       const orchestrator = new StreamOrchestrator();
       const adapter = new NvidiaStreamAdapter();
@@ -527,6 +519,7 @@ export class NvidiaProvider
         imagegen_enabled: false,
         videogen_enabled: false,
         voice_message_enabled: false,
+        user_blocking_enabled: false,
         thread_creation_enabled: false,
       },
     };

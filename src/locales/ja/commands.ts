@@ -32,6 +32,8 @@ import model from "./commands/model";
 import mcp from "./commands/mcp";
 import capabilities from "./commands/capabilities";
 import provider from "./commands/provider";
+import update from "./commands/update";
+import stats from "./commands/stats";
 
 export default {
   commands: {
@@ -66,5 +68,7 @@ export default {
     ...mcp,
     ...capabilities,
     ...provider,
+    ...update,
+    ...stats,
   },
 };

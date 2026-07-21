@@ -373,12 +373,18 @@ const dbConfigured = !!(process.env.POSTGRES_PASSWORD || process.env.DATABASE_UR
 
 const CATEGORIES = {
   CODE: (r: ResultItem) =>
-    r.name.includes("Type Check") || r.name.includes("Linting") || r.name.includes("SQL Audit"),
+    r.name.includes("Type Check") ||
+    r.name.includes("Linting") ||
+    r.name.includes("Runtime Imports") ||
+    r.name.includes("SQL Audit") ||
+    r.name.includes("Media Size"),
   SECURITY: (r: ResultItem) => r.name.includes("Dependency Audit"),
   UNIT_TESTS: (r: ResultItem) => r._category === "unit-test",
   REGRESSION_TESTS: (r: ResultItem) => r._category === "regression-test",
-  DB: (r: ResultItem) => r.name.includes("Schema Drift") || r.name.includes("Lifecycle"),
+  DB: (r: ResultItem) =>
+    r.name.includes("Schema Drift") || r.name.includes("Lifecycle") || r.name.includes("Migration Files"),
   LOCALES: (r: ResultItem) => r.name.includes("Localization"),
+  DOCS: (r: ResultItem) => r.name.includes("Command Reference"),
 };
 
 async function main() {
@@ -388,20 +394,29 @@ async function main() {
   const [
     typeCheckResult,
     lintResult,
+    runtimeImportsResult,
     auditResult,
     sqlAuditResult,
+    mediaSizeResult,
     modelCatalogResult,
+    migrationFilesResult,
     testResultItems,
     schemaDriftResult,
     dbLifecycleResult,
     localesResult,
     localeLengthsResult,
+    commandReferenceResult,
   ] = await Promise.all([
     runCheck("Type Check (bun run check)", ["bun", "run", "check"], true),
     runLint(),
+    runCheck("Runtime Imports (bun run check-runtime-imports)", ["bun", "run", "check-runtime-imports"], true),
     runAudit(),
     runCheck("SQL Audit (bun run audit-sql)", ["bun", "run", "audit-sql"], true),
-    runCheck("Seed Catalog (bun run check-models)", ["bun", "run", "check-models"], true),
+    runCheck("Media Size (bun run check-media-size)", ["bun", "run", "check-media-size"], true),
+    runCheck("Seed Catalog (bun run check-seed-catalogs)", ["bun", "run", "check-seed-catalogs"], true),
+    // Filesystem-only (no DB): verifies rollback pairing + numbering uniqueness,
+    // so it runs unconditionally regardless of local DB configuration.
+    runCheck("Migration Files (bun run check-migrations)", ["bun", "run", "check-migrations"], true),
     runTests(),
     dbConfigured
       ? runCheck("Schema Drift Check (bun run check-schema)", ["bun", "run", "check-schema"], true)
@@ -419,19 +434,28 @@ async function main() {
       ["bun", "run", "check-locale-lengths"],
       true,
     ),
+    runCheck(
+      "Command Reference Freshness (bun run check-command-reference)",
+      ["bun", "run", "check-command-reference"],
+      true,
+    ),
   ]);
 
   const results: ResultItem[] = [
     typeCheckResult,
     lintResult,
+    runtimeImportsResult,
     auditResult,
     sqlAuditResult,
+    mediaSizeResult,
     modelCatalogResult,
+    migrationFilesResult,
     ...testResultItems,
     schemaDriftResult,
     dbLifecycleResult,
     localesResult,
     localeLengthsResult,
+    commandReferenceResult,
   ];
 
   console.log("\n====================================");
@@ -447,16 +471,24 @@ async function main() {
   const HINTS: Record<string, string> = {
     "Type Check": "Run `bun run check` locally to see TypeScript errors.",
     "Linting (bun run lint)": "Review the warning or commit the auto-fixed files.",
+    "Runtime Imports":
+      "Run `bun install --frozen-lockfile`, then `bun run check-runtime-imports`. Confirm bun.lock resolves gaxios to uuid@9.",
     "Dependency Audit":
-      "Find the vulnerable package in the audit log and pin a safe version in the `overrides` field of package.json, or run `bun update <package-name>` to update it specifically.",
+      "Update the parent dependency or run `bun update <package-name>` specifically. Only use a global override when the replacement stays within every dependent package's declared version range.",
     "SQL Audit":
       "Ensure all raw SQL queries are inside the 'src/utils/db/repositories/' folder or exempt them in the script.",
+    "Media Size":
+      "Run `bun run compress-media` to fix this automatically (lossless re-encode, downscaling oversized art to fit). Default Persona avatars/sprites ship to Discord, so keep them under 1 MB. Override the budget with MEDIA_SIZE_LIMIT_BYTES if truly needed.",
     "Schema Drift Check": "Ensure `schema.sql` and your Zod types in `src/types/db/schema.ts` are in sync. See the check output for the specific mismatch (column missing from schema.sql, export coverage gap, or INSERT column count mismatch).",
+    "Migration Files":
+      "Every `NNN_*.sql` up-migration needs a paired `NNN_*.down.sql`, and no two may share an `NNN` prefix. If another PR already merged your number, rename yours to the next free number.",
     "DB Lifecycle Validation": "Check the detailed logs above. Your migration might be invalid or nuke-db failed.",
     "Localization Keys":
       "Missing Japanese equivalents are fine to push — run `bun run prune-locales` to clean up orphaned keys, or add the missing `ja` entries to get a clean run.",
     "Localization Discord Limits":
-      "Discord truncates modal placeholders (>100 chars), modal titles (>45), and command descriptions (>100). Shorten the listed locale strings — both `en-US` and `ja` sides must fit.",
+      "Discord truncates modal placeholders/descriptions and select-option labels/descriptions (>100 chars), modal titles/labels (>45), and command descriptions (>100). Shorten the listed locale strings — both `en-US` and `ja` sides must fit.",
+    "Command Reference":
+      "Run `bun run generate-command-reference` and commit the regenerated docs/features/command-reference.md.",
   };
 
   const getHint = (name: string) => {
@@ -516,6 +548,8 @@ async function main() {
   printSection("\nDatabase Validation", results.filter((r) => CATEGORIES.DB(r)));
 
   printSection("\nLocalization", results.filter((r) => CATEGORIES.LOCALES(r)));
+
+  printSection("\nDocs", results.filter((r) => CATEGORIES.DOCS(r)));
 
   console.log("\n====================================");
   if (allFatalPassed) {

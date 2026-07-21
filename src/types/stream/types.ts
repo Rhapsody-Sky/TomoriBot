@@ -7,6 +7,7 @@
 
 import { HumanizerDegree } from "../db/schema";
 import { createSentenceSplitRegex } from "@/utils/text/processors/chunkProcessor";
+import type { TokenUsage } from "@/utils/text/tokenEstimate";
 
 /**
  * Discord streaming constants extracted from the original implementation
@@ -40,6 +41,45 @@ export enum VisibleDeliveryMode {
 }
 
 /**
+ * Sprite mapping persisted after a successful webhook send so context
+ * rebuilding can recover the decorated "Name (sprite):" label even though the
+ * webhook displays only the clean persona name.
+ */
+export interface SpriteMessageRecordInfo {
+  personaId: number;
+  spriteName: string;
+  /**
+   * Whether this sprite is a DID-alter "identity" sprite. In-memory routing context
+   * only (not part of the persisted persona_sprite_messages mapping): the post-turn
+   * stat recorder uses it to count identity sprites in `sprite_shown` but exclude them
+   * from `sprite_emotion` (so they never reach the emotion breakdown).
+   */
+  isIdentity: boolean;
+}
+
+/**
+ * One delivered sprite, drained from StreamState into StreamResult for the post-turn
+ * stat recorder. Carries the identity flag so it can split the all-inclusive
+ * `sprite_shown` count from the non-identity `sprite_emotion` count.
+ */
+export interface SpriteShownEntry {
+  /** Sprite name — the user-given tag, used directly as the stat metric_key. */
+  name: string;
+  /** Identity (DID-alter) sprites count toward sprite_shown but never sprite_emotion. */
+  isIdentity: boolean;
+}
+
+export interface StreamRenderModifierState {
+  identity: {
+    username?: string;
+    avatarUrl?: string;
+    avatarDataUri?: string;
+  };
+  /** Present when the active render modifier is a persona sprite. */
+  spriteRecord?: SpriteMessageRecordInfo;
+}
+
+/**
  * Stream state tracking for buffer management and code block and think block detection
  */
 export interface StreamState {
@@ -66,6 +106,8 @@ export interface StreamState {
   prefillMatchFailed: boolean; // Whether prefill matching failed (no stripping)
   thoughtSummarySegments: string[];
   thoughtRawSegments: string[];
+  /** OpenRouter-only: upstream serving provider/endpoint (e.g. "minimax-cn") for thought logs. */
+  servingProvider?: string;
   firstReplyUrl?: string;
   /**
    * Holds orphan punctuation segments (e.g. a lone "..." flushed on its own line)
@@ -80,6 +122,37 @@ export interface StreamState {
    * flush boundary with exactly one blank line.
    */
   pendingAggregateJoinNextWithBlankLine: boolean;
+  /** Active render-modifier identity for the current generated line. */
+  activeRenderModifier?: StreamRenderModifierState;
+  /**
+   * Sprite-key of the most recently delivered non-identity sprite, used to detect
+   * when the sprite changes so the group-break name representation can be toggled.
+   */
+  lastDeliveredSpriteKey?: string;
+  /**
+   * Toggles each time a non-identity sprite changes. Decides whether the current
+   * sprite uses the clean persona name (`false`) or the decorated `Persona (sprite)`
+   * name (`true`), so adjacent different-sprite messages never share a username and
+   * Discord renders each avatar instead of grouping them under the first.
+   */
+  spriteGroupParity?: boolean;
+  /**
+   * Sprite labels delivered during this stream, in render order (one entry per
+   * delivered sprite message, repeats kept). Drained into StreamResult.spritesShown
+   * so the post-turn stat recorder can count `sprite_shown` (all) and `sprite_emotion`
+   * (non-identity only) with full user scope.
+   */
+  spritesShown: SpriteShownEntry[];
+  /**
+   * Real, provider-reported token usage for this stream segment, normalized
+   * (via normalizeProviderUsage) from whichever chunk's metadata carried it.
+   * Captured across the whole loop — not just the terminal `done` chunk — so
+   * providers that emit usage on a separate trailing chunk (OpenAI
+   * `include_usage`) or clobber the done metadata (Anthropic `message_stop`)
+   * are still counted. Drained into StreamResult.usage. Undefined when the
+   * provider reported no usage.
+   */
+  usage?: TokenUsage;
 }
 
 /**
@@ -102,6 +175,7 @@ export interface TextProcessingConfig {
   emojiStrings: string[];
   mentionMap?: Map<string, string[]>;
   mentionIdSet?: Set<string>;
+  personaMentionMap?: Map<string, string>;
   botName: string;
   /** Extra names the active persona answers to (lore/default name, trigger names) — used to strip
    *  a leaked multi-name opening label chain like "Tomori: Lilya: ..." */
@@ -258,6 +332,11 @@ export function createDefaultStreamState(): StreamState {
     pendingOrphanPunctuation: undefined,
     pendingAggregatedText: "",
     pendingAggregateJoinNextWithBlankLine: false,
+    activeRenderModifier: undefined,
+    lastDeliveredSpriteKey: undefined,
+    spriteGroupParity: false,
+    spritesShown: [],
+    usage: undefined,
   };
 }
 

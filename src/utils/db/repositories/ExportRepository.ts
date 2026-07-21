@@ -68,11 +68,18 @@ export class ExportRepository {
     includeGlobalMemories = true,
   ): Promise<ExportResult> {
     try {
-      // 1. Query user data from database (includes image appearance fields)
+      // 1. Query user data from database (personalization fields live in the split table)
       const rows = await sql`
-        SELECT user_id, user_nickname, language_pref, impersonation_prompt, physical_appearance_tags, nai_char_ref_url
-        FROM users
-        WHERE user_disc_id = ${userDiscId}
+        SELECT
+          u.user_id,
+          u.user_nickname,
+          u.language_pref,
+          upc.impersonation_prompt,
+          COALESCE(upc.physical_appearance_tags, ARRAY[]::TEXT[]) AS physical_appearance_tags,
+          upc.nai_char_ref_url
+        FROM users u
+        LEFT JOIN user_personalization_configs upc ON upc.user_id = u.user_id
+        WHERE u.user_disc_id = ${userDiscId}
         LIMIT 1
       `;
 
@@ -191,6 +198,7 @@ export class ExportRepository {
           COALESCE(scac.imagegen_enabled, true)                     AS imagegen_enabled,
           COALESCE(snec.tool_notice_hidden_keys, ARRAY[]::TEXT[])   AS tool_notice_hidden_keys,
           COALESCE(scc.self_debug_enabled, false)                   AS self_debug_enabled,
+          COALESCE(scc.model_randomizer_enabled, false)             AS model_randomizer_enabled,
           snaic.image_default_positive_tags                                       AS image_default_positive_tags,
           snaic.image_default_negative_tags                                    AS image_default_negative_tags,
           snaic.nai_sampler                                          AS nai_sampler,
@@ -217,6 +225,8 @@ export class ExportRepository {
           COALESCE(scac.videogen_enabled, false)                    AS videogen_enabled,
           COALESCE(scac.voice_message_enabled, true)                AS voice_message_enabled,
           COALESCE(scac.thread_creation_enabled, true)              AS thread_creation_enabled,
+          COALESCE(scac.user_blocking_enabled, true)                AS user_blocking_enabled,
+          COALESCE(scac.time_awareness_enabled, true)               AS time_awareness_enabled,
           COALESCE(ssc.voice_transcript_chat_mode, true)            AS voice_transcript_chat_mode,
           COALESCE(ssc.chatterbox_turbo_enabled, true)              AS chatterbox_turbo_enabled,
           COALESCE(ssc.chatterbox_cfg_weight, 0.5)                  AS chatterbox_cfg_weight,
@@ -225,6 +235,7 @@ export class ExportRepository {
           COALESCE(snc.uncensor_unicode_space_enabled, false)       AS uncensor_unicode_space_enabled,
           COALESCE(snc.uncensor_sanitize_enabled, false)            AS uncensor_sanitize_enabled,
           COALESCE(scac.tool_use_enabled, true)                     AS tool_use_enabled,
+          COALESCE(scac.verbatim_tool_calling_enabled, false)       AS verbatim_tool_calling_enabled,
           COALESCE(smpc.prompt_snapshot_enabled, false)             AS prompt_snapshot_enabled,
           COALESCE(smemoc.memory_tagging_enabled, false)            AS memory_tagging_enabled,
           COALESCE(smemoc.channel_memory_enabled, false)            AS channel_memory_enabled,
@@ -362,6 +373,7 @@ export class ExportRepository {
             imagegen_enabled: configData.imagegen_enabled,
             tool_notice_hidden_keys: configData.tool_notice_hidden_keys ?? [],
             self_debug_enabled: configData.self_debug_enabled,
+            model_randomizer_enabled: configData.model_randomizer_enabled,
             image_default_positive_tags: configData.image_default_positive_tags ?? undefined,
             image_default_negative_tags: configData.image_default_negative_tags ?? undefined,
             nai_sampler: configData.nai_sampler ?? null,
@@ -388,6 +400,8 @@ export class ExportRepository {
             videogen_enabled: configData.videogen_enabled,
             voice_message_enabled: configData.voice_message_enabled,
             thread_creation_enabled: configData.thread_creation_enabled,
+            user_blocking_enabled: configData.user_blocking_enabled,
+            time_awareness_enabled: configData.time_awareness_enabled,
             voice_transcript_chat_mode: configData.voice_transcript_chat_mode,
             chatterbox_turbo_enabled: configData.chatterbox_turbo_enabled,
             chatterbox_cfg_weight: configData.chatterbox_cfg_weight,
@@ -396,6 +410,7 @@ export class ExportRepository {
             uncensor_unicode_space_enabled: configData.uncensor_unicode_space_enabled,
             uncensor_sanitize_enabled: configData.uncensor_sanitize_enabled,
             tool_use_enabled: configData.tool_use_enabled,
+            verbatim_tool_calling_enabled: configData.verbatim_tool_calling_enabled,
             prompt_snapshot_enabled: configData.prompt_snapshot_enabled,
             memory_tagging_enabled: configData.memory_tagging_enabled,
             channel_memory_enabled: configData.channel_memory_enabled,
@@ -480,10 +495,20 @@ export class ExportRepository {
     try {
       // 1. Query user settings including image appearance fields and behavioral preferences
       const rows = await sql`
-        SELECT user_nickname, language_pref, impersonation_prompt, physical_appearance_tags, nai_char_ref_url,
-               privacy_level, personal_dtm, personal_deliberate_tool_mode, shortterm_cache_crossserver_opt_in
-        FROM users
-        WHERE user_disc_id = ${userDiscId}
+        SELECT
+          u.user_nickname,
+          u.language_pref,
+          upc.impersonation_prompt,
+          COALESCE(upc.physical_appearance_tags, ARRAY[]::TEXT[]) AS physical_appearance_tags,
+          upc.nai_char_ref_url,
+          u.privacy_level,
+          COALESCE(upc.personal_dtm, 'follow') AS personal_dtm,
+          u.personal_deliberate_tool_mode,
+          COALESCE(upc.shortterm_cache_crossserver_opt_in, false) AS shortterm_cache_crossserver_opt_in,
+          u.timezone_offset
+        FROM users u
+        LEFT JOIN user_personalization_configs upc ON upc.user_id = u.user_id
+        WHERE u.user_disc_id = ${userDiscId}
         LIMIT 1
       `;
 
@@ -508,6 +533,7 @@ export class ExportRepository {
           personal_dtm: userData.personal_dtm ?? undefined,
           personal_deliberate_tool_mode: userData.personal_deliberate_tool_mode ?? undefined,
           shortterm_cache_crossserver_opt_in: userData.shortterm_cache_crossserver_opt_in ?? undefined,
+          timezone_offset: userData.timezone_offset ?? undefined,
         },
       };
 

@@ -13,6 +13,7 @@ import {
 import { getCachedTomoriState, getCachedAllPersonas } from "@/utils/cache/tomoriStateCache";
 import { getCachedChannelLlm } from "@/utils/cache/channelLlmCache";
 import { getCachedChannelPrompt } from "@/utils/cache/channelPromptCache";
+import { getCachedChannelContextNote } from "@/utils/cache/channelContextNoteCache";
 import { llmProviderRepo } from "@/utils/db/repositories";
 import { buildContext } from "@/utils/text/contextBuilder";
 import { getCachedActivePreset } from "@/utils/cache/stPresetCache";
@@ -68,6 +69,8 @@ import {
   isSupportedImageAttachmentContentType,
   isSupportedVideoAttachmentContentType,
 } from "@/utils/chat/contextMedia";
+import { normalizeRenderModifierName, resolveRenderModifierSourcePersona } from "@/utils/discord/renderModifierParser";
+import { resolveSpriteMessageDisplayName } from "@/utils/discord/spriteMessageLabel";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -414,6 +417,9 @@ export async function execute(
     // live pipeline would inject for this channel (append/replace). Mirrors contextPipeline.ts.
     const channelPromptOverride = await getCachedChannelPrompt(selectedPersona.server_id, interaction.channelId);
 
+    // Resolve any per-channel context note so the snapshot reflects the additive injection.
+    const channelContextNote = await getCachedChannelContextNote(selectedPersona.server_id, interaction.channelId);
+
     let effectivePersona = selectedPersona;
     if (effectiveLlm !== selectedPersona.llm) {
       effectivePersona = { ...selectedPersona, llm: effectiveLlm };
@@ -489,7 +495,7 @@ export async function execute(
     const personaByNickname = new Map<string, TomoriState>();
     for (const p of personas) {
       if (!p.persona_nickname) continue;
-      const key = p.persona_nickname.toLowerCase();
+      const key = normalizeRenderModifierName(p.persona_nickname);
       if (!personaByNickname.has(key)) personaByNickname.set(key, p);
     }
     const mainPersona = personas.find((p) => !p.is_alter) ?? tomoriState;
@@ -541,9 +547,23 @@ export async function execute(
         personaName = authorName;
       } else if (message.webhookId) {
         const webhookName = message.author.username?.trim();
-        const matchedPersona = webhookName ? personaByNickname.get(webhookName.toLowerCase()) : undefined;
+        const renderModifierSource = webhookName
+          ? resolveRenderModifierSourcePersona(webhookName, personaByNickname)
+          : null;
+        const matchedPersona = webhookName
+          ? (renderModifierSource?.persona ?? personaByNickname.get(normalizeRenderModifierName(webhookName)))
+          : undefined;
         if (matchedPersona) {
-          authorName = matchedPersona.persona_nickname;
+          // Mirror the real pipeline: recover the decorated "Name (sprite)" label
+          // for clean-named sprite messages from the persisted mapping.
+          const spriteDisplayName = renderModifierSource
+            ? null
+            : await resolveSpriteMessageDisplayName(
+                message.id,
+                matchedPersona.persona_id,
+                matchedPersona.persona_nickname,
+              );
+          authorName = renderModifierSource?.displayName ?? spriteDisplayName ?? matchedPersona.persona_nickname;
           authorType = "persona";
           personaName = matchedPersona.persona_nickname;
           effectiveAuthorId = String(matchedPersona.persona_id ?? matchedPersona.persona_nickname);
@@ -760,6 +780,7 @@ export async function execute(
       publicPersonaAttributes,
       tomoriConfig: effectivePersona.config,
       channelPromptOverride,
+      channelContextNote,
       personaPrompt: selectedPersona.persona_prompt ?? null,
       personaLineageId: selectedPersona.persona_lineage_id,
       isDMChannel,
@@ -967,6 +988,7 @@ const TAG_LABELS: Record<string, TagLabel> = {
   [ContextItemTag.KNOWLEDGE_SERVER_INFO]: { title: "Discord Server Info", hint: "system-managed" },
   [ContextItemTag.KNOWLEDGE_SERVER_EMOJIS]: { title: "Server Emojis", hint: "system-managed" },
   [ContextItemTag.KNOWLEDGE_SERVER_STICKERS]: { title: "Server Stickers", hint: "system-managed" },
+  [ContextItemTag.KNOWLEDGE_PERSONA_SPRITES]: { title: "Persona Sprites", hint: "/persona sprites" },
   [ContextItemTag.KNOWLEDGE_SERVER_MEMORIES]: { title: "Server Memories", hint: "/memory server" },
   [ContextItemTag.KNOWLEDGE_SERVER_DOCUMENTS]: { title: "Server Documents", hint: "/memory document add" },
   [ContextItemTag.KNOWLEDGE_SERVER_CONDITIONING]: { title: "Conditioning Log", hint: "/conditioning" },
@@ -1322,6 +1344,7 @@ async function fetchProviderTools(
       imagegen_enabled: persona.config.imagegen_enabled,
       videogen_enabled: persona.config.videogen_enabled,
       voice_message_enabled: persona.config.voice_message_enabled,
+      user_blocking_enabled: persona.config.user_blocking_enabled,
       thread_creation_enabled: persona.config.thread_creation_enabled,
     },
   };

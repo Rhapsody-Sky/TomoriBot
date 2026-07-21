@@ -3,12 +3,21 @@ import type { ForcedMention } from "@/types/discord/mentions";
 import type { TomoriState } from "@/types/db/schema";
 import type { StructuredContextItem } from "@/types/misc/context";
 import type { StreamingContext } from "@/types/tool/interfaces";
-import type { ChatReminderData } from "@/utils/chat/types";
 import { getCachedAllPersonas } from "@/utils/cache/tomoriStateCache";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
 import { log } from "@/utils/misc/logger";
 import { isSelfTriggerMessage } from "@/utils/chat/triggerProcessor";
-import type { LockedChatTurn, ManualTriggerInvoker, RunnableChatAdmission, TextQuotaSource } from "@/utils/chat/types";
+import type {
+  ChatGenerationResultHandler,
+  ChatReminderData,
+  LockedChatTurn,
+  ManualTriggerInvoker,
+  QueuedMessageDiscardHandler,
+  QueuedMessageDiscardReason,
+  RunnableChatAdmission,
+  SceneTurnMetadata,
+  TextQuotaSource,
+} from "@/utils/chat/types";
 
 function parseIntegerEnvFlag(value: string | undefined, defaultValue: number, minimum: number): number {
   if (typeof value !== "string") return defaultValue;
@@ -52,8 +61,11 @@ export type QueuedMessage = {
     StreamingContext,
     "disableCrossChannelMessage" | "disableRecentMessageReplyTool" | "disableReminderTool"
   >;
+  sceneTurn?: SceneTurnMetadata;
   reminderRecipientID?: string;
   reminderData?: ChatReminderData;
+  onGenerationResult?: ChatGenerationResultHandler;
+  onQueueDiscard?: QueuedMessageDiscardHandler;
 };
 
 export interface ChannelLockEntry {
@@ -198,6 +210,7 @@ export function releaseStaleChannelLockIfExpired(channelId: string, lockEntry: C
   lockEntry.followUpEligible = false;
   lockEntry.isInToolCallChain = false;
   lockEntry.isCommandTriggered = false;
+  discardQueuedMessages(lockEntry.messageQueue, "stale_lock_release");
   lockEntry.messageQueue = [];
   return true;
 }
@@ -308,6 +321,59 @@ export function queuePersonaJobsAtFront(args: {
   );
 }
 
+export function queueScenePersonaJobsAtFront(args: {
+  lockEntry: ChannelLockEntry;
+  message: Message;
+  sceneJobs: Array<{
+    personaName: string;
+    selectedPersonaId: number;
+    sceneTurn: SceneTurnMetadata;
+    manualSystemPrompt: string;
+    textQuotaTriggerKey: string;
+  }>;
+  triggeredPersonaIds: number[];
+  forceReason?: boolean;
+  reasoningQuery?: string;
+  llmOverrideCodename?: string;
+  textQuotaSource: TextQuotaSource;
+  textQuotaUserDiscId: string;
+  shouldSurfaceUserErrors?: boolean;
+  injectedContextItems?: StructuredContextItem[];
+  forcedMentions?: ForcedMention[];
+  manualTriggerInvoker?: ManualTriggerInvoker;
+  manualStreamingContextOverrides?: QueuedMessage["manualStreamingContextOverrides"];
+}): void {
+  for (let i = args.sceneJobs.length - 1; i >= 0; i--) {
+    const queuedSceneJob = args.sceneJobs[i];
+    args.lockEntry.messageQueue.unshift({
+      message: args.message,
+      isManuallyTriggered: true,
+      forceReason: args.forceReason,
+      reasoningQuery: args.reasoningQuery,
+      llmOverrideCodename: args.llmOverrideCodename,
+      selectedPersonaId: queuedSceneJob.selectedPersonaId,
+      triggeredPersonaIds: args.triggeredPersonaIds,
+      isPersonaJob: true,
+      textQuotaSource: args.textQuotaSource,
+      textQuotaTriggerKey: queuedSceneJob.textQuotaTriggerKey,
+      textQuotaUserDiscId: args.textQuotaUserDiscId,
+      manualSystemPrompt: queuedSceneJob.manualSystemPrompt,
+      shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
+      injectedContextItems: args.injectedContextItems,
+      forcedMentions: args.forcedMentions,
+      manualTriggerInvoker: args.manualTriggerInvoker,
+      manualStreamingContextOverrides: args.manualStreamingContextOverrides,
+      sceneTurn: queuedSceneJob.sceneTurn,
+    });
+  }
+
+  log.info(
+    `Queued ${args.sceneJobs.length} scene persona job(s) for message ${args.message.id}: ${args.sceneJobs
+      .map((sceneJob) => sceneJob.personaName)
+      .join(", ")}`,
+  );
+}
+
 export function queueStopResponseAtFront(args: {
   channelId: string;
   message: Message;
@@ -380,6 +446,8 @@ export function queueFollowUpForLockedTurn(args: {
   manualStreamingContextOverrides: QueuedMessage["manualStreamingContextOverrides"];
   isNaturalStopMessage: boolean;
   shouldSurfaceUserErrors?: boolean;
+  onGenerationResult?: ChatGenerationResultHandler;
+  onQueueDiscard?: QueuedMessageDiscardHandler;
 }): boolean {
   if (
     !args.lockEntry.isLocked ||
@@ -409,6 +477,8 @@ export function queueFollowUpForLockedTurn(args: {
       textQuotaUserDiscId: args.textQuotaUserDiscId,
       shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
       manualStreamingContextOverrides: args.manualStreamingContextOverrides,
+      onGenerationResult: args.onGenerationResult,
+      onQueueDiscard: args.onQueueDiscard,
     });
 
     log.info(
@@ -434,6 +504,8 @@ export function queueFollowUpForLockedTurn(args: {
     textQuotaUserDiscId: args.textQuotaUserDiscId,
     shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
     manualStreamingContextOverrides: args.manualStreamingContextOverrides,
+    onGenerationResult: args.onGenerationResult,
+    onQueueDiscard: args.onQueueDiscard,
   });
 
   log.info(
@@ -508,6 +580,7 @@ export function releaseChannelLockAndReplayQueue(args: {
   setImmediate(() => {
     args.processQueuedMessage(nextMessageData).catch((error) => {
       log.error(`Error processing queued message ${nextMessageData.message.id}:`, error);
+      discardQueuedMessages([nextMessageData], "queued_processing_failed");
     });
   });
 }
@@ -619,6 +692,7 @@ export function clearChannelProcessingQueue(channelId: string): number {
   }
 
   const clearedCount = lockEntry.messageQueue.length;
+  discardQueuedMessages(lockEntry.messageQueue, "channel_queue_cleared");
   lockEntry.messageQueue = [];
 
   log.info(`Cleared ${clearedCount} queued message(s) for channel ${channelId}.`);
@@ -632,16 +706,21 @@ export function enqueueLatestFollowUp(
   followUp: QueuedMessage,
 ): number {
   const previousLength = lockEntry.messageQueue.length;
-  lockEntry.messageQueue = lockEntry.messageQueue.filter(
-    (queuedMessage) =>
-      !(
-        queuedMessage.isFollowUp &&
-        !queuedMessage.isPersonaJob &&
-        !queuedMessage.isStopResponse &&
-        queuedMessage.message.author.id === userDiscId
-      ),
-  );
+  const removedMessages: QueuedMessage[] = [];
+  lockEntry.messageQueue = lockEntry.messageQueue.filter((queuedMessage) => {
+    const shouldRemove =
+      queuedMessage.isFollowUp &&
+      !queuedMessage.isPersonaJob &&
+      !queuedMessage.isStopResponse &&
+      queuedMessage.message.author.id === userDiscId;
+    if (shouldRemove) {
+      removedMessages.push(queuedMessage);
+      return false;
+    }
+    return true;
+  });
   const removedCount = previousLength - lockEntry.messageQueue.length;
+  discardQueuedMessages(removedMessages, "superseded_follow_up");
   lockEntry.messageQueue.unshift(followUp);
   return removedCount;
 }
@@ -660,15 +739,18 @@ export function clearQueuedSelfReplyWork(
 
   let clearedPersonaJobCount = 0;
   let clearedSelfTriggerCount = 0;
+  const removedMessages: QueuedMessage[] = [];
 
   lockEntry.messageQueue = lockEntry.messageQueue.filter((queuedMsg) => {
     if (queuedMsg.isPersonaJob) {
       clearedPersonaJobCount++;
+      removedMessages.push(queuedMsg);
       return false;
     }
 
     if (!queuedMsg.isManuallyTriggered && isSelfTriggerMessage(queuedMsg.message, allPersonas)) {
       clearedSelfTriggerCount++;
+      removedMessages.push(queuedMsg);
       return false;
     }
 
@@ -681,10 +763,23 @@ export function clearQueuedSelfReplyWork(
       `Cleared ${clearedTotal} queued self-reply item(s) for channel ${channelId} ` +
         `(personaJobs=${clearedPersonaJobCount}, selfTriggers=${clearedSelfTriggerCount}).`,
     );
+    discardQueuedMessages(removedMessages, "self_reply_work_cleared");
   }
 
   return {
     clearedPersonaJobCount,
     clearedSelfTriggerCount,
   };
+}
+
+function discardQueuedMessages(messages: QueuedMessage[], reason: QueuedMessageDiscardReason): void {
+  for (const queuedMessage of messages) {
+    if (!queuedMessage.onQueueDiscard) {
+      continue;
+    }
+
+    Promise.resolve(queuedMessage.onQueueDiscard(reason)).catch((error) => {
+      log.warn(`Queued message discard callback failed for message ${queuedMessage.message.id} (${reason})`, error);
+    });
+  }
 }

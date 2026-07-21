@@ -7,6 +7,7 @@ import {
   buildServerMemberPermissionsConfigWritePlan,
   type ServerMemberPermissionsCommandConfigState,
 } from "@/utils/discord/memberPermissionsConfigMapping";
+import { buildWorkaroundConfigWritePlan, type WorkaroundConfigState } from "@/utils/discord/workaroundConfigMapping";
 
 function sorted(values: string[]): string[] {
   return values.toSorted();
@@ -23,6 +24,8 @@ const disabledCapabilitiesManageState: CapabilitiesManageConfigState = {
   imagegen_enabled: false,
   videogen_enabled: false,
   voice_message_enabled: false,
+  user_blocking_enabled: false,
+  time_awareness_enabled: false,
 };
 
 const enabledCapabilitiesManageState: CapabilitiesManageConfigState = {
@@ -36,6 +39,8 @@ const enabledCapabilitiesManageState: CapabilitiesManageConfigState = {
   imagegen_enabled: true,
   videogen_enabled: true,
   voice_message_enabled: true,
+  user_blocking_enabled: true,
+  time_awareness_enabled: true,
 };
 
 const disabledServerMemberPermissionsState: ServerMemberPermissionsCommandConfigState = {
@@ -50,6 +55,14 @@ const enabledServerMemberPermissionsState: ServerMemberPermissionsCommandConfigS
   attribute_memteaching_enabled: true,
   sampledialogue_memteaching_enabled: true,
   prompt_snapshot_enabled: true,
+};
+
+const disabledWorkaroundState: WorkaroundConfigState = {
+  verbatim_tool_calling_enabled: false,
+};
+
+const enabledWorkaroundState: WorkaroundConfigState = {
+  verbatim_tool_calling_enabled: true,
 };
 
 describe("config command write mappings", () => {
@@ -85,6 +98,7 @@ describe("config command write mappings", () => {
           "imagegen",
           "videogen",
           "voicemessage",
+          "timeawareness",
         ],
         { includeElevenLabs: true },
       );
@@ -99,6 +113,7 @@ describe("config command write mappings", () => {
         imagegen_enabled: true,
         videogen_enabled: true,
         voice_message_enabled: true,
+        time_awareness_enabled: true,
       });
       expect(plan.patch.memberPermissions).toEqual({});
     });
@@ -157,6 +172,32 @@ describe("config command write mappings", () => {
         "sampledialogue_memteaching_enabled",
         "server_memteaching_enabled",
       ]);
+    });
+  });
+
+  describe("/config workarounds", () => {
+    it("routes verbatim tool-calling to server_capabilities_configs", () => {
+      const plan = buildWorkaroundConfigWritePlan(disabledWorkaroundState, ["verbatim_tool_calling"]);
+
+      expect(plan.method).toBe("updateCapabilitiesConfig");
+      expect(plan.patch).toEqual({
+        verbatim_tool_calling_enabled: true,
+      });
+      expect(plan.changes).toEqual([
+        {
+          value: "verbatim_tool_calling",
+          dbColumn: "verbatim_tool_calling_enabled",
+          isEnabled: true,
+          labelKey: "commands.config.workarounds.verbatim_tool_calling_option",
+        },
+      ]);
+    });
+
+    it("returns an empty patch when the selected state is unchanged", () => {
+      const plan = buildWorkaroundConfigWritePlan(enabledWorkaroundState, ["verbatim_tool_calling"]);
+
+      expect(plan.patch).toEqual({});
+      expect(plan.changes).toHaveLength(0);
     });
   });
 });

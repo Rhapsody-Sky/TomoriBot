@@ -31,6 +31,7 @@ import {
   type ImageToolCapabilities,
 } from "@/tools/functionCalls/generateImageToolCapabilities";
 import { checkImageQuota, incrementImageQuota, type QuotaCheckResult } from "../../utils/quota/imageQuotaManager";
+import { statRepository } from "@/utils/db/repositories";
 import { resolveProviderFeatureImplementation } from "@/utils/provider/providerInfoRegistry";
 import { resolveNativeImageGenerationCapability } from "@/utils/provider/providerCapabilityResolver";
 import { generateCustomImageViaEndpoint } from "@/providers/custom/customEndpointDispatcher";
@@ -46,6 +47,7 @@ import { optimizeImageBuffer } from "@/utils/image/imageProcessor";
 import type { CustomEndpointRow } from "@/types/db/schema";
 import { readImageEndpointSupports } from "@/utils/provider/customImageEndpointSupport";
 import { extractImagesFromMessage } from "@/utils/image/imageExtractor";
+import { isOpenRouterGeminiModelCodename } from "@/utils/provider/openrouterModelCapabilities";
 
 const IMAGE_REFERENCE_MAX_COUNT = Number.parseInt(process.env.IMAGE_REFERENCE_MAX_COUNT ?? "3", 10);
 const IMAGE_REFERENCE_MAX_TOTAL_BYTES = Number.parseInt(process.env.IMAGE_REFERENCE_MAX_TOTAL_BYTES ?? "6291456", 10);
@@ -877,7 +879,7 @@ export class GenerateImageTool extends BaseTool {
     const requestPayload = {
       model: modelCodename,
       messages: messages,
-      modalities: ["image", "text"],
+      modalities: isOpenRouterGeminiModelCodename(modelCodename) ? ["image", "text"] : ["image"],
       image_config: {
         aspect_ratio: aspectRatio,
       },
@@ -1613,6 +1615,17 @@ export class GenerateImageTool extends BaseTool {
       // Increment quota after successful generation (server providers only)
       if (creds.source === "server") {
         await incrementImageQuota(context.tomoriState.server_id, userDiscId);
+      }
+      // Record canonical generation telemetry for all providers; quotas enforce limits only.
+      if (context.internalUserId) {
+        statRepository.recordStat({
+          serverId: context.tomoriState.server_id,
+          userId: context.internalUserId,
+          lineageId: context.tomoriState.persona_lineage_id ?? 0,
+          metric: "image_generated",
+          // Key by model codename for a per-model generation breakdown at read time.
+          metricKey: modelCodename,
+        });
       }
 
       // Note: We intentionally DO NOT include imageMetadata for generated images

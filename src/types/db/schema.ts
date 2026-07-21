@@ -2,6 +2,7 @@ import { StickerFormatType } from "discord.js";
 import { z } from "zod";
 import { SUPPORTED_PARAM_VALUES, isSupportedParamValue, type SupportedParamValue } from "@/constants/supportedParams";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_VALUES } from "@/constants/thinkingLevels";
+import { STAT_METRICS } from "@/constants/statMetrics";
 import { TOOL_NOTICE_KEYS, isToolNoticeKey, type ToolNoticeKey } from "@/constants/toolNotices";
 import { DEFAULT_IMAGE_NEGATIVE_TAGS, DEFAULT_IMAGE_POSITIVE_TAGS } from "@/utils/image/tagDefaults";
 import { logitBiasEntrySchema, normalizeLogitBiasEntries } from "@/types/provider/logitBias";
@@ -45,6 +46,7 @@ export const userSchema = z.object({
   shortterm_cache_crossserver_opt_in: z.boolean().default(false), // Short-term memory cross-server sharing
   personal_dtm: z.enum(["off", "follow", "on"]).default("follow"), // Added April 2026 - User-scoped DTM tri-state: 'off' (always disabled), 'follow' (server setting), 'on' (always enabled)
   personal_deliberate_tool_mode: z.enum(["off", "follow", "on"]).default("follow"), // Added May 2026 - User-scoped deliberate tool mode tri-state
+  timezone_offset: z.number().int().min(-12).max(14).nullable().optional(), // Added June 2026 - Personal UTC offset; NULL = not set / opt-out
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
 });
@@ -94,23 +96,28 @@ export const tomoriSchema = z.object({
   // autoch_counter and autoch_next_target moved to personaAutochRuntimeStateSchema (migration 015).
   is_alter: z.boolean().default(false), // Added January 2026 - Distinguishes main persona (false) from alter personas (true)
   webhook_avatar_url: z.string().nullable().optional(), // Added January 2026 - Stored alter avatar reference (production URL; non-production URL or local avatar path)
-  physical_appearance_tags: z.array(z.string()).default([]), // Public imageboard-style physical appearance tags
-  nai_char_ref_url: z.string().nullable().optional(), // Added March 2026 - Persona-specific NovelAI character reference image
-  nai_attg_author: z.string().nullable().optional(), // Added March 2026 - ATTG: Story author name
-  nai_attg_title: z.string().nullable().optional(), // Added March 2026 - ATTG: Story title
-  nai_attg_tags: z.string().nullable().optional(), // Added March 2026 - ATTG: Genre/style tags
-  nai_attg_genre: z.string().nullable().optional(), // Added March 2026 - ATTG: Genre categories
-  nai_attg_stars: z.number().int().min(1).max(5).nullable().optional(), // Added March 2026 - ATTG: Quality stars (Erato only)
-  context_note: z.string().nullable().optional(), // Added April 2026 - Author's note injected into conversation history at inference
-  context_note_depth: z.number().int().min(0).max(100).default(0), // Added April 2026 - Depth from bottom (0=lowest, 100=max)
-  speech_voice_sample_id: z.number().int().nullable().optional(), // Added Phase 4.1 - FK → voice_samples; used for local TTS clone path
-  speech_voice_id: z.string().nullable().optional(), // Added Phase 4.1 - Preset voice ID for provider-hosted voices (e.g. ElevenLabs)
-  speech_voice_name: z.string().nullable().optional(), // Added Phase 4.1 - Cached friendly voice display name (either path)
-  speech_voice_design_prompt: z.string().nullable().optional(), // Added May 2026 - Persona voice-design prompt for instruct-capable local TTS endpoints
+  applied_avatar_hash: z.string().nullable().optional(), // Added migration 033 - preset_avatar_hash last PATCHed onto this persona's guild member avatar (NULL = never synced)
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
 });
 export type TomoriRow = z.infer<typeof tomoriSchema>;
+
+export const personaScopedConfigStateSchema = z.object({
+  physical_appearance_tags: z.array(z.string()).default([]), // From persona_imagegen_configs
+  nai_char_ref_url: z.string().nullable().optional(), // From persona_imagegen_configs
+  nai_attg_author: z.string().nullable().optional(), // From persona_textgen_configs
+  nai_attg_title: z.string().nullable().optional(), // From persona_textgen_configs
+  nai_attg_tags: z.string().nullable().optional(), // From persona_textgen_configs
+  nai_attg_genre: z.string().nullable().optional(), // From persona_textgen_configs
+  nai_attg_stars: z.number().int().min(1).max(5).nullable().optional(), // From persona_textgen_configs
+  context_note: z.string().nullable().optional(), // From persona_context_note_configs
+  context_note_depth: z.number().int().min(0).max(100).default(0), // From persona_context_note_configs
+  speech_voice_sample_id: z.number().int().nullable().optional(), // From persona_voice_configs
+  speech_voice_id: z.string().nullable().optional(), // From persona_voice_configs
+  speech_voice_name: z.string().nullable().optional(), // From persona_voice_configs
+  speech_voice_design_prompt: z.string().nullable().optional(), // From persona_voice_configs
+});
+export type PersonaScopedConfigState = z.infer<typeof personaScopedConfigStateSchema>;
 
 export const personaAttributeSchema = z.object({
   attribute_id: z.number().optional(),
@@ -122,6 +129,53 @@ export const personaAttributeSchema = z.object({
   updated_at: z.date().optional(),
 });
 export type PersonaAttributeRow = z.infer<typeof personaAttributeSchema>;
+
+export const personaSpriteSchema = z.object({
+  sprite_id: z.number().optional(),
+  persona_id: z.number().int(),
+  sprite_name: z.string().min(1).max(64),
+  sprite_key: z.string().min(1).max(64),
+  avatar_url: z.string().min(1),
+  usage_instructions: z.string().max(1000).default(""),
+  // When true, the sprite renders its decorated "Sprite (Persona)" name in
+  // Discord (DID alter style) instead of the clean persona name.
+  is_identity: z.boolean().default(false),
+  created_at: z.coerce.date().optional(),
+  updated_at: z.coerce.date().optional(),
+});
+export type PersonaSpriteRow = z.infer<typeof personaSpriteSchema>;
+
+// Shared official preset sprites, resolved live by pointer personas. Keyed by
+// the preset identity (preset_lineage_id, preset_language) and seeded from the
+// catalog; the avatar_url is a shared object-storage reference used by every
+// server's pointer persona. See docs/subsystems/persona-presets.md.
+export const presetSpriteSchema = z.object({
+  preset_sprite_id: z.number().optional(),
+  preset_lineage_id: z.coerce.number().int(),
+  preset_language: z.string(),
+  sprite_name: z.string().min(1).max(64),
+  sprite_key: z.string().min(1).max(64),
+  avatar_url: z.string().min(1),
+  usage_instructions: z.string().max(1000).default(""),
+  is_identity: z.boolean().default(false),
+  created_at: z.coerce.date().optional(),
+  updated_at: z.coerce.date().optional(),
+});
+export type PresetSpriteRow = z.infer<typeof presetSpriteSchema>;
+
+/**
+ * Maps a webhook-delivered sprite message to the sprite label it rendered with.
+ * Sprite messages display a clean persona name in Discord; context rebuilding
+ * uses these rows to recover the decorated "Name (sprite):" label for the model.
+ */
+export const personaSpriteMessageSchema = z.object({
+  message_disc_id: z.string().min(1),
+  persona_id: z.number().int(),
+  sprite_name: z.string().min(1).max(64),
+  channel_disc_id: z.string().min(1),
+  created_at: z.coerce.date().optional(),
+});
+export type PersonaSpriteMessageRow = z.infer<typeof personaSpriteMessageSchema>;
 
 /**
  * Runtime autochat counters for a persona (Phase 6 Step #16B).
@@ -135,6 +189,36 @@ export const personaAutochRuntimeStateSchema = z.object({
   updated_at: z.date().optional(),
 });
 export type PersonaAutochRuntimeStateRow = z.infer<typeof personaAutochRuntimeStateSchema>;
+
+/**
+ * Coerces a Postgres BIGINT (returned by Bun SQL as bigint or string depending
+ * on magnitude/driver) into a JS number. Mirrors the conditioning_history
+ * lineage handling so large counters/lineage ids parse uniformly.
+ */
+const bigintToNumber = (value: unknown): unknown => {
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim() !== "") return Number(value);
+  return value;
+};
+
+/**
+ * Schema for the stat_counters telemetry table (migration 035). One row per
+ * (server, user, persona lineage, metric, metric_key, day). `count` is a generic
+ * accumulator and `persona_lineage_id` is the cross-server persona anchor (both
+ * BIGINT in Postgres). See plans/stat-tracking.md and src/constants/statMetrics.ts.
+ */
+export const statCounterSchema = z.object({
+  server_id: z.number().int(),
+  user_id: z.number().int(),
+  persona_lineage_id: z.preprocess(bigintToNumber, z.number().int().nonnegative().default(0)),
+  metric: z.enum(STAT_METRICS),
+  metric_key: z.string().default(""),
+  bucket: z.date(),
+  count: z.preprocess(bigintToNumber, z.number().int().default(0)),
+  first_at: z.date().optional(),
+  last_at: z.date().optional(),
+});
+export type StatCounterRow = z.infer<typeof statCounterSchema>;
 
 /**
  * Schema for voice_samples table — reference audio clips for local TTS voice cloning.
@@ -174,6 +258,10 @@ export const llmSchema = z.object({
   supports_prefix_completion: z.boolean().default(false),
   llm_description: z.string().nullable().optional(),
   ja_description: z.string().nullable().optional(),
+  // Official per-model pricing (USD per million tokens, uncached standard rate). Null for OpenRouter
+  // (dynamic live cache) and free/non-metered providers. Coerced because Postgres NUMERIC arrives as a string.
+  input_price_per_million: z.coerce.number().nullable().optional(),
+  output_price_per_million: z.coerce.number().nullable().optional(),
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
 });
@@ -527,6 +615,18 @@ export type AutochatPersonaOverride = z.infer<typeof autochatPersonaOverrideSche
 
 // ── Split Config Tables (Phase 6 / Stage A & B) ──────────────────────────
 
+export const userPersonalizationConfigsSchema = z.object({
+  user_id: z.number().int(),
+  shortterm_cache_crossserver_opt_in: z.boolean().default(false),
+  physical_appearance_tags: z.array(z.string()).default([]),
+  nai_char_ref_url: z.string().nullable().optional(),
+  impersonation_prompt: z.string().nullable().optional(),
+  personal_dtm: z.enum(["off", "follow", "on"]).default("follow"),
+  created_at: z.date().optional(),
+  updated_at: z.date().optional(),
+});
+export type UserPersonalizationConfigsRow = z.infer<typeof userPersonalizationConfigsSchema>;
+
 export const serverModelConfigSchema = z.object({
   server_id: z.number().int(),
   llm_id: z.number().int().nullable().optional(),
@@ -564,6 +664,7 @@ export const serverChatConfigSchema = z.object({
   cascade_limit: z.number().int().default(3),
   timezone_offset: z.number().int().default(0),
   self_debug_enabled: z.boolean().default(false),
+  model_randomizer_enabled: z.boolean().default(false),
   system_prompt: z.string().nullable().optional(),
   context_note: z.string().nullable().optional(),
   context_note_depth: z.number().int().default(0),
@@ -612,7 +713,10 @@ export const serverCapabilitiesConfigSchema = z.object({
   imagegen_enabled: z.boolean().default(true),
   videogen_enabled: z.boolean().default(false),
   voice_message_enabled: z.boolean().default(true),
+  user_blocking_enabled: z.boolean().default(true),
+  time_awareness_enabled: z.boolean().default(true),
   tool_use_enabled: z.boolean().default(true),
+  verbatim_tool_calling_enabled: z.boolean().default(false),
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
 });
@@ -811,6 +915,7 @@ export const personaConfigSchema = z.object({
   reward_conditioning_enabled: z.boolean().default(true),
   punish_conditioning_enabled: z.boolean().default(true),
   llm_id: z.number().int().nullable().optional(), // Added March 2026 - Persona-specific LLM model override
+  humanizer_degree: z.number().int().min(0).max(3).nullable().optional(), // Added July 2026 - Persona humanizer override; NULL inherits server_chat_configs
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
 });
@@ -849,6 +954,22 @@ export const channelPromptOverrideSchema = z.object({
 });
 export type ChannelPromptOverrideRow = z.infer<typeof channelPromptOverrideSchema>;
 
+/**
+ * Schema for per-channel context note entries (migration 034).
+ * When a row exists for a channel, its note is injected into the dialogue
+ * history at the configured depth alongside any persona-scoped note (additive).
+ * The global note from server_chat_configs is only used when neither applies.
+ */
+export const channelContextNoteSchema = z.object({
+  server_id: z.number(),
+  channel_disc_id: z.string(),
+  context_note: z.string(),
+  context_note_depth: z.number().int().min(0).max(100).default(0),
+  created_at: z.date().optional(),
+  updated_at: z.date().optional(),
+});
+export type ChannelContextNoteRow = z.infer<typeof channelContextNoteSchema>;
+
 export const tomoriPresetSchema = z.object({
   persona_preset_id: z.number(),
   persona_preset_name: z.string(),
@@ -870,6 +991,11 @@ export const tomoriPresetSchema = z.object({
   preset_sample_dialogues_out: z.array(z.string()).default([]),
   preset_language: z.string(),
   preset_avatar_path: z.string().nullable().optional(),
+  // Shared object-storage URL of the official avatar image (migration 033),
+  // uploaded once and live-resolved by pointer alters; the hash is its
+  // content-addressed version token used to gate the main-avatar fan-out.
+  preset_avatar_shared_url: z.string().nullable().optional(),
+  preset_avatar_hash: z.string().nullable().optional(),
   preset_trigger_words: z.array(z.string()).default([]),
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
@@ -1016,6 +1142,21 @@ export const personalizationBlacklistSchema = z.object({
   updated_at: z.date().optional(),
 });
 export type PersonalizationBlacklistRow = z.infer<typeof personalizationBlacklistSchema>;
+
+export const personaUserBlockTypeSchema = z.enum(["mute", "block"]);
+export type PersonaUserBlockType = z.infer<typeof personaUserBlockTypeSchema>;
+
+export const personaUserBlockSchema = z.object({
+  server_id: z.number().int(),
+  persona_id: z.number().int(),
+  user_disc_id: z.string(),
+  block_type: personaUserBlockTypeSchema,
+  reason: z.string(),
+  expires_at: z.date(),
+  created_at: z.date().optional(),
+  updated_at: z.date().optional(),
+});
+export type PersonaUserBlockRow = z.infer<typeof personaUserBlockSchema>;
 
 /**
  * Channel Whitelist Schema
@@ -1375,30 +1516,32 @@ export type RandomTriggerRow = z.infer<typeof randomTriggerSchema>;
 /**
  * Tomori's combined state (base config + LLM settings + LLM info)
  */
-export type TomoriState = TomoriRow & {
-  config: AssembledServerConfig;
-  llm: LlmRow; // Added LLM information
-  trigger_words: string[]; // Persona-scoped trigger words from persona_configs
-  persona_prompt: string | null; // Optional persona-specific prompt appended after system prompt
-  persona_attributes: PersonaAttributeRow[]; // Ordered persona attributes with public/private visibility
-  reward_conditioning_enabled: boolean; // Persona-scoped reward conditioning injection toggle
-  punish_conditioning_enabled: boolean; // Persona-scoped punish conditioning injection toggle
-  server_memories: string[]; // Changed to string array to match implementation
-  rotation_keys?: ApiKeyRotationRow[]; // Optional: API key rotation pool for load balancing/failover
-  persona_llm?: LlmRow; // Added March 2026 - Persona-specific model override (highest priority in chain)
-  vision_llm?: LlmRow; // Added March 2026 - Dedicated vision model for non-vision chat models
-  nai_preset?: NaiPresetRow; // Added March 2026 - Active NovelAI sampling preset (null when not using NAI)
-  fallback_llms?: LlmRow[]; // Added March 2026 - Resolved LLM rows for fallback model failover chain (legacy; prefer fallback_chain)
-  fallback_chain?: FallbackEntry[]; // Added April 2026 - Ordered fallback entries resolving both llm and custom_endpoint refs
-  // Autochat runtime counters from persona_autoch_runtime_state (migration 015).
-  autoch_counter: number;
-  autoch_next_target: number;
-};
+export type TomoriState = TomoriRow &
+  PersonaScopedConfigState & {
+    config: AssembledServerConfig;
+    llm: LlmRow; // Added LLM information
+    trigger_words: string[]; // Persona-scoped trigger words from persona_configs
+    persona_prompt: string | null; // Optional persona-specific prompt appended after system prompt
+    persona_attributes: PersonaAttributeRow[]; // Ordered persona attributes with public/private visibility
+    reward_conditioning_enabled: boolean; // Persona-scoped reward conditioning injection toggle
+    punish_conditioning_enabled: boolean; // Persona-scoped punish conditioning injection toggle
+    humanizer_degree_override: number | null; // Persona-scoped humanizer override; when set, load-time overlay writes it onto config.humanizer_degree
+    server_memories: string[]; // Changed to string array to match implementation
+    rotation_keys?: ApiKeyRotationRow[]; // Optional: API key rotation pool for load balancing/failover
+    persona_llm?: LlmRow; // Added March 2026 - Persona-specific model override (highest priority in chain)
+    vision_llm?: LlmRow; // Added March 2026 - Dedicated vision model for non-vision chat models
+    nai_preset?: NaiPresetRow; // Added March 2026 - Active NovelAI sampling preset (null when not using NAI)
+    fallback_llms?: LlmRow[]; // Added March 2026 - Resolved LLM rows for fallback model failover chain (legacy; prefer fallback_chain)
+    fallback_chain?: FallbackEntry[]; // Added April 2026 - Ordered fallback entries resolving both llm and custom_endpoint refs
+    // Autochat runtime counters from persona_autoch_runtime_state (migration 015).
+    autoch_counter: number;
+    autoch_next_target: number;
+  };
 
 /**
  * Schema for validating the combined Tomori state
  */
-export const tomoriStateSchema = tomoriSchema.extend({
+export const tomoriStateSchema = tomoriSchema.merge(personaScopedConfigStateSchema).extend({
   config: assembledServerConfigSchema,
   llm: llmSchema, // Added LLM schema validation
   trigger_words: z.array(z.string()).default([]),
@@ -1406,6 +1549,7 @@ export const tomoriStateSchema = tomoriSchema.extend({
   persona_attributes: z.array(personaAttributeSchema).default([]),
   reward_conditioning_enabled: z.boolean().default(true),
   punish_conditioning_enabled: z.boolean().default(true),
+  humanizer_degree_override: z.number().int().min(0).max(3).nullable().default(null), // Persona humanizer override; NULL = inherit global
   server_memories: z.array(z.string()).default([]), // Changed to array of strings
   rotation_keys: z.array(apiKeyRotationSchema).optional(), // API key rotation pool
   persona_llm: llmSchema.optional(), // Added March 2026 - Persona-specific model override

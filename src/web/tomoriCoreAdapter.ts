@@ -95,32 +95,42 @@ export const setFallbackModelRefs = llmOverrideRepo.setFallbackModelRefs.bind(ll
 export const upsertUserSavedProviderConfig = llmProviderRepo.upsertUserSavedProviderConfig.bind(llmProviderRepo);
 export const deleteUserSavedProviderConfig = llmProviderRepo.deleteUserSavedProviderConfig.bind(llmProviderRepo);
 
+type DashboardPersonaPatch = Partial<TomoriRow> & {
+  context_note?: string | null;
+  context_note_depth?: number;
+  physical_appearance_tags?: string[];
+};
+
 export async function updateTomori(
   personaId: number,
-  patch: Partial<TomoriRow>,
+  patch: DashboardPersonaPatch,
   serverDiscId?: string,
 ): Promise<TomoriRow | null> {
-  const updated = await personaRepository.update(personaId, patch, serverDiscId);
-  if (!updated) return null;
+  const { context_note, context_note_depth, physical_appearance_tags, ...corePatch } = patch;
+  const updated =
+    Object.keys(corePatch).length > 0 ? await personaRepository.update(personaId, corePatch, serverDiscId) : null;
+  if (Object.keys(corePatch).length > 0 && !updated) return null;
+
+  const current = updated ?? ({ persona_id: personaId } as TomoriRow);
 
   const splitWrites: Promise<boolean>[] = [];
-  if (patch.context_note !== undefined || patch.context_note_depth !== undefined) {
+  if (context_note !== undefined || context_note_depth !== undefined) {
     splitWrites.push(
       personaRepository.setContextNote(
         personaId,
-        patch.context_note !== undefined ? patch.context_note : (updated.context_note ?? null),
-        patch.context_note_depth !== undefined ? patch.context_note_depth : (updated.context_note_depth ?? 0),
+        context_note !== undefined ? context_note : null,
+        context_note_depth !== undefined ? context_note_depth : 0,
       ),
     );
   }
-  if (patch.physical_appearance_tags !== undefined) {
-    splitWrites.push(personaRepository.setPhysicalAppearanceTags(personaId, patch.physical_appearance_tags));
+  if (physical_appearance_tags !== undefined) {
+    splitWrites.push(personaRepository.setPhysicalAppearanceTags(personaId, physical_appearance_tags));
   }
 
   if (splitWrites.length > 0 && !(await Promise.all(splitWrites)).every(Boolean)) {
     return null;
   }
-  return updated;
+  return current;
 }
 
 function pickDefined<T extends object, K extends keyof T>(source: object, keys: readonly K[]): Partial<Pick<T, K>> {
