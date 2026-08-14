@@ -1,7 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type MessageActionRowComponentBuilder } from "discord.js";
 import { localizer } from "@/utils/text/localizer";
 
-export const DOCS_BASE_URL = "https://docs.tomoribot.app";
+const DOCS_BASE_URL = "https://docs.tomoribot.app";
 
 export const DOCS_PATHS = {
   QUICKSTART: "/introduction/quickstart/",
@@ -43,7 +43,7 @@ export const DOCS_PATHS = {
 
 export type DocsPath = (typeof DOCS_PATHS)[keyof typeof DOCS_PATHS] | string;
 
-export function buildDocsUrl(path: DocsPath): string {
+function buildDocsUrl(path: DocsPath): string {
   if (path.startsWith("http://") || path.startsWith("https://")) {
     return path;
   }
@@ -57,8 +57,10 @@ export function buildDocsLinkRow(
   path: DocsPath,
   labelKey = "general.docs.open_button_label",
 ): ActionRowBuilder<MessageActionRowComponentBuilder> {
+  // Link buttons render grey by API contract, so an emoji is the only way to add visual weight.
   const button = new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
+    .setEmoji("✨")
     .setLabel(localizer(locale, labelKey))
     .setURL(buildDocsUrl(path));
 

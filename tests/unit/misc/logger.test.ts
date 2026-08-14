@@ -57,12 +57,12 @@ describe("buildLogStreams", () => {
 
     const logger = createProductionLikeLogger(streams);
 
-    // 1. Error record with nested err/context shapes, as produced by log.error()
+    // Error record with nested err/context shapes, as produced by log.error()
     logger.error({ err: { name: "TypeError", message: "boom" }, context: { commandName: "chat" } }, "Chat turn failed");
-    // 2. Custom metric level (52) sits above error and must pass through
+    // Custom metric level (52) sits above error and must pass through
     // biome-ignore lint/suspicious/noExplicitAny: Custom Pino level added at runtime
     (logger as any).metric({ metric: "cache_sizes" }, "metric:cache_sizes");
-    // 3. Below the production "error" level — must be filtered from BOTH sinks
+    // Below the production "error" level, so must be filtered from BOTH sinks
     logger.info("hidden in production");
 
     // Both sinks received byte-identical newline-delimited records
@@ -73,8 +73,8 @@ describe("buildLogStreams", () => {
     const [errorRecord, metricRecord] = stdoutSink.lines.map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(errorRecord?.level).toBe(50);
     expect(errorRecord?.msg).toBe("Chat turn failed");
-    expect((errorRecord?.err as Record<string, unknown>).message).toBe("boom");
-    expect((errorRecord?.context as Record<string, unknown>).commandName).toBe("chat");
+    expect((errorRecord?.err as Record<string, unknown> | undefined)?.message).toBe("boom");
+    expect((errorRecord?.context as Record<string, unknown> | undefined)?.commandName).toBe("chat");
     expect(metricRecord?.level).toBe(52);
     expect(metricRecord?.msg).toBe("metric:cache_sizes");
   });

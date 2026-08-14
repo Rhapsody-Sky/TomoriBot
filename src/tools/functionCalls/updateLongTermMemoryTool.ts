@@ -11,8 +11,9 @@ import { PrivacyLevel } from "../../types/db/schema";
 import { validateMemoryContent } from "@/utils/misc/memoryLimits";
 import { invalidateTomoriStateCache } from "../../utils/cache/tomoriStateCache";
 import { invalidateUserCache } from "../../utils/cache/userCache";
-import { sendMemoryEmbedWithExpand } from "../../utils/discord/expandableEmbedNotice";
+import { MEMORY_NOTICE_PREVIEW_LIMIT, sendMemoryEmbedWithExpand } from "../../utils/discord/expandableEmbedNotice";
 import { convertMentions } from "../../utils/text/contextBuilder";
+import { buildTextPreview } from "@/utils/text/textPreview";
 import { sanitizeUnknownTemplatePlaceholders } from "@/utils/text/processors/mentionProcessor";
 import { personalMemoryRepository, serverMemoryRepository, userRepository } from "@/utils/db/repositories";
 import { resolveUserTarget } from "@/utils/discord/targetResolver";
@@ -54,7 +55,6 @@ export class UpdateLongTermMemoryTool extends BaseTool {
   }
 
   async execute(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    // Validate parameters
     const validation = this.validateParameters(args);
     if (!validation.isValid) {
       return {
@@ -109,7 +109,6 @@ export class UpdateLongTermMemoryTool extends BaseTool {
     }
 
     const memoryId = Math.trunc(memoryIdArg);
-    // Sanitize unknown {word} placeholders before saving (e.g. {bredrumb} → bredrumb)
     const newContent = sanitizeUnknownTemplatePlaceholders(memoryContentArg.trim());
     const isDeleteRequested = newContent.length === 0;
 
@@ -226,6 +225,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
               tomoriState.persona_nickname,
               tomoriState?.config.personal_memories_enabled,
             );
+            const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
             await sendMemoryEmbedWithExpand(
               context.channel,
@@ -239,10 +239,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
                 descriptionKey: "genai.self_teach.server_memory_deleted_description",
                 descriptionVars: {
                   memory_id: memoryId.toString(),
-                  memory_content:
-                    processedMemoryContent.length > 200
-                      ? `${processedMemoryContent.substring(0, 197)}...`
-                      : processedMemoryContent,
+                  memory_content: memoryPreview.text,
                 },
                 footerKey: "genai.self_teach.server_memory_footer",
               },
@@ -278,7 +275,6 @@ export class UpdateLongTermMemoryTool extends BaseTool {
           };
         }
 
-        // 1) Server memory update (server_id + lineage scoped)
         const updatedServerMemory = await serverMemoryRepository.updateByIdWithLineage(
           memoryId,
           newContent,
@@ -299,6 +295,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
             tomoriState.persona_nickname,
             tomoriState?.config.personal_memories_enabled,
           );
+          const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
           await sendMemoryEmbedWithExpand(
             context.channel,
@@ -312,10 +309,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
               descriptionKey: "genai.self_teach.server_memory_updated_description",
               descriptionVars: {
                 memory_id: memoryId.toString(),
-                memory_content:
-                  processedMemoryContent.length > 200
-                    ? `${processedMemoryContent.substring(0, 197)}...`
-                    : processedMemoryContent,
+                memory_content: memoryPreview.text,
               },
               footerKey: "genai.self_teach.server_memory_footer",
             },
@@ -351,7 +345,6 @@ export class UpdateLongTermMemoryTool extends BaseTool {
         };
       }
 
-      // 2) Personal memory update (index-based, requires target user)
       if (resolvedTargetUserId === context.client.user?.id) {
         return {
           success: false,
@@ -481,6 +474,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
           tomoriState.persona_nickname,
           tomoriState?.config.personal_memories_enabled,
         );
+        const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
         await sendMemoryEmbedWithExpand(
           context.channel,
@@ -496,10 +490,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
             descriptionVars: {
               user_nickname: userDisplayName,
               memory_id: memoryId.toString(),
-              memory_content:
-                processedMemoryContent.length > 200
-                  ? `${processedMemoryContent.substring(0, 197)}...`
-                  : processedMemoryContent,
+              memory_content: memoryPreview.text,
             },
             footerKey,
           },
@@ -553,6 +544,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
         tomoriState.persona_nickname,
         tomoriState?.config.personal_memories_enabled,
       );
+      const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
       await sendMemoryEmbedWithExpand(
         context.channel,
@@ -568,10 +560,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
           descriptionVars: {
             user_nickname: userDisplayName,
             memory_id: memoryId.toString(),
-            memory_content:
-              processedMemoryContent.length > 200
-                ? `${processedMemoryContent.substring(0, 197)}...`
-                : processedMemoryContent,
+            memory_content: memoryPreview.text,
           },
           footerKey,
         },

@@ -1,6 +1,4 @@
-// locales/en-US/general.ts
-
-export default {
+﻿export default {
   general: {
     yes: `Yes`,
     confirm: `Confirm`,
@@ -13,7 +11,13 @@ export default {
       bot_name: `Tomori`,
     },
     docs: {
-      open_button_label: `Open Full Docs`,
+      open_button_label: `Learn More`,
+    },
+    legal: {
+      policy_reference: `View the active Terms of Service and Privacy Policy anytime with \`/legal terms\` and \`/legal privacy\`.`,
+      setup_agreement: `Setting up TomoriBot means that you and your server members agree to its \`/legal terms\` and \`/legal privacy\` notices`,
+      provider_policy_reference: `For full details, see \`/legal privacy\` and \`/legal terms\``,
+      data_handling_reference: `**Privacy:** See \`/legal privacy\` for full data handling details`,
     },
     api_styles: {
       openai_compatible: `OpenAI-Compatible`,
@@ -42,6 +46,11 @@ export default {
       cancel_description: `The command has been cancelled.`,
       timeout_title: `⏰ Command Timed Out`,
       timeout_description: `You didn't respond in time. Please try again.`,
+      selector_opened_title: `Selector Opened`,
+      selector_opened_description: `The selection form is open. Submit it to continue, or dismiss it to cancel.`,
+    },
+    text_preview: {
+      truncated_footer: `Showing the first {shown} of {total} characters.`,
     },
     pagination: {
       page_info: `Page {current} of {total}`,
@@ -59,6 +68,29 @@ export default {
       persona_no_attributes: `No attributes configured yet.`,
       persona_select_button: `Select`,
     },
+    persona_workflow: {
+      loading_title: `Preparing Your Selection`,
+      loading_description: `Loading the available options...`,
+      modal_ready_title: `Ready to Continue`,
+      modal_ready_description: `Open the form to continue with your selection.`,
+      open_modal_button: `Open Form`,
+      // One shared, verb-agnostic filtered-notice sentence. The bare item noun
+      // below is interpolated in, so remove/edit variants of a family reuse it.
+      filtered_notice: `Only showing personas that have {items}.`,
+      items: {
+        attributes: `attributes`,
+        sample_dialogues: `sample dialogues`,
+        trigger_words: `trigger words`,
+        persona_prompts: `persona prompts`,
+        voice_designs: `voice designs`,
+        documents: `documents`,
+        chat_history: `chat history`,
+        server_memories: `server memories`,
+        personal_memories: `personal memories`,
+        short_term_memories: `short-term memories`,
+        sprites: `sprites`,
+      },
+    },
     errors: {
       guild_only_title: `Server Only Command`,
       guild_only_description: `This command can only be used within a server.`,
@@ -67,7 +99,7 @@ export default {
       channel_not_supported_title: `Unsupported Channel Type`,
       channel_not_supported_description: `Sorry, I can only work in server text channels or Direct Messages. Group DMs and other channel types are not supported.`,
       tomori_not_setup_title: `Initial Setup Required`,
-      tomori_not_setup_description: `This server still needs initial setup. A member with **Manage Server** permission should run \`/config setup\` first. Use \`/help setup\` or https://docs.tomoribot.app/introduction/quickstart/ for the short guide.`,
+      tomori_not_setup_description: `This server still needs initial setup. A member with **Manage Server** permission should run \`/config setup\` first. Use \`/help setup\` or https://docs.tomoribot.app/en/introduction/quickstart/ for the short guide.`,
       tomori_updating_title: `Currently Updating...`,
       tomori_updating_description: `I'm currently being updated and will be back shortly. Please try again in a few moments!`,
       tomori_not_setup_dm_footer: `DMs use a private setup, so most server-style settings still apply.`,
@@ -161,13 +193,11 @@ export default {
   events: {
     addBot: {
       rejoin_title: `I'm Back!`,
-      rejoin_description: `Looks like I was re-added to this server. Existing settings and personas are still intact. Use \`/config\`, \`/persona\`, \`/memory\`, \`/server\`, and \`/provider add\` to review or change them.
-
-View the active Terms of Service and Privacy Policy anytime with \`/legal terms\` and \`/legal privacy\`.`,
+      rejoin_description: `Looks like I was re-added to this server. Existing settings and personas are still intact. Use \`/config\`, \`/persona\`, \`/memory\`, \`/server\`, and \`/provider add\` to review or change them.{legalNotice}`,
       setup_prompt_title: `Successfully Added`,
-      setup_prompt_description: `Thanks for adding me. To start, someone with **Manage Server** permission should run \`/config setup\` to choose the initial persona and provider. Use \`/help setup\` or read the official [short guide](https://docs.tomoribot.app/introduction/quickstart/).
+      setup_prompt_description: `Thanks for adding me. To start, someone with **Manage Server** permission should run \`/config setup\` to choose the initial persona and provider. Use \`/help setup\` or read the official [short guide](https://docs.tomoribot.app/en/introduction/quickstart/).
 
-Use \`/help api-key\` if you need provider key instructions. View the active Terms of Service and Privacy Policy anytime with \`/legal terms\` and \`/legal privacy\`.`,
+Use \`/help api-key\` if you need provider key instructions.{legalNotice}`,
     },
   },
   reminders: {
@@ -194,9 +224,11 @@ Repeat: {repeat_text}`,
     task_update_repeat_hours: `every {repetition_interval_hours} hour(s)`,
     expand_task_button: `Show Full Task`,
     expand_task_title: `Full Task Content`,
-    reminder_triggered_title: `🔵 Reminder Triggered`,
-    task_triggered_title: `🔵 Task Triggered`,
-    triggered_description: `{reminder_purpose}`,
-    triggered_footer: `An error occurred during generation, so the raw reminder has been sent instead`,
+    reminder_triggered_title: `🟡 Reminder Triggered (Delivery Failed)`,
+    task_triggered_title: `🟡 Task Triggered (Delivery Failed)`,
+    triggered_description: `**Scheduled item ID:** \`{reminder_id}\`\n**Original content:**`,
+    triggered_footer_one_time: `Generation kept failing, so the scheduled content is shown unchanged. This one-time schedule is complete and has been removed.`,
+    triggered_footer_recurring_retained: `Generation kept failing, so the scheduled content is shown unchanged. The next occurrence remains on its original cadence. Use \`/scheduled-task edit\` or \`/scheduled-task remove\` to manage it.`,
+    triggered_footer_recurring_removed: `Generation kept failing and the next occurrence could not be preserved. This recurring schedule has been removed; create it again once the problem is fixed.`,
   },
 };

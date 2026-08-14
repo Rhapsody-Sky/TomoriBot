@@ -20,9 +20,8 @@ import {
 } from "@/providers/zai/zaiShared";
 import { getResolvedCapabilityModelId, resolveCapabilityCredentials } from "@/utils/provider/credentialResolver";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
-import { safeDownload } from "@/utils/security/safeDownload";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
-import { resolveMessageImageUrls } from "@/utils/image/imageExtractor";
+import { downloadDiscoveredImage, resolveMessageImageUrls } from "@/utils/image/imageExtractor";
 
 /**
  * Provider-to-chat-completions-URL mapping for OpenAI-compatible providers.
@@ -51,6 +50,27 @@ const VISION_ANALYSIS_TIMEOUT_MS =
   Number.isFinite(parsedVisionAnalysisTimeoutMs) && parsedVisionAnalysisTimeoutMs > 0
     ? parsedVisionAnalysisTimeoutMs
     : 60_000;
+
+/**
+ * Resolves the model identifier the vision backend will accept.
+ *
+ * A custom endpoint's `llm_codename` is a locally synthesized label
+ * (`custom-s2-gemini-text-google-gemini-3-5-flash-lite`); the id the backend accepts lives on
+ * the endpoint row, so sending the codename is rejected as an unknown model. This mirrors the
+ * text path's resolution in `customProvider`, which falls back to the codename for backends
+ * that ignore the field entirely (KoboldCpp and similar).
+ */
+export function resolveVisionApiModelName(
+  provider: string,
+  llmCodename: string,
+  customEndpointModelName?: string | null,
+): string {
+  if (provider === "zai" || provider === "zaicoding") {
+    return toZaiApiModelName(llmCodename);
+  }
+
+  return customEndpointModelName?.trim() || llmCodename;
+}
 
 /**
  * Built-in tool that analyzes images using a dedicated vision model.
@@ -86,7 +106,7 @@ export class AnalyzeImageTool extends BaseTool {
   };
 
   /**
-   * Basic provider check — available for all providers.
+   * Basic provider check: available for all providers.
    * The real gating logic is in isAvailableForContext().
    */
   isAvailableFor(_provider: string): boolean {
@@ -96,8 +116,8 @@ export class AnalyzeImageTool extends BaseTool {
   /**
    * Context-aware availability check.
    * Only expose this tool when:
-   * 1. A vision model is configured (tomoriState.vision_llm exists)
-   * 2. The active chat model does NOT support images (sees_images = false)
+   * - A vision model is configured (tomoriState.vision_llm exists)
+   * - The active chat model does NOT support images (sees_images = false)
    */
   isAvailableForContext(_provider: string, context: ToolContext): boolean {
     const hasVisionModel = !!context.tomoriState?.vision_llm;
@@ -120,7 +140,6 @@ export class AnalyzeImageTool extends BaseTool {
     const messageId = MessageIdMap.isOpaqueKey(rawMediaId) ? context.messageIdMap?.resolve(rawMediaId) : rawMediaId;
     const prompt = (args.prompt as string) || DEFAULT_VISION_PROMPT;
 
-    // 1. Validate media_id format
     if (!rawMediaId || (!DISCORD_ID_PATTERN.test(rawMediaId) && !MessageIdMap.isOpaqueKey(rawMediaId))) {
       return {
         success: false,
@@ -157,6 +176,13 @@ export class AnalyzeImageTool extends BaseTool {
         };
       }
 
+      const provider = visionLlm.llm_provider.toLowerCase();
+      const apiModelName = resolveVisionApiModelName(
+        provider,
+        visionLlm.llm_codename,
+        creds.customEndpoint?.model_name,
+      );
+
       await sendToolProgressNotice(
         context,
         "image_analysis",
@@ -164,7 +190,7 @@ export class AnalyzeImageTool extends BaseTool {
           titleKey: "tools.vision.analyzing_title",
           descriptionKey: "tools.vision.analyzing_description",
           descriptionVars: {
-            model: escapeMarkdown(visionLlm.llm_codename),
+            model: escapeMarkdown(apiModelName),
           },
           footerKey: "tools.vision.analyzing_footer",
           color: ColorCode.INFO,
@@ -172,19 +198,11 @@ export class AnalyzeImageTool extends BaseTool {
         "AnalyzeImageTool",
       );
 
-      // 4. Extract images from the Discord message
+      // Extract images from the Discord message
       const images = await this.extractImagesFromMessage(messageId, context, analysisSignal);
 
       const apiKey = creds.apiKey;
 
-      // 6. Resolve API model name and provider from the vision LLM row
-      const provider = visionLlm.llm_provider.toLowerCase();
-      const apiModelName =
-        provider === "zai" || provider === "zaicoding"
-          ? toZaiApiModelName(visionLlm.llm_codename)
-          : visionLlm.llm_codename;
-
-      // 7. Route to the appropriate API based on provider family
       let analysisResult: string;
 
       if (provider === "google") {
@@ -227,16 +245,13 @@ export class AnalyzeImageTool extends BaseTool {
   /**
    * Resolve the chat completions endpoint URL for a given provider.
    * Uses the static map for known providers, falls back to custom endpoint.
-   * @param provider - Lowercase provider name
    * @param context - Tool context (for custom endpoint URL)
    * @returns Chat completions URL
    */
   private getEndpointUrl(provider: string, context: ToolContext, customEndpointUrl?: string | null): string {
-    // Check known providers first
     const knownUrl = PROVIDER_CHAT_COMPLETIONS_URLS[provider];
     if (knownUrl) return knownUrl;
 
-    // Custom provider: use the configured endpoint URL
     const customUrl = customEndpointUrl ?? context.tomoriState.config.custom_endpoint_url;
     if (customUrl) {
       return customUrl.endsWith("/chat/completions") ? customUrl : `${customUrl}/chat/completions`;
@@ -249,12 +264,8 @@ export class AnalyzeImageTool extends BaseTool {
   /**
    * Call an OpenAI-compatible vision API (Z.ai, OpenRouter, DeepSeek, Custom).
    * Sends images as base64-encoded data URLs in the content array.
-   * @param apiKey - Decrypted API key
-   * @param model - Model name without provider prefix
    * @param images - Array of base64-encoded image data
-   * @param prompt - User prompt/question for the vision model
    * @param signal - Combined turn-cancellation and vision-analysis timeout signal
-   * @returns Text description from the vision model
    */
   private async callOpenAICompatibleVision(
     apiKey: string,
@@ -264,7 +275,6 @@ export class AnalyzeImageTool extends BaseTool {
     prompt: string,
     signal: AbortSignal,
   ): Promise<string> {
-    // Build the content array with text prompt and image parts
     const contentParts: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
 
     for (const image of images) {
@@ -318,12 +328,9 @@ export class AnalyzeImageTool extends BaseTool {
 
   /**
    * Call Google GenAI vision API using the official SDK.
-   * @param apiKey - Decrypted Google API key
    * @param model - Model name (e.g., "gemini-2.0-flash")
    * @param images - Array of base64-encoded image data
-   * @param prompt - User prompt/question for the vision model
    * @param signal - Combined turn-cancellation and vision-analysis timeout signal
-   * @returns Text description from the vision model
    */
   private async callGoogleVision(
     apiKey: string,
@@ -334,7 +341,6 @@ export class AnalyzeImageTool extends BaseTool {
   ): Promise<string> {
     const genAI = new GoogleGenAI({ apiKey });
 
-    // Build parts array: text prompt + inline image data
     const parts: Part[] = [{ text: prompt }];
     for (const image of images) {
       parts.push({
@@ -366,7 +372,6 @@ export class AnalyzeImageTool extends BaseTool {
    * which scans attachments, embeds, stickers, custom emojis, Components V2 media,
    * and the direct reply target when needed. The download loop below stays local
    * because vision payloads enforce a cumulative byte budget and skip re-optimization.
-   * @param messageId - Discord message ID to fetch images from
    * @param context - Tool execution context with channel access
    * @param signal - Combined turn-cancellation and vision-analysis timeout signal
    * @returns Array of objects with mimeType and base64 data
@@ -376,19 +381,18 @@ export class AnalyzeImageTool extends BaseTool {
     context: ToolContext,
     signal: AbortSignal,
   ): Promise<Array<{ mimeType: string; data: string }>> {
-    // 1. Discover images on the message, or on its direct reply target when the
+    // Discover images on the message, or on its direct reply target when the
     //    reply itself is text-only.
     const { imageUrls, sourceMessageId } = await resolveMessageImageUrls(messageId, context);
 
     log.info(`Found ${imageUrls.length} image(s) in message ${sourceMessageId} for vision analysis`);
 
-    // 2. Convert each image URL to base64, respecting size limit
     const inlineDataArray: Array<{ mimeType: string; data: string }> = [];
     let totalBytes = 0;
 
     for (const imageInfo of imageUrls) {
       try {
-        const imageResponse = await safeDownload(imageInfo.url, {
+        const imageResponse = await downloadDiscoveredImage(imageInfo, {
           maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
           timeoutMs: 15_000,
           externalSignal: signal,
@@ -400,7 +404,6 @@ export class AnalyzeImageTool extends BaseTool {
 
         const imageBuffer = imageResponse.buffer;
 
-        // Check cumulative size limit
         if (totalBytes + imageBuffer.byteLength > MAX_TOTAL_IMAGE_BYTES) {
           log.warn(`Skipping image from ${imageInfo.source}: would exceed ${MAX_TOTAL_IMAGE_BYTES} byte limit`);
           continue;

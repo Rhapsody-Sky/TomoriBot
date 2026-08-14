@@ -12,6 +12,8 @@ import { getCachedTomoriState, getCachedAllPersonas } from "@/utils/cache/tomori
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { decryptApiKey } from "@/utils/security/crypto";
 import { buildContext } from "@/utils/text/contextBuilder";
+import { DEFAULT_SYSTEM_PROMPT } from "@/utils/text/context/templates";
+import { prepareParticipantContext } from "@/utils/text/participants/preparation";
 import { resolveMediaForModel } from "@/utils/text/context/mediaResolver";
 import { getCachedChannelPrompt } from "@/utils/cache/channelPromptCache";
 import { getEmojiPenaltyDirective } from "@/utils/text/emojiPenalty";
@@ -74,7 +76,7 @@ const AVG_SPEAKER_PREFIX_CHARS = 12;
  * Approximate fixed-length instruction blocks included in contextBuilder.ts.
  * These are intentionally rounded; exact lengths vary with server/bot/user names.
  */
-const DEFAULT_SYSTEM_PROMPT_CHARS_EST = 360;
+const DEFAULT_SYSTEM_PROMPT_CHARS_EST = DEFAULT_SYSTEM_PROMPT.length;
 const MENTION_PING_RULE_CHARS_EST = 300;
 const EMOJI_USAGE_RULES_CHARS_EST = 340;
 const STICKER_USAGE_RULES_CHARS_EST = 270; // header + footer, excluding per-sticker lines
@@ -259,9 +261,7 @@ function parseIntegerEnv(value: string | undefined, fallback: number, minimum: n
 /**
  * Estimate tokens for a chat history made of many short messages.
  * Includes a small fixed per-message overhead for chat wrappers plus speaker prefixes.
- * @param messageCount - Number of messages
  * @param avgMessageChars - Average characters per message (excluding speaker prefix)
- * @returns Estimated token count
  */
 function estimateChatHistoryTokens(messageCount: number, avgMessageChars: number): number {
   const totalChars = messageCount * (avgMessageChars + AVG_SPEAKER_PREFIX_CHARS);
@@ -292,7 +292,6 @@ function resolveSampleOutputTokens(tomoriState: TomoriState, personaReplyCharLen
 /**
  * Estimate tool schema token overhead based on currently registered tools.
  * Falls back to a conservative constant if tools are not initialized.
- * @returns Estimated token count for tool schemas
  */
 function estimateToolSchemaTokens(): number {
   try {
@@ -334,14 +333,12 @@ function estimateToolSchemaTokens(): number {
     const json = JSON.stringify(simplified);
     return charsToTokensJson(json.length);
   } catch {
-    // Conservative fallback
     return 1200;
   }
 }
 
 /**
  * Build scenario estimates based on memory limits and usage patterns
- * @returns Object containing minimum, average, and maximum scenarios
  */
 function buildScenarioEstimates(): {
   minimum: ScenarioEstimate;
@@ -350,9 +347,9 @@ function buildScenarioEstimates(): {
 } {
   const limits = getMemoryLimits();
   const baseToolSchemaTokens = estimateToolSchemaTokens();
-  const avgMemoryChars = Math.round(limits.maxMemoryLength * 0.5); // e.g., 128 when max is 256
+  const avgMemoryChars = Math.round(limits.maxMemoryLength * 0.5);
 
-  // 1. Minimum Scenario (Light usage)
+  // Minimum Scenario (Light usage)
   // - 1 user with 0 memories
   // - Minimal persona (single short description)
   // - 80 messages in history (short messages)
@@ -376,7 +373,7 @@ function buildScenarioEstimates(): {
     outputTokens: EST_OUTPUT_SHORT, // Short response (1-2 short paragraphs)
   };
 
-  // 2. Average Scenario (Moderate usage)
+  // Average Scenario (Moderate usage)
   // - 3 users with 10 memories each (~128 chars avg per memory)
   // - 10 server memories (~128 chars avg each)
   // - Typical persona + a few sample dialogues
@@ -389,7 +386,6 @@ function buildScenarioEstimates(): {
       systemPersonality: charsToTokensText(6 * 700 + DEFAULT_SYSTEM_PROMPT_CHARS_EST + MENTION_PING_RULE_CHARS_EST),
       serverInfo: charsToTokensText(260),
       serverEmojis: charsToTokensText(EMOJI_USAGE_RULES_CHARS_EST + 60 + 10 * 34),
-      // Approximate: small sticker list exists, but not huge.
       serverStickers: charsToTokensText(STICKER_USAGE_RULES_CHARS_EST + 8 * 70),
       serverMemories: charsToTokensText(10 * avgMemoryChars + 80), // + heading/formatting
       userMemories: charsToTokensText(3 * 10 * avgMemoryChars + 3 * 90), // + per-user headings
@@ -397,16 +393,15 @@ function buildScenarioEstimates(): {
       reminders: charsToTokensText(3 * (80 + 1 * 140)), // 1 reminder per user on average
       currentContext: charsToTokensText(200),
       toolSchemas: baseToolSchemaTokens,
-      // 5 sample dialogue pairs (10 messages), short-ish.
       sampleDialogues: estimateChatHistoryTokens(10, 160),
       conversationHistory: estimateChatHistoryTokens(80, 140),
     },
     outputTokens: EST_OUTPUT_TYPICAL, // Typical response (a few paragraphs / short explanation)
   };
 
-  // 3. Maximum Scenario (Heavy usage)
-  // - 5 users with 25 memories each (256 chars max per memory)
-  // - 25 server memories (256 chars max each)
+  // Maximum Scenario (Heavy usage)
+  // - 5 users, each holding a full personal memory allowance at max memory length
+  // - A full server memory allowance at max memory length
   // - Maxed persona + maxed sample dialogues
   // - 80 messages in history (multi-paragraph messages)
   // - 10 emojis (constant)
@@ -426,9 +421,7 @@ function buildScenarioEstimates(): {
       userStatus: charsToTokensText(5 * 300), // activities can bloat presence strings
       reminders: charsToTokensText(5 * (100 + 3 * 160)), // 3 reminders per user
       currentContext: charsToTokensText(240),
-      // Tool schemas tend to be constant; add a little headroom for MCP / extra schemas.
       toolSchemas: Math.round(baseToolSchemaTokens * 1.25),
-      // Max sample dialogues (pairs), using the separate MAX_SAMPLE_DIALOGUE_LENGTH
       sampleDialogues: estimateChatHistoryTokens(limits.maxSampleDialogues * 2, limits.maxSampleDialogueLength),
       conversationHistory: estimateChatHistoryTokens(80, 350),
     },
@@ -438,22 +431,14 @@ function buildScenarioEstimates(): {
   return { minimum, average, maximum };
 }
 
-/**
- * Calculate total input tokens for a scenario
- * @param scenario - Scenario estimate object
- * @returns Total input token count
- */
 function calculateTotalInputTokens(scenario: ScenarioEstimate): number {
   return Object.values(scenario.components).reduce((sum, val) => sum + val, 0);
 }
 
 /**
  * Calculate cost for a scenario based on provider pricing
- * @param inputTokens - Number of input tokens
- * @param outputTokens - Number of output tokens
  * @param inputPricePerMillion - Input token price per million
  * @param outputPricePerMillion - Output token price per million
- * @returns Cost in dollars
  */
 function calculateCost(
   inputTokens: number,
@@ -470,9 +455,9 @@ function calculateCost(
  * Resolve per-million input/output pricing for the active model.
  *
  * Precedence (see docs/subsystems/database-schema.md):
- *  1. The model row's own `input_price_per_million` / `output_price_per_million` columns — the official,
+ *  1. The model row's own `input_price_per_million` / `output_price_per_million` columns: the official,
  *     DB-backed source of truth, seeded from the typed catalog (src/db/seed/catalog/models.ts).
- *  2. The optional caller-supplied `fallback` (e.g. OpenRouter's live API pricing cache) — used only when
+ *  2. The optional caller-supplied `fallback` (e.g. OpenRouter's live API pricing cache), used only when
  *     the row carries no price. First-party providers pass no fallback: a model with no catalog price
  *     resolves to `null`, and the caller surfaces "pricing unavailable" instead of guessing a rate.
  *
@@ -486,11 +471,9 @@ function resolveModelPricing(
 ): { input: number; output: number } | null {
   const dbInput = tomoriState.llm.input_price_per_million;
   const dbOutput = tomoriState.llm.output_price_per_million;
-  // 1. DB columns win when both are present (a model priced in the catalog)
   if (typeof dbInput === "number" && typeof dbOutput === "number") {
     return { input: dbInput, output: dbOutput };
   }
-  // 2. Otherwise use the optional fallback, or null when none was supplied (→ "pricing unavailable")
   return fallback ?? null;
 }
 
@@ -499,7 +482,7 @@ function resolveModelPricing(
  *
  * Reads the Google default model's catalog price so the static example stays in lockstep with the
  * seeded source of truth (src/db/seed/catalog/models.ts) instead of a duplicated env/hardcoded value.
- * The `?? ` literals are a defensive backstop only — the Google default row always carries a price.
+ * The `?? ` literals are a defensive backstop only, because the Google default row always carries a price.
  *
  * @returns Representative input/output price per million tokens
  */
@@ -566,6 +549,36 @@ function insertBeforeLatestDialoguePair(
 
   const insertAt = dialogueIndexes.length >= 2 ? dialogueIndexes[1] : dialogueIndexes[0];
   contextSegments.splice(insertAt, 0, injectedItem);
+}
+
+// Local mirror of contextAnnotations.insertAtDialogueDepth so the cost estimate counts
+// the live STM nudge. depth=0 → tail; depth=N → before the Nth dialogue item from bottom.
+function insertAtDialogueDepth(
+  contextSegments: StructuredContextItem[],
+  nudge: StructuredContextItem,
+  depth: number,
+): void {
+  if (depth <= 0) {
+    contextSegments.push(nudge);
+    return;
+  }
+  let found = 0;
+  let lastFoundIndex = -1;
+  for (let i = contextSegments.length - 1; i >= 0; i--) {
+    if (contextSegments[i].metadataTag === ContextItemTag.DIALOGUE_HISTORY) {
+      found++;
+      lastFoundIndex = i;
+      if (found === depth) {
+        contextSegments.splice(i, 0, nudge);
+        return;
+      }
+    }
+  }
+  if (lastFoundIndex !== -1) {
+    contextSegments.splice(lastFoundIndex, 0, nudge);
+  } else {
+    contextSegments.push(nudge);
+  }
 }
 
 function buildGoogleInBandToolSchemasText(tools: unknown[]): string {
@@ -789,7 +802,7 @@ async function buildRuntimeParityContext(
       hasLocalMedia && (imageAttachments.length > 0 || videoAttachments.length > 0) ? [message.id] : undefined;
 
     // Merge consecutive same-author messages, mirroring the real context path
-    // (buildSimplifiedHistory): collapse only when both sides are pure text — if
+    // (buildSimplifiedHistory): collapse only when both sides are pure text if
     // either side carries media, keep separate turns so per-message media IDs stay
     // unambiguous.
     const previousMessage = simplifiedMessages[simplifiedMessages.length - 1];
@@ -845,15 +858,23 @@ async function buildRuntimeParityContext(
   const channelPromptOverride = tomoriState.server_id
     ? await getCachedChannelPrompt(tomoriState.server_id, interaction.channelId)
     : null;
+  const preparedParticipantContext = await prepareParticipantContext({
+    client,
+    guildId: serverDiscId,
+    simplifiedMessageHistory: simplifiedMessages,
+    personas,
+    activePersona: tomoriState,
+    visibleUserIds: [...userListSet],
+    syntheticUsers: new Map(),
+    matrixUsers: new Map(),
+  });
 
   const contextBuild = await buildContext({
     guildId: serverDiscId,
     serverName,
     serverDescription,
     simplifiedMessageHistory: simplifiedMessages,
-    userList: Array.from(userListSet),
-    matrixUsers: new Map<string, string>(),
-    syntheticUsers: new Map<string, { displayName: string; type: "persona" | "webhook" }>(),
+    preparedParticipantContext,
     channelDesc,
     channelName,
     channelId: interaction.channelId,
@@ -887,6 +908,23 @@ async function buildRuntimeParityContext(
   const lowerPriorityTailMessage = buildCombinedTailDirectiveMessage(lowerPriorityTailDirectives);
   if (lowerPriorityTailMessage) {
     insertBeforeLatestDialoguePair(contextSegments, lowerPriorityTailMessage);
+  }
+
+  // Mirror the live pipeline: count the deferred STM content block at its depth (only
+  // when content depth >= 0), placed before the nudge so token positioning matches.
+  if (
+    contextBuild.memoryInjectionItems &&
+    contextBuild.memoryInjectionItems.length > 0 &&
+    (contextBuild.memoryInjectionDepth ?? -1) >= 0
+  ) {
+    for (const memoryItem of contextBuild.memoryInjectionItems) {
+      insertAtDialogueDepth(contextSegments, memoryItem, contextBuild.memoryInjectionDepth ?? 0);
+    }
+  }
+
+  // Mirror the live pipeline: count the unified STM nudge at its configured depth.
+  if (contextBuild.nudgeItem) {
+    insertAtDialogueDepth(contextSegments, contextBuild.nudgeItem, contextBuild.nudgeInjectionDepth ?? 0);
   }
 
   const combinedTailMessage = buildCombinedTailDirectiveMessage(tailDirectives);
@@ -978,25 +1016,20 @@ async function measureGoogleInputTokens(
 }
 
 /**
- * Measure exact input tokens for Vertex AI.
- *
  * Mirrors {@link measureGoogleInputTokens} because Vertex shares the Gemini wire
  * format and tokenizer. The only differences:
- *   1. The client is built from the stored composite key ("{project}::{location}")
+ *   - The client is built from the stored composite key ("{project}::{location}")
  *      via ADC (createVertexClient) instead of a plain GoogleGenAI API key.
- *   2. System instruction + tool schemas are injected in-band before countTokens,
+ *   - System instruction + tool schemas are injected in-band before countTokens,
  *      matching the Google path so the measured prompt includes their token cost.
  * @param tomoriState - Active server/persona state (carries model + catalog pricing)
- * @param apiKey - Decrypted Vertex composite key ("{project_id}::{location}")
- * @param contextItems - Structured context to measure
- * @returns Live cost measurement with Vertex pricing
  */
 async function measureVertexInputTokens(
   tomoriState: TomoriState,
   apiKey: string,
   contextItems: StructuredContextItem[],
 ): Promise<LiveCostMeasurement> {
-  // 1. Build the same provider config the streaming path would use (model + tools).
+  // Build the same provider config the streaming path would use (model + tools).
   const provider = new VertexProvider();
   const providerConfig = (await provider.createConfig(tomoriState, apiKey)) as VertexProviderConfig;
   const adapter = new VertexStreamAdapter();
@@ -1004,7 +1037,7 @@ async function measureVertexInputTokens(
   const tokenCountContents = [...payload.contents];
   const inBandPrelude: typeof tokenCountContents = [];
 
-  // 2. countTokens does not accept request-level systemInstruction — inject in-band
+  // countTokens does not accept request-level systemInstruction, so inject in-band
   //    so the instruction's tokens are still counted (mirrors the Google path).
   if (payload.systemInstruction) {
     inBandPrelude.push({
@@ -1018,7 +1051,6 @@ async function measureVertexInputTokens(
       ],
     });
   }
-  // 3. Likewise inject tool schemas in-band so the measured prompt includes their size.
   if (providerConfig.tools && providerConfig.tools.length > 0) {
     inBandPrelude.push({
       role: "user",
@@ -1033,7 +1065,6 @@ async function measureVertexInputTokens(
     tokenCountContents.unshift(...inBandPrelude);
   }
 
-  // 4. Construct the ADC-backed client from the composite key and count tokens.
   const genAI = createVertexClient(parseVertexCompositeKey(apiKey));
   const countRequest: CountTokensParameters = {
     model: providerConfig.model,
@@ -1046,7 +1077,6 @@ async function measureVertexInputTokens(
     throw new Error("Vertex countTokens did not return totalTokens");
   }
 
-  // 5. Vertex models carry their price on the catalog row; no env fallback remains.
   const pricing = resolveModelPricing(tomoriState);
   if (!pricing) {
     throw new Error(`No catalog price for Vertex model ${providerConfig.model}`);
@@ -1246,10 +1276,6 @@ const ZAI_REASONING_MODELS = ["glm-5.1", "glm-5", "glm-4.7"];
 /**
  * Send a minimal probe request to Z.ai to measure actual input token count.
  * Uses the same OpenAI-compatible usage response pattern as DeepSeek.
- * @param tomoriState - Current server state
- * @param apiKey - Decrypted API key
- * @param contextItems - Structured context items for token measurement
- * @returns Live cost measurement with Z.ai pricing
  */
 async function measureZaiInputTokens(
   providerName: "zai" | "zaicoding",
@@ -1277,7 +1303,6 @@ async function measureZaiInputTokens(
     requestBody.tools = providerConfig.tools;
   }
 
-  // Skip temperature for reasoning models
   if (!ZAI_REASONING_MODELS.includes(providerConfig.model)) {
     requestBody.temperature = providerConfig.temperature;
   }
@@ -1297,7 +1322,6 @@ async function measureZaiInputTokens(
     throw new Error(`Z.ai probe failed (${response.status}): ${errorText.slice(0, 400)}`);
   }
 
-  // Reuse DeepSeek probe response type — same OpenAI-compatible usage format
   const data = (await response.json()) as DeepseekProbeResponse;
   const measuredPromptTokens = parseDeepseekPromptTokens(data.usage);
   if (measuredPromptTokens === undefined) {
@@ -1325,10 +1349,6 @@ const ANTHROPIC_TOKEN_COUNTING_BETA = "token-counting-2024-11-01";
 /**
  * Use Anthropic's dedicated /v1/messages/count_tokens endpoint to measure exact
  * input token usage for the current context without generating any output.
- * @param tomoriState - Current server state
- * @param apiKey - Decrypted API key
- * @param contextItems - Structured context items for token measurement
- * @returns Live cost measurement with Anthropic model-tier pricing
  */
 async function measureAnthropicInputTokens(
   tomoriState: TomoriState,
@@ -1338,11 +1358,9 @@ async function measureAnthropicInputTokens(
   const provider = new AnthropicProvider();
   const providerConfig = (await provider.createConfig(tomoriState, apiKey)) as AnthropicProviderConfig;
 
-  // 1. Assemble context into Anthropic message format (same logic used during streaming)
   const adapter = new AnthropicStreamAdapter();
   const { system, messages } = await adapter.buildProbeMessages(contextItems, providerConfig.seesImages ?? true);
 
-  // 2. Build the count_tokens request body (same shape as /v1/messages, no stream/max_tokens)
   const requestBody: Record<string, unknown> = {
     model: providerConfig.model,
     messages,
@@ -1350,7 +1368,6 @@ async function measureAnthropicInputTokens(
   if (system) requestBody.system = system;
   if (providerConfig.tools && providerConfig.tools.length > 0) requestBody.tools = providerConfig.tools;
 
-  // 3. Call the dedicated token counting endpoint
   const response = await fetch(ANTHROPIC_COUNT_TOKENS_URL, {
     method: "POST",
     headers: {
@@ -1373,7 +1390,6 @@ async function measureAnthropicInputTokens(
     throw new Error("Anthropic count_tokens response missing input_tokens");
   }
 
-  // Pricing comes solely from the catalog row; the old codename-sniffing tier guess is gone.
   const pricing = resolveModelPricing(tomoriState);
   if (!pricing) {
     throw new Error(`No catalog price for Anthropic model ${providerConfig.model}`);
@@ -1406,8 +1422,8 @@ const liveTokenCounters: Record<
 async function sendLiveEstimateEmbed(
   interaction: ChatInputCommandInteraction,
   locale: string,
-  // Accept the structural shape (omit `provider`) so Track A's character estimate — which has
-  // no LiveProvider — can reuse this embed alongside live LiveCostMeasurement objects.
+  // Accept the structural shape (omit `provider`) so Track A's character estimate, which has
+  // no LiveProvider, so can reuse this embed alongside live LiveCostMeasurement objects.
   measurement: Omit<LiveCostMeasurement, "provider">,
   sampleOutputTokens: number | null,
   isCharacterEstimate = false,
@@ -1431,7 +1447,6 @@ async function sendLiveEstimateEmbed(
     ? "commands.tool.estimate.cost.current_estimated_footer"
     : "commands.tool.estimate.cost.current_footer";
 
-  // Single output band: sample-dialogue average when available, typical as fallback.
   const outputBands = [
     sampleOutputTokens && sampleOutputTokens > 0
       ? {
@@ -1651,9 +1666,7 @@ async function sendLiveEstimateUnavailableEmbed(
  * Falls back to {@link sendLiveEstimateUnavailableEmbed} only when the model has no catalog
  * price (nothing to multiply tokens against) or the context build fails.
  * @param client - Discord client (for channel history fetch)
- * @param interaction - The deferred command interaction
  * @param tomoriState - Active server/persona state (model, pricing, config)
- * @param locale - Interaction locale
  * @param errorContext - Structured logging context for failures
  */
 async function sendCharacterEstimateFallbackEmbed(
@@ -1663,14 +1676,13 @@ async function sendCharacterEstimateFallbackEmbed(
   locale: string,
   errorContext: ErrorContext,
 ): Promise<void> {
-  // 1. Without a catalog price there is nothing to estimate cost against.
   const pricing = resolveModelPricing(tomoriState);
   if (!pricing) {
     await sendLiveEstimateUnavailableEmbed(interaction, locale, tomoriState.llm.llm_provider);
     return;
   }
 
-  // 2. Assemble the same context the live pipeline would (no live provider → no truncator).
+  // Assemble the same context the live pipeline would (no live provider → no truncator).
   let contextItems: StructuredContextItem[];
   let personaReplyCharLengths: number[] = [];
   try {
@@ -1687,11 +1699,10 @@ async function sendCharacterEstimateFallbackEmbed(
     return;
   }
 
-  // 3. Approximate input tokens from character counts (no provider counting API available).
+  // Approximate input tokens from character counts (no provider counting API available).
   const estimatedInputTokens = estimateContextItemsTokens(contextItems);
   const sampleOutputTokens = resolveSampleOutputTokens(tomoriState, personaReplyCharLengths);
 
-  // 4. Render the standard current-context embed, flagged as a character-based estimate.
   await sendLiveEstimateEmbed(
     interaction,
     locale,
@@ -1717,10 +1728,6 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
 /**
  * Execute the /tool estimate cost command
  * Displays estimated API costs for different usage scenarios
- * @param client - Discord client instance
- * @param interaction - Command interaction
- * @param userData - User data from database
- * @param locale - Locale of the interaction
  */
 export async function execute(
   client: Client,
@@ -1807,7 +1814,6 @@ export async function execute(
       return;
     }
 
-    // Merge sample dialogue out-turns with persona turns from channel history for a combined average.
     const sampleOutputTokens = resolveSampleOutputTokens(tomoriState, personaReplyCharLengths);
 
     try {

@@ -4,8 +4,6 @@ import type { AssembledServerConfig } from "@/types/db/schema";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import { DEFAULT_SYSTEM_PROMPT, buildPromptContextItems } from "@/utils/text/context/templates";
 
-// ─── Test helpers ───────────────────────────────────────────────────────────
-
 const SERVER_PROMPT = "SERVER SYSTEM PROMPT";
 const CHANNEL_PROMPT = "CHANNEL-SCOPED PROMPT";
 const PERSONA_PROMPT = "PERSONA PROMPT";
@@ -49,8 +47,6 @@ function textForTag(items: StructuredContextItem[], tag: ContextItemTag): string
     .map((p) => p.text)
     .join("");
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("buildPromptContextItems — per-channel prompt override", () => {
   test("no override: system-prompt slot holds the server prompt; no channel block", async () => {
@@ -110,7 +106,7 @@ describe("buildPromptContextItems — per-channel prompt override", () => {
       }),
     );
 
-    // Replace must not be dropped by the suppress flag — it supplies the slot content.
+    // Replace must not be dropped by the suppress flag: it supplies the slot content.
     expect(textForTag(items, ContextItemTag.SYSTEM_HUMANIZER_RULES)).toBe(CHANNEL_PROMPT);
   });
 
@@ -127,5 +123,18 @@ describe("buildPromptContextItems — per-channel prompt override", () => {
       expect(textForTag(items, ContextItemTag.SYSTEM_PERSONA_PROMPT)).toBe(PERSONA_PROMPT);
       expect(textForTag(items, ContextItemTag.SYSTEM_PERSONALITY)).toBe("bullet one\nbullet two");
     }
+  });
+
+  test("omits prompt items that become empty after macro expansion", async () => {
+    const params = makeParams({
+      systemPrompt: "{{if capability:self_teaching}}memory instructions{{/if}}",
+      personaPrompt: "{{if capability:self_teaching}}persona instructions{{/if}}",
+    });
+    params.tomoriAttributes = ["{{if capability:self_teaching}}attribute{{/if}}"];
+    params.toolPromptMacroResolver = { expand: async () => "" };
+
+    const items = await buildPromptContextItems(params);
+
+    expect(items).toEqual([]);
   });
 });

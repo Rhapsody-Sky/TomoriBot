@@ -1,6 +1,4 @@
-// locales/en-US/commands/teach.ts
-
-export default {
+﻿export default {
   teach: {
     sampledialogue: {
       description: `Add a sample user/bot dialogue pair to as an example for how I should respond.`,
@@ -97,7 +95,7 @@ export default {
       main_persona_description: `Main Persona`,
       alter_persona_description: `Alter Persona`,
       rag_disabled_title: `Document RAG Disabled`,
-      rag_disabled_description: `Document retrieval requires the [pgvector](https://github.com/pgvector/pgvector) PostgreSQL extension. Install pgvector in your database and restart me to enable it (see the [self-hosting setup guide](https://docs.tomoribot.app/self-hosting/manual-setup/)).`,
+      rag_disabled_description: `Document retrieval requires the [pgvector](https://github.com/pgvector/pgvector) PostgreSQL extension. Install pgvector in your database and restart me to enable it (see the [self-hosting setup guide](https://docs.tomoribot.app/en/self-hosting/manual-setup/)).`,
       teaching_disabled_title: `Document Teaching Disabled`,
       teaching_disabled_description: `Members are not currently allowed to add or remove documents on this server. A server member with \`Manage Server\` permissions can enable this using \`/server member-permissions\`.`,
       no_embedding_model_title: `No Embedding Model Set`,
@@ -180,9 +178,9 @@ export default {
         content_too_long_title: `Memory Content Too Long`,
         content_too_long_description: `The memory content is too long. Maximum allowed length is {max_length} characters.`,
         success_title: `Personal Memory Added`,
-        success_description: `Successfully added '{memory}' to your personal memories.`,
+        success_description: `Successfully added '{memory}' to your [personal memories](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory).`,
         batch_success_title: `Personal Memories Added`,
-        batch_success_description: `Successfully added {added_count} memories to your personal memories.`,
+        batch_success_description: `Successfully added {added_count} memories to your [personal memories](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory).`,
         success_but_disabled_description: `Successfully added '{memory}' to your personal memories.
 
 **Warning:** Personalization is currently disabled on this server, so this memory won't be used here. It will still be available on other servers where personalization is enabled.`,
@@ -228,9 +226,9 @@ export default {
         content_too_long_title: `Memory Content Too Long`,
         content_too_long_description: `The memory content is too long. Maximum allowed length is {max_length} characters.`,
         success_title: `Server Memory Added`,
-        success_description: `Successfully added '{memory}' to my server memories.`,
+        success_description: `Successfully added '{memory}' to my [server memories](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory).`,
         batch_success_title: `Server Memories Added`,
-        batch_success_description: `Added {added_count} memories to server memory.`,
+        batch_success_description: `Added {added_count} memories to [server memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory).`,
       },
     },
   },

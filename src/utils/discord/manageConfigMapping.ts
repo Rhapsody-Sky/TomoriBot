@@ -11,7 +11,7 @@ type BooleanColumn<T> = {
 type ServerCapabilitiesBooleanColumn = BooleanColumn<ServerCapabilitiesConfigRow>;
 type ServerMemberPermissionsBooleanColumn = BooleanColumn<ServerMemberPermissionsConfigRow>;
 
-export type CapabilitiesManageCapabilityColumn = Extract<
+type CapabilitiesManageCapabilityColumn = Extract<
   ServerCapabilitiesBooleanColumn,
   | "emoji_usage_enabled"
   | "sticker_usage_enabled"
@@ -22,10 +22,11 @@ export type CapabilitiesManageCapabilityColumn = Extract<
   | "videogen_enabled"
   | "voice_message_enabled"
   | "user_blocking_enabled"
+  | "short_term_memory_enabled"
   | "time_awareness_enabled"
 >;
 
-export type CapabilitiesManageMemberPermissionColumn = Extract<
+type CapabilitiesManageMemberPermissionColumn = Extract<
   ServerMemberPermissionsBooleanColumn,
   "self_teaching_enabled" | "personal_memories_enabled"
 >;
@@ -60,7 +61,7 @@ export type CapabilitiesManagePermissionDefinition =
       dbColumn: CapabilitiesManageCapabilityColumn;
     });
 
-export type CapabilitiesManageConfigChange =
+type CapabilitiesManageConfigChange =
   | {
       value: string;
       table: "memberPermissions";
@@ -85,7 +86,7 @@ export interface CapabilitiesManageConfigWritePlan {
   changes: CapabilitiesManageConfigChange[];
 }
 
-export const CAPABILITIES_MANAGE_PERMISSION_DEFINITIONS: readonly CapabilitiesManagePermissionDefinition[] = [
+const CAPABILITIES_MANAGE_PERMISSION_DEFINITIONS: readonly CapabilitiesManagePermissionDefinition[] = [
   {
     value: "selfteaching",
     table: "memberPermissions",
@@ -174,6 +175,14 @@ export const CAPABILITIES_MANAGE_PERMISSION_DEFINITIONS: readonly CapabilitiesMa
     labelKey: "commands.capabilities.manage.userblocking_option",
     descKey: "commands.capabilities.manage.userblocking_desc",
     getState: (c) => c.user_blocking_enabled ?? true,
+  },
+  {
+    value: "shorttermmemory",
+    table: "capabilities",
+    dbColumn: "short_term_memory_enabled",
+    labelKey: "commands.capabilities.manage.shorttermmemory_option",
+    descKey: "commands.capabilities.manage.shorttermmemory_desc",
+    getState: (c) => c.short_term_memory_enabled ?? true,
   },
   {
     value: "timeawareness",

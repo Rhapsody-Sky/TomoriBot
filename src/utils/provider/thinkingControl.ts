@@ -12,10 +12,6 @@ const DEFAULT_HIGH_BUDGET_TOKENS = 8192;
 const GOOGLE_GEMINI_25_PRO_MIN_BUDGET = 128;
 const GOOGLE_GEMINI_25_FLASH_LITE_MIN_BUDGET = 512;
 
-export interface ThinkingLevelSource {
-  thinking_level?: string | null;
-}
-
 export interface AnthropicThinkingRequest {
   thinking?: {
     type: "adaptive" | "disabled";
@@ -106,8 +102,11 @@ function isDeepSeekReasonerModel(model: string): boolean {
   return normalizeModel(model) === "deepseek-reasoner";
 }
 
+// deepseek-v4-flash absorbed deepseek-chat's opt-in thinking toggle; deepseek-chat stays
+// listed so servers still configured with the deprecated codename keep working unchanged.
 function isDeepSeekChatModel(model: string): boolean {
-  return normalizeModel(model) === "deepseek-chat";
+  const normalized = normalizeModel(model);
+  return normalized === "deepseek-chat" || normalized === "deepseek-v4-flash";
 }
 
 function looksLikeOllamaEndpoint(endpointUrl: string): boolean {
@@ -128,11 +127,11 @@ function toProviderReasoningEffortLevel(level: Exclude<ThinkingLevelValue, "auto
   return level === "none" ? "none" : toProviderEffortLevel(level);
 }
 
-export function resolveConfiguredThinkingLevel(value: string | null | undefined): ThinkingLevelValue {
+function resolveConfiguredThinkingLevel(value: string | null | undefined): ThinkingLevelValue {
   return value && isThinkingLevelValue(value) ? value : DEFAULT_THINKING_LEVEL;
 }
 
-export function resolveEffectiveThinkingLevel(
+function resolveEffectiveThinkingLevel(
   configuredLevel: string | null | undefined,
   forceReason?: boolean,
 ): ThinkingLevelValue {

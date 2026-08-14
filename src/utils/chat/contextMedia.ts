@@ -8,6 +8,7 @@ import { YOUTUBE_URL_PATTERNS } from "@/utils/text/youTubeUrlCleaner";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
 import { formatInlineSystemContent } from "@/utils/chat/contextAnnotations";
 import { processEmbedsFromMessage } from "@/utils/chat/contextEmbeds";
+import { resolveForwardChain } from "@/utils/discord/forwardChain";
 
 const SUPPORTED_VIDEO_MIME_TYPES = [
   "video/mp4",
@@ -311,11 +312,11 @@ export function appendComponentMediaFromMessage(
   return { imageCount, videoCount };
 }
 
-export function formatAttachmentSystemHint(filename: string, messageId: string): string {
+function formatAttachmentSystemHint(filename: string, messageId: string): string {
   return `[System: A file named \`${filename}\` is attached (message ID: ${messageId}). Use \`read_file\` with this message ID to read its contents, only if needed.]`;
 }
 
-export function formatAudioAttachmentHint(filename: string): string {
+function formatAudioAttachmentHint(filename: string): string {
   return `[System: An audio file named \`${filename}\` was sent here but was not transcribed.]`;
 }
 
@@ -347,7 +348,15 @@ type ForwardedMessageSnapshot = {
   member: Message["member"] | null;
 };
 
-export function buildForwardContext(args: {
+/**
+ * Render a forwarded message into context text and harvest its media.
+ *
+ * Resolves nested forwards first (see {@link resolveForwardChain}), so a forward of a
+ * forward still yields the original's text and attachments instead of an empty block.
+ *
+ * @param args - Wrapper message, in-progress context content, and media collectors
+ */
+export async function buildForwardContext(args: {
   message: Message;
   content: string;
   imageAttachments: SimplifiedMessageForContext["imageAttachments"];
@@ -357,19 +366,30 @@ export function buildForwardContext(args: {
   clientUserId: string | undefined;
   tomoriNickname: string | null | undefined;
   selfDebugEnabled: boolean;
-}): {
+}): Promise<{
   content: string;
   mediaSourceMessageIds: string[];
   remoteMediaSourceKind?: SimplifiedMessageForContext["remoteMediaSourceKind"];
-} {
+}> {
   if (args.message.reference?.type !== MessageReferenceType.Forward || args.message.messageSnapshots.size === 0) {
     return { content: args.content, mediaSourceMessageIds: [] };
+  }
+
+  // Chase forwards-of-forwards: Discord flattens nested snapshots to nothing, so an
+  // unresolved chain must say so explicitly. Staying silent leaves the model asserting
+  // a forward it cannot see, which invites it to invent a media ID.
+  const chain = await resolveForwardChain(args.message);
+  if (chain.unresolved) {
+    return {
+      content: `[System: ${args.forwarderName} forwarded a message that was itself a forward. Discord does not include the original message's contents in a nested forward, so its text and any attached media cannot be seen.]${args.content ? `\n${args.content}` : ""}`,
+      mediaSourceMessageIds: [],
+    };
   }
 
   const blocks: string[] = [];
   const mediaSourceMessageIds: string[] = [];
   let remoteMediaSourceKind: SimplifiedMessageForContext["remoteMediaSourceKind"];
-  for (const rawSnapshot of args.message.messageSnapshots.values()) {
+  for (const rawSnapshot of chain.snapshots) {
     const snapshot = rawSnapshot as ForwardedMessageSnapshot;
     const preForwardImageCount = args.imageAttachments.length;
     const preForwardVideoCount = args.videoAttachments.length;
@@ -394,6 +414,7 @@ export function buildForwardContext(args: {
     const isForwardedTomoriAuthoredMessage = snapshot.author?.id === args.clientUserId;
     const embedResult = processEmbedsFromMessage({
       embeds: snapshot.embeds,
+      components: snapshot.components,
       content: forwardedTextSegments.join("\n"),
       imageAttachments: args.imageAttachments,
       isTomoriAuthoredMessage: isForwardedTomoriAuthoredMessage,

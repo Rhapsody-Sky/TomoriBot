@@ -33,28 +33,26 @@ import type { OpenRouterModelScope } from "./LlmModelRepository";
 import type { IRepository } from "./IRepository";
 
 /** Export shape for server-scoped provider configuration. */
-export type LlmProviderExportShape = {
+type LlmProviderExportShape = {
   savedProviderConfigs: SavedProviderConfigRow[];
 };
 
-export type LlmProviderCacheOptions = {
+type LlmProviderCacheOptions = {
   serverDiscId?: string;
 };
 
-export type ChannelLlmCacheOptions = LlmProviderCacheOptions & {
+type ChannelLlmCacheOptions = LlmProviderCacheOptions & {
   channelDiscId?: string;
 };
 
 /**
- * LlmProviderRepository — saved provider configs, custom endpoints, and OpenRouter registrations.
+ * LlmProviderRepository: saved provider configs, custom endpoints, and OpenRouter registrations.
  *
  * Owns tables: saved_provider_configs, user_saved_provider_configs, custom_endpoints,
  * openrouter_model_registrations, openrouter_embedding_model_registrations,
  * openrouter_image_model_registrations, openrouter_video_model_registrations.
  */
-export class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
-  // ── private scoped OpenRouter row loaders ──────────────────────────────────
-
+class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
   private async scopedLlmRows(scope: OpenRouterModelScope, includeDeprecated: boolean): Promise<unknown[]> {
     if (scope.kind === "server") {
       return includeDeprecated
@@ -399,13 +397,9 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
         `;
   }
 
-  // ── private write helper ───────────────────────────────────────────────────
-
   private toPostgresTextArrayLiteral(values: readonly string[] | null | undefined): string {
     return `{${(values ?? []).map((v) => `"${v.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
   }
-
-  // ── saved provider config reads ────────────────────────────────────────────
 
   /**
    * Returns all saved provider configs for a server.
@@ -444,7 +438,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
    * Returns the saved provider config for a server + provider pair, or null.
    *
    * @param serverId - Internal server DB ID
-   * @param provider - Provider name
    */
   async loadSavedProviderConfig(serverId: number, provider: string): Promise<SavedProviderConfigRow | null> {
     try {
@@ -506,7 +499,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
    * Returns the saved personal provider config for a user + provider pair, or null.
    *
    * @param userId   - Internal user DB ID
-   * @param provider - Provider name
    */
   async loadUserSavedProviderConfig(userId: number, provider: string): Promise<UserSavedProviderConfigRow | null> {
     try {
@@ -532,8 +524,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
       return null;
     }
   }
-
-  // ── custom endpoint reads ──────────────────────────────────────────────────
 
   /**
    * Returns custom endpoints configured for a server.
@@ -596,7 +586,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     if (ids.length === 0) return [];
 
     try {
-      // Avoid ANY($1) array binding — Bun SQL can intermittently fail on
+      // Avoid ANY($1) array binding, because Bun SQL can intermittently fail on
       // integer-array parameters with protocol error 08P01.
       const distinctIds = Array.from(new Set(ids));
       const placeholders = distinctIds.map((_, i) => `$${i + 1}`).join(", ");
@@ -688,7 +678,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
    * Returns the custom endpoint that owns a specific synthetic model row.
    *
    * Used at runtime to resolve the currently-active model back to its exact endpoint when several
-   * models share a label+capability. Matching is by (owner, capability, model_ref_id) — the
+   * models share a label+capability. Matching is by (owner, capability, model_ref_id): the
    * model_ref_id uniquely identifies the synthetic model, so label is not required.
    *
    * @param params - Scope (serverId or userId), capability, and the synthetic model's id
@@ -739,8 +729,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
       return null;
     }
   }
-
-  // ── OpenRouter model registration reads ───────────────────────────────────
 
   /** Returns LLM registrations for a server. @param serverId - Internal server DB ID */
   async loadOpenRouterModelRegistrationsForServer(serverId: number): Promise<OpenRouterModelRegistrationRow[]> {
@@ -886,8 +874,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     }
   }
 
-  // ── scoped OpenRouter model reads ──────────────────────────────────────────
-
   /**
    * Returns LLMs visible for a given scope (server or personal), filtered by registration.
    *
@@ -993,10 +979,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     }
   }
 
-  // ── saved provider config writes ───────────────────────────────────────────
-
   /**
-   * Upserts a saved provider config snapshot for a server.
    *
    * @param serverId - Internal server DB ID
    * @param config   - Provider config fields to save
@@ -1082,7 +1065,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
    * Deletes a saved provider config for a server + provider pair.
    *
    * @param serverId - Internal server DB ID
-   * @param provider - Provider name
    * @param options  - Optional cache invalidation options
    */
   async deleteSavedProviderConfig(
@@ -1110,7 +1092,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
   }
 
   /**
-   * Upserts a personal saved provider config for a user.
    *
    * @param userId - Internal user DB ID
    * @param config - Personal provider config fields to save
@@ -1119,6 +1100,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     try {
       const provider = config.provider.toLowerCase();
       const enabledCapabilitiesLiteral = this.toPostgresTextArrayLiteral(config.enabled_capabilities);
+      const assignedCapabilitiesLiteral = this.toPostgresTextArrayLiteral(config.assigned_capabilities);
       const fallbackModelRefsJson = JSON.stringify(config.fallback_model_refs ?? []);
       const logitBiasesJson = JSON.stringify(config.llm_logit_biases ?? []);
       const disabledParamsLiteral = this.toPostgresTextArrayLiteral(config.llm_disabled_params);
@@ -1129,7 +1111,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
           llm_id, diffusion_model_id, embedding_model_id,
           video_model_id,
           nai_diffusion_model_id, vision_llm_id, nai_preset_name,
-          thinking_level, enabled_capabilities, fallback_model_refs,
+          thinking_level, enabled_capabilities, assigned_capabilities, fallback_model_refs,
           llm_temperature, llm_top_p, llm_top_k,
           llm_frequency_penalty, llm_presence_penalty, llm_min_p,
           llm_max_output_tokens,
@@ -1139,7 +1121,8 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
           ${config.llm_id}, ${config.diffusion_model_id}, ${config.embedding_model_id},
           ${config.video_model_id ?? null},
           ${config.nai_diffusion_model_id}, ${config.vision_llm_id ?? null}, ${config.nai_preset_name},
-          ${config.thinking_level}, ${enabledCapabilitiesLiteral}::text[], ${fallbackModelRefsJson}::jsonb,
+          ${config.thinking_level}, ${enabledCapabilitiesLiteral}::text[], ${assignedCapabilitiesLiteral}::text[],
+          ${fallbackModelRefsJson}::jsonb,
           ${config.llm_temperature ?? null}, ${config.llm_top_p ?? null}, ${config.llm_top_k ?? null},
           ${config.llm_frequency_penalty ?? null}, ${config.llm_presence_penalty ?? null}, ${config.llm_min_p ?? null},
           ${config.llm_max_output_tokens ?? null},
@@ -1157,6 +1140,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
           nai_preset_name = EXCLUDED.nai_preset_name,
           thinking_level = EXCLUDED.thinking_level,
           enabled_capabilities = EXCLUDED.enabled_capabilities,
+          assigned_capabilities = EXCLUDED.assigned_capabilities,
           fallback_model_refs = EXCLUDED.fallback_model_refs,
           llm_temperature = EXCLUDED.llm_temperature,
           llm_top_p = EXCLUDED.llm_top_p,
@@ -1192,7 +1176,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
    * Deletes a personal saved provider config for a user + provider pair.
    *
    * @param userId   - Internal user DB ID
-   * @param provider - Provider name
    */
   async deleteUserSavedProviderConfig(userId: number, provider: string): Promise<boolean> {
     try {
@@ -1213,10 +1196,7 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     }
   }
 
-  // ── custom endpoint writes ─────────────────────────────────────────────────
-
   /**
-   * Upserts a custom endpoint for a server or user.
    *
    * @param params  - Endpoint configuration
    * @param options - Optional cache invalidation options
@@ -1610,8 +1590,6 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     });
   }
 
-  // ── OpenRouter model registration writes ───────────────────────────────────
-
   /**
    * Upserts an OpenRouter LLM model registration.
    *
@@ -1940,11 +1918,9 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
     }
   }
 
-  // ── IRepository contract ───────────────────────────────────────────────────
-
   /**
    * Exports server-scoped provider configuration.
-   * Stub — full composition with the unified export pipeline lands in Phase 6 (#16.7).
+   * Stub: full composition with the unified export pipeline lands in Phase 6 (#16.7).
    *
    * @param ownerId - Internal server DB ID
    */
@@ -1957,12 +1933,12 @@ export class LlmProviderRepository implements IRepository<LlmProviderExportShape
 
   /**
    * Restores server-scoped provider configuration from an export.
-   * Stub — full implementation lands in Phase 6 (#16.7).
+   * Stub: full implementation lands in Phase 6 (#16.7).
    */
   async fromExportShape(_ownerId: string | number, _data: LlmProviderExportShape): Promise<boolean> {
     return false;
   }
 }
 
-/** Singleton instance — import this in callers. */
+/** Singleton instance: import this in callers. */
 export const llmProviderRepo = new LlmProviderRepository();

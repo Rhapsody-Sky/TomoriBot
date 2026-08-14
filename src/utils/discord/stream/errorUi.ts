@@ -2,7 +2,13 @@ import { EmbedBuilder, MessageFlags, type ColorResolvable } from "discord.js";
 import type { ProviderError, StreamProvider, StreamContext } from "@/types/stream/interfaces";
 import { createTipEmbed, sendStandardEmbed, truncateForEmbedDescription } from "@/utils/discord/embedHelper";
 import { ColorCode, log } from "@/utils/misc/logger";
-import { getProviderErrorDetail, isProviderModelError } from "@/utils/provider/providerErrorClassification";
+import {
+  getProviderErrorDetail,
+  isAccountBalanceExhaustedError,
+  isContextLengthError,
+  isCreditAffordabilityError,
+  isProviderModelError,
+} from "@/utils/provider/providerErrorClassification";
 import { localizer } from "@/utils/text/localizer";
 
 /**
@@ -61,7 +67,12 @@ export class StreamErrorUi {
         reason: providerError.type || "unknown",
       },
       color: ColorCode.ERROR,
-      tipKeys: ["genai.tips.refresh_context", "genai.tips.switch_model_provider"],
+      tipKeys: [
+        "genai.tips.refresh_context",
+        context.textCredentialSource === "personal"
+          ? "genai.tips.switch_model_provider_personal"
+          : "genai.tips.switch_model_provider",
+      ],
     }).catch((e) => log.warn("Stream: Failed to send error embed to channel", e));
   }
 
@@ -89,7 +100,7 @@ export class StreamErrorUi {
         descriptionKey: "genai.generic_error_description",
         descriptionVars: { error_message: error.message },
         color: ColorCode.ERROR,
-        tipKeys: ["genai.tips.refresh_context", "genai.tips.report_support"],
+        tipKeys: ["genai.tips.refresh_context"],
       },
     ).catch((e) => log.warn("Stream: Failed to send generic error embed to channel", e));
   }
@@ -100,9 +111,9 @@ export class StreamErrorUi {
    * Tips are composed from atomic keys so conditional items stay declarative:
    * - `model_fallback` is only offered when the server has no fallback chain configured yet.
    * - OpenRouter-specific items (free-model list / model list) are appended only for that provider.
-   * @param providerError - The normalized provider error.
+   * - Every command-bearing tip resolves against `context.textCredentialSource`, so a failure on
+   *   the user's own key never recommends a manager-only server command that cannot repair it.
    * @param provider - The active stream provider (used to detect OpenRouter for conditional tips).
-   * @param context - The stream context (fallback config + rotation state drive tip/title choices).
    * @returns The title key, ordered tip-item keys, and embed color.
    */
   private resolveProviderErrorPresentation(
@@ -114,16 +125,108 @@ export class StreamErrorUi {
     tipKeys: string[];
     color: ColorResolvable;
   } {
-    // 1. Detect OpenRouter and whether a fallback chain already exists — both gate conditional tips.
-    const isOpenRouter = provider.getProviderInfo().name === "openrouter";
-    const hasFallbackModels = (context.tomoriState.fallback_llms?.length ?? 0) > 0;
-    const modelFallbackTip = hasFallbackModels ? [] : ["genai.tips.model_fallback"];
+    // Detect the provider and whether a fallback chain already exists: both gate conditional tips.
+    const providerName = provider.getProviderInfo().name;
+    const isOpenRouter = providerName === "openrouter";
+    const isPersonal = context.textCredentialSource === "personal";
 
-    // 2. Model errors (unsupported/unknown/deprecated model IDs) — steer toward a supported model.
+    /** Picks the personal variant of a tip key when the failing request used a personal key. */
+    const scoped = (key: string): string => (isPersonal ? `${key}_personal` : key);
+
+    // A personal text override reads the user's own fallback chain, not the server's, so the
+    // server-side chain says nothing about whether this request had a fallback to fall back to.
+    const hasFallbackModels =
+      !isPersonal && (context.tomoriState.fallback_chain?.length ?? context.tomoriState.fallback_llms?.length ?? 0) > 0;
+    const modelFallbackTip = hasFallbackModels ? [] : [scoped("genai.tips.model_fallback")];
+
+    // Offered whenever a personal text route failed: the user can usually recover immediately by
+    // handing the turn back to the server default, except where User BYOK mode forbids it.
+    const disableOverrideTip = isPersonal ? ["genai.tips.disable_personal_text_override"] : [];
+
+    // Specialized Error Conditions
+    const isPrivacyError = providerError.message.includes("Privacy Policy Error");
+    if (isPrivacyError) {
+      return {
+        titleKey: "genai.stream.privacy_error_title",
+        tipKeys: [
+          "genai.tips.openrouter_privacy_settings",
+          scoped("genai.tips.choose_supported_model"),
+          ...(isOpenRouter ? ["genai.tips.openrouter_models"] : []),
+        ],
+        color: ColorCode.ERROR,
+      };
+    }
+
+    const isTempTopPConflict =
+      typeof providerError.userMessage === "string" &&
+      providerError.userMessage.includes("`temperature` and `top_p` cannot both be specified");
+    if (isTempTopPConflict) {
+      return {
+        titleKey: "genai.stream.api_error_title",
+        tipKeys: [scoped("genai.tips.adjust_parameters"), scoped("genai.tips.switch_model_provider")],
+        color: ColorCode.ERROR,
+      };
+    }
+
+    // Model errors (unsupported/unknown/deprecated model IDs): steer toward a supported model.
     if (isProviderModelError(providerError)) {
       return {
         titleKey: "genai.stream.model_error_title",
-        tipKeys: ["genai.tips.choose_supported_model", ...(isOpenRouter ? ["genai.tips.openrouter_models"] : [])],
+        tipKeys: [
+          scoped("genai.tips.choose_supported_model"),
+          ...(isOpenRouter ? ["genai.tips.openrouter_models"] : []),
+          ...disableOverrideTip,
+        ],
+        color: ColorCode.ERROR,
+      };
+    }
+
+    // Exhausted account balance (e.g. DeepSeek 402 "Insufficient Balance"): checked before the
+    //    affordability branch because an empty wallet is the stricter condition, and before the
+    //    generic api_error default, whose `verify_api_key` tip misdiagnoses a perfectly valid key.
+    if (isAccountBalanceExhaustedError(providerError)) {
+      return {
+        titleKey: "genai.stream.balance_exhausted_title",
+        tipKeys: [
+          "genai.tips.top_up_provider_balance",
+          ...(providerName === "deepseek" ? ["genai.tips.deepseek_top_up"] : []),
+          ...(isOpenRouter ? [scoped("genai.tips.openrouter_add_credits")] : []),
+          scoped("genai.tips.switch_model_provider"),
+          ...disableOverrideTip,
+        ],
+        color: ColorCode.ERROR,
+      };
+    }
+
+    // Credit-affordability ceiling (e.g. OpenRouter 402): the account cannot pay for the
+    //    requested max_tokens. Adding history back does not help, so steer toward lowering the
+    //    output-token cap or topping up credits. Checked before the context-length branch
+    //    because the 402 copy is the more specific signal.
+    if (isCreditAffordabilityError(providerError)) {
+      return {
+        titleKey: "genai.stream.credit_limit_title",
+        tipKeys: [
+          scoped("genai.tips.reduce_output_tokens"),
+          ...(isOpenRouter ? [scoped("genai.tips.openrouter_add_credits")] : []),
+          scoped("genai.tips.switch_model_provider"),
+          ...disableOverrideTip,
+        ],
+        color: ColorCode.ERROR,
+      };
+    }
+
+    // Hard context-window overflow (e.g. OpenRouter 400 "maximum context length"): trimming the
+    //    request genuinely helps. Lead with the output-token cap (the reserve the truncator honors),
+    //    then context refresh / shorter message, then a model-fallback nudge when none is configured.
+    if (isContextLengthError(providerError)) {
+      return {
+        titleKey: "genai.stream.context_length_title",
+        tipKeys: [
+          scoped("genai.tips.reduce_output_tokens"),
+          "genai.tips.refresh_context",
+          "genai.tips.shorten_message",
+          ...modelFallbackTip,
+        ],
         color: ColorCode.ERROR,
       };
     }
@@ -136,9 +239,14 @@ export class StreamErrorUi {
             : "genai.stream.rate_limit_title",
           tipKeys: [
             "genai.tips.wait_and_retry",
-            "genai.tips.api_key_rotation",
+            // Rotation pools are a server-scoped, manager-only feature; a personal key has none.
+            ...(isPersonal ? [] : ["genai.tips.api_key_rotation"]),
             ...modelFallbackTip,
             ...(isOpenRouter ? ["genai.tips.openrouter_free_models"] : []),
+            ...(isOpenRouter && providerError.message.includes("free-models-per-day")
+              ? ["genai.tips.openrouter_fund_account"]
+              : []),
+            ...disableOverrideTip,
           ],
           color: ColorCode.WARN,
         };
@@ -150,7 +258,7 @@ export class StreamErrorUi {
             "genai.tips.review_messages",
             "genai.tips.review_memories",
             "genai.tips.blacklist_member",
-            "genai.tips.switch_model_provider",
+            scoped("genai.tips.switch_model_provider"),
           ],
           color: ColorCode.ERROR,
         };
@@ -170,10 +278,16 @@ export class StreamErrorUi {
         return {
           titleKey: "genai.stream.api_error_title",
           tipKeys: [
-            "genai.tips.verify_api_key",
-            "genai.tips.switch_model_provider",
+            // Google rejects a Vertex-style OAuth/service account credential with
+            // ACCESS_TOKEN_TYPE_UNSUPPORTED. "Double-check your API key" misleads here: the key is
+            // not mistyped, it is the wrong kind of credential for this provider.
+            ...(providerError.message.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")
+              ? ["genai.tips.google_credential_type"]
+              : []),
+            scoped("genai.tips.verify_api_key"),
+            scoped("genai.tips.switch_model_provider"),
             ...(isOpenRouter ? ["genai.tips.openrouter_models"] : []),
-            "genai.tips.report_support",
+            ...disableOverrideTip,
           ],
           color: providerError.retryable ? ColorCode.WARN : ColorCode.ERROR,
         };
@@ -182,12 +296,10 @@ export class StreamErrorUi {
 
   /**
    * Builds the embed description for a provider error: a friendly, localized headline followed by
-   * the raw provider detail. The detail is appended for ALL error types — not just model errors —
+   * the raw provider detail. The detail is appended for ALL error types (not just model errors)
    * so providers that map known codes to hardcoded locale strings (e.g. OpenRouter) no longer hide
    * the actual provider message from the user.
-   * @param providerError - The normalized provider error.
    * @param provider - The active stream provider (supplies the localized headline).
-   * @param locale - The resolved user locale.
    * @param isModelError - Whether the error classifies as a model-selection error (drives the headline fallback).
    * @returns The composed description, or null when no headline can be produced.
    */
@@ -197,7 +309,7 @@ export class StreamErrorUi {
     locale: string,
     isModelError: boolean,
   ): string | null {
-    // 1. Headline: the provider's friendly, localized message. Model errors fall back to a generic
+    // Headline: the provider's friendly, localized message. Model errors fall back to a generic
     //    headline when the provider does not supply one.
     const providerHeadline = provider.createErrorDescription(providerError, locale);
     const headline =
@@ -206,14 +318,14 @@ export class StreamErrorUi {
       return null;
     }
 
-    // 2. Raw provider detail. Skip when absent or already embedded in the headline (a provider may
+    // Raw provider detail. Skip when absent or already embedded in the headline (a provider may
     //    have appended it itself) so we never duplicate the "Details" section.
     const detail = getProviderErrorDetail(providerError);
     if (!detail || headline.includes(detail)) {
       return headline;
     }
 
-    // 3. Append the detail, truncated so the combined description stays within Discord's embed limit.
+    // Append the detail, truncated so the combined description stays within Discord's embed limit.
     const detailsLabel = "\n\n**Details:**\n";
     const truncatedDetail = truncateForEmbedDescription(detail, headline.length + detailsLabel.length);
     if (!truncatedDetail) {
