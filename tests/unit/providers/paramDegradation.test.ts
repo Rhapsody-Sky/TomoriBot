@@ -82,6 +82,29 @@ describe("buildDegradationAttempts", () => {
     }
   });
 
+  it("never drops a provider-mandatory reply-shaping key such as thinking", () => {
+    // A rung that drops `thinking` while keeping `tools` yields a tool call with no
+    // reasoning_content, which DeepSeek then rejects when a later request replays that turn.
+    const attempts = buildDegradationAttempts(
+      {
+        model: "deepseek-chat",
+        messages: [],
+        stream: true,
+        stream_options: { include_usage: true },
+        thinking: { type: "enabled" },
+        tools: [{ type: "function" }],
+        top_k: 40,
+        min_p: 0.05,
+      },
+      { mandatoryKeys: new Set(["model", "messages", "stream", "thinking"]) },
+    );
+
+    expect(attempts.map((attempt) => attempt.label)).not.toContain("probe_drop_thinking");
+    for (const attempt of attempts) {
+      expect(attempt.body).toHaveProperty("thinking");
+    }
+  });
+
   it("deduplicates identical serialized bodies", () => {
     const attempts = buildDegradationAttempts(
       { model: "example/model", messages: [], stream: true },
@@ -202,7 +225,7 @@ describe("buildImageStripAttempt", () => {
 
     expect(attempt?.label).toBe("targeted_strip_images");
     expect(attempt?.body.temperature).toBe(0.8);
-    const content = (attempt?.body.messages as Array<Record<string, unknown>>)[0]?.content as Array<
+    const content = (attempt?.body.messages as Array<Record<string, unknown>> | undefined)?.[0]?.content as Array<
       Record<string, unknown>
     >;
     expect(content[0]?.type).toBe("text");

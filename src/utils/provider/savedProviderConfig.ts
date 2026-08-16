@@ -1,5 +1,7 @@
 import type {
   CustomEndpointCapability,
+  DiffusionModelRow,
+  LlmRow,
   SavedProviderConfigRow,
   SavedProviderConfigUpsert,
   AssembledServerConfig,
@@ -26,6 +28,42 @@ export interface ProviderDefaultSelectionIds {
   nai_diffusion_model_id: number | null;
   video_model_id: number | null;
   vision_llm_id: number | null;
+}
+
+/**
+ * Decide whether a saved text-model selection must fall back to the provider default.
+ *
+ * Active selections are preserved across credential updates, including deliberate
+ * non-default choices. Missing, deprecated, or cross-provider references are not
+ * usable and should be replaced with the provider's current default.
+ *
+ * @param provider - Provider owning the saved configuration
+ * @param model - Model currently referenced by the saved configuration
+ * @returns Whether the caller should load and store the current provider default
+ */
+export function shouldRefreshSavedTextModel(
+  provider: string,
+  model: Pick<LlmRow, "llm_provider" | "is_deprecated"> | null,
+): boolean {
+  return model === null || model.is_deprecated || model.llm_provider.toLowerCase() !== provider.toLowerCase();
+}
+
+/**
+ * Decide whether a saved image-model selection must fall back to the provider default.
+ *
+ * Mirrors {@link shouldRefreshSavedTextModel} for `image_diffusion_models`, which backs both the
+ * `diffusion_model_id` and `nai_diffusion_model_id` selections. Without this, a server stays
+ * pointed at a codename the provider has retired and every generation fails.
+ *
+ * @param provider - Provider owning the saved configuration
+ * @param model - Diffusion model currently referenced by the saved configuration
+ * @returns Whether the caller should load and store the current provider default
+ */
+export function shouldRefreshSavedDiffusionModel(
+  provider: string,
+  model: Pick<DiffusionModelRow, "provider" | "is_deprecated"> | null,
+): boolean {
+  return model === null || model.is_deprecated || model.provider.toLowerCase() !== provider.toLowerCase();
 }
 
 export function buildSavedProviderSnapshotFromTomoriState(tomoriState: TomoriState): SavedProviderConfigUpsert {
@@ -68,14 +106,12 @@ export async function loadProviderDefaultSelectionIds(provider: string): Promise
     };
   }
 
-  const [defaultTextModel, defaultEmbeddingModel, defaultDiffusionModel, defaultVideoModel, defaultVisionModel] =
-    await Promise.all([
-      llmModelRepo.loadDefaultModel(normalizedProvider),
-      llmModelRepo.loadDefaultEmbeddingModel(normalizedProvider),
-      llmModelRepo.loadDefaultDiffusionModel(normalizedProvider),
-      llmModelRepo.loadDefaultVideoGenerationModel(normalizedProvider),
-      llmModelRepo.loadDefaultVisionModel(normalizedProvider),
-    ]);
+  const [defaultTextModel, defaultEmbeddingModel, defaultDiffusionModel, defaultVideoModel] = await Promise.all([
+    llmModelRepo.loadDefaultModel(normalizedProvider),
+    llmModelRepo.loadDefaultEmbeddingModel(normalizedProvider),
+    llmModelRepo.loadDefaultDiffusionModel(normalizedProvider),
+    llmModelRepo.loadDefaultVideoGenerationModel(normalizedProvider),
+  ]);
 
   const imageGenerationStyle = getStaticProviderInfo(normalizedProvider)?.featureSupport.imageGeneration ?? "none";
 
@@ -87,7 +123,40 @@ export async function loadProviderDefaultSelectionIds(provider: string): Promise
     nai_diffusion_model_id:
       imageGenerationStyle === "nai-pipeline" ? (defaultDiffusionModel?.diffusion_model_id ?? null) : null,
     video_model_id: defaultVideoModel?.video_model_id ?? null,
-    vision_llm_id: defaultVisionModel?.llm_id ?? null,
+    // Vision is an opt-in fallback slot, never seeded: a provider whose default text model happens
+    // to see images would otherwise silently fill it with the model already answering chat.
+    vision_llm_id: null,
+  };
+}
+
+/**
+ * Resolve which of the two saved image-model selections are unusable.
+ *
+ * Both `diffusion_model_id` and `nai_diffusion_model_id` index `image_diffusion_models`, so both
+ * carry the same retirement exposure and are checked against their own provider default.
+ *
+ * @param provider - Normalized provider owning the saved configuration
+ * @param existingConfig - Saved configuration being rebuilt, or null for a fresh one
+ * @returns Whether each selection should be replaced with the provider default
+ */
+async function resolveDiffusionRefreshFlags(
+  provider: string,
+  existingConfig: {
+    diffusion_model_id?: number | null;
+    nai_diffusion_model_id?: number | null;
+  } | null,
+): Promise<{ refreshDiffusionModel: boolean; refreshNaiDiffusionModel: boolean }> {
+  const diffusionModelId = existingConfig?.diffusion_model_id ?? null;
+  const naiDiffusionModelId = existingConfig?.nai_diffusion_model_id ?? null;
+
+  const [diffusionModel, naiDiffusionModel] = await Promise.all([
+    diffusionModelId ? llmModelRepo.loadDiffusionModelById(diffusionModelId) : null,
+    naiDiffusionModelId ? llmModelRepo.loadDiffusionModelById(naiDiffusionModelId) : null,
+  ]);
+
+  return {
+    refreshDiffusionModel: shouldRefreshSavedDiffusionModel(provider, diffusionModel),
+    refreshNaiDiffusionModel: shouldRefreshSavedDiffusionModel(provider, naiDiffusionModel),
   };
 }
 
@@ -102,19 +171,33 @@ export async function buildSavedProviderConfigFromExistingOrDefaults(params: {
 }): Promise<SavedProviderConfigUpsert> {
   const normalizedProvider = params.provider.toLowerCase();
   const existingConfig = params.existingConfig ?? null;
-  const defaults = existingConfig ? null : await loadProviderDefaultSelectionIds(normalizedProvider);
+  const candidateLlmId = params.llmId ?? existingConfig?.llm_id ?? null;
+  const candidateLlm = candidateLlmId ? await llmModelRepo.loadById(candidateLlmId) : null;
+  const refreshTextModel = shouldRefreshSavedTextModel(normalizedProvider, candidateLlm);
+  const { refreshDiffusionModel, refreshNaiDiffusionModel } = await resolveDiffusionRefreshFlags(
+    normalizedProvider,
+    existingConfig,
+  );
+  const defaults =
+    !existingConfig || refreshTextModel || refreshDiffusionModel || refreshNaiDiffusionModel
+      ? await loadProviderDefaultSelectionIds(normalizedProvider)
+      : null;
 
   return {
     server_id: params.serverId,
     provider: normalizedProvider,
     api_key: params.apiKey,
     key_version: params.keyVersion,
-    llm_id: params.llmId ?? existingConfig?.llm_id ?? defaults?.llm_id ?? null,
-    diffusion_model_id: existingConfig?.diffusion_model_id ?? defaults?.diffusion_model_id ?? null,
+    llm_id: refreshTextModel ? (defaults?.llm_id ?? null) : candidateLlmId,
+    diffusion_model_id: refreshDiffusionModel
+      ? (defaults?.diffusion_model_id ?? null)
+      : (existingConfig?.diffusion_model_id ?? null),
     embedding_model_id: existingConfig?.embedding_model_id ?? defaults?.embedding_model_id ?? null,
-    nai_diffusion_model_id: existingConfig?.nai_diffusion_model_id ?? defaults?.nai_diffusion_model_id ?? null,
+    nai_diffusion_model_id: refreshNaiDiffusionModel
+      ? (defaults?.nai_diffusion_model_id ?? null)
+      : (existingConfig?.nai_diffusion_model_id ?? null),
     video_model_id: existingConfig?.video_model_id ?? defaults?.video_model_id ?? null,
-    vision_llm_id: existingConfig?.vision_llm_id ?? defaults?.vision_llm_id ?? null,
+    vision_llm_id: existingConfig?.vision_llm_id ?? null,
     nai_preset_name: existingConfig?.nai_preset_name ?? null,
     llm_temperature: existingConfig?.llm_temperature ?? params.baseConfig.llm_temperature,
     llm_top_p: existingConfig?.llm_top_p ?? params.baseConfig.llm_top_p,
@@ -141,19 +224,34 @@ export async function buildUserSavedProviderConfigFromExistingOrDefaults(params:
 }): Promise<UserSavedProviderConfigUpsert> {
   const normalizedProvider = params.provider.toLowerCase();
   const existingConfig = params.existingConfig ?? null;
-  const defaults = existingConfig ? null : await loadProviderDefaultSelectionIds(normalizedProvider);
+  const candidateLlmId = params.llmId ?? existingConfig?.llm_id ?? null;
+  const candidateLlm = candidateLlmId ? await llmModelRepo.loadById(candidateLlmId) : null;
+  const refreshTextModel = shouldRefreshSavedTextModel(normalizedProvider, candidateLlm);
+  const { refreshDiffusionModel, refreshNaiDiffusionModel } = await resolveDiffusionRefreshFlags(
+    normalizedProvider,
+    existingConfig,
+  );
+  const defaults =
+    !existingConfig || refreshTextModel || refreshDiffusionModel || refreshNaiDiffusionModel
+      ? await loadProviderDefaultSelectionIds(normalizedProvider)
+      : null;
+  const enabledCapabilities = params.enabledCapabilities ?? existingConfig?.enabled_capabilities ?? [];
 
   return {
     user_id: params.userId,
     provider: normalizedProvider,
     api_key: params.apiKey,
     key_version: params.keyVersion,
-    llm_id: params.llmId ?? existingConfig?.llm_id ?? defaults?.llm_id ?? null,
-    diffusion_model_id: existingConfig?.diffusion_model_id ?? defaults?.diffusion_model_id ?? null,
+    llm_id: refreshTextModel ? (defaults?.llm_id ?? null) : candidateLlmId,
+    diffusion_model_id: refreshDiffusionModel
+      ? (defaults?.diffusion_model_id ?? null)
+      : (existingConfig?.diffusion_model_id ?? null),
     embedding_model_id: existingConfig?.embedding_model_id ?? defaults?.embedding_model_id ?? null,
-    nai_diffusion_model_id: existingConfig?.nai_diffusion_model_id ?? defaults?.nai_diffusion_model_id ?? null,
+    nai_diffusion_model_id: refreshNaiDiffusionModel
+      ? (defaults?.nai_diffusion_model_id ?? null)
+      : (existingConfig?.nai_diffusion_model_id ?? null),
     video_model_id: existingConfig?.video_model_id ?? defaults?.video_model_id ?? null,
-    vision_llm_id: existingConfig?.vision_llm_id ?? defaults?.vision_llm_id ?? null,
+    vision_llm_id: existingConfig?.vision_llm_id ?? null,
     nai_preset_name: existingConfig?.nai_preset_name ?? null,
     llm_temperature: existingConfig?.llm_temperature ?? params.baseConfig.llm_temperature,
     llm_top_p: existingConfig?.llm_top_p ?? params.baseConfig.llm_top_p,
@@ -164,7 +262,12 @@ export async function buildUserSavedProviderConfigFromExistingOrDefaults(params:
     llm_disabled_params: existingConfig?.llm_disabled_params ?? params.baseConfig.llm_disabled_params ?? [],
     llm_logit_biases: existingConfig?.llm_logit_biases ?? params.baseConfig.llm_logit_biases ?? [],
     thinking_level: existingConfig?.thinking_level ?? params.baseConfig.thinking_level,
-    enabled_capabilities: params.enabledCapabilities ?? existingConfig?.enabled_capabilities ?? [],
+    enabled_capabilities: enabledCapabilities,
+    // Anything switched on here is owned here. Previously assigned capabilities are
+    // kept even when currently off, so a re-enable still resolves to this provider.
+    assigned_capabilities: Array.from(
+      new Set([...(existingConfig?.assigned_capabilities ?? []), ...enabledCapabilities]),
+    ),
     fallback_model_refs: existingConfig?.fallback_model_refs ?? [],
   };
 }
@@ -192,8 +295,24 @@ async function hasRegisteredCustomEndpointCapability(
   const parsed = parseCustomProvider(provider);
   const endpointCapability = mapSavedCapabilityToCustomEndpointCapability(capability);
 
-  if (!parsed || !endpointCapability) {
+  if (!parsed || parsed.ownerId === null || !endpointCapability) {
     return false;
+  }
+
+  const ownerId = parsed.ownerId;
+
+  // A label can host several models per capability, and loadCustomEndpoint returns only the most
+  // recently updated one. Vision therefore scans the whole label: a blank text model registered
+  // after an image-capable one must not hide the label from the vision picker.
+  if (capability === "vision") {
+    const endpoints =
+      parsed.scope === "server"
+        ? await llmProviderRepo.loadCustomEndpointsForServer(ownerId)
+        : await llmProviderRepo.loadCustomEndpointsForUser(ownerId);
+
+    return endpoints.some(
+      (row) => row.label === parsed.label && row.capability === endpointCapability && row.sees_images,
+    );
   }
 
   const endpoint =
@@ -209,11 +328,7 @@ async function hasRegisteredCustomEndpointCapability(
           capability: endpointCapability,
         });
 
-  if (!endpoint) {
-    return false;
-  }
-
-  return capability === "vision" ? endpoint.sees_images : true;
+  return endpoint !== null;
 }
 
 export async function hasRegisteredCustomProvider(provider: string): Promise<boolean> {
@@ -260,8 +375,11 @@ export async function loadSavedProvidersForCapability(
           return config.diffusion_model_id !== null || config.nai_diffusion_model_id !== null;
         case "video":
           return config.video_model_id !== null;
+        // Unlike the other slots, vision has no saved selection to require: registering an
+        // image-capable text endpoint is what makes the label eligible, and the picker chooses
+        // among that label's image-capable models.
         case "vision":
-          return config.vision_llm_id !== null;
+          return true;
         default:
           return false;
       }
@@ -314,8 +432,11 @@ export async function loadUserSavedProvidersForCapability(
           return config.diffusion_model_id !== null || config.nai_diffusion_model_id !== null;
         case "video":
           return config.video_model_id !== null;
+        // Unlike the other slots, vision has no saved selection to require: registering an
+        // image-capable text endpoint is what makes the label eligible, and the picker chooses
+        // among that label's image-capable models.
         case "vision":
-          return config.vision_llm_id !== null;
+          return true;
         default:
           return false;
       }

@@ -7,10 +7,6 @@ import { log } from "@/utils/misc/logger";
  * Parse an integer environment flag with a default and enforced minimum.
  * Mirrors the local helper used across the chat modules for consistency.
  *
- * @param value - Raw environment string (may be undefined)
- * @param defaultValue - Fallback when unset or unparseable
- * @param minimum - Lower clamp to keep pathological values out
- * @returns Parsed integer, never below `minimum`
  */
 function parseIntegerEnvFlag(value: string | undefined, defaultValue: number, minimum: number): number {
   if (typeof value !== "string") return defaultValue;
@@ -28,8 +24,8 @@ export interface PostgresPoolOptions {
 /**
  * Connection-pool hygiene for remote/managed PostgreSQL (in seconds).
  *
- * Any networked PostgreSQL fronted by a gateway, proxy, or load-balancer — managed
- * cloud endpoints, RDS Proxy, PgBouncer, a NAT/LB in the path — may silently reap
+ * Any networked PostgreSQL fronted by a gateway, proxy, or load-balancer: managed
+ * cloud endpoints, RDS Proxy, PgBouncer, a NAT/LB in the path; may silently reap
  * idle TCP connections without sending a RST. A pooled connection reaped this way
  * becomes a black hole: the next query hangs into it until an app timeout fires,
  * which surfaces most on longer, less frequent work (e.g. chat turns) rather than
@@ -41,17 +37,15 @@ export interface PostgresPoolOptions {
  * and `connectionTimeout` turns a dead-path hang into a fast, retryable failure.
  * Defaults are safe for all managed providers; overridable via env for incident-time
  * tuning without a rebuild. (Azure Flexible Server's public endpoint, whose gateway
- * reaps at ~4 minutes, is one such path — see plans/azure-free-tier-cost-plan.md.)
+ * reaps at ~4 minutes, is one such path.)
  *
- * @returns Pool options resolved from env with production-safe defaults
  */
 function resolveProductionPoolOptions(): PostgresPoolOptions {
   return {
-    // 1. Close idle pooled connections after 30s — before any gateway/proxy can reap them.
+    // Close idle pooled connections after 30s before any gateway/proxy can reap them.
     idleTimeout: parseIntegerEnvFlag(process.env.POSTGRES_IDLE_TIMEOUT_SECONDS, 30, 5),
-    // 2. Hard age cap so no connection lingers indefinitely even under steady load.
+    // Hard age cap so no connection lingers indefinitely even under steady load.
     maxLifetime: parseIntegerEnvFlag(process.env.POSTGRES_MAX_LIFETIME_SECONDS, 600, 30),
-    // 3. Fail fast on a dead path instead of hanging into a downstream turn timeout.
     connectionTimeout: parseIntegerEnvFlag(process.env.POSTGRES_CONNECTION_TIMEOUT_SECONDS, 10, 1),
   };
 }
@@ -66,13 +60,11 @@ function resolveProductionPoolOptions(): PostgresPoolOptions {
  * Azure and other public-CA providers use the operating-system trust store.
  * AWS RDS retains its maintained provider bundle for compatibility.
  *
- * @returns Configured SQL instance with appropriate TLS settings
  */
 function createDatabaseClient(): SQL {
   const runEnv = process.env.RUN_ENV || "development";
   const isProduction = runEnv === "production" && process.env.TEST_PRODUCTION !== "true";
 
-  // Build connection parameters from environment
   const host = process.env.POSTGRES_HOST || "localhost";
   const port = Number.parseInt(process.env.POSTGRES_PORT || "5432", 10);
   const user = process.env.POSTGRES_USER || "postgres";
@@ -97,7 +89,7 @@ function createDatabaseClient(): SQL {
     // pooled socket can't black-hole a subsequent query (see helper docs).
     const poolOptions = resolveProductionPoolOptions();
 
-    // Unix socket path (e.g. /cloudsql/<connection-name>) — Cloud SQL Auth Proxy handles TLS
+    // Unix socket path (e.g. /cloudsql/<connection-name>): Cloud SQL Auth Proxy handles TLS
     // internally; the client connects via a local socket and must not add a second TLS layer.
     if (host.startsWith("/")) {
       return new SQL({
@@ -197,7 +189,6 @@ let cachedClient: SQL | null = null;
 /**
  * Gets the singleton database client, creating it on first access.
  *
- * @returns Configured SQL client instance
  */
 function getClient(): SQL {
   if (!cachedClient) {
@@ -241,44 +232,112 @@ export const sql = new Proxy(
 ) as SQL;
 
 /**
- * Executes a database query with automatic retry on cached plan errors.
+ * Codes Bun raises when the pool retires a connection out from under a live query.
  *
- * When PostgreSQL prepared statements become stale after schema changes,
- * this wrapper detects the error, resets the connection (clearing the cache),
- * and retries the query once.
+ * Bun's pool (through 1.3.14) fires its `idleTimeout`/`maxLifetime` timers without
+ * draining first: it marks the connection failed and rejects every queued and in-flight
+ * query on it, even though the query and the server are both healthy
+ * (oven-sh/bun#30646, still open). Re-issuing succeeds because the pool has already
+ * discarded the dead socket, so `resetDatabaseConnection` must NOT run on this path;
+ * that would throw away the rest of a healthy pool to fix a connection already gone.
+ */
+const RETIRED_CONNECTION_ERROR_CODES = new Set([
+  "ERR_POSTGRES_LIFETIME_TIMEOUT",
+  "ERR_POSTGRES_IDLE_TIMEOUT",
+  "ERR_POSTGRES_CONNECTION_CLOSED",
+  // The next two reach us from the wire-protocol reader rather than the socket: when a
+  // connection dies mid-message, Bun rejects the pending queries from `#onClose` carrying
+  // whatever state its parser stopped in, so the code marks where the byte stream was
+  // truncated. Prod logs on 2026-08-06 carried 82 of these across unrelated servers in two
+  // bursts, every stack ending at `#onClose`, none retried because of this gap.
+  // Neither code is exclusive to that path (Bun can also raise them from encoding faults),
+  // so read the stack before the code when triaging: a replay costs one query, but a real
+  // encoding bug retried here will look like ordinary connection churn in the logs.
+  "ERR_POSTGRES_INVALID_MESSAGE",
+  "ERR_POSTGRES_UNSUPPORTED_INTEGER_SIZE",
+]);
+
+function isRetiredConnectionError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const { code } = error as { code?: unknown };
+  return typeof code === "string" && RETIRED_CONNECTION_ERROR_CODES.has(code);
+}
+
+interface TransientRetryOptions {
+  /** Total attempts including the first, so 1 disables retrying. */
+  attempts: number;
+  delayMs: number;
+}
+
+function resolveTransientRetryOptions(): TransientRetryOptions {
+  return {
+    attempts: parseIntegerEnvFlag(process.env.POSTGRES_TRANSIENT_RETRY_ATTEMPTS, 2, 1),
+    // A retired socket is replaced on the pool's next tick; retrying in the same tick
+    // can land on the still-closing connection.
+    delayMs: parseIntegerEnvFlag(process.env.POSTGRES_TRANSIENT_RETRY_DELAY_MS, 100, 0),
+  };
+}
+
+/**
+ * Executes a database operation, retrying the transient failures that are the client's
+ * own doing rather than a real query fault: a stale prepared-statement plan after a
+ * schema change, and a connection the pool retired mid-query.
  *
- * @param queryFn - Async function that executes the database query
+ * `queryFn` may run more than once, so it must be safe to replay. Reads always qualify.
+ * A write qualifies only if it is idempotent (an `ON CONFLICT DO UPDATE` reconcile) or
+ * runs inside a transaction, since a socket that dies mid-transaction makes the server
+ * roll back. A non-idempotent write must not use this helper: if the socket dies in the
+ * window between `COMMIT` being sent and its acknowledgement arriving, the replay
+ * double-applies.
+ *
+ * Rethrows once retries are exhausted rather than returning a sentinel, so a caller whose
+ * next line assumes the write landed (a "sync completed" log, a cache invalidation) cannot
+ * run on a failed operation.
+ *
  * @param operationName - Descriptive name for logging (e.g., "load user", "load reminders")
- * @returns Query result or null on failure
  *
  * @example
  * ```typescript
- * const reminders = await withCachedPlanRetry(
+ * const reminders = await withTransientDbRetry(
  *   async () => await sql`SELECT * FROM reminders WHERE due_at <= NOW()`,
  *   "load due reminders"
  * );
  * ```
  */
-export async function withCachedPlanRetry<T>(queryFn: () => Promise<T>, operationName: string): Promise<T | null> {
-  try {
-    return await queryFn();
-  } catch (error) {
-    // Check if this is a cached plan error
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const isCachedPlanError = errorMessage.includes("cached plan must not change result type");
+export async function withTransientDbRetry<T>(queryFn: () => Promise<T>, operationName: string): Promise<T> {
+  const { attempts, delayMs } = resolveTransientRetryOptions();
 
-    if (isCachedPlanError) {
-      log.warn(`Cached plan error during "${operationName}", resetting connection and retrying`);
-      resetDatabaseConnection();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await queryFn();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isCachedPlanError = errorMessage.includes("cached plan must not change result type");
+      const isRetiredConnection = isRetiredConnectionError(error);
 
-      try {
-        return await queryFn();
-      } catch (retryError) {
-        await log.error(`Retry failed for "${operationName}"`, retryError);
-        return null;
+      if (!isCachedPlanError && !isRetiredConnection) {
+        throw error;
+      }
+
+      if (attempt >= attempts) {
+        await log.error(`Exhausted ${attempt} attempt(s) for "${operationName}"`, error);
+        throw error;
+      }
+
+      if (isCachedPlanError) {
+        log.warn(`Cached plan error during "${operationName}", resetting connection and retrying`);
+        resetDatabaseConnection();
+        continue;
+      }
+
+      log.warn(
+        `Pool retired the connection during "${operationName}" (attempt ${attempt}/${attempts}), retrying on a fresh connection`,
+      );
+      if (delayMs > 0) {
+        await Bun.sleep(delayMs);
       }
     }
-
-    throw error;
   }
 }

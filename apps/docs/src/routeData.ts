@@ -25,11 +25,10 @@ const docsRoot = join(dirname(fileURLToPath(import.meta.url)), "content/docs");
  * Mirrors the id scheme from content.config.ts: `index` ids come from README
  * files (or literal index files), other ids map to `<id>.md`/`<id>.mdx`.
  *
- * @param baseId - Entry id without the "ja/" locale prefix.
- * @param locale - "" for the root (English) locale, or "ja".
+ * @param baseId - Entry id without an "en/" or "ja/" locale prefix.
  * @returns True when a source file exists for that id in that locale.
  */
-function entryExists(baseId: string, locale: "" | "ja"): boolean {
+function entryExists(baseId: string, locale: "en" | "ja"): boolean {
   const base = join(docsRoot, locale, baseId);
   const candidates =
     baseId === "index" || baseId.endsWith("/index")
@@ -50,7 +49,7 @@ function entryExists(baseId: string, locale: "" | "ja"): boolean {
  * @returns A cleaned description string, or `undefined` when no prose exists.
  */
 function deriveDescription(body: string, maxLength: number): string | undefined {
-  // Strip HTML comments up front — they can span multiple lines, so the
+  // Strip HTML comments up front because they can span multiple lines, so the
   // line-based filtering below cannot reliably skip their continuations.
   const lines = body.replace(/<!--[\s\S]*?-->/g, "").split(/\r?\n/);
   const paragraph: string[] = [];
@@ -59,21 +58,17 @@ function deriveDescription(body: string, maxLength: number): string | undefined 
   for (const rawLine of lines) {
     const line = rawLine.trim();
 
-    // 1. Track fenced code blocks so their contents are never sampled.
     if (line.startsWith("```") || line.startsWith("~~~")) {
       insideFence = !insideFence;
       continue;
     }
     if (insideFence) continue;
 
-    // 2. A blank line ends the paragraph — stop once we have collected prose.
     if (line === "") {
       if (paragraph.length > 0) break;
       continue;
     }
 
-    // 3. Skip structural / non-prose lines. If we were mid-paragraph and hit
-    //    one of these, the paragraph is done.
     const isNonProse =
       line.startsWith("#") || // headings
       line.startsWith("import ") || // MDX imports
@@ -95,7 +90,6 @@ function deriveDescription(body: string, maxLength: number): string | undefined 
 
   if (paragraph.length === 0) return undefined;
 
-  // 4. Strip inline Markdown so the meta tag contains plain text only.
   const text = paragraph
     .join(" ")
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // images → alt text
@@ -110,7 +104,7 @@ function deriveDescription(body: string, maxLength: number): string | undefined 
   if (text.length === 0) return undefined;
   if (text.length <= maxLength) return text;
 
-  // 5. Truncate at the last word boundary that fits, then add an ellipsis.
+  // Truncate at the last word boundary that fits, then add an ellipsis.
   //    (Japanese prose has no spaces, so the hard cut is the boundary there.)
   const clipped = text.slice(0, maxLength);
   const lastSpace = clipped.lastIndexOf(" ");
@@ -120,14 +114,14 @@ function deriveDescription(body: string, maxLength: number): string | undefined 
 /**
  * Starlight route middleware for SEO head tags.
  *
- * 1. Auto-derives a per-page meta description from the page's first prose
+ * - Auto-derives a per-page meta description from the page's first prose
  *    paragraph whenever the frontmatter has no explicit `description`. A
  *    hand-written `description:` in frontmatter always wins (Starlight emits
  *    it before this middleware runs, so we simply do nothing in that case).
- * 2. Marks internal `wiki/` pages as `noindex` — they are hidden from the
+ * - Marks internal `wiki/` pages as `noindex` because they are hidden from the
  *    sidebar and are maintainer-facing, so they should not appear in search
  *    results or compete with the user-facing pages.
- * 3. Emits hreflang alternate links for pages that exist in both English and
+ * - Emits hreflang alternate links for pages that exist in both English and
  *    Japanese, so Google serves each locale's page to the right audience
  *    instead of treating the pair as competing (or duplicate) content.
  */
@@ -140,20 +134,20 @@ export const onRequest = defineRouteMiddleware((context) => {
   // them would create duplicate-content competition with the English pages.
   // A fallback page becomes indexable automatically once its translation
   // lands (the route stops being a fallback).
-  const isWiki = entry.id === "wiki" || entry.id.startsWith("wiki/");
+  const isJa = entry.id === "ja" || entry.id.startsWith("ja/");
+  const baseId = entry.id.replace(/^(?:en|ja)\/?/, "");
+  const isWiki = baseId === "wiki" || baseId.startsWith("wiki/");
   if (isWiki || starlightRoute.isFallback) {
     head.push({ tag: "meta", attrs: { name: "robots", content: "noindex" } });
   }
 
   // hreflang pairs. Fallback pages (ja URL serving English content) are NOT
-  // pairs — only emit when a real translated source file exists, otherwise
+  // pairs only emit when a real translated source file exists, otherwise
   // Google would be told duplicate English content is "the Japanese version".
-  const isJa = entry.id === "ja" || entry.id.startsWith("ja/");
-  const baseId = isJa ? entry.id.replace(/^ja\/?/, "") : entry.id;
-  if (baseId && entryExists(baseId, "ja") && entryExists(baseId, "")) {
+  if (baseId && entryExists(baseId, "ja") && entryExists(baseId, "en")) {
     const site = context.site ?? new URL("https://docs.tomoribot.app");
     const slug = baseId.replace(/(^|\/)index$/, "").replace(/\/$/, "");
-    const enUrl = new URL(slug ? `/${slug}/` : "/", site).href;
+    const enUrl = new URL(slug ? `/en/${slug}/` : "/en/", site).href;
     const jaUrl = new URL(slug ? `/ja/${slug}/` : "/ja/", site).href;
     head.push({ tag: "link", attrs: { rel: "alternate", hreflang: "en", href: enUrl } });
     head.push({ tag: "link", attrs: { rel: "alternate", hreflang: "ja", href: jaUrl } });

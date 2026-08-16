@@ -4,7 +4,9 @@ import { initBridges } from "@/init/bridges";
 import { initDatabase } from "@/init/database";
 import { createDiscordClient, resolvePresenceIntentEnabled } from "@/init/discord";
 import { startHealthServer } from "@/init/healthServer";
+import { registerHeapSnapshotHandler } from "@/init/heapSnapshot";
 import { initLoaders } from "@/init/loaders";
+import { initMediaProcessing } from "@/init/media";
 import { loadSecrets } from "@/init/secrets";
 import { initTimers } from "@/init/timers";
 import { resolveEnvironment } from "@/types/config";
@@ -20,7 +22,6 @@ import { registerSettingsDashboardPlugin } from "@/web";
  * failure can be reported as an actionable misconfiguration rather than a
  * silent, never-connected process.
  *
- * @param error - The rejection thrown by client.login()
  * @returns true if the failure is a disallowed/privileged intent rejection
  */
 function isDisallowedIntentsError(error: unknown): boolean {
@@ -44,9 +45,14 @@ if (environment === "production") {
 
 await loadSecrets(environment);
 
+registerHeapSnapshotHandler();
+
+initMediaProcessing();
+
 // Probe Discord for Presence Intent approval (or honor an explicit override) before
 // building the client, so we request the privileged intent only when it is actually
-// enabled.
+// enabled, so self-resolving the moment Discord grants approval, with no failed
+// gateway handshake and no manual env change.
 const includePresences = await resolvePresenceIntentEnabled(environment);
 const client = createDiscordClient(includePresences);
 
@@ -60,7 +66,14 @@ registerSettingsDashboardPlugin(client);
 
 initTimers(client);
 
-// Login - triggers clientReady which starts all deferred timers.
+// Login, so triggers clientReady which starts all deferred timers.
+// Awaited inside a try/catch as a defensive net: resolvePresenceIntentEnabled
+// already prevents requesting an unapproved privileged intent, so a
+// DisallowedIntents rejection here is a rare edge (e.g. the Presence Intent was
+// revoked between the approval probe and login). We exit loudly rather than
+// re-wiring the client in place (which would duplicate one-time init like the
+// Matrix bridge and quota-cleanup interval); the probe on the next restart
+// self-heals by booting without the privileged intent.
 try {
   await client.login(process.env.DISCORD_TOKEN);
 } catch (error) {

@@ -8,6 +8,7 @@ import {
   normalizeOpenAICompatibleProviderError,
 } from "@/providers/openaiCompatible/openaiCompatibleErrorFormatter";
 import { streamOpenAICompatibleSseChunks } from "@/providers/openaiCompatible/openaiCompatibleSse";
+import { logRawProviderError } from "@/utils/provider/providerErrorLogging";
 import type {
   OpenAICompatibleAccumulatedToolCall,
   OpenAICompatibleStreamAdapterOptions,
@@ -98,9 +99,9 @@ export class OpenAICompatibleStreamAdapter extends BaseStreamAdapter {
     this.accumulatedReasoningContent = "";
     this.pendingThinkBlockThoughtText = "";
     this.reasoningContentSpillGuard.reset();
-    // 1. Build a persona-label matcher used as a fallback `</think>` closer.
+    // Build a persona-label matcher used as a fallback `</think>` closer.
     //    Matches the persona name at start-of-string or after a newline, followed by ":" or "："
-    //    (half/full-width colon). Required at a line boundary to keep false positives low —
+    //    (half/full-width colon). Required at a line boundary to keep false positives low because
     //    mid-sentence mentions like "as Nerine would" won't trigger.
     const personaName = context.tomoriState.persona_nickname?.trim();
     const personaSpeakerLabelRegex = personaName
@@ -134,6 +135,7 @@ export class OpenAICompatibleStreamAdapter extends BaseStreamAdapter {
       currentTurnModelParts: context.currentTurnModelParts,
       functionInteractionHistory: context.functionInteractionHistory,
       seesImages: openAICompatibleConfig.seesImages ?? false,
+      requiresReasoningContentReplay: this.options.requiresReasoningContentReplay,
       supportsSystemRole,
     });
 
@@ -270,7 +272,7 @@ export class OpenAICompatibleStreamAdapter extends BaseStreamAdapter {
 
       const fetchImpl = this.options.providerName === "custom" ? fetchUserRemoteUrl : fetch;
       const attempts = buildDegradationAttempts(requestBody, {
-        mandatoryKeys: new Set(["model", "messages", "stream"]),
+        mandatoryKeys: new Set(["model", "messages", "stream", ...(this.options.mandatoryBodyKeys ?? [])]),
         stripImages: (attemptMessages) =>
           Array.isArray(attemptMessages)
             ? stripImageBlocksWithNotice(attemptMessages as Array<Record<string, unknown>>)
@@ -378,7 +380,7 @@ export class OpenAICompatibleStreamAdapter extends BaseStreamAdapter {
           if (!response.ok) {
             const responseErrorText = await response.text();
             // A message that names a droppable request param is sufficient evidence on
-            // its own — retry even when the generic status/wording classifier misses.
+            // its own, so retry even when the generic status/wording classifier misses.
             // `degradeOn502` stays off: a direct provider's 502 is an outage, not a
             // parameter incompatibility, and should fail fast into key/model fallback.
             const queuedTargeted = queueTargetedAttempt(i, attempt.body, responseErrorText);
@@ -714,26 +716,8 @@ export class OpenAICompatibleStreamAdapter extends BaseStreamAdapter {
     });
   }
 
-  extractFunctionCall(chunk: RawStreamChunk): FunctionCall | null {
-    const openAIChunk = chunk.data as OpenAICompatibleStreamChunk;
-    const choice = openAIChunk.choices?.[0];
-    if (!choice?.delta?.tool_calls || choice.delta.tool_calls.length === 0) {
-      return null;
-    }
-
-    const toolCall = choice.delta.tool_calls[0];
-    if (!toolCall.function) {
-      return null;
-    }
-
-    return {
-      name: toolCall.function.name || "",
-      args: toolCall.function.arguments ? JSON.parse(toolCall.function.arguments) : {},
-    };
-  }
-
   handleProviderError(error: unknown): ProviderError {
-    log.error(`${this.options.adapterName}: Provider error`, error as Error);
+    logRawProviderError(this.options.adapterName, error);
     return normalizeOpenAICompatibleProviderError(error, {
       errorMessagePrefix: this.options.errorMessagePrefix,
     });

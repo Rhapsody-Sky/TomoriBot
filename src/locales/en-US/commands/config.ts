@@ -1,6 +1,4 @@
-// locales/en-US/commands/config.ts
-
-export default {
+﻿export default {
   config: {
     options: {
       enable: `Enable`,
@@ -192,7 +190,7 @@ export default {
         image_workflow_edit_title: `Edit Image Workflow`,
         video_workflow_edit_title: `Edit Video Workflow`,
         model_name_label: `Model Name (Exact API ID)`,
-        model_name_placeholder: `Exact ID sent in API requests, e.g. deepseek-chat, qwen-chat, gemma3:latest`,
+        model_name_placeholder: `Exact ID sent in API requests, e.g. deepseek-v4-flash, qwen-chat, gemma3:latest`,
         display_name_label: `Display Name`,
         display_name_placeholder: `Leave blank to use model name`,
         num_ctx_label: `Context Window Override`,
@@ -569,14 +567,14 @@ Restored now ({restored_count}): {restored_list}`,
       success_desc: `I'm all set up for this server as \`{persona}\`!`,
       success_desc_with_model: `I'm all set up for this server! I'll answer with the \`{model_name}\` model (\`{provider}\`'s default) as \`{persona}\`.`,
       success_desc_byok: `I'm all set up for this server in User BYOK mode as \`{persona}\`! Each member answers with their own provider until BYOK is turned off.`,
-      success_desc_custom_endpoint: `I'm almost set up for this server as \`{persona}\`! I don't have an active text provider yet — finish the Custom Endpoint step (below) so I can answer.`,
+      success_desc_custom_endpoint: `I'm almost set up for this server as \`{persona}\`! I don't have an active text provider yet, finish the Custom Endpoint step (below) so I can answer.`,
       success_desc_dm: `I'm all set up for our DM as \`{persona}\`!`,
       success_desc_dm_with_model: `I'm all set up for our DM as \`{persona}\`! I'll answer with the \`{model_name}\` model (\`{provider}\`'s default).`,
       next_steps_title: `➡️ Recommended Next Steps`,
       next_steps_value: `- **Mention me in chat** to start talking!\n- Use \`/persona\` to change my name, look, and personality.\n- Use \`/config\` to adjust how I act and what I can do.\n- Use \`/memory\` to teach me things about you and this server.\n- Use \`/server initialize\` to let me use this server's emoji and stickers.`,
       next_steps_value_dm: `- **Just message me here** to start talking!\n- Use \`/persona\` to change my name, look, and personality.\n- Use \`/config\` to adjust how I act and what I can do.\n- Use \`/memory\` to teach me things about you.`,
       learn_more_title: `📖 Learn More`,
-      learn_more_value: `Read the [Official Wiki](https://docs.tomoribot.app/features/) or use {helpFeatures} to learn more about what I can do!\n- [Multiple Personas](https://docs.tomoribot.app/features/chatting-personality/multiple-personas/) = Give me different looks, voices, and triggers\n- [Chatting & Triggers](https://docs.tomoribot.app/features/chatting-personality/chatting-and-triggers/) = Decide when and how I join conversations\n- [Memory](https://docs.tomoribot.app/features/knowledge/memory/) = I remember people, facts, and context\n- [Personalization](https://docs.tomoribot.app/features/knowledge/personalization/) = Teach me about you so I can treat you how you like to be treated\n- [Media Generation](https://docs.tomoribot.app/features/capabilities/media-generation/) = I can make images, video, and voice\n- [Tools & Extensions](https://docs.tomoribot.app/features/capabilities/tools-and-extensions/) = Web search, link reading, and custom tools`,
+      learn_more_value: `Read the [Official Wiki](https://docs.tomoribot.app/en/features/) or use {helpFeatures} to learn more about what I can do!\n- [Multiple Personas](https://docs.tomoribot.app/en/features/chatting-personality/multiple-personas/) = Give me different looks, voices, and triggers\n- [Chatting & Triggers](https://docs.tomoribot.app/en/features/chatting-personality/chatting-and-triggers/) = Decide when and how I join conversations\n- [Memory](https://docs.tomoribot.app/en/features/knowledge/memory/) = I remember people, facts, and context\n- [Personalization](https://docs.tomoribot.app/en/features/knowledge/personalization/) = Teach me about you so I can treat you how you like to be treated\n- [Media Generation](https://docs.tomoribot.app/en/features/capabilities/media-generation/) = I can make images, video, and voice\n- [Tools & Extensions](https://docs.tomoribot.app/en/features/capabilities/tools-and-extensions/) = Web search, link reading, and custom tools`,
       heads_up_title: `⚠️ A Few Things to Note`,
       novelai_expressions_warning_field: `Expressions Disabled`,
       novelai_expressions_warning_value: `Emoji and sticker usage have been automatically disabled to keep NovelAI's context lean and stable. You can re-enable them anytime with \`/capabilities manage\`.`,
@@ -718,7 +716,7 @@ Disabled ({omitted_count}): {omitted_list}`,
         success_title: `System Prompt Updated`,
         success_description: `Custom system prompt has been set successfully:
 \`\`\`
-{preview}...
+{preview}
 \`\`\``,
       },
       clear: {
@@ -729,9 +727,12 @@ Disabled ({omitted_count}): {omitted_list}`,
 {defaultPrompt}
 \`\`\``,
         success_title: `System Prompt Cleared`,
-        success_description: `Custom system prompt has been cleared. Now using the default prompt:
+        success_description: `Custom system prompt has been cleared. Now using the default prompt.`,
+        success_description_with_prompt: `Custom system prompt has been cleared. Now using the default prompt.
+
+Your removed custom prompt, in case you want to keep a copy:
 \`\`\`
-{defaultPrompt}
+{removed_prompt}
 \`\`\``,
       },
       preset: {
@@ -743,7 +744,7 @@ Disabled ({omitted_count}): {omitted_list}`,
         success_description: `System prompt preset applied: **{presetName}**
 Preview:
 \`\`\`
-{preview}...
+{preview}
 \`\`\``,
         no_presets_title: `No Presets Available`,
         no_presets_description: `No system prompt presets found. Please contact the bot administrator.`,

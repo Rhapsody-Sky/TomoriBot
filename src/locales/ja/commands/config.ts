@@ -1,5 +1,3 @@
-// locales/ja/commands/config.ts
-
 export default {
   config: {
     options: {
@@ -192,7 +190,7 @@ export default {
         image_workflow_edit_title: `画像ワークフローを編集`,
         video_workflow_edit_title: `動画ワークフローを編集`,
         model_name_label: `モデル名（正確なAPI ID）`,
-        model_name_placeholder: `APIリクエストで使われる正確なID。例: deepseek-chat, gemma3:latest`,
+        model_name_placeholder: `APIリクエストで使われる正確なID。例: deepseek-v4-flash, gemma3:latest`,
         display_name_label: `表示名`,
         display_name_placeholder: `省略するとモデル名が使われます`,
         num_ctx_label: `コンテキストウィンドウ上書き`,
@@ -718,7 +716,7 @@ export default {
         success_title: `システムプロンプトが更新されました`,
         success_description: `カスタムシステムプロンプトを設定しました：
 \`\`\`
-{preview}...
+{preview}
 \`\`\``,
       },
       clear: {
@@ -729,9 +727,12 @@ export default {
 {defaultPrompt}
 \`\`\``,
         success_title: `システムプロンプトがクリアされました`,
-        success_description: `カスタムシステムプロンプトをクリアしました。現在はデフォルトのプロンプトを使用します：
+        success_description: `カスタムシステムプロンプトをクリアしました。現在はデフォルトのプロンプトを使用します。`,
+        success_description_with_prompt: `カスタムシステムプロンプトをクリアしました。現在はデフォルトのプロンプトを使用します。
+
+削除されたカスタムプロンプトです。控えが必要な場合はコピーしてください：
 \`\`\`
-{defaultPrompt}
+{removed_prompt}
 \`\`\``,
       },
       preset: {
@@ -743,7 +744,7 @@ export default {
         success_description: `システムプロンプトプリセットを適用しました：**{presetName}**
 プレビュー：
 \`\`\`
-{preview}...
+{preview}
 \`\`\``,
         no_presets_title: `プリセットがありません`,
         no_presets_description: `システムプロンプトプリセットが見つかりません。ボット管理者にお問い合わせください。`,

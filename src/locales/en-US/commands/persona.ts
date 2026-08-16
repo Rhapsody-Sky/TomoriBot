@@ -1,5 +1,3 @@
-// locales/en-US/commands/persona.ts
-
 export default {
   persona: {
     description: `Manage personality presets`,
@@ -76,6 +74,7 @@ export default {
         persona_select_title: `Select Persona`,
         no_sprites_title: `🟡 No Sprites`,
         no_sprites_description: `**{persona_name}** does not have any sprites to edit.`,
+        no_eligible_sprites_description: `No persona has any sprites to edit yet. Add some with \`/persona sprites add\`.`,
         select_modal_title: `Select Sprite`,
         select_label: `Sprite to Edit`,
         select_description: `Choose which sprite to edit.`,
@@ -105,6 +104,7 @@ Click **Confirm** to edit it.`,
         persona_select_title: `Select Persona`,
         no_sprites_title: `🟡 No Sprites`,
         no_sprites_description: `**{persona_name}** does not have any sprites to remove.`,
+        no_eligible_sprites_description: `No persona has any sprites to remove yet. Add some with \`/persona sprites add\`.`,
         modal_title: `Remove Persona Sprites`,
         checkbox_label: `Sprites to Keep`,
         checkbox_label_continued: `More Sprites to Keep`,
@@ -211,6 +211,28 @@ Click **Confirm** to edit it.`,
       },
       remove: {
         description: `Remove a persona prompt.`,
+      },
+    },
+    stm: {
+      description: `Manage a persona's short-term memory.`,
+      edit: {
+        description: `Hand-edit a persona's short-term memory for this channel.`,
+        no_permission_title: `Manage Server Required`,
+        no_permission_description: `You need the **Manage Server** permission to edit a persona's short-term memory.`,
+        modal_title: `Edit Short-Term Memory`,
+        success_title: `Short-Term Memory Updated`,
+        success_description: `Updated the short-term memory for **{persona_name}** in this channel.`,
+      },
+      view: {
+        description: `View a persona's short-term memory for this channel (read-only).`,
+        title: `Short-Term Memory`,
+        display: `{content}`,
+        scope_guild: `Showing the server-shared memory injected for this channel.`,
+        scope_dm: `Showing your personal memory injected for this conversation.`,
+        empty_body: `*No short-term memory is stored for this channel yet.*`,
+        truncated: `*…trimmed to fit Discord's display limit.*`,
+        none_title: `No Short-Term Memories`,
+        none_description: `No persona has any short-term memory stored for this channel yet.`,
       },
     },
     "sample-dialogue": {

@@ -3,9 +3,9 @@
  *
  * Renders a standard notification as a Components V2 container with an optional
  * in-card "Expand" button. The button is attached only when the underlying
- * content exceeds the truncation threshold (default 200 chars). Clicking it
- * replies ephemerally with the full, un-truncated content so users can read
- * everything without cluttering the channel.
+ * content exceeds the notice type's truncation threshold. Clicking it replies
+ * ephemerally with the full, un-truncated content so users can read everything
+ * without cluttering the channel.
  *
  * The generic `sendEmbedWithExpand` is reused by both memory-learning notices
  * (`sendMemoryEmbedWithExpand`) and scheduled-task notices
@@ -36,6 +36,7 @@ import { createStandardEmbed, type WebhookEmbedContext } from "@/utils/discord/e
 import { buildNoticeContainer } from "@/utils/discord/ui/statusComponents";
 import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/webhookCore";
 import { ColorCode, log } from "@/utils/misc/logger";
+import { buildTextPreview } from "@/utils/text/textPreview";
 
 type SupportedChannel =
   | TextChannel
@@ -46,10 +47,11 @@ type SupportedChannel =
   | BaseGuildVoiceChannel;
 
 // Default character count above which the "Expand" button is attached. Matches
-// the 200-char truncation applied by the memory and task embed callers.
+// the truncation applied by the task embed callers.
 const DEFAULT_TRUNCATION_THRESHOLD = 200;
 // Shared 24h fallback used when a caller does not provide its own timeout.
 const DEFAULT_EXPAND_BUTTON_TIMEOUT_MS = 86_400_000;
+const DEFAULT_MEMORY_NOTICE_PREVIEW_LIMIT = 600;
 
 // Per-notice-type collector timeouts, each independently configurable via env.
 const MEMORY_EXPAND_BUTTON_TIMEOUT_MS = parsePositiveIntegerEnv(
@@ -59,6 +61,17 @@ const MEMORY_EXPAND_BUTTON_TIMEOUT_MS = parsePositiveIntegerEnv(
 const TASK_EXPAND_BUTTON_TIMEOUT_MS = parsePositiveIntegerEnv(
   process.env.TASK_EXPAND_BUTTON_TIMEOUT_MS,
   DEFAULT_EXPAND_BUTTON_TIMEOUT_MS,
+);
+
+/**
+ * Characters of memory content shown inline before the notice truncates and
+ * offers the expand button. Deliberately below `MAX_MEMORY_LENGTH` (1000) so
+ * the button still has a purpose, and far below Discord's 4000-char text
+ * display cap so the title, footer, and framing sentence always fit.
+ */
+export const MEMORY_NOTICE_PREVIEW_LIMIT = parsePositiveIntegerEnv(
+  process.env.MEMORY_NOTICE_PREVIEW_LIMIT,
+  DEFAULT_MEMORY_NOTICE_PREVIEW_LIMIT,
 );
 
 function parsePositiveIntegerEnv(value: string | undefined, fallback: number): number {
@@ -84,7 +97,7 @@ interface ExpandableNoticeConfig {
   timeoutMs: number;
 }
 
-// Mirrors the private helper in embedHelper.ts — webhooks targeting threads
+// Mirrors the private helper in embedHelper.ts: webhooks targeting threads
 // reference the parent channel, so a thread is only usable when its parent
 // matches the webhook channel.
 function canUseWebhookForChannel(channel: SupportedChannel, webhook: Webhook): boolean {
@@ -100,7 +113,6 @@ function canUseWebhookForChannel(channel: SupportedChannel, webhook: Webhook): b
  * button edits so a CV2 notice never falls back to a partial component update.
  *
  * @param locale - Locale used for title, body, footer, and button label strings.
- * @param embedOptions - Existing standard embed inputs supplied by memory/task callers.
  * @param config - Notice-specific button labels and custom ID.
  * @param includeExpandButton - Whether the visible card needs an Expand action.
  * @param expandButtonDisabled - Whether the Expand button should render disabled.
@@ -144,15 +156,14 @@ function buildNoticeComponents(
  *
  * @param channel - Destination channel (supports the same channel types as `sendStandardEmbed`).
  * @param locale - Locale used for the button label, expand-popup title, and embed strings.
- * @param embedOptions - Pre-built `StandardEmbedOptions` for the visible embed.
- *   The caller is responsible for placing the already-truncated content into `descriptionVars` —
+ *   The caller is responsible for placing the already-truncated content into `descriptionVars`:
  *   this helper does not modify the embed body.
  * @param fullContent - The full, already-processed content (e.g. post-{user}/{bot} substitution).
  *   Used both to decide whether to show the button and as the body of the ephemeral expand reply.
  * @param config - Notice-specific locale keys, button custom ID, threshold, and collector timeout.
  * @param webhookContext - Optional persona webhook identity, identical to `sendStandardEmbed`.
  */
-export async function sendEmbedWithExpand(
+async function sendEmbedWithExpand(
   channel: SupportedChannel,
   locale: string,
   embedOptions: StandardEmbedOptions,
@@ -161,21 +172,23 @@ export async function sendEmbedWithExpand(
   webhookContext?: WebhookEmbedContext,
 ): Promise<void> {
   const truncationThreshold = config.truncationThreshold ?? DEFAULT_TRUNCATION_THRESHOLD;
-  const shouldAttachExpandButton = fullContent.length > truncationThreshold;
+  const thresholdPreview = buildTextPreview(fullContent, truncationThreshold);
+  const fenceSafeContent = buildTextPreview(fullContent, Number.MAX_SAFE_INTEGER).text;
+  const shouldAttachExpandButton = thresholdPreview.truncated;
 
-  // 1. Build the complete CV2 tree up front. Teardown reuses the same renderer
-  //    with only the button disabled, keeping the message in one mode.
+  // Teardown reuses the complete Components V2 tree with only the button
+  // disabled, keeping the message in one rendering mode.
   const activeComponents = buildNoticeComponents(locale, embedOptions, config, shouldAttachExpandButton);
   const disabledComponents = shouldAttachExpandButton
     ? buildNoticeComponents(locale, embedOptions, config, true, true)
     : activeComponents;
 
-  // 2. Resolve thread ID — persona webhooks live on the parent channel and need
+  // Resolve thread ID: persona webhooks live on the parent channel and need
   //    `threadId` to post into a thread.
   const threadId =
     "isThread" in channel && typeof channel.isThread === "function" && channel.isThread() ? channel.id : undefined;
 
-  // 3. Try webhook-persona delivery first so the notice appears under the same
+  // Try webhook-persona delivery first so the notice appears under the same
   //    identity as the AI response, then fall back to a plain bot message.
   const webhook = webhookContext?.webhook;
   const useWebhook = Boolean(webhook && webhookContext?.personaUsername && canUseWebhookForChannel(channel, webhook));
@@ -219,21 +232,21 @@ export async function sendEmbedWithExpand(
     }
   }
 
-  // 4. Short content was not truncated, so there is no collector to wire.
+  // Short content was not truncated, so there is no collector to wire.
   if (!shouldAttachExpandButton) {
     return;
   }
 
-  // 5. Build the ephemeral "full content" embed once — reused for every click.
+  // Build the ephemeral "full content" embed once: reused for every click.
   //    Wrap the content in a fenced code block so newlines and any markdown
   //    inside the content are preserved without being interpreted.
   const fullEmbed = createStandardEmbed(locale, {
     color: embedOptions.color ?? ColorCode.INFO,
     titleKey: config.expandTitleKey,
-    description: `\`\`\`\n${fullContent}\n\`\`\``,
+    description: `\`\`\`\n${fenceSafeContent}\n\`\`\``,
   });
 
-  // 6. Wire the button collector. Any non-bot user may click — the full content
+  // Wire the button collector. Any non-bot user may click, so the full content
   //    is already shown to everyone in the channel (truncated), so ephemeral
   //    expansion is not a privacy escalation.
   const collector = noticeMessage.createMessageComponentCollector({
@@ -283,9 +296,7 @@ export async function sendEmbedWithExpand(
  * "Show Full Memory" button when the processed memory content exceeds the
  * truncation threshold.
  *
- * @param channel - Destination channel.
  * @param locale - Locale for button label, expand title, and embed strings.
- * @param embedOptions - Pre-built embed options with the already-truncated content.
  * @param fullMemoryContent - Full, processed (post-{user}/{bot}) memory content.
  * @param webhookContext - Optional persona webhook identity.
  */
@@ -305,6 +316,7 @@ export async function sendMemoryEmbedWithExpand(
       customId: "memory_notice_expand",
       buttonLabelKey: "genai.self_teach.expand_memory_button",
       expandTitleKey: "genai.self_teach.expand_memory_title",
+      truncationThreshold: MEMORY_NOTICE_PREVIEW_LIMIT,
       timeoutMs: MEMORY_EXPAND_BUTTON_TIMEOUT_MS,
     },
     webhookContext,
@@ -316,9 +328,7 @@ export async function sendMemoryEmbedWithExpand(
  * "Show Full Task" button when the task/reminder purpose exceeds the
  * truncation threshold (created, updated, and deleted task notices).
  *
- * @param channel - Destination channel.
  * @param locale - Locale for button label, expand title, and embed strings.
- * @param embedOptions - Pre-built embed options with the already-truncated purpose.
  * @param fullReminderPurpose - Full, un-truncated reminder/task purpose.
  * @param webhookContext - Optional persona webhook identity.
  */

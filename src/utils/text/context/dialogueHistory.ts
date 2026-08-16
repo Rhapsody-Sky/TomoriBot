@@ -29,7 +29,7 @@ import {
 import { normalizeCustomEmojisForLlm, splitLeadingSystemBlocks } from "./mentionNormalizer";
 import type { MentionConverter } from "./templates";
 import type { SimplifiedMessageForContext } from "./types";
-import { buildDateSpacer } from "./timeAwareness";
+import { buildDateSpacer, TIME_AWARENESS_NOTE_DEPTH } from "./timeAwareness";
 
 export async function appendDialogueHistoryContext(params: {
   contextItems: StructuredContextItem[];
@@ -40,9 +40,8 @@ export async function appendDialogueHistoryContext(params: {
   tomoriConfig: AssembledServerConfig;
   tomoriState: TomoriState | null;
   channelContextNote?: { note: string; depth: number } | null;
-  reunionNote?: { note: string } | null;
+  reunionNote?: string | null;
   dateSpacerTemplate?: string | null;
-  mediaContextWindow?: number;
   includeTimestamps: boolean;
   isUserImpersonation: boolean;
   impersonatedUserId?: string;
@@ -52,9 +51,7 @@ export async function appendDialogueHistoryContext(params: {
 }): Promise<void> {
   const totalMessages = params.simplifiedMessageHistory.length;
   const configuredMessageFetchLimit = normalizeMessageFetchLimit(params.tomoriConfig.message_fetch_limit);
-  const requestedMediaWindow = params.mediaContextWindow ?? memoryGuard.getMediaWindow();
-  const effectiveMediaWindow = Math.min(requestedMediaWindow, configuredMessageFetchLimit);
-  const maxExtendBy = Math.max(0, configuredMessageFetchLimit - effectiveMediaWindow);
+  const effectiveMediaWindow = Math.min(memoryGuard.getMediaWindow(), configuredMessageFetchLimit);
   const mediaWindowCutoff = totalMessages - effectiveMediaWindow;
   const renderedImageMessageIds = getRenderedImageMessageIdsWithinWindow(
     params.simplifiedMessageHistory,
@@ -66,13 +63,12 @@ export async function appendDialogueHistoryContext(params: {
     mediaWindowCutoff,
   );
 
-  // Build the ordered list of active context notes.
   // Persona and channel notes are additive (both injected when set).
   // Global note is a fallback used only when neither persona nor channel has one.
   const personaNoteText = params.tomoriState?.context_note?.trim() || null;
   const channelNoteText = params.channelContextNote?.note?.trim() || null;
 
-  const activeNotes: Array<{ text: string; targetIndex: number; emitted: boolean; isSystemBlock?: boolean }> = [];
+  const activeNotes: Array<{ text: string; targetIndex: number; emitted: boolean }> = [];
 
   if (personaNoteText) {
     const depth = params.tomoriState?.context_note_depth ?? 0;
@@ -96,13 +92,15 @@ export async function appendDialogueHistoryContext(params: {
       emitted: false,
     });
   }
-  const reunionNoteText = params.reunionNote?.note?.trim();
+  // The reunion note sits above the newest messages rather than directly against
+  // the triggering prompt, so it reads as background awareness instead of an
+  // instruction that outranks whatever the user actually asked for.
+  const reunionNoteText = params.reunionNote?.trim();
   if (reunionNoteText) {
     activeNotes.push({
       text: reunionNoteText,
-      targetIndex: Math.max(0, totalMessages - 1),
+      targetIndex: Math.max(0, totalMessages - TIME_AWARENESS_NOTE_DEPTH),
       emitted: false,
-      isSystemBlock: true,
     });
   }
 
@@ -145,7 +143,7 @@ export async function appendDialogueHistoryContext(params: {
         pushDialogueHistoryContextItem(
           params.contextItems,
           "user",
-          [{ type: "text", text: note.isSystemBlock ? note.text : `[System: ${note.text}]` }],
+          [{ type: "text", text: `[System: ${note.text}]` }],
           "context_note_injection",
           ContextItemTag.CONTEXT_NOTE_INJECTION,
         );
@@ -173,7 +171,6 @@ export async function appendDialogueHistoryContext(params: {
       renderedImageMessageIds,
       duplicateImageLastIndex,
       mediaWindowCutoff,
-      maxExtendBy,
     });
 
     const mediaAttributionHint =
@@ -212,7 +209,7 @@ export async function appendDialogueHistoryContext(params: {
       pushDialogueHistoryContextItem(
         params.contextItems,
         "user",
-        [{ type: "text", text: note.isSystemBlock ? note.text : `[System: ${note.text}]` }],
+        [{ type: "text", text: `[System: ${note.text}]` }],
         "context_note_injection",
         ContextItemTag.CONTEXT_NOTE_INJECTION,
       );
@@ -232,14 +229,12 @@ function appendMediaDescriptors(
     renderedImageMessageIds: Set<string>;
     duplicateImageLastIndex: Map<string, number>;
     mediaWindowCutoff: number;
-    maxExtendBy: number;
   },
 ): boolean {
   if (!params.isWithinMediaWindow) {
-    const extendByNeeded = Math.min(params.mediaWindowCutoff - params.index, params.maxExtendBy);
-    const mediaId = params.messageIdMap?.register(params.msg.id, "media") ?? params.msg.id;
     for (const attachment of params.msg.imageAttachments) {
       if (attachment.isEmoji) continue;
+      const mediaId = registerAttachmentMediaId(params, attachment.sourceMessageId);
       params.mediaDescriptors.push({
         kind: "image",
         uri: attachment.proxyUrl,
@@ -247,18 +242,17 @@ function appendMediaDescriptors(
         ...(attachment.url !== attachment.proxyUrl && { fallbackUri: attachment.url }),
         mediaId,
         withinWindow: false,
-        extendBy: extendByNeeded,
         filename: attachment.filename,
       });
     }
     for (const attachment of params.msg.videoAttachments) {
+      const mediaId = registerAttachmentMediaId(params, attachment.sourceMessageId);
       params.mediaDescriptors.push({
         kind: "video",
         uri: attachment.isYouTubeLink ? attachment.url : attachment.proxyUrl,
         mimeType: attachment.mimeType,
         mediaId,
         withinWindow: false,
-        extendBy: extendByNeeded,
         isYouTubeLink: attachment.isYouTubeLink,
         filename: attachment.filename,
       });
@@ -278,7 +272,6 @@ function appendImageDescriptors(params: Parameters<typeof appendMediaDescriptors
   const shouldRenderCountedImages = !hasCountedImages || params.renderedImageMessageIds.has(params.msg.id);
   let skippedCountedImageCount = 0;
   let skippedDuplicateImageCount = 0;
-  const mediaId = params.messageIdMap?.register(params.msg.id, "media") ?? params.msg.id;
 
   for (const attachment of params.msg.imageAttachments) {
     if (attachment.isEmoji) continue;
@@ -295,6 +288,7 @@ function appendImageDescriptors(params: Parameters<typeof appendMediaDescriptors
       continue;
     }
 
+    const mediaId = registerAttachmentMediaId(params, attachment.sourceMessageId);
     params.mediaDescriptors.push({
       kind: "image",
       uri: attachment.proxyUrl,
@@ -326,8 +320,8 @@ function appendImageDescriptors(params: Parameters<typeof appendMediaDescriptors
 function appendVideoDescriptors(params: Parameters<typeof appendMediaDescriptors>[0]): void {
   if (params.msg.videoAttachments.length === 0) return;
 
-  const mediaId = params.messageIdMap?.register(params.msg.id, "media") ?? params.msg.id;
   for (const attachment of params.msg.videoAttachments) {
+    const mediaId = registerAttachmentMediaId(params, attachment.sourceMessageId);
     params.mediaDescriptors.push({
       kind: "video",
       uri: attachment.isYouTubeLink ? attachment.url : attachment.proxyUrl,
@@ -340,6 +334,20 @@ function appendVideoDescriptors(params: Parameters<typeof appendMediaDescriptors
   }
 }
 
+/**
+ * Register the fetchable Discord message that owns one media attachment.
+ *
+ * Copied reply media carries the referenced source message. Local media and
+ * forwarded snapshots fall back to the current wrapper message.
+ */
+function registerAttachmentMediaId(
+  params: Parameters<typeof appendMediaDescriptors>[0],
+  sourceMessageId?: string,
+): string {
+  const resolvedMessageId = sourceMessageId ?? params.msg.id;
+  return params.messageIdMap?.register(resolvedMessageId, "media") ?? resolvedMessageId;
+}
+
 async function buildMediaAttributionHint(
   params: Parameters<typeof appendDialogueHistoryContext>[0] & {
     msg: SimplifiedMessageForContext;
@@ -347,7 +355,14 @@ async function buildMediaAttributionHint(
     hasVideos: boolean;
   },
 ): Promise<string> {
-  const mediaMessageIds = params.msg.mediaSourceMessageIds ?? [params.msg.id];
+  const mediaMessageIds = [
+    ...new Set([
+      ...params.msg.imageAttachments
+        .filter((attachment) => !attachment.isEmoji)
+        .map((attachment) => attachment.sourceMessageId ?? params.msg.id),
+      ...params.msg.videoAttachments.map((attachment) => attachment.sourceMessageId ?? params.msg.id),
+    ]),
+  ];
   const nonEmojiImageCount = params.msg.imageAttachments.filter((attachment) => !attachment.isEmoji).length;
   const videoCount = params.msg.videoAttachments.length;
   const totalMediaCount = nonEmojiImageCount + videoCount;
@@ -367,7 +382,7 @@ async function buildMediaAttributionHint(
   const wasSent = totalMediaCount === 1 ? "was" : "were";
 
   // Forwarded media registers the wrapper message's own id (so tools can resolve
-  // it in the current channel), so it would pass the includes() check below —
+  // it in the current channel), so it would pass the includes() check below.
   // branch on the source kind first to keep the forwarded attribution wording.
   if (params.msg.remoteMediaSourceKind === "forwarded") {
     return `[System: ${thisOrThese} ${mediaWord} (${idLabel}: ${idList}) ${wasSent} attached to the forwarded message described above]`;
@@ -400,20 +415,39 @@ async function appendTextParts(
 ): Promise<void> {
   if (params.msg.content) {
     const normalizedContent = normalizeCustomEmojisForLlm(params.msg.content);
+
+    // The author label is text WE author, so identity macros in it must still resolve: it is
+    //    what tells the model which name owns the turn. Resolved BEFORE the join so the body,
+    //    which is raw prose, can opt out of macro expansion in step 3.
+    const resolvedAuthorLabel = await params.convertMentions(
+      params.msg.authorName,
+      params.client,
+      params.guildId,
+      params.msg.authorName,
+      params.botName,
+      params.tomoriConfig.personal_memories_enabled,
+      undefined,
+      "resolve",
+    );
+
     let processedContent: string;
     if (normalizedContent.startsWith("[System:")) {
       const { leadingSystemBlocks, remainingContent } = splitLeadingSystemBlocks(normalizedContent);
       processedContent =
         leadingSystemBlocks.length > 0 && remainingContent
-          ? `${leadingSystemBlocks.join("\n")}\n${params.msg.authorName}: ${remainingContent}`
+          ? `${leadingSystemBlocks.join("\n")}\n${resolvedAuthorLabel}: ${remainingContent}`
           : normalizedContent;
     } else {
-      processedContent = `${params.msg.authorName}: ${normalizedContent}`;
+      processedContent = `${resolvedAuthorLabel}: ${normalizedContent}`;
     }
 
     if (params.tomoriConfig.humanizer_degree >= HumanizerDegree.HEAVY && params.role === "model") {
       processedContent = humanizeString(processedContent);
     }
+    // Mentions, channel links, and roles still resolve here. Only the identity macros are left
+    //    literal: this string carries a real Discord message body, so rewriting "{bot}"/"{char}"
+    //    would corrupt legitimate content (e.g. a persona preset Tomori drafted for a user) and,
+    //    on a model-role line, would collapse both macros onto the persona's own name.
     processedContent = await params.convertMentions(
       processedContent,
       params.client,
@@ -421,6 +455,8 @@ async function appendTextParts(
       params.msg.authorName,
       params.botName,
       params.tomoriConfig.personal_memories_enabled,
+      undefined,
+      "preserve",
     );
     if (!processedContent.startsWith("[System:")) {
       processedContent = applyUncensorInputTransforms(processedContent, params.uncensorInputOptions);

@@ -1,6 +1,4 @@
-// locales/ja/commands/teach.ts
-
-export default {
+﻿export default {
   teach: {
     sampledialogue: {
       description: `私がどのように応答すべきかの例として、ユーザー/ボットの対話ペアを追加します。`,
@@ -97,7 +95,7 @@ export default {
       main_persona_description: `メインペルソナ`,
       alter_persona_description: `オルタペルソナ`,
       rag_disabled_title: `ドキュメントRAGが無効です`,
-      rag_disabled_description: `文書の参照にはデータベースに [pgvector](https://github.com/pgvector/pgvector) PostgreSQL拡張が必要です。pgvector をインストールして TomoriBot を再起動してください（[自己ホスト設定ガイド](https://docs.tomoribot.app/self-hosting/manual-setup/)を参照）。`,
+      rag_disabled_description: `文書の参照にはデータベースに [pgvector](https://github.com/pgvector/pgvector) PostgreSQL拡張が必要です。pgvector をインストールして TomoriBot を再起動してください（[自己ホスト設定ガイド](https://docs.tomoribot.app/ja/self-hosting/manual-setup/)を参照）。`,
       teaching_disabled_title: `ドキュメントの教育が無効です`,
       teaching_disabled_description: `現在、このサーバーではメンバーが文書を教える・削除することは許可されていません。\`サーバー管理\`権限を持つメンバーが\`/server member-permissions\`で有効にできます。`,
       no_embedding_model_title: `埋め込みモデルが設定されていません`,
@@ -180,9 +178,9 @@ export default {
         content_too_long_title: `記憶の内容が長すぎます`,
         content_too_long_description: `記憶の内容が長すぎます。最大許容長は {max_length} 文字です。`,
         success_title: `個人的な記憶が追加されました`,
-        success_description: `'{memory}' をあなたの個人的な記憶に正常に追加しました。`,
+        success_description: `'{memory}' をあなたの[個人的な記憶](https://docs.tomoribot.app/ja/features/knowledge/memory/#long-term-memory)に正常に追加しました。`,
         batch_success_title: `個人的な記憶を追加しました`,
-        batch_success_description: `{added_count} 件の個人的な記憶を追加しました。`,
+        batch_success_description: `{added_count} 件の[個人的な記憶](https://docs.tomoribot.app/ja/features/knowledge/memory/#long-term-memory)を追加しました。`,
         success_but_disabled_description: `'{memory}' をあなたの個人的な記憶に正常に追加しました。
 
 **警告:** 現在、このサーバーではパーソナライズが無効になっているため、この記憶はここでは使用されません。パーソナライズが有効になっている他のサーバーでは引き続き利用可能です。`,
@@ -228,9 +226,9 @@ export default {
         content_too_long_title: `記憶の内容が長すぎます`,
         content_too_long_description: `記憶の内容が長すぎます。最大許容長は {max_length} 文字です。`,
         success_title: `サーバーの記憶が追加されました`,
-        success_description: `'{memory}' を私のサーバーの記憶に正常に追加しました。`,
+        success_description: `'{memory}' を私の[サーバーの記憶](https://docs.tomoribot.app/ja/features/knowledge/memory/#long-term-memory)に正常に追加しました。`,
         batch_success_title: `サーバーの記憶を追加しました`,
-        batch_success_description: `{added_count} 件のサーバー記憶を追加しました。`,
+        batch_success_description: `{added_count} 件の[サーバー記憶](https://docs.tomoribot.app/ja/features/knowledge/memory/#long-term-memory)を追加しました。`,
       },
     },
   },

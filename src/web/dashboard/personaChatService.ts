@@ -2,6 +2,7 @@ import type { BaseGuildTextChannel, Client, Guild, Message, MessageCreateOptions
 import { z } from "zod";
 import { buildContext } from "@/utils/text/context/builder";
 import type { SimplifiedMessageForContext } from "@/utils/text/context/types";
+import { prepareParticipantContext } from "@/utils/text/participants/preparation";
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { getProviderForTomori } from "@/utils/provider/providerFactory";
 import { selectApiKey } from "@/utils/security/keyRotation";
@@ -131,12 +132,23 @@ export class DashboardPersonaChatService {
       const persona = safeTestState(personalOverlay.tomoriState);
       const history = buildHistory(parsed.data.messages, actor, persona);
       const channelId = `dashboard-test-${snapshot.serverDiscordId}-${actor.discordId}`;
+      const preparedParticipantContext = await prepareParticipantContext({
+        client: this.client,
+        guildId: snapshot.serverDiscordId,
+        simplifiedMessageHistory: history,
+        personas: snapshot.rawPersonas,
+        activePersona: persona,
+        visibleUserIds: [actor.discordId],
+        syntheticUsers: new Map(),
+        matrixUsers: new Map(),
+        responderPersonaIds: persona.persona_id ? new Set([persona.persona_id]) : undefined,
+      });
       const context = await buildContext({
         guildId: snapshot.serverDiscordId,
         serverName: guild.name,
         serverDescription: guild.description,
         simplifiedMessageHistory: history,
-        userList: [actor.user.user_nickname],
+        preparedParticipantContext,
         channelDesc: "Private dashboard persona test chat. No Discord messages are sent.",
         channelName: "Dashboard test chat",
         channelId,
@@ -145,16 +157,6 @@ export class DashboardPersonaChatService {
         triggererUserId: actor.user.user_id,
         tomoriNickname: persona.persona_nickname,
         tomoriAttributes: persona.attribute_list ?? [],
-        publicPersonaAttributes: snapshot.rawPersonas
-          .filter((entry) => entry.persona_id !== persona.persona_id)
-          .map((entry) => ({
-            personaId: entry.persona_id ?? 0,
-            personaName: entry.persona_nickname,
-            attributes: (entry.persona_attributes ?? [])
-              .filter((attribute) => attribute.is_public)
-              .map((attribute) => attribute.attribute_text),
-          }))
-          .filter((entry) => entry.personaId > 0 && entry.attributes.length > 0),
         tomoriConfig: persona.config,
         personaPrompt: persona.persona_prompt,
         personaLineageId: persona.persona_lineage_id,
