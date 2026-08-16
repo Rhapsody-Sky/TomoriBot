@@ -295,6 +295,90 @@ export class ServerMemoryRepository implements IRepository<ServerMemoryExportSha
   }
 
   /**
+   * Updates one server memory with exact server, lineage, and optional teacher guards.
+   * Omitting taughtByUserId grants server-owner scope; providing it restricts the
+   * write to memories taught by that user.
+   */
+  async updateScoped(
+    serverMemoryId: number,
+    serverId: number,
+    personaLineageId: number,
+    content: string,
+    tags: string[] = [],
+    taughtByUserId?: number,
+  ): Promise<ServerMemoryRow | null> {
+    const contentValidation = validateMemoryContent(content);
+    if (!contentValidation.isValid) return null;
+
+    try {
+      const [updated] =
+        taughtByUserId === undefined
+          ? await sql`
+              UPDATE server_memories
+              SET content = ${content}, tags = ${sql.array(tags, "TEXT")}, updated_at = NOW()
+              WHERE server_memory_id = ${serverMemoryId}
+                AND server_id = ${serverId}
+                AND persona_lineage_id = ${personaLineageId}
+              RETURNING *
+            `
+          : await sql`
+              UPDATE server_memories
+              SET content = ${content}, tags = ${sql.array(tags, "TEXT")}, updated_at = NOW()
+              WHERE server_memory_id = ${serverMemoryId}
+                AND server_id = ${serverId}
+                AND persona_lineage_id = ${personaLineageId}
+                AND user_id = ${taughtByUserId}
+              RETURNING *
+            `;
+      if (!updated) return null;
+
+      const parsed = serverMemorySchema.safeParse(updated);
+      if (!parsed.success) {
+        log.warn(`Skipping invalid updated server memory row ${serverMemoryId}:`, parsed.error.flatten());
+        return null;
+      }
+      return parsed.data;
+    } catch (error) {
+      log.error(`Error updating scoped server memory ${serverMemoryId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Removes one server memory with exact server, lineage, and optional teacher guards.
+   */
+  async removeScoped(
+    serverMemoryId: number,
+    serverId: number,
+    personaLineageId: number,
+    taughtByUserId?: number,
+  ): Promise<boolean> {
+    try {
+      const [deleted] =
+        taughtByUserId === undefined
+          ? await sql`
+              DELETE FROM server_memories
+              WHERE server_memory_id = ${serverMemoryId}
+                AND server_id = ${serverId}
+                AND persona_lineage_id = ${personaLineageId}
+              RETURNING server_memory_id
+            `
+          : await sql`
+              DELETE FROM server_memories
+              WHERE server_memory_id = ${serverMemoryId}
+                AND server_id = ${serverId}
+                AND persona_lineage_id = ${personaLineageId}
+                AND user_id = ${taughtByUserId}
+              RETURNING server_memory_id
+            `;
+      return !!deleted;
+    } catch (error) {
+      log.error(`Error removing scoped server memory ${serverMemoryId}:`, error);
+      return false;
+    }
+  }
+
+  /**
    * Batch-inserts multiple server memories in a single transaction.
    * All rows share the same serverId, personaId, personaLineageId, userId, and tags.
    * Rolls back all inserts if any row fails (atomicity guarantee).

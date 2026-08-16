@@ -11,7 +11,7 @@ sidebar:
 
 Every slash command currently registered by TomoriBot, generated from the same command builders and English locale descriptions used for Discord registration.
 
-Top-level command groups: **27**. Runnable slash commands: **233**.
+Top-level command groups: **28**. Runnable slash commands: **234**.
 
 ## `/bot`
 
@@ -84,6 +84,14 @@ Contribute commands.
 | Command | Summary |
 |---|---|
 | `/contribute github` | Get the GitHub repository link and learn how to contribute to TomoriBot. |
+
+## `/dashboard`
+
+Open the TomoriBot settings dashboard
+
+| Command | Summary |
+|---|---|
+| `/dashboard` | Open the TomoriBot settings dashboard |
 
 ## `/donate`
 

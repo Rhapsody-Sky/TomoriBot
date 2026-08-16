@@ -67,6 +67,43 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Memory — regression", () => {
     expect(memory).toBeNull();
   });
 
+  it("scoped server memory writes enforce server, lineage, and teacher ownership", async () => {
+    const memory = await serverMemoryRepository.add(
+      refs.serverId,
+      refs.personaId,
+      refs.personaLineageId,
+      altUserId,
+      "scoped server memory",
+    );
+    const memoryId = memory?.server_memory_id;
+    expect(memoryId).toBeNumber();
+    if (!memoryId) throw new Error("Failed to create scoped server memory fixture");
+
+    const wrongTeacher = await serverMemoryRepository.updateScoped(
+      memoryId,
+      refs.serverId,
+      refs.personaLineageId,
+      "must not be written",
+      [],
+      refs.userId,
+    );
+    expect(wrongTeacher).toBeNull();
+
+    const adminUpdate = await serverMemoryRepository.updateScoped(
+      memoryId,
+      refs.serverId,
+      refs.personaLineageId,
+      "admin-scoped update",
+      ["verified"],
+    );
+    expect(adminUpdate?.content).toBe("admin-scoped update");
+
+    expect(await serverMemoryRepository.removeScoped(memoryId, refs.serverId, refs.personaLineageId + 1)).toBe(false);
+    expect(await serverMemoryRepository.removeScoped(memoryId, refs.serverId, refs.personaLineageId, altUserId)).toBe(
+      true,
+    );
+  });
+
   // ── personal memories ────────────────────────────────────────────────────
 
   it("addPersonalMemoryByTomori inserts a personal memory", async () => {
@@ -89,5 +126,29 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Memory — regression", () => {
   it("loadPersonalMemoriesForUserLineage returns empty array for unknown user", async () => {
     const memories = await personalMemoryRepository.loadForUserLineage(999_999_999, refs.personaLineageId);
     expect(memories).toHaveLength(0);
+  });
+
+  it("owned personal memory writes enforce both user and persona lineage", async () => {
+    const memory = await personalMemoryRepository.add(altUserId, refs.personaLineageId, "owned personal memory");
+    const memoryId = memory?.personal_memory_id;
+    expect(memoryId).toBeNumber();
+    if (!memoryId) throw new Error("Failed to create owned personal memory fixture");
+
+    expect(
+      await personalMemoryRepository.updateOwned(memoryId, refs.userId, refs.personaLineageId, "must not be written"),
+    ).toBeNull();
+
+    const updated = await personalMemoryRepository.updateOwned(
+      memoryId,
+      altUserId,
+      refs.personaLineageId,
+      "owner-scoped update",
+      ["verified"],
+    );
+    expect(updated?.content).toBe("owner-scoped update");
+    expect(updated?.tags).toEqual(["verified"]);
+
+    expect(await personalMemoryRepository.removeOwned(memoryId, altUserId, refs.personaLineageId + 1)).toBe(false);
+    expect(await personalMemoryRepository.removeOwned(memoryId, altUserId, refs.personaLineageId)).toBe(true);
   });
 });

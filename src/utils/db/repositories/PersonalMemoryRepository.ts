@@ -107,6 +107,62 @@ export class PersonalMemoryRepository implements IRepository<PersonalMemoryExpor
   }
 
   /**
+   * Updates one personal memory with exact owner and lineage guards.
+   * This is the preferred boundary for non-command surfaces such as plugins.
+   */
+  async updateOwned(
+    personalMemoryId: number,
+    userId: number,
+    personaLineageId: number,
+    content: string,
+    tags: string[] = [],
+  ): Promise<PersonalMemoryRow | null> {
+    const contentValidation = validateMemoryContent(content);
+    if (!contentValidation.isValid) return null;
+
+    try {
+      const [updated] = await sql`
+        UPDATE personal_memories
+        SET content = ${content}, tags = ${sql.array(tags, "TEXT")}, updated_at = NOW()
+        WHERE personal_memory_id = ${personalMemoryId}
+          AND user_id = ${userId}
+          AND persona_lineage_id = ${personaLineageId}
+        RETURNING *
+      `;
+      if (!updated) return null;
+
+      const parsed = personalMemorySchema.safeParse(updated);
+      if (!parsed.success) {
+        log.warn(`Skipping invalid updated personal memory row ${personalMemoryId}:`, parsed.error.flatten());
+        return null;
+      }
+      return parsed.data;
+    } catch (error) {
+      log.error(`Error updating owned personal memory ${personalMemoryId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Removes one personal memory with exact owner and lineage guards.
+   */
+  async removeOwned(personalMemoryId: number, userId: number, personaLineageId: number): Promise<boolean> {
+    try {
+      const [deleted] = await sql`
+        DELETE FROM personal_memories
+        WHERE personal_memory_id = ${personalMemoryId}
+          AND user_id = ${userId}
+          AND persona_lineage_id = ${personaLineageId}
+        RETURNING personal_memory_id
+      `;
+      return !!deleted;
+    } catch (error) {
+      log.error(`Error removing owned personal memory ${personalMemoryId}:`, error);
+      return false;
+    }
+  }
+
+  /**
    * Delete a personal memory scoped to user + persona lineage.
    * Used by the updateLongTermMemoryTool function call handler.
    *

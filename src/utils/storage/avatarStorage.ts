@@ -248,6 +248,9 @@ export async function loadStoredPersonaAvatarBuffer(reference: string): Promise<
   try {
     return await fs.readFile(absolutePath);
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
     log.warn(`[Avatar Storage] Failed to load local persona avatar ${trimmedReference}`, error);
     return null;
   }

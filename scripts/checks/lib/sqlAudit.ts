@@ -82,8 +82,6 @@ export const EXEMPT_PATHS = new Map<string, string>([
   ["src/utils/security/crypto.ts", "security primitive"],
   ["src/utils/security/keyRotation.ts", "security primitive"],
   ["src/utils/documents/documentService.ts", "RAG service layer; SQL invoked exclusively through RagRepository facade"],
-  ["src/web/settingsServer.ts", "optional settings dashboard boundary; dashboard-only projections across config tables"],
-  ["src/web/tomoriCoreAdapter.ts", "optional settings dashboard adapter; isolates web UI integration from core bot flow"],
 ]);
 
 /** Normalize a path to POSIX separators for stable comparison across OSes. */

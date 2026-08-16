@@ -215,6 +215,8 @@ TomoriBot can host a Discord OAuth settings dashboard at `/settings`. It is disa
 http://localhost:3001/settings/oauth/callback
 ```
 
+Once enabled, `/dashboard` sends the signed-in user the configured public link. Members can manage their own data and providers; server-owned controls still require Manage Server or Administrator.
+
 See [`docs/architecture/subsystems/settings-website.md`](docs/architecture/subsystems/settings-website.md) for the route list and deployment notes.
 
 ## C. Optional Sidecars & Servers
