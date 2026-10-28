@@ -1,4 +1,10 @@
 import type { StreamResult } from "@/types/provider/interfaces";
+import type { SpriteMessageRecordInfo } from "@/types/stream/types";
+
+export interface PendingResponsePresentation {
+  text: string;
+  sprite?: SpriteMessageRecordInfo;
+}
 
 /** Room left for held prose in the current turn, shared across tool-loop passes. */
 export interface PendingResponseLimit {
@@ -15,6 +21,7 @@ export type PendingResponseTruncation = "send_message_limit" | "flush_limit" | "
 /** Normalized public prose and its original presentation, held until the turn chooses it. */
 export interface PendingStreamResponse {
   text: string;
+  presentation?: PendingResponsePresentation[];
   /** UTF-8 bytes of the raw replay segments, counted against the turn's retention ceiling. */
   retainedBytes: number;
   segments: number;

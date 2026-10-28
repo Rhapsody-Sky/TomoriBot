@@ -4,6 +4,9 @@ import { addressingStyleSchema, USER_IDENTITY_FIELD_MAX_LENGTH, USER_NICKNAME_MA
 import { z } from "zod";
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { normalizeTriggerWord } from "@/utils/text/triggerWords";
+import { slugifyLabel } from "@/utils/text/slugifyLabel";
+import { PERSONA_NAMING_VALUE_MAX_LENGTH } from "@/types/personaNaming";
+import { localizer } from "@/utils/text/localizer";
 import type {
   PersonaAppearancePatch,
   PersonaContextPatch,
@@ -44,6 +47,27 @@ const profileSchema = z
   .strict();
 
 const personaLimits = getMemoryLimits();
+const namingValue = z.string().trim().max(PERSONA_NAMING_VALUE_MAX_LENGTH).nullable();
+const personaNamingSchema = z.object({ nickname: namingValue, prefix: namingValue, suffix: namingValue }).strict();
+const stmCategoriesSchema = z
+  .object({
+    categories: z
+      .array(
+        z
+          .object({
+            label: z.string().trim().min(1),
+            description: z.string().trim().min(1),
+          })
+          .strict()
+          .refine(
+            ({ label, description }) =>
+              !label.includes(":") && `${label}: ${description}`.length <= 1000 && Boolean(slugifyLabel(label)),
+          ),
+      )
+      .max(5),
+  })
+  .strict()
+  .refine(({ categories }) => new Set(categories.map(({ label }) => slugifyLabel(label))).size === categories.length);
 const personaIdentitySchema = z.object({ nickname: z.string().trim().min(2).max(32) }).strict();
 const personaPromptSchema = z
   .object({
@@ -82,10 +106,76 @@ export type DashboardSettingsCore = Pick<
   | "updatePersonaPrompt"
   | "updatePersonaContext"
   | "updatePersonaAppearance"
+  | "updatePersonaNaming"
+  | "updateStmCategories"
 >;
 
 export class DashboardSettingsService {
   constructor(private readonly core: DashboardSettingsCore) {}
+
+  async updateStmCategories(snapshot: DashboardGuildSnapshot, value: unknown) {
+    const parsed = stmCategoriesSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new DashboardServiceError(
+        "invalid_stm_categories",
+        422,
+        localizer("en-US", "general.dashboard.stm_categories_invalid"),
+      );
+    }
+    const categories = parsed.data.categories.length
+      ? parsed.data.categories
+      : [
+          {
+            label: "summary",
+            description: "A running summary of recent events, topics, and context from this conversation.",
+          },
+        ];
+    if (!(await this.core.updateStmCategories(snapshot.serverId, categories))) {
+      throw new DashboardServiceError(
+        "stm_categories_update_failed",
+        500,
+        localizer("en-US", "general.dashboard.stm_categories_failed"),
+      );
+    }
+    return categories;
+  }
+
+  async updatePersonaNaming(
+    snapshot: DashboardGuildSnapshot,
+    user: RegisteredDashboardUser,
+    personaId: number,
+    value: unknown,
+  ) {
+    const persona = snapshot.personas.find((entry) => entry.personaId === personaId && entry.lineageId > 0);
+    if (!persona)
+      throw new DashboardServiceError(
+        "persona_not_found",
+        404,
+        localizer("en-US", "general.dashboard.naming_persona_missing"),
+      );
+    const parsed = personaNamingSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new DashboardServiceError(
+        "invalid_persona_naming",
+        422,
+        localizer("en-US", "general.dashboard.naming_invalid"),
+      );
+    }
+    const preference = { ...parsed.data, nickname: parsed.data.nickname || null };
+    const updated = await this.core.updatePersonaNaming({
+      userId: user.user_id,
+      userDiscId: user.user_disc_id,
+      personaLineageId: persona.lineageId,
+      ...preference,
+    });
+    if (!updated)
+      throw new DashboardServiceError(
+        "persona_naming_update_failed",
+        500,
+        localizer("en-US", "general.dashboard.naming_failed"),
+      );
+    return preference;
+  }
 
   async updateProfile(userId: number, userDiscordId: string, value: unknown): Promise<RegisteredDashboardUser> {
     const parsed = profileSchema.safeParse(value);

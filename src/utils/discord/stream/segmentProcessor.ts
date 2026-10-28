@@ -322,6 +322,13 @@ export class StreamSegmentProcessor {
       // own message, but the reviewer and the rewrite request read this as one continuous draft.
       const separator = held && !/\s$/u.test(held) && !/^\s/u.test(next) ? (opensLine ? "\n" : " ") : "";
       state.pendingResponseText = held + separator + next;
+      const retainedSegment = state.pendingResponseSegments?.at(-1);
+      if (retainedSegment) {
+        retainedSegment.presentation = {
+          text: separator + segmentToSend,
+          sprite: deliveryOptions?.spriteRecord,
+        };
+      }
       if (shouldClearActiveRenderModifier) state.activeRenderModifier = undefined;
       if (shouldStopForSpeakerGuard) this.deps.requestStop(context.channel.id, "speaker_guard");
       const deliverable = resolveDeliverableHeldLength(context);
@@ -628,6 +635,8 @@ export class StreamSegmentProcessor {
   ): Promise<void> {
     if (context.holdResponseText) {
       state.pendingResponseText = (state.pendingResponseText ?? "") + (state.pendingOrphanPunctuation ?? "");
+      const presentation = state.pendingResponseSegments?.findLast((segment) => segment.presentation)?.presentation;
+      if (presentation) presentation.text += state.pendingOrphanPunctuation ?? "";
       state.pendingOrphanPunctuation = undefined;
       return;
     }

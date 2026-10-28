@@ -68,8 +68,9 @@
     try {
       localStorage.setItem("tomoribot.dashboard.palette", appearance.palette);
       localStorage.setItem("tomoribot.dashboard.theme", appearance.theme);
+      toast(ui("appearance_saved"));
     } catch {
-      // Appearance still works for the current page when storage is unavailable.
+      toast(ui("appearance_session_only"), "warning");
     }
   };
 
@@ -84,6 +85,8 @@
   };
 
   applyAppearance();
+
+  const ui = (key) => state.overview.interfaceCopy[key];
 
   const settingsGroups = [
     {
@@ -100,6 +103,7 @@
               section: "chat",
               fields: ["system_prompt", "context_note", "context_note_depth", "message_fetch_limit", "timezone_offset"],
             },
+            { section: "capabilities", fields: ["time_awareness_enabled"] },
           ],
         },
         {
@@ -119,48 +123,133 @@
         {
           eyebrow: "Conversation",
           title: "Output",
-          description: "How generated responses are shaped, split, varied, and accompanied by diagnostics.",
+          descriptionKey: "output_hint",
           sources: [
             {
               section: "chat",
               fields: [
                 "humanizer_degree",
                 "send_message_limit",
-                "self_debug_enabled",
-                "model_randomizer_enabled",
                 "response_prefill",
                 "response_reviewer_prompt",
                 "response_review_items",
               ],
             },
+            {
+              section: "capabilities",
+              fields: ["response_drafting_enabled", "emoji_usage_enabled", "sticker_usage_enabled"],
+            },
           ],
         },
+        { section: "nsfw" },
       ],
     },
     {
       id: "models",
       label: "Models & sampling",
-      sections: ["modelBehavior", "sampling"],
+      panels: [
+        {
+          descriptionKey: "models_hint",
+          sources: [
+            { section: "modelBehavior", fields: ["llm_temperature", "thinking_level"] },
+            { section: "chat", fields: ["model_randomizer_enabled"] },
+          ],
+        },
+        { section: "sampling" },
+      ],
     },
     {
-      id: "access",
-      label: "Access & channels",
-      sections: ["capabilities", "memberPermissions", "channelScope", "autochat", "welcome"],
+      id: "channels",
+      labelKey: "channels",
+      panels: [
+        { section: "channelScope", fields: ["rp_channel_ids"], titleKey: "channels", descriptionKey: "channels_hint" },
+        { section: "autochat" },
+        { section: "welcome" },
+      ],
     },
     {
       id: "memory",
-      label: "Memory & notices",
-      sections: ["memory", "stm", "notices"],
+      labelKey: "memory",
+      panels: [
+        {
+          titleKey: "learning",
+          descriptionKey: "learning_hint",
+          sources: [
+            {
+              section: "memberPermissions",
+              fields: [
+                "personal_memories_enabled",
+                "server_memteaching_enabled",
+                "attribute_memteaching_enabled",
+                "sampledialogue_memteaching_enabled",
+                "self_teaching_enabled",
+              ],
+            },
+            { section: "memory", fields: ["memory_tagging_enabled"] },
+            { section: "capabilities", fields: ["user_info_updates_enabled"] },
+          ],
+        },
+        {
+          titleKey: "boundaries",
+          descriptionKey: "boundaries_hint",
+          sources: [
+            { section: "memory", fields: ["channel_memory_enabled"] },
+            {
+              section: "channelScope",
+              fields: ["private_channel_ids", "crosschannel_blocklist_ids", "stm_privacy_bypass"],
+            },
+          ],
+        },
+        {
+          section: "stm",
+          sources: [{ section: "capabilities", fields: ["short_term_memory_enabled"] }, { section: "stm" }],
+        },
+      ],
     },
     {
       id: "media",
-      label: "Media",
-      sections: ["speech", "novelai", "nsfw"],
+      labelKey: "tools",
+      panels: [
+        {
+          section: "capabilities",
+          titleKey: "tools",
+          descriptionKey: "tools_hint",
+          fields: [
+            "tool_use_enabled",
+            "web_search_enabled",
+            "manage_message_enabled",
+            "thread_creation_enabled",
+            "imagegen_enabled",
+            "videogen_enabled",
+            "user_blocking_enabled",
+            "conditioning_interactions_enabled",
+            "dice_rolling_enabled",
+            "danbooru_enabled",
+          ],
+        },
+        {
+          section: "speech",
+          sources: [{ section: "capabilities", fields: ["voice_message_enabled"] }, { section: "speech" }],
+        },
+        { section: "novelai" },
+      ],
     },
     {
-      id: "providers",
-      label: "Provider policy",
-      sections: ["byok"],
+      id: "diagnostics",
+      labelKey: "diagnostics",
+      panels: [
+        { section: "notices" },
+        {
+          titleKey: "diagnostics",
+          descriptionKey: "diagnostics_hint",
+          sources: [
+            { section: "modelBehavior", fields: ["hide_respond_embed"] },
+            { section: "memberPermissions", fields: ["hide_impersonation_embeds", "prompt_snapshot_enabled"] },
+            { section: "chat", fields: ["self_debug_enabled"] },
+            { section: "channelScope", fields: ["thought_log_channel_disc_id"] },
+          ],
+        },
+      ],
     },
   ];
 
@@ -250,14 +339,137 @@
   const toast = (message, kind = "success") => {
     const element = document.createElement("div");
     element.className = `toast toast-${kind}`;
+    element.setAttribute("role", kind === "error" ? "alert" : "status");
     element.textContent = message;
+    if (kind === "error") {
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.textContent = "\u00d7";
+      dismiss.setAttribute("aria-label", state.overview ? ui("dismiss") : "Dismiss message");
+      dismiss.addEventListener("click", () => element.remove());
+      element.append(dismiss);
+    }
     toastRegion.append(element);
+    toastRegion.scrollTop = toastRegion.scrollHeight;
     requestAnimationFrame(() => element.classList.add("toast-visible"));
-    setTimeout(() => {
-      element.classList.remove("toast-visible");
-      setTimeout(() => element.remove(), 180);
-    }, 3500);
+    if (kind !== "error")
+      setTimeout(() => {
+        element.classList.remove("toast-visible");
+        setTimeout(() => element.remove(), 180);
+      }, 3500);
   };
+
+  const draftForms = "[data-profile-section], [data-settings-sections], [data-persona-naming], #stm-categories-form";
+  const drafts = new Map();
+  const formBaselines = new WeakMap();
+  let savingForms = 0;
+
+  function updatePanelSpan(panel, height) {
+    const layout = getComputedStyle(panel.parentElement);
+    const rowHeight = Number.parseFloat(layout.gridAutoRows);
+    const gap = Number.parseFloat(layout.columnGap);
+    panel.style.setProperty("--panel-rows", String(Math.ceil((height + gap) / rowHeight)));
+  }
+
+  const panelResizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.target.isConnected) continue;
+      const height = entry.borderBoxSize[0]?.blockSize ?? entry.target.getBoundingClientRect().height;
+      updatePanelSpan(entry.target, height);
+    }
+  });
+
+  const navigationResizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      document.documentElement.style.setProperty(
+        "--mobile-navigation-height",
+        `${entry.target.getBoundingClientRect().height}px`,
+      );
+    }
+  });
+
+  function formSnapshot(form) {
+    return Array.from(form.querySelectorAll("input[name], select[name], textarea[name]"), (input) => ({
+      name: input.name,
+      value: input.value,
+      checked: input.type === "checkbox" ? input.checked : undefined,
+    }));
+  }
+
+  function restoreSnapshot(form, values) {
+    form.querySelectorAll("input[name], select[name], textarea[name]").forEach((input) => {
+      const value = values.find(
+        (entry) => entry.name === input.name && (entry.checked === undefined || entry.value === input.value),
+      );
+      if (!value) return;
+      if (value.checked !== undefined) input.checked = value.checked;
+      else input.value = value.value;
+    });
+    form.querySelectorAll("[data-naming-mode]").forEach((mode) => {
+      form.elements[mode.dataset.namingMode].disabled = mode.value !== "custom";
+    });
+    resizeAutoGrowTextareas(form);
+  }
+
+  function observePanelLayout(root) {
+    panelResizeObserver.disconnect();
+    root.querySelectorAll(".settings-grid > .panel, .provider-layout > .panel").forEach((panel) => {
+      updatePanelSpan(panel, panel.getBoundingClientRect().height);
+      panelResizeObserver.observe(panel);
+    });
+  }
+
+  function initDraftForms(root) {
+    root.querySelectorAll(draftForms).forEach((form) => {
+      if (formBaselines.has(form)) return;
+      const key = form.dataset.profileSection
+        ? `profile/${form.dataset.profileSection}`
+        : `${state.guildId}/${form.dataset.settingsKey || (form.dataset.personaNaming ? `naming/${form.dataset.personaNaming}` : "stm-categories")}`;
+      form.dataset.draftKey = key;
+      formBaselines.set(form, formSnapshot(form));
+      const status = document.createElement("div");
+      status.className = "draft-status";
+      status.hidden = true;
+      status.innerHTML = `<span>${escapeHtml(ui("unsaved"))}</span><button class="button button-quiet button-small" type="button" data-discard-draft>${escapeHtml(ui("discard"))}</button>`;
+      form.append(status);
+      if (!form.querySelector("input[name], select[name], textarea[name]")) {
+        form.querySelector('button[type="submit"]').disabled = true;
+      }
+      if (drafts.has(key)) restoreSnapshot(form, drafts.get(key));
+      captureDraft(form);
+    });
+  }
+
+  function captureDraft(form) {
+    if (!form || !formBaselines.has(form)) return;
+    const values = formSnapshot(form);
+    const changed = JSON.stringify(values) !== JSON.stringify(formBaselines.get(form));
+    if (changed) drafts.set(form.dataset.draftKey, values);
+    else drafts.delete(form.dataset.draftKey);
+    form.querySelector(".draft-status").hidden = !changed;
+  }
+
+  function completeFormSave(form) {
+    drafts.delete(form.dataset.draftKey);
+    formBaselines.set(form, formSnapshot(form));
+    form.querySelector(".draft-status")?.setAttribute("hidden", "");
+    form.querySelector(".form-error")?.remove();
+  }
+
+  function showFormError(form, error, partial = false) {
+    form.querySelector(".form-error")?.remove();
+    const message = document.createElement("div");
+    message.className = "form-error";
+    message.setAttribute("role", "alert");
+    message.textContent = `${error.message} ${ui(partial ? "partial" : "retry")}`;
+    form.querySelector(".form-actions")?.before(message);
+  }
+
+  window.addEventListener("beforeunload", (event) => {
+    if (!drafts.size && !savingForms) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
 
   async function api(path, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -310,7 +522,7 @@
 
   function navButton(id, label, adminOnly = false) {
     if (adminOnly && !state.overview?.canManage) return "";
-    return `<button class="nav-item${state.view === id ? " is-active" : ""}" data-nav="${id}" type="button">
+    return `<button class="nav-item${state.view === id ? " is-active" : ""}" data-nav="${id}" type="button" aria-current="${state.view === id ? "page" : "false"}">
       <span class="nav-mark" aria-hidden="true"></span><span>${escapeHtml(label)}</span>
     </button>`;
   }
@@ -364,7 +576,7 @@
           <nav class="nav-stack" aria-label="Dashboard">
             <span class="nav-label">Workspace</span>
             ${navButton("overview", "Overview")}
-            ${navButton("profile", "My profile")}
+            ${navButton("profile", ui("my_settings"))}
             ${navButton("personal-memory", "Global memory")}
             ${navButton("personas", "Personas")}
             ${navButton("personal-providers", "My providers")}
@@ -490,6 +702,139 @@
     </div>`;
   }
 
+  const primaryMobileViews = ["overview", "personas", "profile"];
+  const navigationIcons = {
+    overview: "house",
+    personas: "users-round",
+    profile: "user-round",
+    "personal-memory": "brain",
+    "personal-providers": "plug",
+    "server-providers": "plug",
+    settings: "settings-2",
+    conversation: "message-circle",
+    models: "sliders-horizontal",
+    channels: "radio",
+    memory: "brain",
+    media: "image",
+    diagnostics: "bell",
+    personal: "brain",
+    server: "book-open",
+    preferences: "user-round",
+    appearance: "palette",
+    sprites: "image",
+  };
+  let navigationChoices = [];
+
+  function navigationIcon(name) {
+    return `<svg class="navigation-icon" aria-hidden="true" focusable="false"><use href="/settings/assets/navigation-icons.svg?v=2#${name}"></use></svg>`;
+  }
+
+  function refreshButton(action, label, scope = "") {
+    return `<button class="refresh-icon-button" data-${action}-refresh="${escapeHtml(scope)}" type="button" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">${navigationIcon("refresh-cw")}</button>`;
+  }
+
+  function initNavigationMenus() {
+    document.querySelector("#navigation-sheet[open]")?.close();
+    const mainNav = document.querySelector(".nav-stack");
+    mainNav.id = "dashboard-navigation";
+    document.querySelector(".mobile-bottom-nav")?.remove();
+    const mobileNav = document.createElement("nav");
+    mobileNav.className = "mobile-bottom-nav";
+    mobileNav.setAttribute("aria-label", mainNav.getAttribute("aria-label"));
+    mobileNav.innerHTML =
+      primaryMobileViews
+        .map((view) => {
+          const source = mainNav.querySelector(`[data-nav="${view}"]`);
+          return `<button type="button" data-nav="${view}" aria-current="${state.view === view ? "page" : "false"}">${navigationIcon(navigationIcons[view])}<span>${escapeHtml(source.textContent.trim())}</span></button>`;
+        })
+        .join("") +
+      `<button type="button" data-navigation-menu="dashboard-navigation" aria-haspopup="dialog" aria-controls="navigation-sheet" aria-current="${primaryMobileViews.includes(state.view) ? "false" : "page"}">${navigationIcon("ellipsis")}<span>${escapeHtml(ui("navigation_more"))}</span></button>`;
+    document.querySelector(".dashboard-shell").append(mobileNav);
+    navigationResizeObserver.disconnect();
+    document.documentElement.style.setProperty(
+      "--mobile-navigation-height",
+      `${mobileNav.getBoundingClientRect().height}px`,
+    );
+    navigationResizeObserver.observe(mobileNav);
+    if (!document.querySelector("#navigation-sheet")) {
+      const sheet = document.createElement("dialog");
+      sheet.id = "navigation-sheet";
+      sheet.className = "mobile-navigation-sheet";
+      sheet.setAttribute("aria-labelledby", "navigation-sheet-title");
+      app.append(sheet);
+    }
+    for (const [selector, id] of [
+      [".settings-tabs", "settings-navigation"],
+      [".persona-tabs", "persona-navigation"],
+      [".persona-picker", "persona-selection"],
+    ]) {
+      const nav = document.querySelector(selector);
+      if (!nav) continue;
+      nav.id = id;
+      nav.dataset.sheetNav = "";
+      let button = nav.previousElementSibling;
+      if (!button?.matches("[data-navigation-menu]")) {
+        button = document.createElement("button");
+        button.type = "button";
+        button.className = "mobile-section-button";
+        button.dataset.navigationMenu = id;
+        button.setAttribute("aria-controls", "navigation-sheet");
+        button.setAttribute("aria-haspopup", "dialog");
+        nav.before(button);
+      }
+      const selected = nav.querySelector('[aria-current="page"], [aria-pressed="true"]');
+      const persona = state.overview.personas.find(
+        (entry) => entry.personaId === Number(selected?.dataset.personaSelect),
+      );
+      const label = persona?.nickname || selected?.textContent.trim() || nav.getAttribute("aria-label");
+      const key = selected?.dataset.settingsGroup || selected?.dataset.personaPanel;
+      button.innerHTML = `${persona ? personaAvatar(persona) : navigationIcon(navigationIcons[key] || "settings-2")}<strong>${escapeHtml(label)}</strong><span class="section-switch-action">${navigationIcon("menu")}<span>${escapeHtml(ui("navigation_menu"))}</span></span>`;
+      button.setAttribute("aria-label", `${ui("navigation_menu")}: ${label}`);
+      button.title = persona ? nav.getAttribute("aria-label") : ui("navigation_switch");
+    }
+  }
+
+  function openNavigationSheet(trigger) {
+    const source = document.getElementById(trigger.dataset.navigationMenu);
+    const main = source.id === "dashboard-navigation";
+    navigationChoices = [...source.querySelectorAll("button")].filter(
+      (button) => !main || !primaryMobileViews.includes(button.dataset.nav),
+    );
+    const sheet = document.querySelector("#navigation-sheet");
+    sheet.innerHTML = `<div class="sheet-grip" aria-hidden="true"></div><header class="navigation-sheet-heading"><h2 id="navigation-sheet-title">${escapeHtml(main ? ui("navigation_more") : source.getAttribute("aria-label"))}</h2><button type="button" data-navigation-close aria-label="${escapeHtml(ui("navigation_close"))}" title="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header><div class="navigation-sheet-options">${navigationChoices
+      .map((button, index) => {
+        const key = button.dataset.nav || button.dataset.settingsGroup || button.dataset.personaPanel;
+        const selected =
+          button.getAttribute("aria-current") === "page" || button.getAttribute("aria-pressed") === "true";
+        const persona = state.overview.personas.find(
+          (entry) => entry.personaId === Number(button.dataset.personaSelect),
+        );
+        const content = persona
+          ? `${personaAvatar(persona)}<span class="navigation-persona-copy"><strong>${escapeHtml(persona.nickname)}</strong><small>${escapeHtml(button.querySelector("small").textContent)}</small></span>`
+          : `${navigationIcon(navigationIcons[key] || "settings-2")}<span>${escapeHtml(button.textContent.trim())}</span>`;
+        return `<button type="button" data-navigation-choice="${index}" aria-current="${selected ? "page" : "false"}">${content}${selected ? navigationIcon("check") : ""}</button>`;
+      })
+      .join(
+        "",
+      )}</div>${main ? `<a class="navigation-sheet-signout" href="/settings/logout">${escapeHtml(document.querySelector('.icon-link[href="/settings/logout"]').textContent)}</a>` : ""}`;
+    sheet.showModal();
+    (sheet.querySelector('[aria-current="page"]') || sheet.querySelector("[data-navigation-choice]")).focus({
+      preventScroll: true,
+    });
+  }
+
+  function focusNavigation(selector) {
+    const target = document.querySelector(selector);
+    const mobile = matchMedia("(max-width: 980px)").matches;
+    const focused = mobile
+      ? target?.dataset.nav
+        ? document.querySelector(`.mobile-bottom-nav [data-nav="${target.dataset.nav}"]`) ||
+          document.querySelector(".mobile-bottom-nav [data-navigation-menu]")
+        : target?.closest("[data-sheet-nav]")?.previousElementSibling
+      : target;
+    focused?.focus({ preventScroll: true });
+  }
+
   function renderView() {
     const workspace = document.querySelector("#workspace");
     if (!workspace || !state.overview) return;
@@ -517,6 +862,17 @@
       default:
         renderOverview(workspace);
     }
+    initDraftForms(workspace);
+    observePanelLayout(workspace);
+    initNavigationMenus();
+    workspace.querySelectorAll(".settings-tabs, .persona-tabs").forEach((nav) => {
+      const active = nav.querySelector('[aria-current="page"]');
+      if (!active) return;
+      const bounds = nav.getBoundingClientRect();
+      const button = active.getBoundingClientRect();
+      if (button.right > bounds.right) nav.scrollLeft += button.right - bounds.right;
+      else if (button.left < bounds.left) nav.scrollLeft += button.left - bounds.left;
+    });
   }
 
   function renderOverview(workspace) {
@@ -690,12 +1046,13 @@
     }
   }
 
-  function renderProfile(workspace) {
+  function renderProfilePanel(section) {
     const profile = state.overview.profile;
-    workspace.innerHTML = `
-      ${pageHeader("Personal", "My profile", "These preferences belong to you, not to the selected server.")}
-      <form class="panel form-panel" id="profile-form">
-        <div class="panel-heading"><div><p class="eyebrow">Identity</p><h2>Personal defaults</h2></div></div>
+    return `<form class="panel form-panel" data-profile-section="${section}">
+        <div class="panel-heading"><div><p class="eyebrow">Personal</p><h2>${escapeHtml(ui(section))}</h2><p>${escapeHtml(ui(`${section}_hint`))}</p></div></div>
+        ${
+          section === "profile"
+            ? `
         <div class="form-grid">
           <label class="field">${fieldLabel("Nickname", "Your personal display name when Tomori refers to you. Empty uses your current Discord display name.")}<input name="user_nickname" value="${escapeHtml(profile.nickname ?? "")}" maxlength="${profile.limits.nickname}"></label>
           <label class="field">${fieldLabel(profile.copy.gender, profile.copy.genderHint)}<input name="gender_identity" value="${escapeHtml(profile.genderIdentity ?? "")}" maxlength="${profile.limits.identity}"></label>
@@ -713,6 +1070,14 @@
               )
               .join("")}
           </select></label>
+        </div>
+        <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated traits used when image generation needs to depict you.")}<input name="physical_appearance_tags" value="${escapeHtml((profile.physicalAppearanceTags || []).join(", "))}"></label>
+        `
+            : ""
+        }
+        ${
+          section === "privacy"
+            ? `
           <label class="field">${fieldLabel("Privacy level", "Controls which personal memory features may store information about you.")}
             <select name="privacy_level">
               <option value="0"${profile.privacyLevel === 0 ? " selected" : ""}>Minimal</option>
@@ -720,6 +1085,16 @@
               <option value="2"${profile.privacyLevel === 2 ? " selected" : ""}>Full opt-out</option>
             </select>
           </label>
+          <label class="switch-row"><span><strong>Cross-server short-term memory</strong><small>Share recent context between servers you use.</small></span>
+            <input name="shortterm_cache_crossserver_opt_in" type="checkbox"${profile.crossServerShortTermMemory ? " checked" : ""}><i></i>
+          </label>
+        `
+            : ""
+        }
+        ${
+          section === "conversation"
+            ? `
+        <div class="form-grid">
           <label class="field">${fieldLabel("Personal trigger mode", "Overrides or follows the server's deliberate persona-trigger behavior for you.")}
             <select name="personal_dtm">
               ${["off", "follow", "on"].map((value) => `<option value="${value}"${profile.personalDtm === value ? " selected" : ""}>${value[0].toUpperCase() + value.slice(1)}</option>`).join("")}
@@ -732,19 +1107,28 @@
           </label>
           <label class="field">${fieldLabel("Timezone offset", "Your UTC offset for personal date and time context. Empty follows the server default.")}<input name="timezone_offset" type="number" min="-12" max="14" step="0.25" value="${profile.timezoneOffset ?? ""}"></label>
         </div>
-        <label class="switch-row"><span><strong>Cross-server short-term memory</strong><small>Share recent context between servers you use.</small></span>
-          <input name="shortterm_cache_crossserver_opt_in" type="checkbox"${profile.crossServerShortTermMemory ? " checked" : ""}><i></i>
-        </label>
-        <label class="switch-row"><span><strong>${escapeHtml(profile.copy.serverFallback)}</strong><small>${escapeHtml(profile.copy.serverFallbackHint)}</small></span>
-          <input name="personal_server_fallback_enabled" type="checkbox"${profile.personalServerFallback ? " checked" : ""}><i></i>
-        </label>
         <label class="switch-row"><span><strong>${escapeHtml(profile.copy.nudgeOptOut)}</strong><small>${escapeHtml(profile.copy.nudgeOptOutHint)}</small></span>
           <input name="natural_nudge_opt_out" type="checkbox"${profile.naturalNudgeOptOut ? " checked" : ""}><i></i>
         </label>
         <label class="field">${fieldLabel("Impersonation prompt", "Instructions Tomori uses when generating a message in your voice.")}<textarea name="impersonation_prompt" rows="5">${escapeHtml(profile.impersonationPrompt || "")}</textarea></label>
-        <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated traits used when image generation needs to depict you.")}<input name="physical_appearance_tags" value="${escapeHtml((profile.physicalAppearanceTags || []).join(", "))}"></label>
-        <div class="form-actions"><button class="button button-primary" type="submit">Save profile</button></div>
+        `
+            : ""
+        }
+        ${
+          section === "fallback"
+            ? `
+        <label class="switch-row"><span><strong>${escapeHtml(profile.copy.serverFallback)}</strong><small>${escapeHtml(profile.copy.serverFallbackHint)}</small></span>
+          <input name="personal_server_fallback_enabled" type="checkbox"${profile.personalServerFallback ? " checked" : ""}><i></i>
+        </label>`
+            : ""
+        }
+        <div class="form-actions"><button class="button button-primary" type="submit">${escapeHtml(ui("save"))}</button></div>
       </form>`;
+  }
+
+  function renderProfile(workspace) {
+    workspace.innerHTML = `${pageHeader("Personal", ui("my_settings"), "These preferences belong to you, not to the selected server.")}
+      <div class="profile-settings">${["profile", "privacy", "conversation"].map(renderProfilePanel).join("")}</div>`;
   }
 
   function renderMemoryCollection({ personal, global = false, persona = null }) {
@@ -768,7 +1152,7 @@
       <section class="memory-command-bar">
         <div><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>
         <div class="toolbar-actions">
-          <button class="button button-quiet" data-memory-refresh type="button">Refresh</button>
+          ${refreshButton("memory", ui("refresh_memories"))}
           <button class="button button-quiet" data-memory-export type="button">Export</button>
           <button class="button button-quiet" data-memory-import type="button">Import</button>
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
@@ -852,9 +1236,6 @@
       `<div class="panel-heading"><div><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p></div><button class="button button-secondary button-small" type="submit">Save</button></div>`;
     const attributes = persona.attributes || [];
     const dialogues = persona.sampleDialogues || [];
-    const chat = state.personaTestChats[persona.personaId] || [];
-    const model = state.overview.modelSummary?.text;
-
     return `<div class="persona-studio">
       <div class="persona-editor-stack">
         <form class="panel persona-settings-panel" data-persona-id="${persona.personaId}" data-persona-section="identity">
@@ -933,8 +1314,14 @@
             : ""
         }
       </div>
+      ${renderPersonaTestChat(persona)}
+    </div>`;
+  }
 
-      <aside class="panel persona-test-panel" data-persona-id="${persona.personaId}">
+  function renderPersonaTestChat(persona) {
+    const chat = state.personaTestChats[persona.personaId] || [];
+    const model = state.overview.modelSummary?.text;
+    return `<aside class="panel persona-test-panel" data-persona-id="${persona.personaId}">
         <div class="persona-test-heading">
           <div>${personaAvatar(persona)}<span><p class="eyebrow">Private preview</p><h2>Test ${escapeHtml(persona.nickname)}</h2></span></div>
           <button class="button button-quiet button-small" type="button" data-test-chat-reset="${persona.personaId}"${chat.length ? "" : " disabled"}>Reset</button>
@@ -944,12 +1331,24 @@
           ${
             chat.length
               ? chat
-                  .map(
-                    (message) => `<article class="test-chat-message test-chat-${message.role}">
-                      <span>${message.role === "user" ? "You" : escapeHtml(persona.nickname)}</span>
-                      <p>${escapeHtml(message.content)}</p>
-                    </article>`,
-                  )
+                  .map((message) => {
+                    const segments =
+                      message.role === "assistant" && message.segments?.length
+                        ? message.segments
+                        : [{ content: message.content, sprite: null }];
+                    return segments
+                      .map(
+                        (segment) => `<article class="test-chat-message test-chat-${message.role}">
+                        ${
+                          message.role === "user"
+                            ? "<span>You</span>"
+                            : `<div class="test-chat-identity">${personaAvatar(segment.sprite ? { nickname: segment.sprite.name, avatarUrl: segment.sprite.imageUrl } : persona)}<div><strong>${escapeHtml(segment.sprite?.displayName || persona.nickname)}</strong>${segment.sprite ? `<small>${escapeHtml(segment.sprite.name)}</small>` : ""}</div></div>`
+                        }
+                        <p>${escapeHtml(segment.content)}</p>
+                      </article>`,
+                      )
+                      .join("");
+                  })
                   .join("")
               : `<div class="test-chat-empty"><strong>Start a clean test conversation.</strong><span>The preview uses the current saved persona settings. Save edits before testing them.</span></div>`
           }
@@ -960,8 +1359,7 @@
           <textarea id="persona-test-input" name="message" rows="3" maxlength="4000" placeholder="Message ${escapeHtml(persona.nickname)}..." required${state.personaTestChatBusy ? " disabled" : ""}></textarea>
           <button class="button button-primary" type="submit"${state.personaTestChatBusy ? " disabled" : ""}>Send</button>
         </form>
-      </aside>
-    </div>`;
+      </aside>`;
   }
 
   function renderPersonaAppearance(persona) {
@@ -999,6 +1397,45 @@
     </div>`;
   }
 
+  function renderPersonaNaming(persona) {
+    const { values, copy, maxLength } = state.overview.personaNaming;
+    const preference = values[persona.personaId] || {};
+    return `<form class="panel settings-panel" data-persona-naming="${persona.personaId}">
+      <div class="panel-heading"><div><h2>${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.description)}</p></div></div>
+      <p class="field-hint">${escapeHtml(copy.hint)}</p>
+      <div class="naming-fields">${["nickname", "prefix", "suffix"]
+        .map((key) => {
+          const value = preference[key];
+          const mode = value == null ? "inherit" : value === "" && key !== "nickname" ? "none" : "custom";
+          return `<fieldset class="choice-field"><legend>${escapeHtml(copy[key])}</legend>
+          <label class="field"><span class="sr-only">${escapeHtml(copy[key])}</span><select name="${key}Mode" data-naming-mode="${key}">
+            ${["inherit", "custom", ...(key === "nickname" ? [] : ["none"])].map((option) => `<option value="${option}"${mode === option ? " selected" : ""}>${escapeHtml(copy[option])}</option>`).join("")}
+          </select></label>
+          <label class="field"><span>${escapeHtml(copy.value)}</span><input name="${key}" maxlength="${maxLength}" value="${escapeHtml(value ?? "")}" required${mode === "custom" ? "" : " disabled"}></label>
+        </fieldset>`;
+        })
+        .join("")}</div>
+      <div class="form-actions"><button class="button button-quiet" type="submit" name="action" value="reset" formnovalidate>${escapeHtml(copy.reset)}</button><button class="button button-primary" type="submit">${escapeHtml(copy.save)}</button></div>
+    </form>`;
+  }
+
+  function renderStmCategories() {
+    const { values, copy } = state.overview.settings.stmCategories;
+    return `<form class="panel settings-panel is-wide" id="stm-categories-form">
+      <div class="panel-heading"><div><h2>${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.description)}</p></div></div>
+      <p class="field-hint">${escapeHtml(copy.hint)}</p>
+      <div class="stm-category-fields">${Array.from({ length: 5 }, (_, index) => {
+        const category = values[index];
+        return `<fieldset class="choice-field stm-category-row" data-stm-slot><legend class="sr-only">${escapeHtml(copy.label)} ${index + 1}</legend>
+          <label class="field"><span>${escapeHtml(copy.label)} ${index + 1}</span><input name="label${index}" maxlength="997" value="${escapeHtml(category?.label ?? "")}"></label>
+          <label class="field"><span>${escapeHtml(copy.categoryDescription)}</span><textarea name="description${index}" rows="2" maxlength="997" data-auto-grow>${escapeHtml(category?.description ?? "")}</textarea></label>
+        </fieldset>`;
+      }).join("")}</div>
+      <p class="field-hint">${escapeHtml(copy.warning)}</p>
+      <div class="form-actions"><button class="button button-quiet" type="submit" name="action" value="reset" formnovalidate>${escapeHtml(copy.reset)}</button><button class="button button-primary" type="submit">${escapeHtml(copy.save)}</button></div>
+    </form>`;
+  }
+
   function renderPersonaWorkspace(workspace) {
     const personas = (state.overview.personas || []).filter((persona) => persona.lineageId !== 0);
     const personaActions = state.overview.canManage
@@ -1013,12 +1450,12 @@
     if (!personas.some((persona) => persona.personaId === state.personaId)) {
       state.personaId = personas[0].personaId;
     }
-    if (!state.overview.canManage && ["settings", "appearance"].includes(state.personaPanel)) {
+    if (!state.overview.canManage && ["settings", "appearance", "sprites"].includes(state.personaPanel)) {
       state.personaPanel = "personal";
     }
 
     const persona = personas.find((entry) => entry.personaId === state.personaId) || personas[0];
-    const memoryPanel = !["settings", "appearance"].includes(state.personaPanel);
+    const memoryPanel = ["personal", "server"].includes(state.personaPanel);
     if (memoryPanel) {
       state.memoryKind = state.personaPanel === "server" ? "server" : "personal";
       state.lineageId = persona.lineageId;
@@ -1048,34 +1485,78 @@
           ${personaAvatar(persona, "persona-focus-avatar")}
           <div><p class="eyebrow">${persona.isAlter ? "Alter persona" : "Main persona"}</p><h2>${escapeHtml(persona.nickname)}</h2><span>Lineage ${persona.lineageId} / ${(persona.triggerWords || []).length} trigger words</span></div>
         </div>
-        <nav class="persona-tabs" role="tablist" aria-label="${escapeHtml(persona.nickname)} workspace">
-          <button class="persona-tab${state.personaPanel === "personal" ? " is-active" : ""}" type="button" role="tab" aria-selected="${state.personaPanel === "personal"}" data-persona-panel="personal">Personal memory</button>
-          <button class="persona-tab${state.personaPanel === "server" ? " is-active" : ""}" type="button" role="tab" aria-selected="${state.personaPanel === "server"}" data-persona-panel="server">Server knowledge</button>
+        <nav class="persona-tabs" aria-label="${escapeHtml(persona.nickname)} workspace">
+          <button class="persona-tab${state.personaPanel === "personal" ? " is-active" : ""}" type="button" aria-current="${state.personaPanel === "personal" ? "page" : "false"}" data-persona-panel="personal">Personal memory</button>
+          <button class="persona-tab${state.personaPanel === "server" ? " is-active" : ""}" type="button" aria-current="${state.personaPanel === "server" ? "page" : "false"}" data-persona-panel="server">Server knowledge</button>
+          <button class="persona-tab${state.personaPanel === "preferences" ? " is-active" : ""}" type="button" aria-current="${state.personaPanel === "preferences" ? "page" : "false"}" data-persona-panel="preferences">${escapeHtml(state.overview.personaNaming.copy.tab)}</button>
           ${
             state.overview.canManage
-              ? `<button class="persona-tab${state.personaPanel === "settings" ? " is-active" : ""}" type="button" role="tab" aria-selected="${state.personaPanel === "settings"}" data-persona-panel="settings">Persona settings</button>
-                 <button class="persona-tab${state.personaPanel === "appearance" ? " is-active" : ""}" type="button" role="tab" aria-selected="${state.personaPanel === "appearance"}" data-persona-panel="appearance">Appearance &amp; image prompt</button>`
+              ? `<button class="persona-tab${state.personaPanel === "settings" ? " is-active" : ""}" type="button" aria-current="${state.personaPanel === "settings" ? "page" : "false"}" data-persona-panel="settings">Persona settings</button>
+                 <button class="persona-tab${state.personaPanel === "appearance" ? " is-active" : ""}" type="button" aria-current="${state.personaPanel === "appearance" ? "page" : "false"}" data-persona-panel="appearance">Appearance &amp; image prompt</button>
+                 <button class="persona-tab${state.personaPanel === "sprites" ? " is-active" : ""}" type="button" aria-current="${state.personaPanel === "sprites" ? "page" : "false"}" data-persona-panel="sprites">${escapeHtml(ui("sprites"))}</button>`
               : ""
           }
         </nav>
       </section>
       <div class="persona-panel-content">
         ${
-          state.personaPanel === "settings"
-            ? renderPersonaSettings(persona)
-            : state.personaPanel === "appearance"
-              ? renderPersonaAppearance(persona)
-              : renderMemoryCollection({
-                  personal: state.personaPanel === "personal",
-                  persona,
-                })
+          state.personaPanel === "preferences"
+            ? renderPersonaNaming(persona)
+            : state.personaPanel === "settings"
+              ? renderPersonaSettings(persona)
+              : state.personaPanel === "appearance"
+                ? renderPersonaAppearance(persona)
+                : state.personaPanel === "sprites"
+                  ? `<div class="persona-studio"><section id="sprite-workspace"><p role="status">${escapeHtml(ui("sprite_loading"))}</p></section>${renderPersonaTestChat(persona)}</div>`
+                  : renderMemoryCollection({
+                      personal: state.personaPanel === "personal",
+                      persona,
+                    })
         }
       </div>`;
 
     if (memoryPanel) {
       loadMemories();
+    } else if (state.personaPanel === "sprites") {
+      loadSprites(persona.personaId);
     } else {
       resizeAutoGrowTextareas(workspace);
+    }
+  }
+
+  let spriteLoadVersion = 0;
+
+  async function loadSprites(personaId) {
+    const version = ++spriteLoadVersion;
+    const guildId = state.guildId;
+    const current = () =>
+      version === spriteLoadVersion &&
+      guildId === state.guildId &&
+      personaId === state.personaId &&
+      state.view === "personas" &&
+      state.personaPanel === "sprites";
+    try {
+      const data = await api(`/guilds/${guildId}/personas/${personaId}/sprites`);
+      if (!current()) return;
+      const root = document.querySelector("#sprite-workspace");
+      const editor = (
+        sprite,
+      ) => `<form class="panel sprite-card" data-sprite-form data-persona-id="${personaId}" ${sprite ? `data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
+        ${sprite ? `<div class="sprite-image"><img src="${escapeHtml(sprite.imageUrl)}&v=${Date.now()}" alt="${escapeHtml(sprite.name)}" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></div>` : `<h3>${escapeHtml(ui("sprite_add"))}</h3>`}
+        <label class="field">${fieldLabel(ui("sprite_name"), ui("sprite_name_hint"))}<input name="name" maxlength="${data.limits.name}" value="${escapeHtml(sprite?.name || "")}" required></label>
+        <label class="field">${fieldLabel(ui("sprite_instructions"), ui("sprite_instructions_hint"))}<textarea name="instructions" maxlength="${data.limits.instructions}" rows="3">${escapeHtml(sprite?.instructions || "")}</textarea></label>
+        <label class="switch-row"><span><strong>${escapeHtml(ui("sprite_identity"))}</strong><small>${escapeHtml(ui("sprite_identity_hint"))}</small></span><input type="checkbox" role="switch" name="identity" ${sprite?.identity ? "checked" : ""}><i aria-hidden="true"></i></label>
+        <label class="field">${fieldLabel(ui("sprite_file"), `${ui("sprite_file_hint")} (${Math.floor(data.limits.imageBytes / 1024 / 1024)} MB)`)}<input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif" ${sprite ? "" : "required"}></label>
+        <div class="sprite-actions"><button class="button button-primary" type="submit">${escapeHtml(ui(sprite ? "sprite_edit" : "sprite_add"))}</button>${sprite ? `<button class="button button-danger" type="button" data-sprite-remove>${escapeHtml(ui("sprite_remove"))}</button>` : ""}</div>
+      </form>`;
+      root.innerHTML = `<div class="sprite-toolbar"><div><h2>${escapeHtml(ui("sprites"))} <small>${data.sprites.length} / ${data.limits.count}</small></h2><p>${escapeHtml(ui("sprites_hint"))}</p></div><div class="sprite-actions"><button type="button" class="button button-secondary" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button type="button" class="button button-secondary" data-sprite-export ${data.sprites.length ? "" : "disabled"}>${escapeHtml(ui("sprite_export"))}</button><input type="file" accept=".zip,application/zip" data-sprite-archive hidden></div></div>
+        ${data.inherited ? `<p class="memory-policy-note">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
+        ${data.sprites.length ? "" : `<p>${escapeHtml(ui("sprite_empty"))}</p>`}
+        <div class="sprite-grid">${data.sprites.map(editor).join("")}${editor(null)}</div>`;
+    } catch (error) {
+      if (!current()) return;
+      document.querySelector("#sprite-workspace").innerHTML =
+        `<div class="empty-state"><strong>${escapeHtml(ui("sprite_load_failed"))}</strong><span>${escapeHtml(error.message)}</span><button class="button button-secondary" type="button" data-sprite-retry>${escapeHtml(ui("sprite_retry"))}</button></div>`;
     }
   }
 
@@ -1123,14 +1604,16 @@
       return `<fieldset class="field field-wide choice-field"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="field-hint">${escapeHtml(field.hint)}</p>` : ""}<div class="check-grid">${options || '<p class="choice-empty">No text channels are available.</p>'}</div></fieldset>`;
     }
     if (field.type === "multiselect") {
+      const notices = field.key === "tool_notice_hidden_keys";
       const selected = new Set(Array.isArray(value) ? value.map(String) : []);
       const options = (field.options || [])
-        .map(
-          (option) =>
-            `<label class="check-option"><input type="checkbox" name="${escapeHtml(field.key)}" value="${escapeHtml(option.value)}"${selected.has(String(option.value)) ? " checked" : ""}><span><strong>${escapeHtml(option.label)}</strong></span></label>`,
+        .map((option) =>
+          notices
+            ? `<label class="switch-row"><span><strong>${escapeHtml(option.label)}</strong><small>${escapeHtml(option.description)}</small></span><input type="checkbox" role="switch" name="${escapeHtml(field.key)}" value="${escapeHtml(option.value)}"${selected.has(String(option.value)) ? " checked" : ""}><i aria-hidden="true"></i></label>`
+            : `<label class="check-option"><input type="checkbox" name="${escapeHtml(field.key)}" value="${escapeHtml(option.value)}"${selected.has(String(option.value)) ? " checked" : ""}><span><strong>${escapeHtml(option.label)}</strong>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`,
         )
         .join("");
-      return `<fieldset class="field field-wide choice-field"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="field-hint">${escapeHtml(field.hint)}</p>` : ""}<div class="check-grid check-grid-compact">${options}</div></fieldset>`;
+      return `<fieldset class="field field-wide choice-field" data-setting-field="${escapeHtml(field.key)}"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="field-hint">${escapeHtml(field.hint)}</p>` : ""}<div class="${notices ? "notice-switches" : "check-grid check-grid-compact"}">${options}</div></fieldset>`;
     }
     if (field.type === "select" || field.type === "persona") {
       return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${escapeHtml(field.key)}">${selectOptions(field, value)}</select></label>`;
@@ -1141,30 +1624,31 @@
     return `<label class="field field-wide">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : (value ?? ""))}"></label>`;
   }
 
-  function renderSettings(workspace) {
+  function renderSettingsPanel(panel) {
     const settings = state.overview.settings;
-    if (!settings) {
-      workspace.innerHTML = `<div class="empty-state"><strong>Manage Server permission required.</strong></div>`;
-      return;
-    }
-    const activeGroup = settingsGroups.find((group) => group.id === state.settingsGroup) || settingsGroups[0];
     const sectionById = new Map(settings.catalog.map((section) => [section.id, section]));
-    const renderPanel = (panel) => {
-      const sources = (panel.sources || [{ section: panel.section, fields: panel.fields }]).flatMap((source) => {
-        const section = sectionById.get(source.section);
-        if (!section) return [];
-        const fields = source.fields
-          ? source.fields.flatMap((key) => {
-              const field = section.fields.find((candidate) => candidate.key === key);
-              return field ? [field] : [];
-            })
-          : section.fields;
-        return [{ section, fields }];
-      });
-      if (!sources.length) return "";
-      const primarySection = sources[0].section;
-      return `<form class="panel settings-panel${panel.wide ? " is-wide" : ""}" data-settings-sections="${sources.map((source) => source.section.id).join(",")}" data-settings-panel-title="${escapeHtml(panel.title || primarySection.title)}">
-        <div class="panel-heading"><div><p class="eyebrow">${escapeHtml(panel.eyebrow || primarySection.eyebrow)}</p><h2>${escapeHtml(panel.title || primarySection.title)}</h2><p>${escapeHtml(panel.description || primarySection.description)}</p></div></div>
+    const sources = (panel.sources || [{ section: panel.section, fields: panel.fields }]).flatMap((source) => {
+      const section = sectionById.get(source.section);
+      if (!section) return [];
+      const fields = source.fields
+        ? source.fields.flatMap((key) => {
+            const field = section.fields.find((candidate) => candidate.key === key);
+            return field ? [field] : [];
+          })
+        : section.fields;
+      return [{ section, fields }];
+    });
+    if (!sources.length) return "";
+    const primarySection = sectionById.get(panel.section) || sources[0].section;
+    const title = panel.titleKey ? ui(panel.titleKey) : panel.title || primarySection.title;
+    const description = panel.descriptionKey
+      ? ui(panel.descriptionKey)
+      : panel.description || primarySection.description;
+    const panelKey = sources
+      .map(({ section, fields }) => `${section.id}:${fields.map((field) => field.key).join("+")}`)
+      .join("/");
+    return `<form class="panel settings-panel${panel.wide ? " is-wide" : ""}" data-settings-key="${escapeHtml(panelKey)}" data-settings-sections="${sources.map((source) => source.section.id).join(",")}" data-settings-panel-title="${escapeHtml(title)}">
+        <div class="panel-heading"><div><p class="eyebrow">${escapeHtml(panel.eyebrow || primarySection.eyebrow)}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div></div>
         <div class="settings-fields">
           ${sources
             .flatMap(({ section, fields }) =>
@@ -1174,36 +1658,35 @@
         </div>
         <div class="form-actions"><button class="button button-primary" type="submit">Save changes</button></div>
       </form>`;
-    };
-    const visiblePanels =
-      activeGroup.panels ||
-      settings.catalog
-        .filter((section) => activeGroup.sections.includes(section.id))
-        .map((section) => ({
-          section: section.id,
-          eyebrow: section.eyebrow,
-          title: section.title,
-          description: section.description,
-        }));
+  }
+
+  function renderSettings(workspace) {
+    if (!state.overview.settings) {
+      workspace.innerHTML = `<div class="empty-state"><strong>Manage Server permission required.</strong></div>`;
+      return;
+    }
+    const activeGroup = settingsGroups.find((group) => group.id === state.settingsGroup) || settingsGroups[0];
     const settingsContent = `<div class="settings-grid${activeGroup.id === "conversation" ? " settings-grid-conversation" : ""}">
-      ${visiblePanels.map(renderPanel).join("")}
+      ${activeGroup.panels.map(renderSettingsPanel).join("")}
+      ${activeGroup.id === "memory" ? renderStmCategories() : ""}
     </div>`;
     workspace.innerHTML = `
       ${pageHeader(
         "Administration",
         "Server settings",
-        "Each panel maps to one current TomoriBot config domain and saves independently.",
-        `<button class="button button-secondary" data-overview-refresh type="button">Refresh all</button>`,
+        ui("settings_hint"),
+        refreshButton("overview", ui("refresh_all")),
       )}
-      <nav class="settings-tabs" role="tablist" aria-label="Server settings groups">
+      <nav class="settings-tabs" aria-label="Server settings groups">
         ${settingsGroups
           .map(
             (group) =>
-              `<button class="settings-tab${group.id === activeGroup.id ? " is-active" : ""}" type="button" role="tab" aria-selected="${group.id === activeGroup.id}" data-settings-group="${group.id}">${escapeHtml(group.label)}</button>`,
+              `<button class="settings-tab${group.id === activeGroup.id ? " is-active" : ""}" type="button" aria-current="${group.id === activeGroup.id ? "page" : "false"}" data-settings-group="${group.id}">${escapeHtml(group.labelKey ? ui(group.labelKey) : group.label)}</button>`,
           )
           .join("")}
       </nav>
       ${settingsContent}`;
+    resizeAutoGrowTextareas(workspace);
   }
 
   const providerCapabilities = [
@@ -1364,9 +1847,9 @@
             ? "This server requires personal provider credentials."
             : "Your encrypted credentials and active personal capabilities."
           : "Server-owned credentials, endpoints, registrations, and failover.",
-        `<button class="button button-secondary" type="button" data-provider-refresh="${scope}">Refresh</button>`,
+        refreshButton("provider", ui("refresh_providers"), scope),
       )}
-      ${personal ? "" : renderServerModels(data)}
+      ${personal ? renderProfilePanel("fallback") : renderSettingsPanel({ section: "byok" }) + renderServerModels(data)}
       <div class="provider-layout">
         <form class="panel provider-panel" id="provider-credential-form" data-provider-scope="${scope}">
           <div class="panel-heading"><div><p class="eyebrow">Credentials</p><h2>Add or replace a key</h2></div></div>
@@ -1396,21 +1879,25 @@
             <label class="field">${fieldLabel("Auth token", "Optional bearer token or API secret, stored encrypted.")}<input name="authToken" type="password" autocomplete="new-password"></label>
             <label class="field">${fieldLabel("Context size", "Maximum context window reported for this text model, in tokens.")}<input name="numCtx" type="number" min="512" max="2000000"></label>
           </div>
-          <div class="option-grid">
+          <fieldset class="field choice-field endpoint-features">
+            <legend>${escapeHtml(ui("endpoint_features"))}</legend>
+            <p class="field-hint">${escapeHtml(ui("endpoint_features_hint"))}</p>
+            <div class="check-grid">
             ${[
-              ["hasTools", "Tools"],
-              ["seesImages", "Vision"],
-              ["seesVideos", "Video input"],
-              ["supportsStructOutput", "Structured output"],
-              ["strictRoleAlternation", "Strict roles"],
-              ["supportsPrefixCompletion", "Prefix completion"],
+              ["hasTools", "endpoint_tools"],
+              ["seesImages", "endpoint_images"],
+              ["seesVideos", "endpoint_videos"],
+              ["supportsStructOutput", "endpoint_structured"],
+              ["strictRoleAlternation", "endpoint_roles"],
+              ["supportsPrefixCompletion", "endpoint_prefix"],
             ]
               .map(
-                ([name, label]) =>
-                  `<label class="capability-toggle"><input name="${name}" type="checkbox"><span>${label}</span></label>`,
+                ([name, key]) =>
+                  `<label class="check-option"><input name="${name}" type="checkbox"><span><strong>${escapeHtml(ui(key))}</strong><small>${escapeHtml(ui(`${key}_hint`))}</small></span></label>`,
               )
               .join("")}
-          </div>
+            </div>
+          </fieldset>
           <div class="form-actions"><button class="button button-primary" type="submit">Test and register</button></div>
         </form>
         <section class="panel provider-panel">
@@ -1501,8 +1988,11 @@
     }
   }
 
-  async function refreshOverview(message = "Dashboard refreshed") {
+  async function refreshOverview(message = "Dashboard refreshed", discardKeys = []) {
     const overview = await api(`/guilds/${state.guildId}/overview`);
+    discardKeys.forEach((key) => {
+      drafts.delete(key);
+    });
     state.overview = overview;
     renderShell();
     toast(message);
@@ -1587,18 +2077,32 @@
   }
 
   async function withBusyForm(form, action) {
+    if (form.classList.contains("is-saving")) return;
+    savingForms += 1;
     const controls = Array.from(form.querySelectorAll("button, input, select, textarea"));
+    const disabledStates = controls.map((control) => control.disabled);
+    const focused = form.contains(document.activeElement) ? document.activeElement : null;
+    const submit = focused?.matches('button[type="submit"]')
+      ? focused
+      : form.querySelector('button[type="submit"]:not([value="reset"])');
+    const submitLabel = submit?.textContent;
+    if (submit && state.overview) submit.textContent = ui("saving");
     controls.forEach((control) => {
       control.disabled = true;
     });
     form.classList.add("is-saving");
+    form.setAttribute("aria-busy", "true");
     try {
       await action();
     } finally {
-      controls.forEach((control) => {
-        control.disabled = false;
+      controls.forEach((control, index) => {
+        control.disabled = disabledStates[index];
       });
       form.classList.remove("is-saving");
+      form.removeAttribute("aria-busy");
+      if (submit) submit.textContent = submitLabel;
+      if (focused?.isConnected) focused.focus({ preventScroll: true });
+      savingForms -= 1;
     }
   }
 
@@ -1656,13 +2160,13 @@
   }
 
   async function refreshPersonas(personaId, message) {
+    if (message) toast(message);
     state.overview = await api(`/guilds/${state.guildId}/overview`);
     if (personaId && state.overview.personas.some((persona) => persona.personaId === personaId)) {
       state.personaId = personaId;
     }
     state.avatarRevision += 1;
     renderView();
-    if (message) toast(message);
   }
 
   function resizeAutoGrowTextarea(textarea) {
@@ -1683,6 +2187,15 @@
       const messages = document.querySelector(".test-chat-messages");
       if (messages) messages.scrollTop = messages.scrollHeight;
     });
+  }
+
+  function updatePersonaTestChat(personaId) {
+    const panel = document.querySelector(`.persona-test-panel[data-persona-id="${personaId}"]`);
+    const persona = state.overview?.personas.find((entry) => entry.personaId === personaId);
+    if (panel && persona) {
+      panel.outerHTML = renderPersonaTestChat(persona);
+      scrollTestChat();
+    }
   }
 
   function appendAttributeRow(form) {
@@ -1746,6 +2259,11 @@
     "error",
     (event) => {
       const image = event.target;
+      if (image instanceof HTMLImageElement && image.hasAttribute("data-sprite-image")) {
+        image.hidden = true;
+        image.nextElementSibling.hidden = false;
+        return;
+      }
       if (!(image instanceof HTMLImageElement) || !image.dataset.avatarFallback) return;
       const fallback = document.createElement("span");
       fallback.className = `${image.className} persona-avatar-fallback`;
@@ -1754,6 +2272,13 @@
     },
     true,
   );
+
+  matchMedia("(max-width: 980px)").addEventListener("change", () => {
+    document.querySelector("#navigation-sheet[open]")?.close();
+    if (document.activeElement?.closest(".mobile-bottom-nav, .mobile-section-button, .nav-stack, [data-sheet-nav]")) {
+      focusNavigation(`.nav-stack [data-nav="${state.view}"]`);
+    }
+  });
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || !event.ctrlKey) return;
@@ -1764,11 +2289,113 @@
   });
 
   document.addEventListener("input", (event) => {
+    captureDraft(event.target.closest(draftForms));
     const textarea = event.target.closest?.("textarea[data-auto-grow]");
     if (textarea) resizeAutoGrowTextarea(textarea);
   });
 
   document.addEventListener("click", async (event) => {
+    if (event.target.closest("[data-sprite-retry]")) return loadSprites(state.personaId);
+    if (event.target.closest("[data-sprite-import]")) {
+      document.querySelector("[data-sprite-archive]").click();
+      return;
+    }
+    const spriteRemove = event.target.closest("[data-sprite-remove]");
+    if (spriteRemove) {
+      const form = spriteRemove.closest("[data-sprite-form]");
+      const personaId = Number(form.dataset.personaId);
+      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites?key=${encodeURIComponent(form.dataset.spriteKey)}`;
+      try {
+        await withBusyForm(form, async () => {
+          if (!(await confirmAction(ui("sprite_remove_title"), ui("sprite_remove_detail")))) return;
+          const result = await api(path, { method: "DELETE" });
+          await refreshPersonas(personaId, result.message);
+        });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
+    }
+    const spriteExport = event.target.closest("[data-sprite-export]");
+    if (spriteExport) {
+      spriteExport.disabled = true;
+      try {
+        const response = await fetch(`${BASE}/guilds/${state.guildId}/personas/${state.personaId}/sprites/export`);
+        if (!response.ok) throw new Error((await response.json()).error.message);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "sprites.zip";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const skipped = Number(response.headers.get("X-Sprite-Skipped") || 0);
+        toast(ui("sprite_exported").replace("{skipped}", String(skipped)), skipped ? "warning" : "success");
+      } catch (error) {
+        toast(error.message, "error");
+      } finally {
+        spriteExport.disabled = false;
+      }
+      return;
+    }
+    const navigationMenu = event.target.closest("[data-navigation-menu]");
+    if (navigationMenu) {
+      openNavigationSheet(navigationMenu);
+      return;
+    }
+    const sheet = document.querySelector("#navigation-sheet");
+    const navigationChoice = event.target.closest("[data-navigation-choice]");
+    if (navigationChoice) {
+      const choice = navigationChoices[Number(navigationChoice.dataset.navigationChoice)];
+      sheet.close();
+      choice.click();
+      return;
+    }
+    if (event.target.closest("[data-navigation-close]")) {
+      sheet.close();
+      return;
+    }
+    if (event.target === sheet) {
+      const bounds = sheet.getBoundingClientRect();
+      if (
+        event.clientX < bounds.left ||
+        event.clientX > bounds.right ||
+        event.clientY < bounds.top ||
+        event.clientY > bounds.bottom
+      )
+        sheet.close();
+      return;
+    }
+    if (
+      savingForms &&
+      event.target.closest(
+        "[data-nav], [data-persona-select], [data-persona-panel], [data-settings-group], [data-guild-select], [data-overview-refresh]",
+      )
+    ) {
+      toast(ui("saving"));
+      return;
+    }
+    const signOut = event.target.closest('a[href="/settings/logout"]');
+    if (signOut?.closest("#navigation-sheet")) sheet.close();
+    if (signOut && drafts.size) {
+      event.preventDefault();
+      if (await confirmAction(ui("discard_title"), ui("leave_detail"))) {
+        drafts.clear();
+        window.location.assign(signOut.href);
+      }
+      return;
+    }
+    const discard = event.target.closest("[data-discard-draft]");
+    if (discard) {
+      const form = discard.form;
+      if (await confirmAction(ui("discard_title"), ui("discard_detail"))) {
+        restoreSnapshot(form, formBaselines.get(form));
+        captureDraft(form);
+        form.querySelector(".form-error")?.remove();
+        form.querySelector('button[type="submit"]:not([value="reset"])')?.focus({ preventScroll: true });
+      }
+      return;
+    }
     const serverPicker = document.querySelector("#server-picker-dialog");
     if (event.target === serverPicker) {
       serverPicker.close();
@@ -1872,7 +2499,7 @@
       if (state.personaTestChats[personaId]?.length) {
         if (!(await confirmAction("Reset test chat?", "This clears the local preview conversation."))) return;
         state.personaTestChats[personaId] = [];
-        renderView();
+        updatePersonaTestChat(personaId);
       }
       return;
     }
@@ -1881,6 +2508,7 @@
       state.personaId = Number(personaSelect.dataset.personaSelect);
       state.memoryData = null;
       renderView();
+      focusNavigation(`[data-persona-select="${state.personaId}"]`);
       return;
     }
     const personaPanel = event.target.closest("[data-persona-panel]");
@@ -1888,12 +2516,14 @@
       state.personaPanel = personaPanel.dataset.personaPanel;
       state.memoryData = null;
       renderView();
+      focusNavigation(`[data-persona-panel="${state.personaPanel}"]`);
       return;
     }
     const settingsGroup = event.target.closest("[data-settings-group]");
     if (settingsGroup) {
       state.settingsGroup = settingsGroup.dataset.settingsGroup;
       renderView();
+      focusNavigation(`[data-settings-group="${state.settingsGroup}"]`);
       return;
     }
     const nav = event.target.closest("[data-nav]");
@@ -1901,6 +2531,7 @@
       state.view = nav.dataset.nav;
       state.memoryData = null;
       renderShell();
+      focusNavigation(`.nav-stack [data-nav="${state.view}"]`);
       return;
     }
     const edit = event.target.closest("[data-memory-edit]");
@@ -1930,8 +2561,12 @@
       );
     }
     if (event.target.closest("[data-overview-refresh]")) {
+      const currentKeys = [...drafts.keys()].filter(
+        (key) => key.startsWith(`${state.guildId}/`) || key.startsWith("profile/"),
+      );
+      if (currentKeys.length && !(await confirmAction(ui("discard_title"), ui("refresh_detail")))) return;
       try {
-        await refreshOverview("Server settings refreshed");
+        await refreshOverview("Server settings refreshed", currentKeys);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -1939,6 +2574,33 @@
   });
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-sprite-archive]")) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const personaId = state.personaId;
+      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites/import`;
+      const root = document.querySelector("#sprite-workspace");
+      try {
+        await withBusyForm(root, async () => {
+          if (!(await confirmAction(ui("sprite_import"), ui("sprite_import_detail")))) return;
+          const body = new FormData();
+          body.set("file", file);
+          const result = await api(path, { method: "POST", body });
+          toast(result.message, result.failed ? "warning" : "success");
+          await refreshPersonas(personaId);
+        });
+      } catch (error) {
+        toast(error.message, "error");
+      } finally {
+        event.target.value = "";
+      }
+      return;
+    }
+    captureDraft(event.target.closest(draftForms));
+    const namingMode = event.target.closest("[data-naming-mode]");
+    if (namingMode) {
+      namingMode.form.elements[namingMode.dataset.namingMode].disabled = namingMode.value !== "custom";
+    }
     if (event.target.id === "memory-import-file" && event.target.files?.[0]) {
       await importMemories(event.target.files[0]);
       event.target.value = "";
@@ -1976,7 +2638,8 @@
             }),
           },
         );
-        await refreshProviders("personal", "Provider capability updated");
+        toast("Provider capability updated");
+        await refreshProviders("personal");
       } catch (error) {
         capabilityToggle.checked = !capabilityToggle.checked;
         capabilityToggle.disabled = false;
@@ -1986,6 +2649,30 @@
   });
 
   document.addEventListener("submit", async (event) => {
+    if (event.target.classList.contains("is-saving")) {
+      event.preventDefault();
+      return;
+    }
+    if (event.target.matches("[data-sprite-form]")) {
+      event.preventDefault();
+      const form = event.target;
+      const personaId = Number(form.dataset.personaId);
+      const editing = form.hasAttribute("data-sprite-key");
+      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites${editing ? `?key=${encodeURIComponent(form.dataset.spriteKey)}` : ""}`;
+      const body = new FormData(form);
+      body.set("identity", String(form.elements.identity.checked));
+      if (!form.elements.file.files.length) body.delete("file");
+      try {
+        await withBusyForm(form, async () => {
+          if (!editing && !(await confirmAction(ui("sprite_add"), ui("sprite_add_detail")))) return;
+          const result = await api(path, { method: editing ? "PUT" : "POST", body });
+          await refreshPersonas(personaId, result.message);
+        });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
+    }
     if (event.target.id === "persona-create-form") {
       event.preventDefault();
       const form = event.target;
@@ -2096,20 +2783,21 @@
       const history = [...(state.personaTestChats[personaId] || []).slice(-23), { role: "user", content }];
       state.personaTestChats[personaId] = history;
       state.personaTestChatBusy = true;
-      renderView();
-      scrollTestChat();
+      updatePersonaTestChat(personaId);
       try {
         const result = await api(`/guilds/${state.guildId}/personas/test-chat`, {
           method: "POST",
-          body: JSON.stringify({ personaId, messages: history }),
+          body: JSON.stringify({ personaId, messages: history.map(({ role, content }) => ({ role, content })) }),
         });
-        state.personaTestChats[personaId] = [...history, { role: "assistant", content: result.content }].slice(-24);
+        state.personaTestChats[personaId] = [
+          ...history,
+          { role: "assistant", content: result.content, segments: result.segments },
+        ].slice(-24);
       } catch (error) {
         toast(error.message, "error");
       } finally {
         state.personaTestChatBusy = false;
-        renderView();
-        scrollTestChat();
+        updatePersonaTestChat(state.personaId);
       }
       return;
     }
@@ -2130,7 +2818,8 @@
           });
         });
         form.reset();
-        await refreshProviders(scope, "Provider key stored");
+        toast("Provider key stored");
+        await refreshProviders(scope);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -2163,7 +2852,8 @@
           });
         });
         form.reset();
-        await refreshProviders(scope, "Endpoint tested and registered");
+        toast("Endpoint tested and registered");
+        await refreshProviders(scope);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -2192,7 +2882,8 @@
             : result?.status === "already_registered"
               ? "This OpenRouter model was already registered for this scope"
               : "OpenRouter model registered";
-        await refreshProviders(scope, message);
+        toast(message);
+        await refreshProviders(scope);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -2220,7 +2911,8 @@
             }),
           });
         });
-        await refreshProviders("server", "Primary models saved");
+        toast("Primary models saved");
+        await refreshProviders("server");
       } catch (error) {
         toast(error.message, "error");
       }
@@ -2243,40 +2935,34 @@
             body: JSON.stringify({ refs }),
           });
         });
-        await refreshProviders("server", "Fallback chain saved");
+        toast("Fallback chain saved");
+        await refreshProviders("server");
       } catch (error) {
         toast(error.message, "error");
       }
       return;
     }
 
-    if (event.target.id === "profile-form") {
+    if (event.target.matches("[data-profile-section]")) {
       event.preventDefault();
       const form = event.target;
+      const patch = {};
+      for (const input of form.querySelectorAll("input[name], select[name], textarea[name]")) {
+        if (input.type === "checkbox") patch[input.name] = input.checked;
+        else if (input.name === "privacy_level") patch[input.name] = Number(input.value);
+        else if (input.name === "timezone_offset") patch[input.name] = input.value === "" ? null : Number(input.value);
+        else if (input.name === "physical_appearance_tags") patch[input.name] = parseTags(input.value);
+        else patch[input.name] = input.value || null;
+      }
       try {
-        const result = await api("/profile", {
-          method: "PATCH",
-          body: JSON.stringify({
-            user_nickname: form.elements.user_nickname.value,
-            gender_identity: form.elements.gender_identity.value,
-            pronouns: form.elements.pronouns.value,
-            addressing_style: form.elements.addressing_style.value || null,
-            privacy_level: Number(form.elements.privacy_level.value),
-            personal_dtm: form.elements.personal_dtm.value,
-            personal_deliberate_tool_mode: form.elements.personal_deliberate_tool_mode.value,
-            timezone_offset:
-              form.elements.timezone_offset.value === "" ? null : Number(form.elements.timezone_offset.value),
-            shortterm_cache_crossserver_opt_in: form.elements.shortterm_cache_crossserver_opt_in.checked,
-            personal_server_fallback_enabled: form.elements.personal_server_fallback_enabled.checked,
-            natural_nudge_opt_out: form.elements.natural_nudge_opt_out.checked,
-            impersonation_prompt: form.elements.impersonation_prompt.value || null,
-            physical_appearance_tags: parseTags(form.elements.physical_appearance_tags.value),
-          }),
+        await withBusyForm(form, async () => {
+          const result = await api("/profile", { method: "PATCH", body: JSON.stringify(patch) });
+          state.overview.profile = result.profile;
+          completeFormSave(form);
         });
-        state.overview.profile = result.profile;
         toast("Profile saved");
       } catch (error) {
-        toast(error.message, "error");
+        showFormError(form, error);
       }
       return;
     }
@@ -2324,6 +3010,74 @@
       return;
     }
 
+    const namingForm = event.target.closest("[data-persona-naming]");
+    const categoriesForm = event.target.closest("#stm-categories-form");
+    if (namingForm || categoriesForm) {
+      event.preventDefault();
+      const form = namingForm || categoriesForm;
+      const overview = state.overview;
+      const guildId = state.guildId;
+      const data = namingForm ? overview.personaNaming : overview.settings.stmCategories;
+      const reset = event.submitter?.value === "reset";
+      const personaId = Number(namingForm?.dataset.personaNaming);
+      const payload = namingForm
+        ? Object.fromEntries(
+            ["nickname", "prefix", "suffix"].map((key) => {
+              const mode = reset ? "inherit" : form.elements[`${key}Mode`].value;
+              return [key, mode === "inherit" ? null : mode === "none" ? "" : form.elements[key].value];
+            }),
+          )
+        : {
+            categories: reset
+              ? []
+              : Array.from({ length: 5 }, (_, index) => ({
+                  label: form.elements[`label${index}`].value.trim(),
+                  description: form.elements[`description${index}`].value.trim(),
+                })).filter(({ label, description }) => label || description),
+          };
+      try {
+        await withBusyForm(form, async () => {
+          if (reset && !(await confirmAction(data.copy.resetTitle, data.copy.resetDetail))) return;
+          if (categoriesForm && !reset && !(await confirmAction(data.copy.confirm, data.copy.warning))) return;
+          const result = await api(
+            namingForm ? `/guilds/${guildId}/personas/${personaId}/naming` : `/guilds/${guildId}/stm/categories`,
+            { method: "PUT", body: JSON.stringify(payload) },
+          );
+          if (namingForm) {
+            const lineageId = overview.personas.find((persona) => persona.personaId === personaId)?.lineageId;
+            for (const persona of overview.personas.filter((entry) => entry.lineageId === lineageId)) {
+              data.values[persona.personaId] = result.preference;
+            }
+          } else {
+            data.values = result.categories;
+          }
+          completeFormSave(form);
+          if (state.overview === overview && form.isConnected) {
+            const workspace = form.closest(".workspace");
+            const scrollTop = workspace.scrollTop;
+            form.outerHTML = namingForm
+              ? renderPersonaNaming(overview.personas.find((persona) => persona.personaId === personaId))
+              : renderStmCategories();
+            initDraftForms(workspace);
+            observePanelLayout(workspace);
+            resizeAutoGrowTextareas(document);
+            workspace.scrollTop = scrollTop;
+            workspace
+              .querySelector(
+                namingForm
+                  ? "[data-persona-naming] button[type=submit]:not([value=reset])"
+                  : "#stm-categories-form button[type=submit]:not([value=reset])",
+              )
+              ?.focus({ preventScroll: true });
+          }
+          toast(data.copy.saved);
+        });
+      } catch (error) {
+        showFormError(form, error);
+      }
+      return;
+    }
+
     const settingsForm = event.target.closest("[data-settings-sections]");
     if (settingsForm) {
       event.preventDefault();
@@ -2331,24 +3085,32 @@
         .split(",")
         .map((sectionId) => state.overview.settings.catalog.find((entry) => entry.id === sectionId))
         .filter(Boolean);
+      let savedSections = 0;
       try {
         await withBusyForm(settingsForm, async () => {
-          const updates = await Promise.all(
-            sections.map(async (section) => ({
-              section,
-              result: await api(`/guilds/${state.guildId}/settings/${section.id}`, {
-                method: "PATCH",
-                body: JSON.stringify(collectSettingsPatch(settingsForm, section)),
-              }),
-            })),
-          );
-          for (const { section, result } of updates) {
+          for (const section of sections) {
+            const result = await api(`/guilds/${state.guildId}/settings/${section.id}`, {
+              method: "PATCH",
+              body: JSON.stringify(collectSettingsPatch(settingsForm, section)),
+            });
             state.overview.settings.values[section.id] = result.values;
+            if (section.id === "byok") state.providerData.personal = null;
+            const savedFields = new Set(section.fields.map((field) => field.key));
+            const values = formSnapshot(settingsForm);
+            formBaselines.set(
+              settingsForm,
+              formBaselines
+                .get(settingsForm)
+                .map((value, index) => (savedFields.has(value.name) ? values[index] : value)),
+            );
+            captureDraft(settingsForm);
+            savedSections += 1;
           }
+          completeFormSave(settingsForm);
         });
         toast(`${settingsForm.dataset.settingsPanelTitle || "Settings"} saved`);
       } catch (error) {
-        toast(error.message, "error");
+        showFormError(settingsForm, error, savedSections > 0);
       }
       return;
     }

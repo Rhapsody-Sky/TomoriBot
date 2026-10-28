@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { TomoriState } from "@/types/db/schema";
 import { dashboardTestChatInternals } from "@/web/dashboard/personaChatService";
-import type { DashboardActor } from "@/web/dashboard/types";
-import { createLlmRow, createPersona } from "../../helpers/fixtures";
+import type { DashboardActor, DashboardGuildSnapshot } from "@/web/dashboard/types";
+import { createLlmRow, createPersona, createServerConfig } from "../../helpers/fixtures";
 
 function createState(): TomoriState {
   return createPersona({
@@ -32,6 +32,34 @@ function createState(): TomoriState {
 }
 
 describe("dashboard persona test chat isolation", () => {
+  it("groups resolved sprite runs and scopes preview images to server personas", () => {
+    const snapshot: DashboardGuildSnapshot = {
+      serverId: 1,
+      serverDiscordId: "123456789012345678",
+      config: createServerConfig(),
+      rawPersonas: [createState()],
+      personas: [],
+    };
+    const sprite = { personaId: 9, spriteName: "Happy", isIdentity: false };
+    const result = dashboardTestChatInternals.buildPresentation(
+      [
+        { text: "Hello!", sprite },
+        { text: "\nStill smiling.", sprite },
+        { text: "Another voice.", sprite: { ...sprite, spriteName: "The Voice", isIdentity: true } },
+        { text: "Back to normal." },
+        { text: "No foreign sprite.", sprite: { ...sprite, personaId: 100 } },
+      ],
+      snapshot,
+    );
+    expect(result).toHaveLength(3);
+    expect(result[0]?.content).toBe("Hello!\nStill smiling.");
+    expect(result[0]?.sprite?.imageUrl).toBe(
+      "/settings/api/guilds/123456789012345678/personas/9/sprites/image?key=happy",
+    );
+    expect(result[1]?.sprite).toMatchObject({ name: "The Voice", identity: true, displayName: "The Voice (Tomori)" });
+    expect(result[2]?.sprite).toBeNull();
+    expect(result[2]?.content).toContain("No foreign sprite.");
+  });
   it("disables tools, media, humanization, and message side effects without mutating the source", () => {
     const source = createState();
     const safe = dashboardTestChatInternals.safeTestState(source);

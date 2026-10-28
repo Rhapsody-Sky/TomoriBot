@@ -520,6 +520,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
     let consumed = false;
     return {
       text: collected.pendingResponseText ?? "",
+      presentation: segments.flatMap((segment) => (segment.presentation ? [segment.presentation] : [])),
       retainedBytes: collected.pendingResponseBytes ?? 0,
       segments: segments.length,
       truncation: collected.pendingResponseTruncation,

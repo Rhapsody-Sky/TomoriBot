@@ -32,8 +32,11 @@ Members with Manage Server or Administrator can additionally:
   sample dialogues, context note, and appearance data from the same persona
   workspace as its memories;
 - test a selected persona against the configured text model in an isolated,
-  request-local preview chat;
-- edit the split server config domains independently, including chat behavior,
+  request-local preview chat, with sprite portraits and identity names for each
+  part of the response;
+- manage persona sprites, including image uploads, names, usage instructions,
+  identity mode, deletion, and ZIP import/export;
+- edit server settings in task-based panels, including chat behavior,
   model sampling, cooldowns, capabilities, memory policy, channels, autochat,
   speech, NovelAI defaults, BYOK policy, welcome messages, notices, and text
   workarounds;
@@ -46,6 +49,40 @@ Members with Manage Server or Administrator can additionally:
 
 The `/dashboard` command returns the configured public dashboard link. The URL
 comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
+
+## Settings Navigation
+
+My settings groups profile and appearance, privacy and memory, and personal
+conversation preferences into separately saved panels. Personal provider
+fallback belongs to My providers; server BYOK policy belongs to Server providers.
+Persona-specific naming stays under Personas > My preferences and affects only
+the signed-in member. Administrative persona settings remain permission-gated.
+Persona settings and Sprites share the same test-chat history. Sending or
+resetting the chat leaves the editor inputs intact. Save sprite descriptions
+before testing them; the model uses the saved configuration.
+
+Server settings groups conversation, models and sampling, channels and automation,
+memory, tools and media, and notices and diagnostics. Memory contains learning
+permissions, channel boundaries, STM behavior and category definitions. Response
+review belongs to Conversation > Output; thought logs and prompt snapshots belong
+to Notices & diagnostics.
+
+At widths up to 980 pixels, a bottom navigation bar provides Overview, Personas,
+My settings and More. More opens the remaining permitted destinations in a modal
+bottom sheet. Server settings and persona sections use the same sheet pattern,
+with the current section shown above the content. Escape, the close button or a
+tap outside dismisses the sheet. Desktop keeps the sidebar and inline tabs.
+Navigation icons are bundled Lucide assets with their license alongside them;
+the dashboard does not fetch icons from an external service.
+
+Profile panels, server settings, STM categories and persona naming retain unsaved
+edits in page-local memory when switching views or servers. They are not persisted
+to browser storage. Discard and explicit refresh ask for confirmation; closing or
+reloading the page uses the browser's unsaved-changes warning. Saving disables the
+form and temporarily blocks workspace navigation. Failed saves retain the edits
+and show an inline recovery message. A panel spanning multiple repository domains
+saves them in sequence; successful writes are retained if a later write fails,
+and the error identifies the partial save. These writes are not transactional.
 
 ## Memory Ownership
 
@@ -107,10 +144,12 @@ The integration is isolated under `src/web`:
   Discord guild permission checks.
 - `src/web/dashboard/core.ts` is the gateway to TomoriBot repositories, cache
   invalidation, encryption, and provider domain services.
-- `memoryService.ts`, `settingsService.ts`, `personaService.ts`,
+- `memoryService.ts`, `settingsService.ts`, `personaService.ts`, `spriteService.ts`,
   `personaChatService.ts`, and `providerService.ts` contain dashboard policy
   and request validation without direct SQL.
-- `settingsCatalog.ts` maps each settings panel to one split config domain.
+- `settingsCatalog.ts` defines validated fields for each split config domain.
+  The frontend groups those fields into task-based panels and sends partial
+  patches to the existing domain endpoints.
 - STM settings use `ShortTermMemoryRepository`, including its upsert path for
   servers without a stored STM configuration. Other settings retain their own
   repository domains; the dashboard introduces no schema or migrations.
@@ -118,6 +157,12 @@ The integration is isolated under `src/web`:
   provider ownership and embedding-family changes. Custom connection removal
   uses provider-panel operations and removes all models on that connection;
   an active text connection must first be replaced.
+- Sprite routes require server management permission, including image previews
+  and exports. Mutations use the shared Discord sprite operations for validation,
+  quotas, preset-pointer materialization, cache invalidation and image cleanup.
+  Browser uploads pass bounded `File` objects; Discord attachments retain their
+  safe-download path. ZIP import reports created, replaced and failed entries;
+  export reports unreadable images that were skipped.
 - `assets/app.js` and `assets/app.css` contain the dependency-free browser UI.
 
 There is no dashboard raw-SQL exemption. `bun run audit-sql` must continue to
@@ -136,6 +181,10 @@ report no SQL below `src/web`.
 - Persona test chat disables tools, media generation, message management,
   self-teaching, humanization, and post-turn effects. Its history lives in the
   browser and no Discord message or memory write is performed.
+  It collects the stream's held response without calling its delivery function.
+  Sprite presentation comes from the shared stream parser, including changes
+  across lines and plain-label resets. Images use the permission-gated sprite
+  proxy; only text and roles are submitted as history on the next turn.
 - Custom endpoint registration uses the same reachability and remote-URL policy
   as the slash commands before anything is persisted.
 - API keys are validated when requested and encrypted through TomoriBot's
@@ -181,6 +230,20 @@ bun run test tests/regression/db/memory.regression.test.ts
 The unit tests do not verify production database upgrades or live provider
 requests. Before upgrading an existing deployment, back up its database and
 stored avatar files and test the upstream migration sequence on a restored copy.
-Draft-review model/checker selection, STM categories and stored STM content,
-persona-specific naming preferences, and advanced natural-nudge schedules still
-use the Discord panels.
+Server settings > Memory includes an admin-only STM category editor with up to
+five categories. Names use the shared slug rules, and each name plus description
+must fit Discord's 1,000-character input limit. Empty slots are omitted; clearing
+all slots or restoring defaults saves the standard summary category. Category
+changes do not delete or migrate stored STM contents, so changing category keys
+can hide older values until a later model update.
+
+Personas > My preferences lets each member set their own nickname, prefix and
+suffix for the selected persona lineage. These preferences follow the lineage
+across servers. The API derives both the user and lineage from the authenticated
+session and the selected server's persona list. Inherit saves null; None saves
+an explicit empty prefix or suffix. Reset removes all three overrides through
+the existing personal configuration operation, including user cache invalidation.
+Administrators do not receive access to other members' naming preferences.
+
+Draft-review model/checker selection, stored STM content, and advanced
+natural-nudge schedules still use the Discord panels.

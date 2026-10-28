@@ -66,12 +66,13 @@ type Sent = { text: string; options?: StreamDeliveryOptions };
  * Discord. Each send is reported to the channel continuity the way recordSuccessfulSend reports it,
  * with a fresh snowflake, so the sprite group alternation sees real adjacency.
  */
-function makeHarness(options: { isAlter: boolean }) {
+function makeHarness(options: { isAlter: boolean; holdResponseText?: boolean }) {
   const channel = { id: "1382235263668846612", lastMessageId: null as string | null };
   let snowflake = 1400000000000000000n;
   const context = {
     channel,
     contextItems: [],
+    holdResponseText: options.holdResponseText,
     tomoriState: {
       persona_id: PERSONA_ID,
       persona_nickname: "Locke",
@@ -135,6 +136,20 @@ describe("StreamSegmentProcessor plain-label sprite revert", () => {
   afterEach(() => {
     clearPersonaSpriteCache();
     clearAllChannelDeliveryContinuity();
+  });
+
+  it("retains resolved sprite presentation without delivering held responses", async () => {
+    const harness = makeHarness({ isAlter: true, holdResponseText: true });
+    await harness.send("Locke (smug): heh, nice try\n");
+    await harness.send("Still smiling.\n");
+    await harness.send("Locke (The Voice): We are here.\n");
+    await harness.send("Locke: Back to normal.\n");
+    expect(harness.sent).toEqual([]);
+    const presentation = harness.state.pendingResponseSegments?.map((segment) => segment.presentation);
+    expect(presentation?.map((part) => part?.sprite?.spriteName)).toEqual(["smug", "smug", "The Voice", undefined]);
+    expect(presentation?.[2]?.sprite?.isIdentity).toBe(true);
+    expect(presentation?.[0]?.text).not.toContain("Locke (smug):");
+    expect(presentation?.[3]?.text).toContain("Back to normal.");
   });
 
   it("returns to the base persona when a line opens with the plain own-name label", async () => {

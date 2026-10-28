@@ -1,6 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
+import { createHmac } from "node:crypto";
 import type { Client } from "discord.js";
 import { createDashboardApp } from "@/web/dashboard/server";
+import { TomoriDashboardCore } from "@/web/dashboard/core";
+import { DashboardSessionStore, SESSION_COOKIE } from "@/web/dashboard/auth";
+import { initializeLocalizer } from "@/utils/text/localizer";
+import { createServerConfig, createUserRow } from "../../helpers/fixtures";
 
 const fakeClient = {
   application: { id: "123456789012345678" },
@@ -29,15 +34,26 @@ describe("dashboard HTTP shell", () => {
       ["app.css", "text/css"],
       ["companion.css", "text/css"],
       ["app.js", "application/javascript"],
+      ["navigation-icons.svg", "image/svg+xml"],
       ["tomoribot_logo.png", "image/png"],
       ["tomori_companion_logo.svg", "image/svg+xml"],
       ["tomori_texture5.png", "image/png"],
       ["noto-sans-jp.ttf", "font/ttf"],
+      ["noto-sans-jp-bold.ttf", "font/ttf"],
     ]) {
       const response = await app.request(`http://localhost/settings/assets/${asset}`);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain(contentType);
       expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(100);
+    }
+  });
+
+  it("revalidates the navigation sprite so added icons do not remain missing after an update", async () => {
+    for (const suffix of ["", "?v=2"]) {
+      const response = await app.request(`/settings/assets/navigation-icons.svg${suffix}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-cache");
+      expect(await response.text()).toContain('id="refresh-cw"');
     }
   });
 
@@ -79,6 +95,9 @@ describe("dashboard HTTP shell", () => {
     expect(css).toContain("background: var(--surface-solid)");
     expect(companionCss).toContain(".switch-row input:checked + i::after");
     expect(companionCss).toContain("transform: translateX(21px)");
+    expect(source).toContain('class="switch-row"><span><strong>');
+    expect(source).toContain('role="switch"');
+    expect(source).toContain('"notice-switches"');
     expect(companionCss).toContain(".nav-stack {\n  gap: 3px;\n  overflow-x: hidden;\n  overflow-y: auto;");
     expect(source).toContain("data-avatar-fallback");
     expect(source).toContain("'s memories about you");
@@ -141,5 +160,134 @@ describe("dashboard HTTP shell", () => {
         message: "Sign in required.",
       },
     });
+  });
+});
+
+describe("dashboard memory and naming authorization", () => {
+  beforeAll(() => initializeLocalizer());
+  afterEach(() => mock.restore());
+
+  function setup(canManage = false) {
+    const { app, config } = createDashboardApp(fakeClient);
+    const session = new DashboardSessionStore().create(
+      { id: "987654321098765432", username: "Mirri" },
+      "test-token",
+      3600,
+    );
+    session.guildCache = {
+      fetchedAt: Date.now(),
+      guilds: [{ id: "123456789012345678", name: "Test server", iconUrl: null, memberCount: 5, canManage }],
+    };
+    spyOn(DashboardSessionStore.prototype, "get").mockImplementation((id) => (id === session.id ? session : null));
+    spyOn(TomoriDashboardCore.prototype, "ensureUser").mockResolvedValue(
+      createUserRow({ user_id: 7, user_disc_id: session.user.id }),
+    );
+    spyOn(TomoriDashboardCore.prototype, "loadGuildSnapshot").mockResolvedValue({
+      serverId: 42,
+      serverDiscordId: "123456789012345678",
+      config: createServerConfig(),
+      rawPersonas: [],
+      personas: [
+        {
+          personaId: 9,
+          lineageId: 77,
+          nickname: "Tomori",
+          isAlter: true,
+          isPointer: false,
+          avatarUrl: null,
+          triggerWords: [],
+          personaPrompt: null,
+          attributes: [],
+          sampleDialogues: [],
+          contextNote: null,
+          contextNoteDepth: 0,
+          physicalAppearanceTags: [],
+          humanizerOverride: null,
+        },
+      ],
+    });
+    const namingWrite = spyOn(TomoriDashboardCore.prototype, "updatePersonaNaming").mockResolvedValue(true);
+    const categoryWrite = spyOn(TomoriDashboardCore.prototype, "updateStmCategories").mockResolvedValue(true);
+    const signature = createHmac("sha256", config.sessionSecret).update(session.id).digest("base64url");
+    const headers = {
+      Cookie: `${SESSION_COOKIE}=${session.id}.${signature}`,
+      "X-CSRF-Token": session.csrfToken,
+      "Content-Type": "application/json",
+    };
+    return { app, headers, session, namingWrite, categoryWrite };
+  }
+
+  it("allows a member's own naming preferences but denies server category writes", async () => {
+    const { app, headers, namingWrite, categoryWrite } = setup();
+    const preference = { nickname: "Mirri", prefix: "", suffix: null };
+    const response = await app.request("/settings/api/guilds/123456789012345678/personas/9/naming", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(preference),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ preference });
+    expect(namingWrite).toHaveBeenCalledWith({
+      userId: 7,
+      userDiscId: "987654321098765432",
+      personaLineageId: 77,
+      ...preference,
+    });
+    const denied = await app.request("/settings/api/guilds/123456789012345678/stm/categories", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ categories: [] }),
+    });
+    expect(denied.status).toBe(403);
+    expect(categoryWrite).not.toHaveBeenCalled();
+  });
+
+  it("requires authentication, membership and CSRF even for administrators", async () => {
+    const { app, headers, namingWrite, categoryWrite } = setup(true);
+    for (const route of ["personas/9/naming", "stm/categories"]) {
+      const url = `/settings/api/guilds/123456789012345678/${route}`;
+      expect((await app.request(url, { method: "PUT" })).status).toBe(401);
+      expect((await app.request(url, { method: "PUT", headers: { Cookie: headers.Cookie } })).status).toBe(403);
+      expect(
+        (await app.request(url.replace("123456789012345678", "111111111111111111"), { method: "PUT", headers })).status,
+      ).toBe(403);
+    }
+    expect(namingWrite).not.toHaveBeenCalled();
+    expect(categoryWrite).not.toHaveBeenCalled();
+  });
+
+  it("rejects foreign personas and user spoofing without writes, including for admins", async () => {
+    const { app, headers, namingWrite } = setup(true);
+    const preference = { nickname: null, prefix: null, suffix: null };
+    for (const [personaId, body, status] of [
+      [10, preference, 404],
+      [9, { ...preference, userId: 8 }, 422],
+      ["9junk", preference, 404],
+    ] as const) {
+      const response = await app.request(`/settings/api/guilds/123456789012345678/personas/${personaId}/naming`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(status);
+    }
+    expect(namingWrite).not.toHaveBeenCalled();
+  });
+
+  it("returns validation errors for bad categories and permits valid admin writes", async () => {
+    const { app, headers, categoryWrite } = setup(true);
+    const url = "/settings/api/guilds/123456789012345678/stm/categories";
+    const invalid = await app.request(url, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ categories: [{ label: "Goals", description: "" }] }),
+    });
+    expect(invalid.status).toBe(422);
+    expect(categoryWrite).not.toHaveBeenCalled();
+    const categories = [{ label: "Goals", description: "Current goals" }];
+    const saved = await app.request(url, { method: "PUT", headers, body: JSON.stringify({ categories }) });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({ categories });
+    expect(categoryWrite).toHaveBeenCalledWith(42, categories);
   });
 });

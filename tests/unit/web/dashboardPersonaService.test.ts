@@ -1,4 +1,5 @@
-import { describe, expect, it, mock } from "bun:test";
+import { beforeAll, describe, expect, it, mock } from "bun:test";
+import { initializeLocalizer } from "@/utils/text/localizer";
 import type { Client } from "discord.js";
 import type { TomoriDashboardCore } from "@/web/dashboard/core";
 import { DashboardPersonaService } from "@/web/dashboard/personaService";
@@ -57,6 +58,93 @@ function createService() {
 }
 
 describe("dashboard personal and memory settings", () => {
+  beforeAll(() => initializeLocalizer());
+
+  it("validates category keys and Discord limits before replacing any definitions", async () => {
+    const updateStmCategories = mock(async () => true);
+    const service = new DashboardSettingsService({ updateStmCategories } as unknown as DashboardSettingsCore);
+    const category = { label: "Recent events", description: "Events in this conversation" };
+    for (const value of [
+      null,
+      { categories: [category], server_id: 99 },
+      { categories: [{ ...category, position: 4 }] },
+      { categories: Array(6).fill(category) },
+      { categories: [category, { ...category, label: "recent-events" }] },
+      { categories: [{ ...category, label: "!!!" }] },
+      { categories: [{ ...category, label: "Recent: events" }] },
+      { categories: [{ ...category, description: " " }] },
+      { categories: [{ label: "a", description: "x".repeat(998) }] },
+    ]) {
+      await expect(service.updateStmCategories(createSnapshot(), value)).rejects.toMatchObject({
+        code: "invalid_stm_categories",
+        status: 422,
+      });
+    }
+    expect(updateStmCategories).not.toHaveBeenCalled();
+    const categories = [category, { label: "a", description: "x".repeat(997) }];
+    expect(await service.updateStmCategories(createSnapshot(), { categories })).toEqual(categories);
+    expect(updateStmCategories).toHaveBeenCalledWith(42, categories);
+  });
+
+  it("restores summary mode on empty categories and reports write failures", async () => {
+    const updateStmCategories = mock(async () => true);
+    const service = new DashboardSettingsService({ updateStmCategories } as unknown as DashboardSettingsCore);
+    const restored = await service.updateStmCategories(createSnapshot(), { categories: [] });
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.label).toBe("summary");
+    expect(updateStmCategories).toHaveBeenCalledWith(42, restored);
+    updateStmCategories.mockResolvedValue(false);
+    await expect(service.updateStmCategories(createSnapshot(), { categories: [] })).rejects.toMatchObject({
+      status: 500,
+    });
+  });
+
+  it("derives naming ownership and lineage from trusted inputs and preserves affix suppression", async () => {
+    const updatePersonaNaming = mock(async () => true);
+    const service = new DashboardSettingsService({ updatePersonaNaming } as unknown as DashboardSettingsCore);
+    const user = { ...createUserRow(), user_id: 7 };
+    const preference = { nickname: " Mirri ", prefix: null, suffix: "" };
+    expect(await service.updatePersonaNaming(createSnapshot(), user, 9, preference)).toEqual({
+      ...preference,
+      nickname: "Mirri",
+    });
+    expect(updatePersonaNaming).toHaveBeenCalledWith({
+      userId: 7,
+      userDiscId: user.user_disc_id,
+      personaLineageId: 77,
+      nickname: "Mirri",
+      prefix: null,
+      suffix: "",
+    });
+    const reset = { nickname: null, prefix: null, suffix: null };
+    expect(await service.updatePersonaNaming(createSnapshot(), user, 9, reset)).toEqual(reset);
+    expect(updatePersonaNaming).toHaveBeenLastCalledWith({
+      userId: 7,
+      userDiscId: user.user_disc_id,
+      personaLineageId: 77,
+      ...reset,
+    });
+    updatePersonaNaming.mockClear();
+    for (const value of [
+      { ...preference, userId: 8 },
+      { ...preference, personaLineageId: 88 },
+      { nickname: null },
+      { ...preference, prefix: "x".repeat(101) },
+    ]) {
+      await expect(service.updatePersonaNaming(createSnapshot(), user, 9, value)).rejects.toMatchObject({
+        status: 422,
+      });
+    }
+    await expect(service.updatePersonaNaming(createSnapshot(), user, 10, reset)).rejects.toMatchObject({ status: 404 });
+    const unavailable = createSnapshot();
+    const unavailablePersona = unavailable.personas[0];
+    if (!unavailablePersona) throw new Error("Missing test persona");
+    unavailablePersona.lineageId = 0;
+    await expect(service.updatePersonaNaming(unavailable, user, 9, reset)).rejects.toMatchObject({ status: 404 });
+    expect(updatePersonaNaming).not.toHaveBeenCalled();
+    updatePersonaNaming.mockResolvedValue(false);
+    await expect(service.updatePersonaNaming(createSnapshot(), user, 9, reset)).rejects.toMatchObject({ status: 500 });
+  });
   it("saves new profile preferences only for the authenticated user and preserves explicit neutral addressing", async () => {
     const updateUser = mock(async () => createUserRow({ user_id: 7 }));
     const service = new DashboardSettingsService({ updateUser } as unknown as DashboardSettingsCore);

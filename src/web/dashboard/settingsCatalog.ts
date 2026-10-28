@@ -46,7 +46,7 @@ export interface SettingsFieldDefinition {
   max?: number;
   step?: number;
   nullable?: boolean;
-  options?: Array<{ value: string | number; label: string }>;
+  options?: Array<{ value: string | number; label: string; description?: string }>;
 }
 
 export interface SettingsSectionDefinition {
@@ -585,6 +585,7 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
         options: TOOL_NOTICE_DEFINITIONS.map((notice) => ({
           value: notice.key,
           label: localizer("en-US", notice.labelKey),
+          description: localizer("en-US", `general.dashboard.hidden_notice_help.${notice.key}`),
         })),
       },
       {

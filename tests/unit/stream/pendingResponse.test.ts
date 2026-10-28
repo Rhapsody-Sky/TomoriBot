@@ -5,6 +5,7 @@ import { HumanizerDegree } from "@/types/db/schema";
 import type { ProcessedChunk, StreamConfig, StreamContext, StreamProvider } from "@/types/stream/interfaces";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
 import { createPersona } from "../../helpers/fixtures";
+import { invalidatePersonaSpriteCache, setPersonaSpriteCache } from "@/utils/cache/personaSpriteCacheStore";
 
 const config: StreamConfig = {
   model: "fixture",
@@ -176,6 +177,39 @@ describe("held collection ceiling", () => {
 });
 
 describe("pending stream presentation", () => {
+  it("returns sprite changes with held text and never sends them", async () => {
+    const { context, provider, send } = fixture([
+      { type: "text", content: "Mirri (happy): Hello!\nStill happy.\nMirri: Back to normal.\n" },
+      { type: "done" },
+    ]);
+    const personaId = context.tomoriState.persona_id;
+    if (!personaId) throw new Error("Fixture persona requires an ID");
+    setPersonaSpriteCache(personaId, [
+      {
+        sprite_id: 1,
+        persona_id: personaId,
+        sprite_name: "Happy",
+        sprite_key: "happy",
+        avatar_url: "https://example.com/happy.png",
+        usage_instructions: "",
+        is_identity: false,
+      },
+    ]);
+    try {
+      const result = await new StreamOrchestrator().streamToDiscord(provider, config, context);
+      expect(result.status).toBe("completed");
+      expect(result.pendingResponse?.presentation?.map((part) => part.sprite?.spriteName)).toEqual([
+        "Happy",
+        "Happy",
+        undefined,
+      ]);
+      expect(result.pendingResponse?.presentation?.at(-1)?.text).toContain("Back to normal.");
+      expect(send).not.toHaveBeenCalled();
+      expect(context.deliveredMessageRefs).toEqual([]);
+    } finally {
+      invalidatePersonaSpriteCache(personaId);
+    }
+  });
   it("holds early flushes and pre-tool prose, strips reasoning and keeps terminal usage", async () => {
     const { context, provider, send } = fixture([
       { type: "text", content: "<think>private thought</think>Mirri: I will check.\n" },

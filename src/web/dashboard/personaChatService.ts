@@ -11,6 +11,9 @@ import { resolveEffectiveUserNaming } from "@/utils/text/userNaming";
 import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
 import type { TomoriState } from "@/types/db/schema";
 import type { StreamingContext } from "@/types/tool/interfaces";
+import type { PendingResponsePresentation } from "@/types/stream/pendingResponse";
+import { formatRenderModifierWebhookName } from "@/utils/discord/renderModifierParser";
+import { normalizePersonaSpriteKey } from "@/utils/persona/sprites";
 import { DashboardServiceError } from "./errors";
 import type { DashboardActor, DashboardGuildSnapshot } from "./types";
 
@@ -35,6 +38,33 @@ const testChatSchema = z
   });
 
 const activeChats = new Set<string>();
+
+function buildPresentation(parts: PendingResponsePresentation[], snapshot: DashboardGuildSnapshot) {
+  const segments: Array<{
+    content: string;
+    sprite: { name: string; identity: boolean; imageUrl: string; displayName: string } | null;
+  }> = [];
+  for (const part of parts) {
+    const persona = part.sprite && snapshot.rawPersonas.find((entry) => entry.persona_id === part.sprite?.personaId);
+    const sprite =
+      persona && part.sprite
+        ? {
+            name: part.sprite.spriteName,
+            identity: part.sprite.isIdentity,
+            displayName: part.sprite.isIdentity
+              ? formatRenderModifierWebhookName(part.sprite.spriteName, persona.persona_nickname)
+              : persona.persona_nickname,
+            imageUrl: `/settings/api/guilds/${snapshot.serverDiscordId}/personas/${persona.persona_id}/sprites/image?key=${encodeURIComponent(normalizePersonaSpriteKey(part.sprite.spriteName))}`,
+          }
+        : null;
+    const previous = segments.at(-1);
+    if (previous && previous.sprite?.imageUrl === sprite?.imageUrl) previous.content += part.text;
+    else segments.push({ content: part.text, sprite });
+  }
+  return segments
+    .map((segment) => ({ ...segment, content: segment.content.trim() }))
+    .filter((segment) => segment.content);
+}
 
 function safeTestState(state: TomoriState): TomoriState {
   return {
@@ -204,6 +234,7 @@ export class DashboardPersonaChatService {
       const chunks: string[] = [];
       const channel = createCollectorChannel(guild, channelId, chunks);
       const streamingContext: StreamingContext = {
+        holdResponseText: true,
         disableYouTubeProcessing: true,
         disableAllTools: true,
         suppressUserErrors: true,
@@ -234,10 +265,19 @@ export class DashboardPersonaChatService {
           result.status === "timeout" ? "The test response timed out." : "The selected model could not answer.",
         );
       }
-      const content = result.accumulatedText?.trim() || chunks.join("\n").trim();
+      const segments = buildPresentation(result.pendingResponse?.presentation ?? [], snapshot);
+      const content = segments.length
+        ? segments
+            .map(
+              (segment) =>
+                `${segment.sprite ? formatRenderModifierWebhookName(persona.persona_nickname, segment.sprite.name) : persona.persona_nickname}: ${segment.content}`,
+            )
+            .join("\n")
+        : result.pendingResponse?.text.trim() || result.accumulatedText?.trim() || chunks.join("\n").trim();
       if (!content) throw new DashboardServiceError("test_chat_empty", 502, "The selected model returned no text.");
       return {
         content,
+        segments,
         model: persona.llm.llm_codename,
         provider: persona.llm.llm_provider,
       };
@@ -255,6 +295,7 @@ export class DashboardPersonaChatService {
 }
 
 export const dashboardTestChatInternals = {
+  buildPresentation,
   buildHistory,
   safeTestState,
 };

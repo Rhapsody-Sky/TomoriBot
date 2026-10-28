@@ -6,6 +6,14 @@ const DOWNLOAD_TIMEOUT_MS = 15000;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif"]);
 const ALLOWED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif"]);
 
+export type PersonaSpriteAttachment = APIAttachment | File;
+
+export function personaSpriteAttachmentMetadata(attachment: PersonaSpriteAttachment) {
+  return attachment instanceof File
+    ? { filename: attachment.name, size: attachment.size, content_type: attachment.type }
+    : attachment;
+}
+
 export type PersonaSpriteImageValidationResult =
   | { ok: true }
   | {
@@ -13,7 +21,10 @@ export type PersonaSpriteImageValidationResult =
       reason: "file_too_large" | "invalid_format";
     };
 
-export function validatePersonaSpriteImageAttachment(attachment: APIAttachment): PersonaSpriteImageValidationResult {
+export function validatePersonaSpriteImageAttachment(
+  input: PersonaSpriteAttachment,
+): PersonaSpriteImageValidationResult {
+  const attachment = personaSpriteAttachmentMetadata(input);
   const maxSizeBytes = PERSONA_LIMITS.MAX_AVATAR_SIZE_MB * 1024 * 1024;
   if (attachment.size > maxSizeBytes) {
     return { ok: false, reason: "file_too_large" };
@@ -33,8 +44,12 @@ export function validatePersonaSpriteImageAttachment(attachment: APIAttachment):
 }
 
 export async function downloadPersonaSpriteImageAttachment(
-  attachment: APIAttachment,
+  attachment: PersonaSpriteAttachment,
 ): Promise<{ ok: true; buffer: Buffer } | { ok: false; reason: "timeout" | "download_failed" }> {
+  if (attachment instanceof File) {
+    if (!validatePersonaSpriteImageAttachment(attachment).ok) return { ok: false, reason: "download_failed" };
+    return { ok: true, buffer: Buffer.from(await attachment.arrayBuffer()) };
+  }
   const downloadResult = await safeDownload(attachment.url, {
     maxSizeMB: PERSONA_LIMITS.MAX_AVATAR_SIZE_MB,
     timeoutMs: DOWNLOAD_TIMEOUT_MS,

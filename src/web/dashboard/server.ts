@@ -1,11 +1,16 @@
 import type { Client, GuildBasedChannel } from "discord.js";
 import { resolve } from "node:path";
-import type { Context } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { Hono } from "hono";
 import { z } from "zod";
 import { log } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
-import { USER_IDENTITY_FIELD_MAX_LENGTH, USER_NICKNAME_MAX_LENGTH } from "@/types/personaNaming";
+import {
+  PERSONA_NAMING_VALUE_MAX_LENGTH,
+  USER_IDENTITY_FIELD_MAX_LENGTH,
+  USER_NICKNAME_MAX_LENGTH,
+} from "@/types/personaNaming";
 import {
   OAUTH_STATE_COOKIE,
   SESSION_COOKIE,
@@ -29,6 +34,7 @@ import { DashboardMemoryService } from "./memoryService";
 import { DashboardProviderService } from "./providerService";
 import { DashboardPersonaChatService } from "./personaChatService";
 import { DashboardPersonaService } from "./personaService";
+import { DashboardSpriteService, SPRITE_UPLOAD_MAX_BYTES } from "./spriteService";
 import { getDashboardRuntimeConfig } from "./runtimeConfig";
 import { getSettingsCatalog, isSettingsSectionId, serializeSettingsValues } from "./settingsCatalog";
 import { DashboardSettingsService } from "./settingsService";
@@ -44,6 +50,10 @@ import { renderDashboardHtml } from "./ui";
 const BASE_PATH = "/settings";
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 const DASHBOARD_STATS_TIMEFRAMES = new Set<DashboardStatsTimeframe>(["today", "week", "month", "year", "all_time"]);
+
+type DashboardEnv = {
+  Variables: { spriteContext: { snapshot: DashboardGuildSnapshot; personaId: number; actorDiscordId: string } };
+};
 
 const memoryImportSchema = z
   .object({
@@ -64,12 +74,14 @@ const dashboardAssets = {
   "app.css": { path: "src/web/dashboard/assets/app.css", contentType: "text/css; charset=utf-8" },
   "companion.css": { path: "src/web/dashboard/assets/companion.css", contentType: "text/css; charset=utf-8" },
   "app.js": { path: "src/web/dashboard/assets/app.js", contentType: "application/javascript; charset=utf-8" },
+  "navigation-icons.svg": { path: "src/web/dashboard/assets/navigation-icons.svg", contentType: "image/svg+xml" },
   "tomoribot_logo.png": { path: "src/web/assets/tomoribot_logo.png", contentType: "image/png" },
   "tomori_companion_logo.svg": {
     path: "src/web/assets/tomori_companion_logo.svg",
     contentType: "image/svg+xml",
   },
   "noto-sans-jp.ttf": { path: "assets/fonts/NotoSansJP-Regular.ttf", contentType: "font/ttf" },
+  "noto-sans-jp-bold.ttf": { path: "assets/fonts/NotoSansJP-Bold.ttf", contentType: "font/ttf" },
   "tomori_texture5.png": { path: "src/web/assets/tomori_texture5.png", contentType: "image/png" },
 } as const;
 
@@ -241,9 +253,10 @@ export function createDashboardApp(client: Client) {
   const memories = new DashboardMemoryService(core);
   const providers = new DashboardProviderService(core);
   const personas = new DashboardPersonaService(core, client);
+  const sprites = new DashboardSpriteService();
   const personaChat = new DashboardPersonaChatService(client);
   const settings = new DashboardSettingsService(core);
-  const app = new Hono();
+  const app = new Hono<DashboardEnv>();
   sessions.startCleanup();
 
   app.use("*", async (context, next) => {
@@ -269,7 +282,10 @@ export function createDashboardApp(client: Client) {
     context.header("Content-Type", asset.contentType);
     context.header(
       "Cache-Control",
-      assetName === "app.js" || assetName === "app.css" || assetName === "companion.css"
+      assetName === "app.js" ||
+        assetName === "app.css" ||
+        assetName === "companion.css" ||
+        assetName === "navigation-icons.svg"
         ? "no-cache"
         : "public, max-age=86400",
     );
@@ -352,8 +368,117 @@ export function createDashboardApp(client: Client) {
       guild: result.guild,
       setupComplete: true,
       canManage: result.actor.canManage,
+      interfaceCopy: Object.fromEntries(
+        [
+          "navigation_more",
+          "navigation_menu",
+          "refresh_all",
+          "refresh_memories",
+          "refresh_providers",
+          "appearance_saved",
+          "appearance_session_only",
+          "sprites",
+          "sprites_hint",
+          "sprite_inherited",
+          "sprite_name",
+          "sprite_name_hint",
+          "sprite_instructions",
+          "sprite_instructions_hint",
+          "sprite_identity",
+          "sprite_identity_hint",
+          "sprite_file",
+          "sprite_file_hint",
+          "sprite_add",
+          "sprite_edit",
+          "sprite_remove",
+          "sprite_remove_title",
+          "sprite_remove_detail",
+          "sprite_add_detail",
+          "sprite_import",
+          "sprite_import_detail",
+          "sprite_export",
+          "sprite_exported",
+          "sprite_empty",
+          "sprite_retry",
+          "sprite_loading",
+          "sprite_load_failed",
+          "sprite_image_missing",
+          "navigation_switch",
+          "navigation_close",
+          "endpoint_features",
+          "endpoint_features_hint",
+          "endpoint_tools",
+          "endpoint_tools_hint",
+          "endpoint_images",
+          "endpoint_images_hint",
+          "endpoint_videos",
+          "endpoint_videos_hint",
+          "endpoint_structured",
+          "endpoint_structured_hint",
+          "endpoint_roles",
+          "endpoint_roles_hint",
+          "endpoint_prefix",
+          "endpoint_prefix_hint",
+          "my_settings",
+          "profile",
+          "profile_hint",
+          "privacy",
+          "privacy_hint",
+          "conversation",
+          "conversation_hint",
+          "memory",
+          "learning",
+          "learning_hint",
+          "boundaries",
+          "boundaries_hint",
+          "channels",
+          "channels_hint",
+          "tools",
+          "tools_hint",
+          "diagnostics",
+          "diagnostics_hint",
+          "models_hint",
+          "output_hint",
+          "settings_hint",
+          "fallback",
+          "fallback_hint",
+          "save",
+          "unsaved",
+          "discard",
+          "discard_title",
+          "discard_detail",
+          "refresh_detail",
+          "leave_detail",
+          "saving",
+          "retry",
+          "partial",
+          "dismiss",
+        ].map((key) => [key, localizer("en-US", `general.dashboard.interface_${key}`)]),
+      ),
       profile: serializeProfile(result.actor),
       personas: result.snapshot.personas,
+      personaNaming: {
+        values: await core.loadPersonaNaming(result.actor.user.user_id, result.snapshot),
+        maxLength: PERSONA_NAMING_VALUE_MAX_LENGTH,
+        copy: {
+          tab: localizer("en-US", "general.dashboard.naming_tab"),
+          title: localizer("en-US", "general.dashboard.naming_title"),
+          description: localizer("en-US", "general.dashboard.naming_description"),
+          nickname: localizer("en-US", "general.dashboard.naming_nickname"),
+          prefix: localizer("en-US", "general.dashboard.naming_prefix"),
+          suffix: localizer("en-US", "general.dashboard.naming_suffix"),
+          inherit: localizer("en-US", "general.dashboard.naming_inherit"),
+          custom: localizer("en-US", "general.dashboard.naming_custom"),
+          none: localizer("en-US", "general.dashboard.naming_none"),
+          hint: localizer("en-US", "general.dashboard.naming_hint"),
+          value: localizer("en-US", "general.dashboard.naming_value"),
+          save: localizer("en-US", "general.dashboard.save"),
+          reset: localizer("en-US", "general.dashboard.reset_defaults"),
+          saved: localizer("en-US", "general.dashboard.naming_saved"),
+          resetTitle: localizer("en-US", "general.dashboard.naming_reset"),
+          resetDetail: localizer("en-US", "general.dashboard.naming_reset_detail"),
+        },
+      },
       channels,
       memoryPolicy: {
         personalMemoryUseEnabled: result.snapshot.config.personal_memories_enabled !== false,
@@ -375,6 +500,23 @@ export function createDashboardApp(client: Client) {
       settings: result.actor.canManage
         ? {
             catalog: getSettingsCatalog(),
+            stmCategories: {
+              values: await core.loadStmCategories(result.snapshot.serverId),
+              copy: {
+                title: localizer("en-US", "general.dashboard.stm_categories_title"),
+                description: localizer("en-US", "general.dashboard.stm_categories_description"),
+                label: localizer("en-US", "general.dashboard.stm_category_label"),
+                categoryDescription: localizer("en-US", "general.dashboard.stm_category_description"),
+                hint: localizer("en-US", "general.dashboard.stm_categories_hint"),
+                warning: localizer("en-US", "general.dashboard.stm_categories_warning"),
+                confirm: localizer("en-US", "general.dashboard.stm_categories_confirm"),
+                save: localizer("en-US", "general.dashboard.save"),
+                reset: localizer("en-US", "general.dashboard.reset_defaults"),
+                saved: localizer("en-US", "general.dashboard.stm_categories_saved"),
+                resetTitle: localizer("en-US", "general.dashboard.stm_categories_reset"),
+                resetDetail: localizer("en-US", "general.dashboard.stm_categories_reset_detail"),
+              },
+            },
             values: serializeSettingsValues({
               ...result.snapshot.config,
               ...(await core.loadStmSettings(result.snapshot.serverId)),
@@ -796,6 +938,49 @@ export function createDashboardApp(client: Client) {
     }
   });
 
+  app.put(`${BASE_PATH}/api/guilds/:guildId/stm/categories`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    try {
+      const categories = await settings.updateStmCategories(
+        result.snapshot,
+        await context.req.json().catch(() => null),
+      );
+      return context.json({ categories });
+    } catch (error) {
+      if (!(error instanceof DashboardServiceError)) log.error("Dashboard STM category update failed", error);
+      return jsonError(
+        context,
+        error instanceof DashboardServiceError ? error : localizer("en-US", "general.dashboard.stm_categories_failed"),
+      );
+    }
+  });
+
+  app.put(`${BASE_PATH}/api/guilds/:guildId/personas/:personaId/naming`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    const personaId = Number(context.req.param("personaId"));
+    try {
+      const preference = await settings.updatePersonaNaming(
+        result.snapshot,
+        result.actor.user,
+        personaId,
+        await context.req.json().catch(() => null),
+      );
+      return context.json({ preference });
+    } catch (error) {
+      if (!(error instanceof DashboardServiceError)) log.error("Dashboard persona naming update failed", error);
+      return jsonError(
+        context,
+        error instanceof DashboardServiceError ? error : localizer("en-US", "general.dashboard.naming_failed"),
+      );
+    }
+  });
+
   app.patch(`${BASE_PATH}/api/guilds/:guildId/settings/:sectionId`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config, true);
     if (result instanceof Response) return result;
@@ -877,6 +1062,70 @@ export function createDashboardApp(client: Client) {
     } catch (error) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Persona import failed.");
     }
+  });
+
+  const spriteRoot = `${BASE_PATH}/api/guilds/:guildId/personas/:personaId/sprites`;
+  const spriteGuard: MiddlewareHandler<DashboardEnv> = async (context, next) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId) return context.notFound();
+    sprites.persona(result.snapshot, personaId);
+    context.set("spriteContext", { snapshot: result.snapshot, personaId, actorDiscordId: result.actor.discordId });
+    context.header("Cache-Control", "private, no-store");
+    await next();
+  };
+  app.use(spriteRoot, spriteGuard);
+  app.use(`${spriteRoot}/*`, spriteGuard);
+  const spriteBodyLimit = bodyLimit({
+    maxSize: SPRITE_UPLOAD_MAX_BYTES + 64 * 1024,
+    onError: (context) =>
+      jsonError(
+        context,
+        new DashboardServiceError("sprite_size", 413, localizer("en-US", "general.dashboard.sprite_errors.size")),
+      ),
+  });
+  app.use(spriteRoot, spriteBodyLimit);
+  app.use(`${spriteRoot}/*`, spriteBodyLimit);
+  app.get(spriteRoot, async (context) => {
+    const { snapshot, personaId } = context.get("spriteContext");
+    return context.json(await sprites.list(snapshot, personaId));
+  });
+  app.on(["POST", "PUT"], spriteRoot, async (context) => {
+    const { snapshot, personaId } = context.get("spriteContext");
+    const key = context.req.method === "PUT" ? context.req.query("key") : null;
+    if (key === undefined || key === "") return context.notFound();
+    return context.json(await sprites.save(snapshot, personaId, key, await context.req.parseBody({ all: true })));
+  });
+  app.delete(spriteRoot, async (context) => {
+    const { snapshot, personaId } = context.get("spriteContext");
+    const key = context.req.query("key");
+    if (!key) return context.notFound();
+    return context.json(await sprites.remove(snapshot, personaId, key));
+  });
+  app.post(`${spriteRoot}/import`, async (context) => {
+    const { snapshot, personaId, actorDiscordId } = context.get("spriteContext");
+    const body = await context.req.parseBody({ all: true });
+    return context.json(await sprites.import(snapshot, personaId, actorDiscordId, body.file));
+  });
+  app.get(`${spriteRoot}/export`, async (context) => {
+    const { snapshot, personaId } = context.get("spriteContext");
+    const result = await sprites.export(snapshot, personaId);
+    context.header("Content-Type", "application/zip");
+    context.header("Content-Disposition", `attachment; filename="${result.filename}"`);
+    context.header("X-Sprite-Skipped", String(result.skippedCount));
+    return context.body(new Uint8Array(result.buffer));
+  });
+  app.get(`${spriteRoot}/image`, async (context) => {
+    const { snapshot, personaId } = context.get("spriteContext");
+    const key = context.req.query("key");
+    if (!key) return context.notFound();
+    context.header("Content-Type", "image/png");
+    return context.body(new Uint8Array(await sprites.image(snapshot, personaId, key)));
   });
 
   app.put(`${BASE_PATH}/api/guilds/:guildId/personas/:personaId/attributes`, async (context) => {
@@ -1110,6 +1359,7 @@ export function createDashboardApp(client: Client) {
   });
 
   app.onError(async (error, context) => {
+    if (error instanceof DashboardServiceError) return jsonError(context, error);
     await log.error("Unhandled dashboard request error", error);
     return jsonError(context, "Dashboard request failed.");
   });

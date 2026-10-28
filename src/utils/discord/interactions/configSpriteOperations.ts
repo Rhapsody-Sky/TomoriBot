@@ -1,4 +1,3 @@
-import type { APIAttachment } from "discord.js";
 import type { PersonaSpriteRow, TomoriState } from "@/types/db/schema";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { personaSpriteRepository } from "@/utils/db/repositories";
@@ -9,6 +8,8 @@ import { forkPointerForAvatarChange } from "@/utils/persona/pointerFork";
 import { buildSpriteArchive, readSpriteArchive, type SpriteArchiveBuildEntry } from "@/utils/persona/spriteArchive";
 import {
   downloadPersonaSpriteImageAttachment,
+  personaSpriteAttachmentMetadata,
+  type PersonaSpriteAttachment,
   validatePersonaSpriteImageAttachment,
 } from "@/utils/persona/spriteImages";
 import {
@@ -94,7 +95,7 @@ export interface ConfigSpriteOperations {
     rawName: string;
     rawInstructions: string;
     isIdentity: boolean;
-    attachment: APIAttachment | null;
+    attachment: PersonaSpriteAttachment | null;
   }): Promise<ConfigSpriteAddResult>;
   editSprite(input: {
     persona: TomoriState;
@@ -103,7 +104,7 @@ export interface ConfigSpriteOperations {
     rawName: string;
     rawInstructions: string;
     isIdentity: boolean;
-    attachment: APIAttachment | null;
+    attachment: PersonaSpriteAttachment | null;
   }): Promise<ConfigSpriteEditResult>;
   removeSprite(input: {
     persona: TomoriState;
@@ -114,7 +115,7 @@ export interface ConfigSpriteOperations {
     persona: TomoriState;
     serverDiscId: string;
     quotaKey: string;
-    attachment: APIAttachment | null;
+    attachment: PersonaSpriteAttachment | null;
   }): Promise<ConfigSpriteImportResult>;
   exportSprites(input: { persona: TomoriState }): Promise<ConfigSpriteExportResult>;
 }
@@ -135,7 +136,7 @@ async function materializeForSpriteWrite(persona: TomoriState, serverDiscId: str
 }
 
 async function downloadAndConvert(
-  attachment: APIAttachment,
+  attachment: PersonaSpriteAttachment,
 ): Promise<{ ok: true; buffer: Buffer } | { ok: false; failure: SpriteTransferFailure }> {
   const downloaded = await downloadPersonaSpriteImageAttachment(attachment);
   if (!downloaded.ok) return { ok: false, failure: { status: "download-failed", reason: downloaded.reason } };
@@ -305,8 +306,10 @@ export const configSpriteOperations: ConfigSpriteOperations = {
     const personaId = persona.persona_id;
     if (!personaId) return { status: "write-failed" };
 
-    if (!attachment?.filename.toLowerCase().endsWith(".zip")) return { status: "invalid-file" };
-    if (attachment.size > MAX_ARCHIVE_BYTES) return { status: "file-too-large" };
+    if (!attachment) return { status: "invalid-file" };
+    const metadata = personaSpriteAttachmentMetadata(attachment);
+    if (!metadata.filename.toLowerCase().endsWith(".zip")) return { status: "invalid-file" };
+    if (metadata.size > MAX_ARCHIVE_BYTES) return { status: "file-too-large" };
 
     // One import-operation slot covers the whole batch rather than one avatar-quota slot per sprite
     // inside it, because a batch import is a single operation.
@@ -315,11 +318,14 @@ export const configSpriteOperations: ConfigSpriteOperations = {
 
     if (memoryGuard.checkMemory().status === "critical") return { status: "memory-critical" };
 
-    const download = await safeDownload(attachment.url, {
-      maxSizeMB: IMPORT_LIMITS.MAX_PERSONA_IMPORT_SIZE_MB,
-      timeoutMs: ARCHIVE_DOWNLOAD_TIMEOUT_MS,
-      knownSize: attachment.size,
-    });
+    const download =
+      attachment instanceof File
+        ? { success: true, buffer: Buffer.from(await attachment.arrayBuffer()) }
+        : await safeDownload(attachment.url, {
+            maxSizeMB: IMPORT_LIMITS.MAX_PERSONA_IMPORT_SIZE_MB,
+            timeoutMs: ARCHIVE_DOWNLOAD_TIMEOUT_MS,
+            knownSize: attachment.size,
+          });
     if (!download.success || !download.buffer) return { status: "download-failed" };
 
     const archive = await readSpriteArchive(download.buffer, {

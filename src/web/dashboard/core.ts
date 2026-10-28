@@ -44,6 +44,8 @@ import { providerPanelOperations, removeScopedRegistration } from "@/utils/provi
 import { DashboardServiceError } from "./errors";
 import { shortTermMemoryRepository } from "@/utils/db/repositories/ShortTermMemoryRepository";
 import { serverStmConfigSchema } from "@/types/db/schema";
+import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
+import { personalConfigOperations } from "@/utils/discord/interactions/personalConfigOperations";
 import {
   type OpenRouterModelCapability,
   type RegisteredOpenRouterModelEntry,
@@ -694,6 +696,44 @@ export class TomoriDashboardCore {
       tool_description_override: row.tool_description_override ?? null,
       update_nudge_override: row.update_nudge_override ?? null,
     };
+  }
+
+  async loadStmCategories(serverId: number) {
+    return (await shortTermMemoryRepository.getStmCategories(serverId)).map(({ label, description }) => ({
+      label,
+      description,
+    }));
+  }
+
+  async updateStmCategories(serverId: number, categories: Array<{ label: string; description: string }>) {
+    return shortTermMemoryRepository.upsertStmCategories(
+      serverId,
+      categories.map((category, position) => ({ ...category, position })),
+    );
+  }
+
+  async loadPersonaNaming(userId: number, snapshot: DashboardGuildSnapshot) {
+    const preferences = await userNamingRepository.loadPreferences(
+      snapshot.personas.map((persona) => ({ userId, personaLineageId: persona.lineageId })),
+    );
+    return Object.fromEntries(
+      snapshot.personas.map((persona) => {
+        const preference = preferences.get(userPersonaNamingPairKey(userId, persona.lineageId));
+        return [
+          persona.personaId,
+          {
+            nickname: preference?.nickname_override ?? null,
+            prefix: preference?.prefix_override ?? null,
+            suffix: preference?.suffix_override ?? null,
+          },
+        ];
+      }),
+    );
+  }
+
+  async updatePersonaNaming(input: Parameters<typeof personalConfigOperations.setPersonaNaming>[0]) {
+    const result = await personalConfigOperations.setPersonaNaming(input);
+    return result.status === "success";
   }
 
   async updateSettings(

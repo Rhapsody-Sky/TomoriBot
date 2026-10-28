@@ -3,7 +3,7 @@ export function renderDashboardHtml(): string {
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="dark light">
     <meta name="theme-color" content="#16131c">
     <title>TomoriBot Control Room</title>
@@ -26,13 +26,13 @@ export function renderDashboardHtml(): string {
         <span class="heart">✧</span><span class="heart teal">♡</span>
       </div>
     </div>
-    <div id="app" class="app-shell" aria-live="polite">
+    <div id="app" class="app-shell">
       <div class="boot-screen">
         <img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="boot-logo">
         <div class="boot-line"></div>
       </div>
     </div>
-    <div id="toast-region" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+    <div id="toast-region" class="toast-region"></div>
     <script src="/settings/assets/app.js" defer></script>
   </body>
 </html>`;
