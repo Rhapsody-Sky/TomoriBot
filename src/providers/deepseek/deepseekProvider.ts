@@ -1,3 +1,4 @@
+import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type {
   AnyThreadChannel,
   BaseGuildTextChannel,
@@ -14,7 +15,7 @@ import { DeepseekStreamAdapter, type DeepseekStreamConfig } from "@/providers/de
 import { getDeepseekToolAdapter } from "@/providers/deepseek/deepseekToolAdapter";
 import {
   createOpenAICompatibleHttpError,
-  normalizeOpenAICompatibleProviderError,
+  reportOpenAICompatibleKeyValidationFailure,
 } from "@/providers/openaiCompatible/openaiCompatibleErrorFormatter";
 import { callDeepseekStructuredJSON } from "@/providers/deepseek/deepseekStructuredOutput";
 import {
@@ -22,8 +23,6 @@ import {
   generateRoleplaySummaryDeepseek,
 } from "@/providers/deepseek/compactGenerator";
 import { generatePresetFromPromptDeepseek } from "@/providers/deepseek/presetGenerator";
-import { isBraveSearchAvailable } from "@/tools/restAPIs/brave/braveSearchService";
-import { getMCPManager } from "@/utils/mcp/mcpManager";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import type { TomoriState } from "@/types/db/schema";
 import type { StructuredContextItem } from "@/types/misc/context";
@@ -56,12 +55,20 @@ import type { StreamingContext } from "@/types/tool/interfaces";
 import { type ToolStateForContext, getAvailableToolsWithMCP } from "@/tools/toolRegistry";
 import { applyStreamContextAvailability } from "@/tools/availability";
 import { log } from "@/utils/misc/logger";
+import { toDeepseekApiModelName } from "@/providers/deepseek/deepseekShared";
 import { buildRuntimeLogitBiasMapForLlm } from "@/utils/provider/logitBiasResolver";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
-const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
+const DEFAULT_DEEPSEEK_MODEL = "deepseek-flash";
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_BETA_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/beta/chat/completions";
+
+/**
+ * Expressions/emojis classified per structured-output call during `/expressions initialize`.
+ * One call keeps the whole batch inside a single response.
+ */
+export const DEEPSEEK_EXPRESSION_BATCH_SIZE = 20;
 
 export interface DeepseekProviderConfig extends ProviderConfig {
   endpointUrl: string;
@@ -99,12 +106,16 @@ export class DeepseekProvider
 
       return { valid: true };
     } catch (error) {
-      log.error("DeepSeek API key validation failed", error as Error);
       return {
         valid: false,
-        error: normalizeOpenAICompatibleProviderError(error, {
-          errorMessagePrefix: "DeepSeek API error",
-        }),
+        error: await reportOpenAICompatibleKeyValidationFailure(
+          error,
+          "deepseek",
+          "DeepSeek API key validation failed",
+          {
+            errorMessagePrefix: "DeepSeek API error",
+          },
+        ),
       };
     }
   }
@@ -122,16 +133,31 @@ export class DeepseekProvider
     return await callDeepseekStructuredJSON(request, responseSchema, zodSchema);
   }
 
+  /**
+   * @param batchSizeOverride - Sizes the batch differently from the provider default; callers
+   *                           that do not pass one get `DEEPSEEK_EXPRESSION_BATCH_SIZE`.
+   */
+  getExpressionInitializationBatchSize(batchSizeOverride?: number): number {
+    return typeof batchSizeOverride === "number" && batchSizeOverride > 0
+      ? batchSizeOverride
+      : DEEPSEEK_EXPRESSION_BATCH_SIZE;
+  }
+
   async getTools(
     tomoriState: TomoriState,
     streamingContext?: StreamingContext,
   ): Promise<Array<Record<string, unknown>>> {
-    if (!tomoriState.llm.has_tools) {
-      log.info("DeepSeek provider: Model does not support tools (seeded capability)");
+    if (!resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
+      log.info(
+        `DeepSeek provider: Tools unavailable (tool_use_enabled=${tomoriState.config.tool_use_enabled}, has_tools=${tomoriState.llm.has_tools})`,
+      );
       return [];
     }
 
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -140,7 +166,11 @@ export class DeepseekProvider
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -153,6 +183,7 @@ export class DeepseekProvider
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -161,13 +192,18 @@ export class DeepseekProvider
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("deepseek", toolStateForContext);
 
@@ -184,6 +220,7 @@ export class DeepseekProvider
         providerLabel: "DeepSeek provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -212,11 +249,11 @@ export class DeepseekProvider
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<DeepseekProviderConfig> {
     const samplingParams = buildActiveSamplingParams(tomoriState.config);
     const config: DeepseekProviderConfig = {
-      model: tomoriState.llm.llm_codename,
+      model: toDeepseekApiModelName(tomoriState.llm.llm_codename),
       apiKey,
       temperature: tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 4096,
+      maxOutputTokens: await resolveRequestMaxOutputTokens(tomoriState),
       endpointUrl: DEEPSEEK_CHAT_COMPLETIONS_URL,
       seesImages: tomoriState.llm.sees_images,
       seesVideos: tomoriState.llm.sees_videos,
@@ -228,7 +265,7 @@ export class DeepseekProvider
       config.logitBias = runtimeLogitBias;
     }
 
-    if (tomoriState.llm.has_tools) {
+    if (resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
       config.tools = await this.getTools(tomoriState);
     }
 
@@ -282,7 +319,7 @@ export class DeepseekProvider
         log.info("DeepseekProvider: Using beta endpoint for assistant prefix completion");
       }
 
-      if (streamingContext && tomoriState.llm.has_tools) {
+      if (streamingContext && resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("DeepseekProvider: Reloading tools with streaming context for context-aware availability");
         streamConfig.tools = await this.getTools(tomoriState, streamingContext);
       }
@@ -338,15 +375,6 @@ export class DeepseekProvider
       return undefined;
     }
 
-    const hasBraveApiKey = await isBraveSearchAvailable(request.tomoriState.server_id);
-
-    if (!hasBraveApiKey) {
-      const mcpManager = getMCPManager();
-      if (!mcpManager.isReady()) {
-        await mcpManager.initializeMCPServers();
-      }
-    }
-
     const toolStateForContext: ToolStateForContext = {
       server_id: request.tomoriState.server_id.toString(),
       activePersonaHasElevenlabsVoice: Boolean(
@@ -355,7 +383,10 @@ export class DeepseekProvider
           request.tomoriState.speech_voice_id?.trim(),
       ),
       activePersonaVoiceDesignPrompt: request.tomoriState.speech_voice_design_prompt?.trim() || null,
-      activePersonaVoiceName: request.tomoriState.speech_voice_name,
+      activePersonaVoiceSampleId: request.tomoriState.speech_voice_sample_id,
+      activePersonaVoiceId: request.tomoriState.speech_voice_id,
+      activePersonaVoiceSourcePriority: request.tomoriState.voice_source_priority,
+
       diffusion_model_id: request.tomoriState.config.diffusion_model_id,
       nai_diffusion_model_id: request.tomoriState.config.nai_diffusion_model_id,
       video_model_id: request.tomoriState.config.video_model_id,
@@ -368,6 +399,7 @@ export class DeepseekProvider
         supports_structoutput: request.tomoriState.llm.supports_structoutput,
       },
       config: {
+        emoji_usage_enabled: false,
         sticker_usage_enabled: false,
         web_search_enabled: true,
         self_teaching_enabled: false,
@@ -376,7 +408,11 @@ export class DeepseekProvider
         videogen_enabled: false,
         voice_message_enabled: false,
         user_blocking_enabled: false,
+        user_info_updates_enabled: false,
         thread_creation_enabled: false,
+        conditioning_interactions_enabled: false,
+        dice_rolling_enabled: false,
+        danbooru_enabled: false,
       },
     };
 

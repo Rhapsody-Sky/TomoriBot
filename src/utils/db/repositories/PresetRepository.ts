@@ -1,3 +1,4 @@
+import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCacheStore";
 /**
  * PresetRepository: manages SillyTavern preset data, persona preset import/export,
  * and SillyTavern card conversion.
@@ -24,6 +25,8 @@ import {
   type ValidationResult,
   type PresetExportData,
 } from "@/types/preset/presetExport";
+import { PERSONA_NICKNAME_MAX_LENGTH } from "@/types/personaNaming";
+import { getDiscordTextLength } from "@/utils/text/discordTextLimits";
 import { log } from "@/utils/misc/logger";
 import { invalidateStPresetCache } from "@/utils/cache/stPresetCache";
 import { validatePersonaConfigFields } from "@/utils/db/sqlSecurity";
@@ -32,6 +35,22 @@ import type { SillyTavernCardMetadata } from "@/utils/image/pngMetadata";
 import { dedupeTriggerWords, normalizeTriggerWord, stripSurroundingTriggerQuotes } from "@/utils/text/triggerWords";
 import { personaRepository } from "@/utils/db/repositories/PersonaRepository";
 import { getBaseTriggerWords } from "@/utils/text/localizer";
+import { EMPTY_PERSONA_NAMING_CONFIG } from "@/types/personaNaming";
+import { userNamingRepository } from "@/utils/db/repositories/UserNamingRepository";
+import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
+import {
+  DEFAULT_NATURAL_NUDGE_TALKATIVENESS,
+  personaAuthoredIdleNudgesSchema,
+  sameNaturalNudgeInterests,
+  type PersonaAuthoredIdleNudge,
+} from "@/modules/natural-nudges/db/types";
+
+export type StPresetsReadResult = { status: "fresh"; presets: StPresetRow[] } | { status: "unavailable"; presets: [] };
+
+export interface StPresetNodeCounts {
+  total: number;
+  enabled: number;
+}
 
 type JsonObject = Record<string, unknown>;
 
@@ -81,6 +100,29 @@ function normalizeLineageId(value: unknown): number | null {
 
 function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Compares authored definitions field by field, because JSONB reorders object keys and a raw
+ * serialization would misread an unchanged list as a customization.
+ */
+function samePersonaAuthoredIdleNudges(cardList: readonly PersonaAuthoredIdleNudge[], stored: unknown): boolean {
+  const card = personaAuthoredIdleNudgesSchema.safeParse(cardList);
+  const preset = personaAuthoredIdleNudgesSchema.safeParse(stored);
+  if (!card.success || !preset.success) return false;
+  const key = (list: readonly PersonaAuthoredIdleNudge[]) =>
+    JSON.stringify(
+      list.map((nudge) => [
+        nudge.id,
+        nudge.category,
+        nudge.title,
+        nudge.brief,
+        nudge.agenda_hint,
+        nudge.prerequisites,
+        nudge.recommended_tools,
+      ]),
+    );
+  return key(card.data) === key(preset.data);
 }
 
 function normalizePresetPublicFlags(preset: TomoriPresetRow): boolean[] {
@@ -450,6 +492,7 @@ class PresetRepository {
     const expectedPublicFlags = data.attribute_public_flags ?? buildPrivateAttributePublicFlags(data.attribute_list);
     const expectedPrompt = normalizeNullableText(data.persona_prompt);
     const expectedTriggers = dedupeTriggerWords(data.trigger_words, { lowercase: false });
+    const expectedNamingConfig = data.naming_config ?? EMPTY_PERSONA_NAMING_CONFIG;
 
     return (
       presets.find((preset) => {
@@ -459,7 +502,15 @@ class PresetRepository {
           arraysEqual(preset.preset_sample_dialogues_in, data.sample_dialogues_in) &&
           arraysEqual(preset.preset_sample_dialogues_out, data.sample_dialogues_out) &&
           arraysEqual(resolveOfficialPresetTriggerWords(preset), expectedTriggers) &&
-          resolveOfficialPresetPrompt(preset) === expectedPrompt
+          resolveOfficialPresetPrompt(preset) === expectedPrompt &&
+          JSON.stringify(preset.preset_naming_config) === JSON.stringify(expectedNamingConfig) &&
+          // Cards from before Natural Nudges carry none of these fields, so their absence still matches.
+          (data.natural_nudge_talkativeness === undefined ||
+            data.natural_nudge_talkativeness === preset.natural_nudge_talkativeness) &&
+          (data.natural_nudge_interests === undefined ||
+            sameNaturalNudgeInterests(data.natural_nudge_interests, preset.natural_nudge_interests)) &&
+          (data.natural_nudge_idle_nudges === undefined ||
+            samePersonaAuthoredIdleNudges(data.natural_nudge_idle_nudges, preset.natural_nudge_idle_nudges))
         );
       }) ?? null
     );
@@ -511,6 +562,7 @@ class PresetRepository {
     presetName: string,
     rawJson: unknown,
     nodes: Omit<StPresetNodeRow, "node_id" | "preset_id">[],
+    description?: string | null,
   ): Promise<StPresetRow | null> {
     try {
       // Use a transaction to ensure atomicity (preset + all nodes or nothing)
@@ -524,8 +576,8 @@ class PresetRepository {
 
         // Insert the preset metadata + raw JSON
         const [preset] = await tx`
-          INSERT INTO st_presets (server_id, preset_name, raw_json)
-          VALUES (${serverId}, ${presetName}, ${JSON.stringify(rawJson)})
+          INSERT INTO st_presets (server_id, preset_name, raw_json, description)
+          VALUES (${serverId}, ${presetName}, ${JSON.stringify(rawJson)}, ${description ?? null})
           RETURNING *
         `;
 
@@ -569,39 +621,45 @@ class PresetRepository {
   }
 
   /**
+   * Load all ST presets for a server with read status provenance.
+   */
+  async loadPresetsForServerResult(serverId: number): Promise<StPresetsReadResult> {
+    try {
+      const rows = await sql`
+        SELECT preset_id, server_id, preset_name, is_active, description, created_at, updated_at
+        FROM st_presets
+        WHERE server_id = ${serverId}
+        ORDER BY created_at ASC
+      `;
+      return { status: "fresh", presets: rows as StPresetRow[] };
+    } catch (error) {
+      log.error(`[PresetRepository] Failed to load presets for server ${serverId}`, error);
+      return { status: "unavailable", presets: [] };
+    }
+  }
+
+  /**
    * Load all ST presets for a server (metadata only, no nodes).
    *
    * @returns Array of preset rows ordered by creation date
    */
   async loadPresetsForServer(serverId: number): Promise<StPresetRow[]> {
-    try {
-      const rows = await sql`
-        SELECT preset_id, server_id, preset_name, is_active, created_at, updated_at
-        FROM st_presets
-        WHERE server_id = ${serverId}
-        ORDER BY created_at ASC
-      `;
-      return rows as StPresetRow[];
-    } catch (error) {
-      log.error(`[PresetRepository] Failed to load presets for server ${serverId}`, error);
-      return [];
-    }
+    const result = await this.loadPresetsForServerResult(serverId);
+    return result.presets;
   }
 
   /**
-   * Load a single preset by ID (with raw JSON).
-   *
-   * @param presetId - The preset_id to load
-   * @returns The preset row or null if not found
+   * Load a single preset by ID and server scope (with raw JSON).
    */
-  async loadPresetById(presetId: number): Promise<StPresetRow | null> {
+  async loadPresetByIdForServer(presetId: number, serverId: number): Promise<StPresetRow | null> {
     try {
       const [row] = await sql`
-        SELECT * FROM st_presets WHERE preset_id = ${presetId}
+        SELECT * FROM st_presets
+        WHERE preset_id = ${presetId} AND server_id = ${serverId}
       `;
       return (row as StPresetRow) ?? null;
     } catch (error) {
-      log.error(`[PresetRepository] Failed to load preset ${presetId}`, error);
+      log.error(`[PresetRepository] Failed to load preset ${presetId} for server ${serverId}`, error);
       return null;
     }
   }
@@ -647,6 +705,35 @@ class PresetRepository {
   }
 
   /**
+   * Returns total non-marker and enabled non-marker node counts in a single query
+   * scoped to the server.
+   */
+  async countToggleableNodesForServer(presetId: number, serverId: number): Promise<StPresetNodeCounts> {
+    try {
+      const [row] = await sql`
+        SELECT
+          COUNT(*)::int AS total,
+          COUNT(CASE WHEN n.is_enabled = true THEN 1 END)::int AS enabled
+        FROM st_preset_nodes n
+        JOIN st_presets p ON p.preset_id = n.preset_id
+        WHERE n.preset_id = ${presetId}
+          AND p.server_id = ${serverId}
+          AND n.is_marker = false
+      `;
+      return {
+        total: Number(row?.total ?? 0),
+        enabled: Number(row?.enabled ?? 0),
+      };
+    } catch (error) {
+      log.error(
+        `[PresetRepository] Failed to count toggleable nodes for preset ${presetId} on server ${serverId}`,
+        error,
+      );
+      return { total: 0, enabled: 0 };
+    }
+  }
+
+  /**
    * Load ALL nodes for a preset (including markers), ordered by node_order.
    * Used by the context builder when assembling the full prompt.
    *
@@ -669,11 +756,11 @@ class PresetRepository {
 
   /**
    * Batch-update enabled states for multiple nodes in a single transaction.
-   * Accepts a map of identifier → is_enabled for all nodes in the preset.
+   * Accepts a map of identifier -> is_enabled for all nodes in the preset.
    *
    * @param presetId - The preset_id owning these nodes
-   * @param enabledMap - Map of node identifier → desired enabled state
-   * @param serverId - Internal server_id for cache invalidation
+   * @param enabledMap - Map of node identifier -> desired enabled state
+   * @param serverId - Internal server_id for scope resolution and cache invalidation
    * @returns True if the update succeeded
    */
   async updateNodeEnabledStates(
@@ -682,7 +769,15 @@ class PresetRepository {
     serverId: number,
   ): Promise<boolean> {
     try {
-      await sql.begin(async (tx) => {
+      const success = await sql.begin(async (tx) => {
+        const [preset] = await tx<Array<{ preset_id: number }>>`
+          SELECT preset_id FROM st_presets
+          WHERE preset_id = ${presetId} AND server_id = ${serverId}
+        `;
+        if (!preset) {
+          return false;
+        }
+
         for (const [identifier, isEnabled] of enabledMap) {
           await tx`
             UPDATE st_preset_nodes
@@ -690,11 +785,14 @@ class PresetRepository {
             WHERE preset_id = ${presetId} AND identifier = ${identifier}
           `;
         }
+        return true;
       });
 
-      log.info(`[PresetRepository] Updated ${enabledMap.size} node states for preset ${presetId}`);
-      invalidateStPresetCache(serverId);
-      return true;
+      if (success) {
+        log.info(`[PresetRepository] Updated ${enabledMap.size} node states for preset ${presetId}`);
+        invalidateStPresetCache(serverId);
+      }
+      return success;
     } catch (error) {
       log.error(`[PresetRepository] Failed to update node states for preset ${presetId}`, error);
       return false;
@@ -705,22 +803,24 @@ class PresetRepository {
    * Delete a preset and all its nodes (CASCADE handles node cleanup).
    *
    * @param presetId - The preset_id to delete
-   * @param serverId - Internal server_id for cache invalidation
+   * @param serverId - Internal server_id for scope resolution and cache invalidation
    * @returns True if a row was deleted
    */
   async deletePreset(presetId: number, serverId: number): Promise<boolean> {
     try {
-      const result = await sql`
-        DELETE FROM st_presets WHERE preset_id = ${presetId}
+      const rows = await sql<Array<{ preset_id: number }>>`
+        DELETE FROM st_presets
+        WHERE preset_id = ${presetId} AND server_id = ${serverId}
+        RETURNING preset_id
       `;
-      const deleted = (result as unknown[]).length > 0 || (result as { count?: number }).count === 1;
+      const deleted = rows.length > 0;
       if (deleted) {
-        log.success(`[PresetRepository] Deleted preset ${presetId}`);
+        log.success(`[PresetRepository] Deleted preset ${presetId} for server ${serverId}`);
         invalidateStPresetCache(serverId);
       }
       return deleted;
     } catch (error) {
-      log.error(`[PresetRepository] Failed to delete preset ${presetId}`, error);
+      log.error(`[PresetRepository] Failed to delete preset ${presetId} for server ${serverId}`, error);
       return false;
     }
   }
@@ -728,30 +828,62 @@ class PresetRepository {
   /**
    * Set a preset as active and deactivate all others for the same server.
    * Uses a transaction to ensure only one preset is active at a time.
+   * Target preset must belong to serverId; forged or cross-scope targets perform no write.
    *
+   * @param serverId - Internal server_id for scope resolution and cache invalidation
    * @param presetId - The preset_id to activate
    * @returns True if the activation succeeded
    */
   async setActivePreset(serverId: number, presetId: number): Promise<boolean> {
     try {
-      await sql.begin(async (tx) => {
-        // Deactivate all presets for this server
+      const success = await sql.begin(async (tx) => {
+        const [target] = await tx<Array<{ preset_id: number }>>`
+          SELECT preset_id FROM st_presets
+          WHERE preset_id = ${presetId} AND server_id = ${serverId}
+        `;
+        if (!target) {
+          return false;
+        }
+
         await tx`
           UPDATE st_presets SET is_active = false
           WHERE server_id = ${serverId}
         `;
-        // Activate the target preset
         await tx`
           UPDATE st_presets SET is_active = true
           WHERE preset_id = ${presetId} AND server_id = ${serverId}
         `;
+        return true;
       });
 
-      log.success(`[PresetRepository] Activated preset ${presetId} for server ${serverId}`);
+      if (success) {
+        log.success(`[PresetRepository] Activated preset ${presetId} for server ${serverId}`);
+        invalidateStPresetCache(serverId);
+      }
+      return success;
+    } catch (error) {
+      log.error(`[PresetRepository] Failed to activate preset ${presetId} for server ${serverId}`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Deactivate all presets for a server.
+   *
+   * @param serverId - Internal server_id for scope resolution and cache invalidation
+   * @returns True if the deactivation succeeded
+   */
+  async deactivateAllPresets(serverId: number): Promise<boolean> {
+    try {
+      await sql`
+        UPDATE st_presets SET is_active = false
+        WHERE server_id = ${serverId}
+      `;
+      log.success(`[PresetRepository] Deactivated all presets for server ${serverId}`);
       invalidateStPresetCache(serverId);
       return true;
     } catch (error) {
-      log.error(`[PresetRepository] Failed to activate preset ${presetId} for server ${serverId}`, error);
+      log.error(`[PresetRepository] Failed to deactivate all presets for server ${serverId}`, error);
       return false;
     }
   }
@@ -786,10 +918,12 @@ class PresetRepository {
               SELECT
                 p.persona_id, p.persona_nickname, p.persona_lineage_id,
                 p.attribute_list, p.sample_dialogues_in, p.sample_dialogues_out,
-                p.is_alter, p.is_pointer, p.preset_lineage_id, p.preset_language,
+                p.is_alter, p.is_pointer, p.preset_lineage_id, p.preset_language, p.is_nsfw,
+                pvc.speech_voice_design_prompt, pvc.voice_source_priority,
                 pic.physical_appearance_tags, pic.nai_char_ref_url,
                 ptc.nai_attg_author, ptc.nai_attg_title, ptc.nai_attg_tags, ptc.nai_attg_genre, ptc.nai_attg_stars
               FROM personas p
+              LEFT JOIN persona_voice_configs pvc ON pvc.persona_id = p.persona_id
               LEFT JOIN persona_imagegen_configs pic ON pic.persona_id = p.persona_id
               LEFT JOIN persona_textgen_configs ptc ON ptc.persona_id = p.persona_id
               WHERE p.server_id = ${serverId}
@@ -800,10 +934,12 @@ class PresetRepository {
               SELECT
                 p.persona_id, p.persona_nickname, p.persona_lineage_id,
                 p.attribute_list, p.sample_dialogues_in, p.sample_dialogues_out,
-                p.is_alter, p.is_pointer, p.preset_lineage_id, p.preset_language,
+                p.is_alter, p.is_pointer, p.preset_lineage_id, p.preset_language, p.is_nsfw,
+                pvc.speech_voice_design_prompt, pvc.voice_source_priority,
                 pic.physical_appearance_tags, pic.nai_char_ref_url,
                 ptc.nai_attg_author, ptc.nai_attg_title, ptc.nai_attg_tags, ptc.nai_attg_genre, ptc.nai_attg_stars
               FROM personas p
+              LEFT JOIN persona_voice_configs pvc ON pvc.persona_id = p.persona_id
               LEFT JOIN persona_imagegen_configs pic ON pic.persona_id = p.persona_id
               LEFT JOIN persona_textgen_configs ptc ON ptc.persona_id = p.persona_id
               WHERE p.server_id = ${serverId}
@@ -818,6 +954,9 @@ class PresetRepository {
 
       const presetData = personaRows[0];
       const pointerPreset = await this.loadPointerPresetForPersonaRow(presetData as Record<string, unknown>);
+      const nudgeConfig = (await naturalNudgeRepository.loadPersonaConfigs([presetData.persona_id as number])).get(
+        presetData.persona_id as number,
+      );
       if (typeof targetPersonaId !== "number") {
         const mainCountRows = await sql`
           SELECT COUNT(*)::int AS count
@@ -844,7 +983,7 @@ class PresetRepository {
       let triggerWords: string[] | null = null;
       let personaPrompt: string | null = null;
       const personaConfigRows = await sql`
-        SELECT trigger_words, persona_prompt
+        SELECT trigger_words, persona_prompt, preserve_preset_identity
         FROM persona_configs
         WHERE persona_id = ${presetData.persona_id}
         LIMIT 1
@@ -854,8 +993,9 @@ class PresetRepository {
         personaPrompt = personaConfigRows[0].persona_prompt ?? null;
       }
 
+      const preserveIdentity = personaConfigRows[0]?.preserve_preset_identity === true;
       if (pointerPreset) {
-        triggerWords = resolveOfficialPresetTriggerWords(pointerPreset);
+        if (!preserveIdentity) triggerWords = resolveOfficialPresetTriggerWords(pointerPreset);
         personaPrompt = resolveOfficialPresetPrompt(pointerPreset);
       }
 
@@ -884,6 +1024,14 @@ class PresetRepository {
       const exportedPresetLineageId = pointerPreset
         ? normalizeLineageId(pointerPreset.preset_lineage_id)
         : normalizeLineageId(presetData.preset_lineage_id);
+      const namingConfigs =
+        pointerPreset && !preserveIdentity
+          ? null
+          : await userNamingRepository.loadPersonaConfigs([presetData.persona_id as number]);
+      const exportedNamingConfig =
+        pointerPreset && !preserveIdentity
+          ? pointerPreset.preset_naming_config
+          : (namingConfigs?.get(presetData.persona_id as number) ?? EMPTY_PERSONA_NAMING_CONFIG);
 
       // Build export object with metadata (includes NovelAI persona fields)
       const exportData: PresetExport = {
@@ -898,6 +1046,9 @@ class PresetRepository {
           sample_dialogues_out: exportedSampleDialoguesOut,
           trigger_words: triggerWords || [],
           persona_prompt: personaPrompt,
+          speech_voice_design_prompt: presetData.speech_voice_design_prompt ?? null,
+          voice_source_priority: presetData.voice_source_priority ?? "design",
+          naming_config: exportedNamingConfig,
           persona_lineage_id: lineageId,
           ...(exportedPresetLineageId !== null ? { preset_lineage_id: exportedPresetLineageId } : {}),
           physical_appearance_tags: presetData.physical_appearance_tags || [],
@@ -907,6 +1058,14 @@ class PresetRepository {
           nai_attg_tags: presetData.nai_attg_tags ?? null,
           nai_attg_genre: presetData.nai_attg_genre ?? null,
           nai_attg_stars: presetData.nai_attg_stars ?? null,
+          is_nsfw: pointerPreset ? pointerPreset.is_nsfw : presetData.is_nsfw === true,
+          ...(nudgeConfig
+            ? {
+                natural_nudge_interests: nudgeConfig.interests,
+                natural_nudge_talkativeness: nudgeConfig.talkativeness,
+                natural_nudge_idle_nudges: nudgeConfig.idle_nudges,
+              }
+            : {}),
         },
       };
 
@@ -928,11 +1087,9 @@ class PresetRepository {
   }
 
   /**
-   * Imports TomoriBot preset personality data, replacing existing personality.
+   * Replaces the existing personality.
    *
-   * @param serverDiscId - Discord server ID to import preset for
    * @param identityMode - preserve: keep/import lineage, fork: assign a fresh lineage
-   * @returns ImportResult indicating success or failure with item counts
    */
   async importPresetData(
     serverDiscId: string,
@@ -1015,6 +1172,22 @@ class PresetRepository {
           return { success: false, error: "commands.persona.import.error_import_failed" };
         }
 
+        if (
+          !(await personaRepository.setVoiceConfig(
+            mainTomoriId,
+            {
+              speech_voice_design_prompt: validatedImportData.speech_voice_design_prompt ?? null,
+              voice_source_priority: validatedImportData.voice_source_priority ?? "design",
+              speech_voice_sample_id: null,
+              speech_voice_id: null,
+              speech_voice_name: null,
+            },
+            { materialize: Boolean(validatedImportData.speech_voice_design_prompt) },
+          ))
+        )
+          return { success: false, error: "commands.persona.import.error_import_failed" };
+        invalidateTomoriStateCache(serverDiscId);
+        await sql`UPDATE speech_voice_bindings SET pending_delete = true WHERE persona_id = ${mainTomoriId}`;
         log.success(
           `Successfully imported preset pointer for server ${serverDiscId}: ${validatedImportData.tomori_nickname}`,
         );
@@ -1027,6 +1200,7 @@ class PresetRepository {
             dialogueCount: validatedImportData.sample_dialogues_in.length,
             triggerWordCount: validatedImportData.trigger_words.length,
           },
+          mainPersonaIsPointer: !validatedImportData.speech_voice_design_prompt,
         };
       }
 
@@ -1063,7 +1237,8 @@ class PresetRepository {
             END,
             is_pointer = false,
             preset_lineage_id = ${importedPresetLineageId},
-            preset_language = NULL
+            preset_language = NULL,
+            is_nsfw = ${validatedImportData.is_nsfw === true}
           WHERE persona_id = ${mainTomoriId}
         `;
       } catch (error) {
@@ -1120,7 +1295,38 @@ class PresetRepository {
           trigger_words = EXCLUDED.trigger_words,
           persona_prompt = EXCLUDED.persona_prompt
       `;
+      await userNamingRepository.savePersonaConfig(
+        mainTomoriId,
+        validatedImportData.naming_config ?? EMPTY_PERSONA_NAMING_CONFIG,
+      );
+      if (
+        !(await naturalNudgeRepository.savePersonaConfig(mainTomoriId, {
+          talkativeness: validatedImportData.natural_nudge_talkativeness ?? DEFAULT_NATURAL_NUDGE_TALKATIVENESS,
+          interests: validatedImportData.natural_nudge_interests ?? [],
+        }))
+      )
+        return { success: false, error: "commands.persona.import.error_import_failed" };
 
+      if (
+        (await naturalNudgeRepository.replacePersonaIdleNudges(
+          mainTomoriId,
+          validatedImportData.natural_nudge_idle_nudges ?? [],
+        )) !== "success"
+      )
+        return { success: false, error: "commands.persona.import.error_import_failed" };
+
+      if (
+        !(await personaRepository.setVoiceConfig(mainTomoriId, {
+          speech_voice_design_prompt: validatedImportData.speech_voice_design_prompt ?? null,
+          voice_source_priority: validatedImportData.voice_source_priority ?? "design",
+          speech_voice_sample_id: null,
+          speech_voice_id: null,
+          speech_voice_name: null,
+        }))
+      )
+        return { success: false, error: "commands.persona.import.error_import_failed" };
+      invalidateTomoriStateCache(serverDiscId);
+      await sql`UPDATE speech_voice_bindings SET pending_delete = true WHERE persona_id = ${mainTomoriId}`;
       log.success(`Successfully imported preset for server ${serverDiscId}: ${validatedImportData.tomori_nickname}`);
 
       return {
@@ -1131,6 +1337,7 @@ class PresetRepository {
           dialogueCount: validatedImportData.sample_dialogues_in.length,
           triggerWordCount: validatedImportData.trigger_words.length,
         },
+        mainPersonaIsPointer: false,
       };
     } catch (error) {
       log.error(`Error importing preset data for server ${serverDiscId}:`, error);
@@ -1139,10 +1346,8 @@ class PresetRepository {
   }
 
   /**
-   * Validates already-extracted preset data, including converted imports and
-   * command-added trigger words.
-   * Runtime memory env limits are intentionally not applied here; preset import
-   * uses schema safety limits.
+   * Covers converted imports and command-added trigger words. Runtime memory env limits are
+   * intentionally not applied here; preset import uses schema safety limits.
    */
   validatePresetData(data: unknown): ValidationResult {
     const validated = presetExportDataSchema.safeParse(data);
@@ -1166,14 +1371,18 @@ class PresetRepository {
       return { valid: false, error: "commands.persona.import.error_dialogue_mismatch" };
     }
 
+    if (getDiscordTextLength(normalizedData.tomori_nickname) > PERSONA_NICKNAME_MAX_LENGTH) {
+      return {
+        valid: false,
+        error: `commands.persona.import.error_nickname_too_long|${PERSONA_NICKNAME_MAX_LENGTH}`,
+      };
+    }
+
     return { valid: true, data: normalizedData };
   }
 
   /**
-   * Validates and parses a preset import file.
-   *
    * @param jsonData - The parsed JSON data from the PNG metadata
-   * @returns Validation result with parsed data or error message
    */
   validatePresetFile(jsonData: unknown): ValidationResult {
     if (typeof jsonData !== "object" || jsonData === null) {

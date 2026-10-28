@@ -1,17 +1,34 @@
+import {
+  getProviderContentRejectionCode,
+  providerContentRejectionSchema,
+} from "@/utils/provider/providerErrorClassification";
+import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
+import {
+  findProviderRequestDeniedError,
+  notifyProviderToolFailure,
+  reportProviderUsage,
+  type ProviderUsageContext,
+} from "@/utils/provider/providerUsage";
+import { reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { classifySendFailure } from "@/utils/discord/stream/sendFailureCache";
 /**
  * Image Generation Tool
  * Allows TomoriBot to generate images using the active provider's native image API
  * Supports text-to-image, and image-to-image only when the active provider supports it
  */
 
-import { AttachmentBuilder } from "discord.js";
+import { AttachmentBuilder, type Channel } from "discord.js";
+import { canMirrorToThoughtLog } from "@/utils/discord/thoughtLogAudience";
 import { GoogleGenAI } from "@google/genai";
 import sharp from "sharp";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
 import { resolveAvatarByIdentity, type ResolvedAvatarData } from "@/utils/discord/avatarResolver";
 import { buildGeneratedImageComponentsV2Payload } from "@/utils/discord/generatedImageMessage";
-import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/personaDispatch";
+import { prepareGeneratedImage } from "@/utils/image/generatedImageMetadata";
+import { mediaDeliveryFailure, sendToolMediaPost } from "@/utils/discord/webhook/toolMediaDelivery";
+import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
 import {
   buildImageToolNoticeDescription,
   buildReferencedMessageUrl,
@@ -35,9 +52,12 @@ import { statRepository } from "@/utils/db/repositories";
 import { resolveProviderFeatureImplementation } from "@/utils/provider/providerInfoRegistry";
 import { resolveNativeImageGenerationCapability } from "@/utils/provider/providerCapabilityResolver";
 import { generateCustomImageViaEndpoint } from "@/providers/custom/customEndpointDispatcher";
+import { generateOpenRouterImage } from "@/providers/openrouter/openrouterImageGeneration";
+import { buildGeminiImagePromptParts } from "@/providers/utils/geminiImageParts";
 import { ZAI_CODING_IMAGES_GENERATIONS_URL, ZAI_GENERAL_IMAGES_GENERATIONS_URL } from "@/providers/zai/zaiShared";
-import { getResolvedCapabilityModelId, resolveCapabilityCredentials } from "@/utils/provider/credentialResolver";
-import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
+import { getResolvedCapabilityModelId } from "@/utils/provider/credentialResolver";
+import { resolveCredentialsWithMediaQuota } from "@/utils/quota/mediaQuotaGate";
+import { formatCustomModelDisplay } from "@/utils/provider/customProviderUtils";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
 import { llmModelRepo } from "@/utils/db/repositories/LlmModelRepository";
@@ -47,11 +67,11 @@ import { optimizeImageBuffer } from "@/utils/image/imageProcessor";
 import type { CustomEndpointRow } from "@/types/db/schema";
 import { readImageEndpointSupports } from "@/utils/provider/customImageEndpointSupport";
 import { extractImagesFromMessage } from "@/utils/image/imageExtractor";
-import { isOpenRouterGeminiModelCodename } from "@/utils/provider/openrouterModelCapabilities";
+import { beginTextModelHandoffBeforeComfyUi } from "@/utils/provider/textModelComfyUiHandoff";
 
 const IMAGE_REFERENCE_MAX_COUNT = Number.parseInt(process.env.IMAGE_REFERENCE_MAX_COUNT ?? "3", 10);
 const IMAGE_REFERENCE_MAX_TOTAL_BYTES = Number.parseInt(process.env.IMAGE_REFERENCE_MAX_TOTAL_BYTES ?? "6291456", 10);
-const IMAGE_REFERENCE_TINY_MAX_BYTES = Number.parseInt(process.env.IMAGE_REFERENCE_TINY_MAX_BYTES ?? "950000", 10);
+const IMAGE_REFERENCE_TINY_MAX_BYTES = 950_000;
 const IMAGE_REFERENCE_MAX_SINGLE_BYTES = Number.parseInt(process.env.IMAGE_REFERENCE_MAX_SINGLE_BYTES ?? "2097152", 10);
 
 type ImageReference = {
@@ -193,7 +213,7 @@ function resolveImageParameterDescription(parameterName: string, capabilities: I
 }
 
 function includeImageParameter(parameterName: string, capabilities: ImageToolCapabilities): boolean {
-  if (parameterName === "prompt" || parameterName === "aspect_ratio") {
+  if (parameterName === "prompt" || parameterName === "aspect_ratio" || parameterName === "nsfw") {
     return true;
   }
 
@@ -264,6 +284,10 @@ export class GenerateImageTool extends BaseTool {
   parameters: ToolParameterSchema = {
     type: "object",
     properties: {
+      nsfw: {
+        type: "boolean",
+        description: "Set true when the image requires a Discord spoiler, useful for NSFW images.",
+      },
       prompt: {
         type: "string",
         description:
@@ -662,31 +686,12 @@ export class GenerateImageTool extends BaseTool {
       : rawMediaId;
   }
 
-  private shouldSuppressThoughtLogDiagnostic(context: ToolContext): boolean {
-    if (!context.tomoriState.config.thought_log_channel_disc_id) {
-      return true;
-    }
-    if (
-      "isDMBased" in context.channel &&
-      typeof context.channel.isDMBased === "function" &&
-      context.channel.isDMBased()
-    ) {
-      return true;
-    }
-
-    const privateChannelIds = context.tomoriState.config.private_channel_ids ?? [];
-    const parentId = context.channel.isThread() ? context.channel.parentId : null;
-    return (
-      privateChannelIds.includes(context.channel.id) || (parentId !== null && privateChannelIds.includes(parentId))
-    );
-  }
-
   private async sendDiagnosticImagesToThoughtLog(
     context: ToolContext,
     diagnostics: ProviderNativeImageGenerationResult["diagnosticImages"],
     prompt: string,
   ): Promise<void> {
-    if (!diagnostics?.length || this.shouldSuppressThoughtLogDiagnostic(context)) {
+    if (!diagnostics?.length) {
       return;
     }
 
@@ -705,6 +710,15 @@ export class GenerateImageTool extends BaseTool {
         thoughtLogChannel.isDMBased())
     ) {
       log.warn(`GenerateImageTool: Thought log channel ${thoughtLogChannelId} is missing. Skipping diagnostic image.`);
+      return;
+    }
+    if (
+      !canMirrorToThoughtLog(
+        context.channel as Channel,
+        thoughtLogChannel,
+        context.tomoriState.config.private_channel_ids ?? [],
+      )
+    ) {
       return;
     }
 
@@ -747,238 +761,29 @@ export class GenerateImageTool extends BaseTool {
     attachmentFilename: string,
     elapsedMs: number,
     referencedIdentities: string[] = [],
+    promptAttachment?: AttachmentBuilder,
   ): Promise<import("discord.js").Message> {
-    const threadId =
-      "isThread" in context.channel && typeof context.channel.isThread === "function" && context.channel.isThread()
-        ? context.channel.id
-        : undefined;
     const componentsPayload = buildGeneratedImageComponentsV2Payload(
       attachmentFilename,
       elapsedMs,
       context.locale,
       referencedIdentities,
+      Boolean(promptAttachment),
+      attachment.spoiler,
     );
-
-    if (context.webhook && context.personaUsername) {
-      try {
-        return await sendWebhookMessageWithIdentity(
-          context.webhook,
-          {
-            files: [attachment],
-            ...componentsPayload,
-            withComponents: true,
-            ...(threadId ? { threadId } : {}),
-          },
-          {
-            username: context.personaUsername,
-            avatarUrl: context.personaAvatarUrl,
-            avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/") ? context.personaAvatarUrl : undefined,
-          },
-        );
-      } catch (error) {
-        log.warn("Failed to send generated image via webhook with Components V2, retrying without components", error);
-        try {
-          return await sendWebhookMessageWithIdentity(
-            context.webhook,
-            {
-              files: [attachment],
-              ...(threadId ? { threadId } : {}),
-            },
-            {
-              username: context.personaUsername,
-              avatarUrl: context.personaAvatarUrl,
-              avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/") ? context.personaAvatarUrl : undefined,
-            },
-          );
-        } catch (fallbackError) {
-          log.warn("Failed to send generated image via webhook, falling back to bot message", fallbackError as Error);
-        }
-      }
-    }
-
-    try {
-      return await context.channel.send({
-        files: [attachment],
-        ...componentsPayload,
-      });
-    } catch (error) {
-      log.warn("Failed to send generated image with Components V2, falling back to attachment-only message", error);
-      return await context.channel.send({ files: [attachment] });
-    }
-  }
-
-  /**
-   * Generate image using OpenRouter API
-   * @param modelCodename - Model codename (e.g., "google/gemini-2.5-flash-image")
-   * @param aspectRatio - Aspect ratio (e.g., "16:9")
-   * @param referenceImages - Optional array of reference images for img2img
-   * @returns Promise resolving to generated image data and mimeType
-   */
-  private async generateImageWithOpenRouter(
-    apiKey: string,
-    modelCodename: string,
-    prompt: string,
-    aspectRatio: string,
-    referenceImages?: Array<{ mimeType: string; data: string }>,
-    abortSignal?: AbortSignal,
-  ): Promise<{ imageData: string | null; mimeType: string | null }> {
-    // Helpful debug log for provider/model combo
-    log.info(
-      `[OpenRouter] Sending image request to model "${modelCodename}" (aspect ratio: ${aspectRatio}, refs: ${referenceImages?.length ?? 0})`,
+    const files = () =>
+      [attachment, ...(promptAttachment ? [promptAttachment] : [])].map(
+        (file) =>
+          new AttachmentBuilder(file.attachment, {
+            name: file.name ?? undefined,
+            description: file.description ?? undefined,
+          }),
+      );
+    return sendToolMediaPost(
+      context,
+      () => ({ files: files(), ...componentsPayload, withComponents: true }),
+      () => ({ files: files() }),
     );
-
-    const messages: Array<{
-      role: string;
-      content: Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-    }> = [];
-
-    // Build content array with text prompt first (OpenRouter recommendation)
-    const contentParts: Array<{
-      type: string;
-      text?: string;
-      image_url?: { url: string };
-    }> = [{ type: "text", text: prompt }];
-
-    if (referenceImages && referenceImages.length > 0) {
-      for (const img of referenceImages) {
-        contentParts.push({
-          type: "image_url",
-          image_url: {
-            url: `data:${img.mimeType};base64,${img.data}`,
-          },
-        });
-      }
-      log.info(
-        `[OpenRouter] Added ${referenceImages.length} reference image(s) to content array. Total content parts: ${contentParts.length}`,
-      );
-    }
-
-    messages.push({
-      role: "user",
-      content: contentParts,
-    });
-
-    const requestPayload = {
-      model: modelCodename,
-      messages: messages,
-      modalities: isOpenRouterGeminiModelCodename(modelCodename) ? ["image", "text"] : ["image"],
-      image_config: {
-        aspect_ratio: aspectRatio,
-      },
-    };
-
-    // Log request structure (without full base64 data to avoid log clutter)
-    log.info(
-      `[OpenRouter] Request payload structure: ${JSON.stringify(
-        {
-          model: requestPayload.model,
-          messageCount: requestPayload.messages.length,
-          message: {
-            role: messages[0]?.role,
-            contentParts: contentParts.map((part) => ({
-              type: part.type,
-              hasImageUrl: part.type === "image_url",
-              hasText: part.type === "text",
-              imageDataPreview: part.image_url?.url.substring(0, 100),
-              textPreview: part.text?.substring(0, 50),
-            })),
-          },
-          modalities: requestPayload.modalities,
-          image_config: requestPayload.image_config,
-        },
-        null,
-        2,
-      )}`,
-    );
-
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestPayload),
-      signal: abortSignal,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      const bodySnippet = errorText.slice(0, 500);
-      log.warn(
-        `[OpenRouter] Image request failed (${response.status} ${response.statusText}) for model "${modelCodename}". Body: ${bodySnippet}`,
-      );
-
-      let parsedMessage = "";
-      try {
-        const parsed = JSON.parse(errorText);
-        parsedMessage = (parsed?.error?.message as string | undefined) || (parsed?.message as string | undefined) || "";
-      } catch {
-        // ignore JSON parse errors; fall back to raw snippet
-      }
-
-      const friendlyMessage = parsedMessage || bodySnippet || `${response.status} ${response.statusText}`.trim();
-
-      throw new Error(
-        `OpenRouter API request failed (${response.status} ${response.statusText}) for model "${modelCodename}": ${friendlyMessage}`,
-      );
-    }
-
-    const result = await response.json();
-
-    // Extract image from response.
-    // OpenRouter may return images either in `message.images` or embedded in `message.content` parts.
-    const message = result.choices?.[0]?.message;
-
-    let imageUrl: string | null = null;
-
-    if (message?.images?.[0]) {
-      const firstImage = message.images[0];
-      // OpenRouter may return either snake_case (image_url) or camelCase (imageUrl)
-      imageUrl = firstImage?.image_url?.url || firstImage?.imageUrl?.url || null;
-    } else if (Array.isArray(message?.content)) {
-      const firstImagePart = message.content.find(
-        (part: unknown) =>
-          typeof part === "object" &&
-          part !== null &&
-          "type" in part &&
-          (part as { type?: string }).type === "image_url",
-      ) as { image_url?: { url?: string } } | undefined;
-
-      imageUrl = firstImagePart?.image_url?.url || null;
-    }
-
-    if (imageUrl) {
-      // OpenRouter may return data URLs like "data:image/png;base64,..." OR a normal URL.
-      const dataUrlMatches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
-      if (dataUrlMatches) {
-        return {
-          imageData: dataUrlMatches[2],
-          mimeType: dataUrlMatches[1],
-        };
-      }
-
-      // Fallback: fetch remote URL and convert to base64.
-      if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
-        const imageResponse = await safeDownload(imageUrl, {
-          maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
-          timeoutMs: 15_000,
-          externalSignal: abortSignal,
-        });
-        if (imageResponse.success && imageResponse.buffer) {
-          const mimeType = imageResponse.contentType?.split(";")[0] || null;
-          return {
-            imageData: imageResponse.buffer.toString("base64"),
-            mimeType,
-          };
-        }
-      }
-    }
-
-    return { imageData: null, mimeType: null };
   }
 
   /**
@@ -1091,17 +896,23 @@ export class GenerateImageTool extends BaseTool {
 
     // Default to allowed; overwritten below for server-credential users
     let quotaCheck: QuotaCheckResult = { allowed: true };
+    let usageContext: ProviderUsageContext | undefined;
+    let generationRoute:
+      | { provider: string; modelId: number; model: string; credentialSource: "server" | "personal" }
+      | undefined;
 
     try {
-      // Resolve credentials first so we can skip server quota for personal BYOK users
-      const creds = await resolveCapabilityCredentials(context.tomoriState.server_id, "image-standard", {
-        userId: context.internalUserId ?? null,
-      });
-
-      // Personal BYOK users bring their own API quota, so bypass server quota entirely
-      if (creds.source === "server") {
-        quotaCheck = await checkImageQuota(context.tomoriState.server_id, userDiscId);
-      }
+      const { credentials: creds, quotaCheck: serverQuotaCheck } = await resolveCredentialsWithMediaQuota(
+        context.tomoriState.server_id,
+        "image-standard",
+        context.internalUserId ?? null,
+        checkImageQuota,
+        userDiscId,
+        quotaCheck,
+        undefined,
+        context.streamContext?.imageModelSelection,
+      );
+      quotaCheck = serverQuotaCheck;
 
       if (!quotaCheck.allowed) {
         let errorMessage = "";
@@ -1155,13 +966,18 @@ export class GenerateImageTool extends BaseTool {
       }
 
       const modelCodename = await this.getDiffusionModelCodename(diffusionModelId);
-      const displayModelName = creds.customEndpoint
-        ? formatCustomEndpointModelDisplay(creds.customEndpoint)
-        : modelCodename;
+      generationRoute = {
+        provider: creds.provider,
+        modelId: diffusionModelId,
+        model: modelCodename,
+        credentialSource: creds.source,
+      };
+      const displayModelName = creds.customEndpoint ? formatCustomModelDisplay(creds.customEndpoint) : modelCodename;
 
       log.info(`Using diffusion model: ${modelCodename} for image generation`);
 
       const apiKey = creds.apiKey;
+      usageContext = creds.usageContext;
       const executionProvider = creds.provider;
       const appliedNegativePrompt = this.customEndpointSupportsNegativePrompt(creds.customEndpoint)
         ? effectiveNegativePrompt
@@ -1378,6 +1194,13 @@ export class GenerateImageTool extends BaseTool {
           : null;
 
       if (creds.customEndpoint) {
+        const handoff =
+          creds.customEndpoint.api_style === "comfyui"
+            ? await beginTextModelHandoffBeforeComfyUi({
+                tomoriState: context.tomoriState,
+                comfyUi: { endpointUrl: creds.customEndpoint.endpoint_url, apiKey },
+              })
+            : null;
         try {
           const result = await generateCustomImageViaEndpoint({
             endpoint: creds.customEndpoint,
@@ -1409,6 +1232,7 @@ export class GenerateImageTool extends BaseTool {
             inpaintExtendPixels: extendPixels,
             clothingMode,
             clothingSegmentCategories,
+            abortSignal: context.abortSignal,
           });
           generatedImageData = result.imageData;
           await this.sendDiagnosticImagesToThoughtLog(context, result.diagnosticImages, effectivePrompt);
@@ -1451,12 +1275,15 @@ export class GenerateImageTool extends BaseTool {
               inpaintExtendPixels: extendPixels,
               clothingMode,
               clothingSegmentCategories,
+              abortSignal: context.abortSignal,
             });
             generatedImageData = retryResult.imageData;
             await this.sendDiagnosticImagesToThoughtLog(context, retryResult.diagnosticImages, effectivePrompt);
           } else {
             throw err;
           }
+        } finally {
+          void handoff?.restore();
         }
       } else if (nativeImageProvider) {
         const result = await nativeImageProvider.generateNativeImage({
@@ -1470,14 +1297,17 @@ export class GenerateImageTool extends BaseTool {
         generatedImageData = result.imageData;
       } else if (imageGenerationImplementation === "openrouter") {
         // Use OpenRouter API
-        const result = await this.generateImageWithOpenRouter(
-          apiKey,
-          modelCodename,
-          effectivePrompt,
-          aspectRatio,
-          providerReferenceImages.length > 0 ? providerReferenceImages : undefined,
-          context.abortSignal,
+        const result = await withProviderUsageContext(usageContext, async () =>
+          generateOpenRouterImage({
+            apiKey,
+            modelCodename,
+            prompt: effectivePrompt,
+            aspectRatio,
+            ...(providerReferenceImages.length > 0 ? { referenceImages: providerReferenceImages } : {}),
+            ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
+          }),
         );
+        reportProviderUsage(usageContext, { modelCodename, costUsd: result.costUsd });
         generatedImageData = result.imageData;
       } else if (imageGenerationImplementation === "google") {
         // Use Google Gemini API
@@ -1486,31 +1316,19 @@ export class GenerateImageTool extends BaseTool {
           model: modelCodename,
         });
 
-        const messagePayload: {
-          message: string;
-          media?: Array<{ mimeType: string; data: string }>;
-          config?: {
-            responseModalities: string[];
-            imageConfig: {
-              aspectRatio: string;
-            };
-          };
-        } = {
-          message: effectivePrompt,
+        const response = await chat.sendMessage({
+          message: buildGeminiImagePromptParts(effectivePrompt, providerReferenceImages),
           config: {
             responseModalities: ["IMAGE"],
             imageConfig: {
               aspectRatio: aspectRatio,
             },
+            ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
           },
-        };
+        });
 
-        if (providerReferenceImages.length > 0) {
-          messagePayload.media = providerReferenceImages;
-        }
-
-        const response = await chat.sendMessage(messagePayload);
-
+        const rejection = getProviderContentRejectionCode(response);
+        if (rejection) throw Object.assign(new Error("Image request blocked by the provider"), { code: rejection });
         if (response?.candidates && response.candidates.length > 0 && response.candidates[0]?.content?.parts) {
           for (const part of response.candidates[0].content.parts) {
             if (part.inlineData) {
@@ -1568,9 +1386,20 @@ export class GenerateImageTool extends BaseTool {
         };
       }
 
-      const imageBuffer = Buffer.from(generatedImageData, "base64");
-      const attachmentFilename = `generated_${Date.now()}.png`;
-      const attachment = new AttachmentBuilder(imageBuffer, {
+      // /kill stops awaiting this tool but cannot stop it, so a backend that ignores the signal
+      // still finishes here; posting now would deliver and charge for a reply the user killed.
+      if (context.abortSignal?.aborted) {
+        return { success: false, error: "Image generation was cancelled." };
+      }
+
+      const preparedImage = await prepareGeneratedImage(
+        Buffer.from(generatedImageData, "base64"),
+        effectivePrompt,
+        context.locale,
+        effectiveNegativePrompt,
+      );
+      const attachmentFilename = `${args.nsfw === true ? "SPOILER_" : ""}generated_${Date.now()}.${preparedImage.extension}`;
+      const attachment = new AttachmentBuilder(preparedImage.buffer, {
         name: attachmentFilename,
       });
 
@@ -1580,6 +1409,7 @@ export class GenerateImageTool extends BaseTool {
         attachmentFilename,
         Date.now() - startedAtMs,
         referencedIdentityNames,
+        preparedImage.promptAttachment,
       );
 
       log.success("Successfully generated and sent image to Discord");
@@ -1599,11 +1429,9 @@ export class GenerateImageTool extends BaseTool {
         });
       }
 
-      // Note: We intentionally DO NOT include imageMetadata for generated images
-      // because Discord CDN URLs are protected and cannot be fetched by external
-      // servers (like OpenRouter). The model doesn't need to see its own generated
-      // output - it just needs confirmation that the generation succeeded.
-      // The text message includes the Discord message ID for reference.
+      // Generated images omit imageMetadata: Discord CDN URLs are protected and cannot be
+      // fetched by external servers such as OpenRouter. The model needs only confirmation
+      // that generation succeeded, and the text message carries the Discord message ID.
 
       let successMessage = `Successfully generated and sent image to Discord (message ID: ${sentMessage.id}). The image has been created based on your prompt${
         referenceImagesUsed ? " and the reference image(s)" : ""
@@ -1627,43 +1455,51 @@ export class GenerateImageTool extends BaseTool {
         endTurn: context.streamContext?.endTurnAfterTools?.includes(this.name) ?? false,
       };
     } catch (error) {
+      if (error instanceof DiscordDeliveryError) return mediaDeliveryFailure(context, error.outcome);
+      const denied = findProviderRequestDeniedError(error, usageContext);
+      if (denied) return notifyProviderToolFailure(context, denied);
+      if (context.abortSignal?.aborted) {
+        return { success: false, error: "Image generation was cancelled." };
+      }
+      const toolFailure = createProviderToolFailure(error, {
+        locale: context.locale,
+        provider: generationRoute?.provider ?? "unknown",
+        credentialScope: generationRoute?.credentialSource,
+      });
       const errorMessage = error instanceof Error ? error.message : String(error);
 
-      // Localize errors, but fall back to readable defaults if the localizer
-      // isn't initialized or a key is missing (to avoid leaking locale keys)
-      const getReadableError = (key: string, fallback: string): string => {
-        const localized = localizer(context.locale, key);
-        return localized === key ? fallback : localized;
-      };
+      const isBillingRefusal = /\b(?:billing|payment|quota|balance|credits?|402|PERMISSION_DENIED)\b/i.test(
+        errorMessage,
+      );
+      const isSafetyRefusal =
+        providerContentRejectionSchema.safeParse(toolFailure.failure?.code).success ||
+        errorMessage.includes("safety") ||
+        errorMessage.includes("blocked") ||
+        errorMessage.includes("RECITATION");
+      const isAuthenticationRefusal = ["401", "403", "authentication"].includes(toolFailure.failure?.code ?? "");
 
-      log.error("Image generation failed:", error as Error);
+      await reportProviderFailure({
+        summary: "Image generation failed",
+        errorType: "ImageGenerationFailed",
+        error,
+        expected: isBillingRefusal || isSafetyRefusal || isAuthenticationRefusal || classifySendFailure(error) !== null,
+        serverId: context.tomoriState.server_id,
+        userId: context.internalUserId ?? null,
+        dimensions: {
+          operation: "image-generation",
+          provider: generationRoute?.provider ?? "unknown",
+          refusal: isBillingRefusal
+            ? "billing"
+            : isSafetyRefusal
+              ? "safety"
+              : isAuthenticationRefusal
+                ? "authentication"
+                : "none",
+        },
+        metadata: generationRoute,
+      });
 
-      if (
-        errorMessage.includes("billing") ||
-        errorMessage.includes("payment") ||
-        errorMessage.includes("quota") ||
-        errorMessage.includes("PERMISSION_DENIED")
-      ) {
-        return {
-          success: false,
-          error: getReadableError("errors.google.400_billing_default_message", "Billing is required for this service"),
-        };
-      }
-
-      if (errorMessage.includes("safety") || errorMessage.includes("blocked") || errorMessage.includes("RECITATION")) {
-        return {
-          success: false,
-          error: getReadableError(
-            "genai.google.content_blocked_default_message",
-            "Your content was blocked by safety filters",
-          ),
-        };
-      }
-
-      return {
-        success: false,
-        error: `Failed to generate image: ${errorMessage}`,
-      };
+      return toolFailure;
     }
   }
   /**

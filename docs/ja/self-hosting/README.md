@@ -12,6 +12,7 @@ sidebar:
   label: "概要"
   groupLabel: "セルフホスト"
   order: 3
+aiGenerated: false
 ---
 
 <!-- STUB (Phase 1 structural). Phase 2 writes: requirements + module directory.
@@ -24,5 +25,3 @@ sidebar:
 3. [`docker-compose`](./docker-compose) : コンテナ化されたボットとデータベース。ホストにBunやPostgreSQLは不要
 
 オプションモジュール（ローカルLLM、ComfyUI、SearXNG、Crawl4AI、ローカルTTS/STT、ChatMock、ローカルMCPサーバー）についてはそれぞれ独自のページがあります。全ディレクトリについては[`local-endpoints`](./local-endpoints)を参照してください。
-
-トモリが稼働した後は、[`maintenance`](./maintenance)にて、ホスト側のスクリプト、更新、およびデータベースのバックアップと復元について説明します。

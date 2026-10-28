@@ -12,6 +12,44 @@ import {
   relocateAssistantMediaToUserTurns,
 } from "@/providers/utils/strictChatCompat";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
+import { AnthropicStreamAdapter } from "@/providers/anthropic/anthropicStreamAdapter";
+import type { ToolHistoryEntry } from "@/utils/chat/types";
+
+it("keeps rejected tool-use/result pairs under strict alternating roles", async () => {
+  const adapter = new AnthropicStreamAdapter() as unknown as {
+    assembleAnthropicContext(
+      items: StructuredContextItem[],
+      parts: Array<Record<string, unknown>>,
+      history: ToolHistoryEntry[],
+      seesImages: boolean,
+      enforceAlternation: boolean,
+    ): Promise<{ messages: Array<{ role: string; content: Array<Record<string, unknown>> }> }>;
+  };
+  const history = ["fixture_lookup", "fixture_action"].map(
+    (name): ToolHistoryEntry => ({
+      functionCall: { name, args: { target: "fixture" } },
+      functionResponse: {
+        functionResponse: { name, response: { result: { status: "review_rejected", actionExecuted: false } } },
+      },
+    }),
+  );
+  const { messages } = await adapter.assembleAnthropicContext(
+    [{ role: "user", parts: [{ type: "text", text: "Fixture task" }] }],
+    [],
+    history,
+    false,
+    true,
+  );
+  expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+  for (const index of [1, 3]) {
+    const use = messages[index]?.content.find((part) => part.type === "tool_use");
+    const result = messages[index + 1]?.content.find((part) => part.type === "tool_result");
+    expect(result?.tool_use_id).toBe(use?.id);
+    expect(JSON.parse(String(result?.content))).toMatchObject({
+      functionResponse: { name: use?.name, response: { result: { status: "review_rejected", actionExecuted: false } } },
+    });
+  }
+});
 
 describe("providerRequires* safety nets", () => {
   it("flags anthropic for alternation, deepseek/zai/zaicoding for prefix", () => {
@@ -68,6 +106,31 @@ describe("applyAssistantPrefixCompletion", () => {
   it("no-ops on an empty messages array", () => {
     const body: { messages: unknown[] } = { messages: [] };
     expect(() => applyAssistantPrefixCompletion(body, prefill)).not.toThrow();
+  });
+
+  it("stamps reasoning_content: '' on the prefix turn when requiresReasoningContent is true", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: prefill },
+      ],
+    };
+    applyAssistantPrefixCompletion(body, prefill, true);
+    const last = body.messages.at(-1) as Record<string, unknown>;
+    expect(last.prefix).toBe(true);
+    expect(last.reasoning_content).toBe("");
+  });
+
+  it("omits reasoning_content when requiresReasoningContent is false or omitted", () => {
+    const body = { messages: [{ role: "assistant", content: prefill }] };
+    applyAssistantPrefixCompletion(body, prefill, false);
+    expect((body.messages[0] as Record<string, unknown>).reasoning_content).toBeUndefined();
+  });
+
+  it("does not clobber an already-present reasoning_content", () => {
+    const body = { messages: [{ role: "assistant", content: prefill, reasoning_content: "captured CoT" }] };
+    applyAssistantPrefixCompletion(body, prefill, true);
+    expect((body.messages[0] as Record<string, unknown>).reasoning_content).toBe("captured CoT");
   });
 });
 

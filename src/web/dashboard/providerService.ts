@@ -16,7 +16,7 @@ import type { DashboardActor, DashboardGuildSnapshot } from "./types";
 
 const providerNameSchema = z.string().trim().toLowerCase().min(1).max(120);
 const capabilitySchema = z.enum(["text", "embedding", "image", "video", "vision"]);
-const openRouterCapabilitySchema = z.enum(["text", "embedding", "image", "video"]);
+const openRouterCapabilitySchema = z.enum(["text", "embedding", "image", "video", "decision"]);
 
 const providerCredentialSchema = z
   .object({
@@ -52,7 +52,6 @@ const customEndpointSchema = z
       "openai-compatible-transcription",
     ]),
     endpointUrl: z.string().trim().url().max(2_048),
-    displayName: z.string().trim().min(1).max(120),
     modelName: z.string().trim().max(180).nullable().default(null),
     authToken: z.string().trim().max(4_000).nullable().default(null),
     numCtx: z.number().int().min(512).max(2_000_000).nullable().default(null),
@@ -135,7 +134,6 @@ function serializeEndpoint(row: {
   endpoint_url: string;
   model_name?: string | null;
   model_ref_id?: number | null;
-  display_name: string;
   num_ctx?: number | null;
   requires_auth: boolean;
   has_tools: boolean;
@@ -151,7 +149,7 @@ function serializeEndpoint(row: {
     endpointUrl: row.endpoint_url,
     modelName: row.model_name ?? null,
     modelRefId: row.model_ref_id ?? null,
-    displayName: row.display_name,
+    displayName: row.label,
     numCtx: row.num_ctx ?? null,
     requiresAuth: row.requires_auth,
     hasTools: row.has_tools,
@@ -345,6 +343,9 @@ export class DashboardProviderService {
     if (result.status === "invalid_model") {
       throw new DashboardServiceError("openrouter_model_not_found", 404, "OpenRouter did not return that model.");
     }
+    if (result.status === "write_failed") {
+      throw new DashboardServiceError("openrouter_save_failed", 500, "The model registration was not saved.");
+    }
     return result;
   }
 
@@ -363,6 +364,9 @@ export class DashboardProviderService {
       parsed.data.capability,
       parsed.data.modelName,
     );
+    if (result.status === "write_failed") {
+      throw new DashboardServiceError("openrouter_delete_failed", 500, "The model registration was not removed.");
+    }
     if (result.status !== "removed") {
       throw new DashboardServiceError("openrouter_model_not_found", 404, "The registration was not found.");
     }

@@ -6,18 +6,19 @@
 import { log } from "../../utils/misc/logger";
 import { BaseTool, type ToolContext, type ToolResult, type ToolParameterSchema } from "../../types/tool/interfaces";
 import { validateFutureTime } from "@/utils/text/processors/timeUtils";
-import { formatTimeRemaining } from "@/utils/text/processors/formatters";
+import { formatLocalizedDuration, formatTimeRemaining } from "@/utils/text/processors/formatters";
 import {
   parseTimeWithOffset,
   formatUTCOffset,
   formatTimeWithOffset,
   isValidUtcOffset,
-  UTC_OFFSET_MIN,
-  UTC_OFFSET_MAX,
 } from "../../utils/text/timezoneHelper";
+import { UTC_OFFSET_MAX, UTC_OFFSET_MIN } from "@/constants/utcOffset";
 import { localizer } from "@/utils/text/localizer";
-import { isMatrixBridgeWebhookUsername } from "../../utils/bridges";
-import { resolveChannelTarget, resolveUserTarget } from "@/utils/discord/targetResolver";
+import { isMatrixRelayMessage } from "@/utils/chat/triggerProcessor";
+import { verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
+import { resolveChannelTarget, resolveTriggererDiscordId, resolveUserTarget } from "@/utils/discord/targetResolver";
+import { MAX_REMINDERS_PER_SERVER, ReminderLimitError } from "@/utils/db/repositories/ServerScheduleRepository";
 
 /**
  * Tool for creating scheduled tasks that trigger messages at specific times
@@ -169,14 +170,14 @@ export class ReminderTool extends BaseTool {
     const { ColorCode } = await import("../../utils/misc/logger");
 
     const tomoriState = context.tomoriState;
-    const resolvedUserId = context.message?.author?.id || context.userId;
+    const resolvedUserId = resolveTriggererDiscordId(context);
 
     // Matrix relay messages arrive via Discord webhook (author = webhook bot).
     // The webhook bot has no users table record, so loadUserRow returns null.
     // Detect this case so we can relax the requestingUserRow guard below and
     // store created_by_user_id = null (the column is nullable for this reason).
-    const isMatrixRelayRequester =
-      !!context.message?.webhookId && isMatrixBridgeWebhookUsername(context.message?.author?.username ?? "");
+    if (context.message) await verifyMessageWebhook(context.message);
+    const isMatrixRelayRequester = !!context.message && isMatrixRelayMessage(context.message);
 
     const requestingUserRow = resolvedUserId ? await userRepository.loadByDiscordId(resolvedUserId) : null;
     const channelId = context.channel.id;
@@ -333,10 +334,10 @@ export class ReminderTool extends BaseTool {
     const timezoneOffset = tomoriState.config.timezone_offset ?? 0;
 
     if (reminderTimeArg && typeof reminderTimeArg === "string" && reminderTimeArg.trim()) {
-      // Method 1: Absolute time provided - parse in the offset the model labeled
-      // the time with (utc_offset), falling back to the server's configured timezone.
-      // The model passes wall-clock time as spoken and labels the frame instead of
-      // converting it, so deterministic code does the offset arithmetic here.
+      // Absolute time: parse in the offset the model labeled the time with (utc_offset),
+      // falling back to the server's configured timezone. The model passes wall-clock time as
+      // spoken and labels the frame instead of converting it, so deterministic code does the
+      // offset arithmetic here.
       timeCalculationMethod = "absolute";
 
       // Validate utc_offset only when it will actually be used (absolute path)
@@ -432,7 +433,7 @@ export class ReminderTool extends BaseTool {
       let actualNicknameInDB = requestedTargetUser || "Tomori";
       let resolvedTargetUserId = "";
       let resolvedTargetUserLabel = actualNicknameInDB;
-      // Target's personal timezone offset (/personal timezone): used only for the
+      // Target's personal timezone offset (/personal config): used only for the
       // dual-clock confirmation display, never for time interpretation
       let targetPersonalOffset: number | null = null;
 
@@ -494,7 +495,7 @@ export class ReminderTool extends BaseTool {
             };
           }
 
-          actualNicknameInDB = targetUserRow.user_nickname;
+          actualNicknameInDB = resolvedTargetUserLabel ?? targetUserRow.user_nickname ?? targetUserRow.user_disc_id;
           targetPersonalOffset = targetUserRow.timezone_offset ?? null;
         }
       }
@@ -518,7 +519,9 @@ export class ReminderTool extends BaseTool {
         );
 
         const timeRemainingMs = finalReminderTime.getTime() - Date.now();
+        // The tool result feeds model context, which stays English; only the embed follows the locale.
         const timeRemainingStr = formatTimeRemaining(timeRemainingMs);
+        const localizedTimeRemaining = formatLocalizedDuration(timeRemainingMs, context.locale);
 
         // Format the reminder time in the server's configured timezone
         const timeFormatOptions: Intl.DateTimeFormatOptions = {
@@ -528,7 +531,12 @@ export class ReminderTool extends BaseTool {
           hour: "2-digit",
           minute: "2-digit",
         };
-        const formattedReminderTime = formatTimeWithOffset(finalReminderTime, timezoneOffset, timeFormatOptions);
+        const formattedReminderTime = formatTimeWithOffset(
+          finalReminderTime,
+          timezoneOffset,
+          timeFormatOptions,
+          context.locale,
+        );
 
         const useRecurringTaskEmbed = isSelfReminder && repetitionIntervalHours !== null;
         const useOneTimeTaskEmbed = isSelfReminder && repetitionIntervalHours === null;
@@ -541,7 +549,12 @@ export class ReminderTool extends BaseTool {
             ? localizer(context.locale, "reminders.dual_time_display", {
                 server_time: formattedReminderTime,
                 server_offset: formatUTCOffset(timezoneOffset),
-                user_time: formatTimeWithOffset(finalReminderTime, targetPersonalOffset, timeFormatOptions),
+                user_time: formatTimeWithOffset(
+                  finalReminderTime,
+                  targetPersonalOffset,
+                  timeFormatOptions,
+                  context.locale,
+                ),
                 user_offset: formatUTCOffset(targetPersonalOffset),
                 user_nickname: actualNicknameInDB,
               })
@@ -561,8 +574,7 @@ export class ReminderTool extends BaseTool {
         // Long purposes receive an expansion button so the full text remains
         // available ephemerally without adding channel clutter.
         await sendTaskEmbedWithExpand(
-          context.channel,
-          context.locale,
+          context,
           {
             color: useRecurringTaskEmbed ? ColorCode.INFO : ColorCode.SUCCESS,
             titleKey: useRecurringTaskEmbed
@@ -588,19 +600,15 @@ export class ReminderTool extends BaseTool {
                   : "reminders.reminder_set_footer",
             footerVars: repetitionIntervalHours
               ? {
-                  time_remaining: timeRemainingStr,
+                  time_remaining: localizedTimeRemaining,
                   repetition_interval_hours: repetitionIntervalHours,
                 }
               : {
-                  time_remaining: timeRemainingStr,
+                  time_remaining: localizedTimeRemaining,
                 },
           },
           reminderPurpose,
-          {
-            webhook: context.webhook,
-            personaUsername: context.personaUsername,
-            personaAvatarUrl: context.personaAvatarUrl,
-          },
+          dbResult.reminder_id === undefined ? undefined : { kind: "task", id: dbResult.reminder_id },
         );
 
         return {
@@ -631,6 +639,16 @@ export class ReminderTool extends BaseTool {
         },
       };
     } catch (error) {
+      if (error instanceof ReminderLimitError) {
+        return {
+          success: false,
+          error: `This server already has ${MAX_REMINDERS_PER_SERVER} pending reminders and tasks. Ask the user to remove some with /scheduled-task remove before adding another.`,
+          data: {
+            status: "reminder_creation_failed_limit",
+            reason: `The server reached its limit of ${MAX_REMINDERS_PER_SERVER} pending reminders.`,
+          },
+        };
+      }
       log.error("Error during reminder creation", error as Error);
       return {
         success: false,

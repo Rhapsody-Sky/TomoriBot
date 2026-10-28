@@ -1,6 +1,6 @@
 import { log, ColorCode } from "../../utils/misc/logger";
 import { sendStandardEmbed } from "../../utils/discord/embedHelper";
-import type { Client, Guild } from "discord.js";
+import { DiscordAPIError, RESTJSONErrorCodes, type Client, type Guild } from "discord.js";
 import { findBestChannel } from "@/utils/discord/eventHelper";
 import { serverRepository } from "@/utils/db/repositories/ServerRepository";
 import { personaRepository } from "@/utils/db/repositories/PersonaRepository";
@@ -35,7 +35,11 @@ const handler = async (client: Client, guild: Guild): Promise<void> => {
     let channel = guild.systemChannel;
     let sentSuccessfully = false;
 
-    if (channel) {
+    if (
+      channel &&
+      guild.members.me &&
+      channel.permissionsFor(guild.members.me)?.has(["ViewChannel", "SendMessages", "EmbedLinks"])
+    ) {
       try {
         await sendStandardEmbed(channel, serverLocale, welcomeEmbedOptions);
         sentSuccessfully = true;
@@ -57,6 +61,13 @@ const handler = async (client: Client, guild: Guild): Promise<void> => {
       log.success(`Sent welcome message to fallback channel ${channel.name} in ${guild.name}`);
     }
   } catch (error) {
+    if (
+      error instanceof DiscordAPIError &&
+      (error.code === RESTJSONErrorCodes.MissingAccess || error.code === RESTJSONErrorCodes.MissingPermissions)
+    ) {
+      log.warn(`Guild ${guild.id} denied the welcome message channel`, error);
+      return;
+    }
     log.error(`Error handling guild join for ${guild.id}:`, error);
   }
 };

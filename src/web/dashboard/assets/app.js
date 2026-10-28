@@ -123,7 +123,15 @@
           sources: [
             {
               section: "chat",
-              fields: ["humanizer_degree", "send_message_limit", "self_debug_enabled", "model_randomizer_enabled"],
+              fields: [
+                "humanizer_degree",
+                "send_message_limit",
+                "self_debug_enabled",
+                "model_randomizer_enabled",
+                "response_prefill",
+                "response_reviewer_prompt",
+                "response_review_items",
+              ],
             },
           ],
         },
@@ -142,7 +150,7 @@
     {
       id: "memory",
       label: "Memory & notices",
-      sections: ["memory", "notices"],
+      sections: ["memory", "stm", "notices"],
     },
     {
       id: "media",
@@ -689,7 +697,22 @@
       <form class="panel form-panel" id="profile-form">
         <div class="panel-heading"><div><p class="eyebrow">Identity</p><h2>Personal defaults</h2></div></div>
         <div class="form-grid">
-          <label class="field">${fieldLabel("Nickname", "Your personal display name when Tomori refers to you.")}<input name="user_nickname" value="${escapeHtml(profile.nickname)}" maxlength="80" required></label>
+          <label class="field">${fieldLabel("Nickname", "Your personal display name when Tomori refers to you. Empty uses your current Discord display name.")}<input name="user_nickname" value="${escapeHtml(profile.nickname ?? "")}" maxlength="${profile.limits.nickname}"></label>
+          <label class="field">${fieldLabel(profile.copy.gender, profile.copy.genderHint)}<input name="gender_identity" value="${escapeHtml(profile.genderIdentity ?? "")}" maxlength="${profile.limits.identity}"></label>
+          <label class="field">${fieldLabel(profile.copy.pronouns, profile.copy.pronounsHint)}<input name="pronouns" value="${escapeHtml(profile.pronouns ?? "")}" maxlength="${profile.limits.identity}"></label>
+          <label class="field">${fieldLabel(profile.copy.addressingStyle, profile.copy.addressingStyleHint)}<select name="addressing_style">
+            ${[
+              ["", profile.copy.styleDefault],
+              ["neutral", profile.copy.styleNeutral],
+              ["masculine", profile.copy.styleMasculine],
+              ["feminine", profile.copy.styleFeminine],
+            ]
+              .map(
+                ([value, label]) =>
+                  `<option value="${value}"${(profile.addressingStyle ?? "") === value ? " selected" : ""}>${escapeHtml(label)}</option>`,
+              )
+              .join("")}
+          </select></label>
           <label class="field">${fieldLabel("Privacy level", "Controls which personal memory features may store information about you.")}
             <select name="privacy_level">
               <option value="0"${profile.privacyLevel === 0 ? " selected" : ""}>Minimal</option>
@@ -707,10 +730,16 @@
               ${["off", "follow", "on"].map((value) => `<option value="${value}"${profile.personalDeliberateToolMode === value ? " selected" : ""}>${value[0].toUpperCase() + value.slice(1)}</option>`).join("")}
             </select>
           </label>
-          <label class="field">${fieldLabel("Timezone offset", "Your UTC offset for personal date and time context. Empty follows the server default.")}<input name="timezone_offset" type="number" min="-12" max="14" value="${profile.timezoneOffset ?? ""}"></label>
+          <label class="field">${fieldLabel("Timezone offset", "Your UTC offset for personal date and time context. Empty follows the server default.")}<input name="timezone_offset" type="number" min="-12" max="14" step="0.25" value="${profile.timezoneOffset ?? ""}"></label>
         </div>
         <label class="switch-row"><span><strong>Cross-server short-term memory</strong><small>Share recent context between servers you use.</small></span>
           <input name="shortterm_cache_crossserver_opt_in" type="checkbox"${profile.crossServerShortTermMemory ? " checked" : ""}><i></i>
+        </label>
+        <label class="switch-row"><span><strong>${escapeHtml(profile.copy.serverFallback)}</strong><small>${escapeHtml(profile.copy.serverFallbackHint)}</small></span>
+          <input name="personal_server_fallback_enabled" type="checkbox"${profile.personalServerFallback ? " checked" : ""}><i></i>
+        </label>
+        <label class="switch-row"><span><strong>${escapeHtml(profile.copy.nudgeOptOut)}</strong><small>${escapeHtml(profile.copy.nudgeOptOutHint)}</small></span>
+          <input name="natural_nudge_opt_out" type="checkbox"${profile.naturalNudgeOptOut ? " checked" : ""}><i></i>
         </label>
         <label class="field">${fieldLabel("Impersonation prompt", "Instructions Tomori uses when generating a message in your voice.")}<textarea name="impersonation_prompt" rows="5">${escapeHtml(profile.impersonationPrompt || "")}</textarea></label>
         <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated traits used when image generation needs to depict you.")}<input name="physical_appearance_tags" value="${escapeHtml((profile.physicalAppearanceTags || []).join(", "))}"></label>
@@ -1234,7 +1263,7 @@
         (endpoint) => `<article class="provider-row endpoint-row">
           <div class="provider-row-heading">
             <div><span class="provider-scope">${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}</span><strong>${escapeHtml(endpoint.displayName)}</strong><small>${escapeHtml(endpoint.endpointUrl)}</small></div>
-            <button class="button button-danger button-small" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove</button>
+            <button class="button button-danger button-small" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>
           </div>
           <div class="endpoint-flags">
             ${endpoint.requiresAuth ? "<span>Auth</span>" : ""}
@@ -1356,7 +1385,6 @@
           <div class="panel-heading"><div><p class="eyebrow">Custom</p><h2>Register endpoint</h2></div></div>
           <div class="form-grid">
             <label class="field">${fieldLabel("Internal label", "Stable letters, numbers, underscores, or dashes used to identify this endpoint.")}<input name="label" pattern="[A-Za-z0-9_-]+" maxlength="48" required></label>
-            <label class="field">${fieldLabel("Display name", "Human-readable name shown in model and provider selectors.")}<input name="displayName" maxlength="120" required></label>
             <label class="field field-wide">${fieldLabel("Endpoint URL", "Base URL Tomori connects to. It is tested before registration.")}<input name="endpointUrl" type="url" required></label>
             <label class="field">${fieldLabel("Capability", "Type of generation or processing this connection provides.")}<select name="capability">
               <option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="speech">Speech</option><option value="transcription">Transcription</option>
@@ -1392,7 +1420,7 @@
         <form class="panel provider-panel" id="openrouter-form" data-provider-scope="${scope}">
           <div class="panel-heading"><div><p class="eyebrow">OpenRouter</p><h2>Scoped model registration</h2></div></div>
           <div class="form-grid">
-            <label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option></select></label>
+            <label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option></select></label>
             <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label>
           </div>
           <div class="form-actions"><button class="button button-primary" type="submit">Register model</button></div>
@@ -1526,7 +1554,13 @@
   }
 
   async function deleteEndpoint(scope, endpointId) {
-    if (!(await confirmAction("Remove endpoint?", "This also removes its scoped model registration."))) return;
+    if (
+      !(await confirmAction(
+        "Remove connection?",
+        "This removes the endpoint connection and all models registered on it. Active text providers must be changed first.",
+      ))
+    )
+      return;
     try {
       await api(`/guilds/${state.guildId}/providers/${scope}/endpoints/${endpointId}`, {
         method: "DELETE",
@@ -2113,7 +2147,6 @@
             method: "POST",
             body: JSON.stringify({
               label: form.elements.label.value,
-              displayName: form.elements.displayName.value,
               endpointUrl: form.elements.endpointUrl.value,
               capability: form.elements.capability.value,
               apiStyle: form.elements.apiStyle.value,
@@ -2225,12 +2258,17 @@
           method: "PATCH",
           body: JSON.stringify({
             user_nickname: form.elements.user_nickname.value,
+            gender_identity: form.elements.gender_identity.value,
+            pronouns: form.elements.pronouns.value,
+            addressing_style: form.elements.addressing_style.value || null,
             privacy_level: Number(form.elements.privacy_level.value),
             personal_dtm: form.elements.personal_dtm.value,
             personal_deliberate_tool_mode: form.elements.personal_deliberate_tool_mode.value,
             timezone_offset:
               form.elements.timezone_offset.value === "" ? null : Number(form.elements.timezone_offset.value),
             shortterm_cache_crossserver_opt_in: form.elements.shortterm_cache_crossserver_opt_in.checked,
+            personal_server_fallback_enabled: form.elements.personal_server_fallback_enabled.checked,
+            natural_nudge_opt_out: form.elements.natural_nudge_opt_out.checked,
             impersonation_prompt: form.elements.impersonation_prompt.value || null,
             physical_appearance_tags: parseTags(form.elements.physical_appearance_tags.value),
           }),

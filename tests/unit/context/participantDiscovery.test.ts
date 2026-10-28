@@ -2,13 +2,13 @@ import { describe, expect, it } from "bun:test";
 import type { Client } from "discord.js";
 import { PrivacyLevel, type TomoriState, type UserRow } from "@/types/db/schema";
 import {
-  CONTEXT_REFERENCE_ELIGIBILITY_POLICY_VERSION,
   isEligibleContextReferenceUserV1,
   type ContextReferenceCandidate,
 } from "@/utils/db/repositories/UserRepository";
 import { createDiscordParticipantMemberDirectory } from "@/utils/text/participants/candidateSources";
 import {
   buildParticipantDiscoveryPlan,
+  discoverHistoricalSyntheticCandidates,
   discoverPersonaReferenceCandidates,
   discoverVisibleAuthorCandidates,
   parsePersonaId,
@@ -57,7 +57,11 @@ function userRow(discordId: string, nickname: string): UserRow {
     shortterm_cache_crossserver_opt_in: false,
     personal_dtm: "follow",
     personal_deliberate_tool_mode: "follow",
+    personal_server_fallback_enabled: true,
+    natural_nudge_opt_out: false,
     timezone_offset: null,
+    message_proxy_service: null,
+    message_proxy_instance_id: null,
   };
 }
 
@@ -121,6 +125,17 @@ describe("participant discovery plan", () => {
         referencePlan,
       }),
     ).rejects.toThrow("cannot be both a synthetic webhook and a Matrix user");
+  });
+
+  it("keys a stable proxy identity as a Discord-shaped user even when a webhook entry exists", () => {
+    const messageProxyUserId = "pk:11111111-2222-4333-8444-555555555555";
+    const syntheticUsers = new Map([[messageProxyUserId, { displayName: "Hiro", type: "webhook" as const }]]);
+
+    const visible = discoverVisibleAuthorCandidates({ participantIds: [messageProxyUserId], syntheticUsers });
+    expect(visible).toHaveLength(1);
+    expect(visible[0]?.key).toEqual(createDiscordUserKey(messageProxyUserId));
+
+    expect(discoverHistoricalSyntheticCandidates(syntheticUsers)).toHaveLength(0);
   });
 
   it("is pure, merges multiple reasons, and retains active-turn-independent aliases and evidence", async () => {
@@ -338,8 +353,7 @@ describe("participant candidate sources", () => {
 });
 
 describe("context reference eligibility policy v1", () => {
-  it("keeps the pure policy version explicit and preserves default-only rejection", () => {
-    expect(CONTEXT_REFERENCE_ELIGIBILITY_POLICY_VERSION).toBe(1);
+  it("rejects default-only rows and accepts rows with activity evidence", () => {
     expect(isEligibleContextReferenceUserV1(userRow("100", "Default"), INELIGIBLE_EVIDENCE)).toBe(false);
     expect(isEligibleContextReferenceUserV1(userRow("100", "Active"), ELIGIBLE_EVIDENCE)).toBe(true);
   });

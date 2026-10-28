@@ -1,3 +1,5 @@
+import { callCustomDecisions } from "@/providers/custom/customDecisions";
+import type { ProviderDecisionRequest, DecisionResult, SupportsDecisions } from "@/types/provider/featureInterfaces";
 /**
  * Custom provider implementation for self-hosted OpenAI-compatible endpoints
  *
@@ -14,6 +16,7 @@
  * - validateApiKey() performs health check rather than strict key validation
  */
 
+import { resolveChatMaxOutputTokens } from "@/utils/provider/maxOutputTokens";
 import type {
   BaseGuildTextChannel,
   BaseGuildVoiceChannel,
@@ -30,8 +33,6 @@ import {
 } from "@/providers/custom/customCompactGenerator";
 import { generatePresetFromPromptCustom } from "@/providers/custom/customPresetGenerator";
 import { callCustomStructuredJSON } from "@/providers/custom/customStructuredOutput";
-import { isBraveSearchAvailable } from "@/tools/restAPIs/brave/braveSearchService";
-import { getMCPManager } from "@/utils/mcp/mcpManager";
 import { getEffectiveLlmModelName } from "@/utils/provider/modelDisplay";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
@@ -78,9 +79,14 @@ import {
 } from "../../types/provider/interfaces";
 import { getCustomToolAdapter } from "./customToolAdapter";
 import { customProviderInfo } from "./providerInfo";
-import { resolveCustomEndpointForProvider } from "@/utils/provider/customEndpointService";
+import {
+  resolveCustomEndpointForProvider,
+  resolveCustomTextEndpointTarget,
+} from "@/utils/provider/customEndpointService";
+import { parseCustomProvider } from "@/utils/provider/customProviderUtils";
 import { buildCustomHeaders } from "@/providers/custom/customOpenAICompatibleUtils";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
 /**
  * Default model name placeholder for custom provider
@@ -94,6 +100,8 @@ const DEFAULT_CUSTOM_MODEL = "custom/default";
 export interface CustomProviderConfig extends ProviderConfig {
   /** Custom endpoint URL (e.g., http://localhost:11434/v1) */
   endpointUrl: string;
+  /** The backend server's connection, which keys its ComfyUI VRAM handoff. */
+  customConnectionId?: number | null;
   /** Whether the model supports image inputs (user-declared) */
   seesImages?: boolean;
   /** Whether the model supports video inputs (user-declared) */
@@ -115,6 +123,7 @@ export class CustomProvider
   extends BaseLLMProvider
   implements
     LLMProvider,
+    SupportsDecisions,
     SupportsStructuredOutput,
     SupportsConversationCompaction,
     SupportsPresetGeneration,
@@ -122,9 +131,10 @@ export class CustomProvider
     SupportsNativeImageGeneration,
     SupportsNativeVideoGeneration
 {
-  /**
-   * Get provider information and capabilities
-   */
+  async callDecisions(request: ProviderDecisionRequest): Promise<DecisionResult> {
+    return await callCustomDecisions(request);
+  }
+
   getInfo(): ProviderInfo {
     return customProviderInfo;
   }
@@ -207,12 +217,17 @@ export class CustomProvider
     streamingContext?: StreamingContext,
   ): Promise<Array<Record<string, unknown>>> {
     // Only return tools if the model supports them (user-declared capability)
-    if (!tomoriState.llm.has_tools) {
-      log.info("Custom provider: Model does not support tools (user-declared capability)");
+    if (!resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
+      log.info(
+        `Custom provider: Tools unavailable (tool_use_enabled=${tomoriState.config.tool_use_enabled}, has_tools=${tomoriState.llm.has_tools})`,
+      );
       return [];
     }
 
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -221,7 +236,11 @@ export class CustomProvider
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -234,6 +253,7 @@ export class CustomProvider
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -242,13 +262,18 @@ export class CustomProvider
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("custom", toolStateForContext);
 
@@ -265,6 +290,7 @@ export class CustomProvider
         providerLabel: "Custom provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -328,15 +354,6 @@ export class CustomProvider
       return undefined;
     }
 
-    const hasBraveApiKey = await isBraveSearchAvailable(request.tomoriState.server_id);
-
-    if (!hasBraveApiKey) {
-      const mcpManager = getMCPManager();
-      if (!mcpManager.isReady()) {
-        await mcpManager.initializeMCPServers();
-      }
-    }
-
     const toolStateForContext: ToolStateForContext = {
       server_id: request.tomoriState.server_id.toString(),
       activePersonaHasElevenlabsVoice: Boolean(
@@ -345,7 +362,10 @@ export class CustomProvider
           request.tomoriState.speech_voice_id?.trim(),
       ),
       activePersonaVoiceDesignPrompt: request.tomoriState.speech_voice_design_prompt?.trim() || null,
-      activePersonaVoiceName: request.tomoriState.speech_voice_name,
+      activePersonaVoiceSampleId: request.tomoriState.speech_voice_sample_id,
+      activePersonaVoiceId: request.tomoriState.speech_voice_id,
+      activePersonaVoiceSourcePriority: request.tomoriState.voice_source_priority,
+
       diffusion_model_id: request.tomoriState.config.diffusion_model_id,
       nai_diffusion_model_id: request.tomoriState.config.nai_diffusion_model_id,
       video_model_id: request.tomoriState.config.video_model_id,
@@ -358,6 +378,7 @@ export class CustomProvider
         supports_structoutput: request.tomoriState.llm.supports_structoutput,
       },
       config: {
+        emoji_usage_enabled: false,
         sticker_usage_enabled: false,
         web_search_enabled: true,
         self_teaching_enabled: false,
@@ -366,7 +387,11 @@ export class CustomProvider
         videogen_enabled: false,
         voice_message_enabled: false,
         user_blocking_enabled: false,
+        user_info_updates_enabled: false,
         thread_creation_enabled: false,
+        conditioning_interactions_enabled: false,
+        dice_rolling_enabled: false,
+        danbooru_enabled: false,
       },
     };
 
@@ -408,35 +433,18 @@ export class CustomProvider
    * @param apiKey - The decrypted API key (may be endpoint URL or auth token)
    */
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<CustomProviderConfig> {
-    // Get endpoint URL: prefer the server model config mirror (populated when the active text model
-    // is a custom one). The mirror can be NULL when a persona override points at a custom LLM while
-    // the global text model is non-custom. In that case fall back to the custom_endpoints table.
-    let endpointUrl = tomoriState.config.custom_endpoint_url ?? null;
-    let endpointModelNameHint: string | null = null;
-    let endpointNumCtxHint: number | null = null;
-    if (!endpointUrl) {
-      // Pass the active model id so the correct endpoint is chosen when the label hosts several
-      // text models; falls back to the label default when unset (legacy rows / single model).
-      const textEndpoint = await resolveCustomEndpointForProvider(
-        tomoriState.llm.llm_provider.toLowerCase(),
-        "text",
-        tomoriState.llm.llm_id,
-      );
-      endpointUrl = textEndpoint?.endpoint_url ?? null;
-      endpointModelNameHint = textEndpoint?.model_name ?? null;
-      endpointNumCtxHint = textEndpoint?.num_ctx ?? null;
-    }
+    const {
+      endpointUrl,
+      modelNameHint: endpointModelNameHint,
+      numCtx,
+    } = await resolveCustomTextEndpointTarget(tomoriState);
 
     if (!endpointUrl) {
       throw new Error(
-        "Custom endpoint URL not configured. Register it with /provider custom-endpoint add or /personal custom-endpoint add, then select it again.",
+        "Custom endpoint URL not configured. Register it with /providers or /personal providers, then select it again.",
       );
     }
 
-    // Determine which model name to use:
-    // If custom_model_name is set, use it (for Ollama, etc. that require exact model names)
-    // Fall back to the endpoint's registered model_name hint (set during /provider custom-endpoint add)
-    // Last resort: llm_codename (for KoboldCpp, etc. that don't care about model selection)
     const modelName = tomoriState.config.custom_model_name || endpointModelNameHint || tomoriState.llm.llm_codename;
 
     log.info(`Custom provider: Using endpoint URL: ${endpointUrl}`);
@@ -454,16 +462,22 @@ export class CustomProvider
       apiKey: apiKey, // May be used for Bearer auth if endpoint requires it
       temperature: tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 4096,
+      maxOutputTokens: resolveChatMaxOutputTokens({
+        provider: "custom",
+        configured: tomoriState.config.llm_max_output_tokens,
+        modelMaxOutputTokens: null,
+        contextWindow: numCtx,
+      }),
       endpointUrl: endpointUrl,
+      customConnectionId: parseCustomProvider(tomoriState.llm.llm_provider)?.connectionId ?? null,
       seesImages: tomoriState.llm.sees_images,
       seesVideos: tomoriState.llm.sees_videos,
       ...samplingParams,
       repetitionPenalty: 1.1,
-      numCtx: tomoriState.config.custom_num_ctx ?? endpointNumCtxHint ?? null,
+      numCtx,
     };
 
-    if (tomoriState.llm.has_tools) {
+    if (resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
       config.tools = await this.getTools(tomoriState);
     }
 
@@ -517,12 +531,12 @@ export class CustomProvider
         isManuallyTriggered: streamingContext?.isManuallyTriggered,
       };
 
-      if (streamingContext && tomoriState.llm.has_tools) {
+      if (streamingContext && resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("CustomProvider: Reloading tools with streaming context for context-aware availability");
         const contextAwareTools = await this.getTools(tomoriState, streamingContext);
         streamConfig.tools = contextAwareTools;
         log.info(`Context-aware tools loaded: ${contextAwareTools.length} tools`);
-      } else if (streamingContext && !tomoriState.llm.has_tools) {
+      } else if (streamingContext && !resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("Skipping context-aware tool reload - model doesn't support tools");
       }
 

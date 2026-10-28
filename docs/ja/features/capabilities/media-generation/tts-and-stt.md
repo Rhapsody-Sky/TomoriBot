@@ -2,61 +2,83 @@
 title: "音声: TTS & STT"
 sidebar:
   order: 3
+aiGenerated: true
 ---
 
-TomoriBotは、**話す**（テキスト読み上げ、TTS）ことと、**聞く**（音声認識、STT）ことができます：
+TomoriBotは、Discordで話したり聞いたりすることができます。テキスト読み上げ (TTS) で音声応答を送信し、音声テキスト変換 (STT) で音声メッセージを会話コンテキストに書き起こします。
 
-- **TTS**を使用すると、ネイティブのDiscord音声メッセージで返信できます。
-- **STT**を使用すると、ユーザーからの音声の添付ファイルを、会話のコンテキストとして使用できるテキストに変換できます。
-
-どちらも同じエンドポイントシステムを通じて機能します。最も簡単な方法は**ElevenLabs**（クラウド版。詳細は下記）を使用することです。自身のハードウェアで音声を処理したい場合は、ローカルエンジンを使用し、セルフホストのガイドに従ってください。
+`/providers` で音声プロバイダーを選択するか、自分自身のGoogleまたはOpenRouter音声モデルを使用する場合は `/personal providers` を使用します。また、独自のハードウェア上でローカル音声モデルを実行することもできます。
 
 ## テキスト読み上げ（TTS）
+<!-- anchor: text-to-speech -->
+
+### GoogleとOpenRouterの音声
+
+Googleを追加すると、`TTS（ボイスデザイン）` にGemini Flash TTSが選択されます。OpenRouterを追加すると、`TTS（ボイスクローン）` に有料のFish S2.1 Proが選択され、そのスロットが空の場合にのみ `TTS（ボイスデザイン）` にSeed Audio 1.0が設定されます。OpenRouterはすでに選択されているGeminiやVertexのデザインを置き換えないため、両方のプロバイダーを同時にアクティブにしておくことができます。Seedが提供される前にOpenRouterを追加していた場合、Seedを選択するまでデザインスロットは空のままになります。OpenRouterキーを再度追加すると、意図的にクリアしたスロットを含め、空のデザインスロットにSeedが設定されます。Flash-Liteや無料のFishを使用するには明示的なモデル選択が必要であり、利用可否やプロバイダーのクォータが適用されます。いずれかのスロットを変更またはクリアするには、`/config` > モデル > モデルの切り替え を使用します。
+個人の選択とオン/オフの切り替えは `/personal config` > モデル > モデルの切り替え にあります。一方の個人モードをオフにすると、もう一方がアクティブのまま、そのモードでサーバーの選択を使用できます。
+
+選択と同じスコープのプロバイダーのAPIキーを使用してください。チャットのサブスクリプションだけではAPIアクセスは有効になりません。Geminiの[無料API利用枠](https://ai.google.dev/gemini-api/docs/pricing) にはプロジェクトクォータと利用要件があります。AI Studioでアクセス権を確認してください。無料のFishは別個のモデルコード `fish-audio/s2.1-pro-free:free` であり、明示的に選択する必要があります。「サーバーモデルのフォールバック」が有効になっている場合、個人の無料モデルが失敗してもサーバーの有料モデルの選択へフォールバックできます。
+
+`/config` > ペルソナ > 音声 で `声を説明` を選択すると、最大1,000文字の説明を保存できます。モデルを選択する前に説明を記述できます。Fishまたはローカルの音声クローンモデルを使用するには、`/config` > モデル > TTSパラメーターと音声 で参照を追加し、ペルソナの「音声」ページで割り当てます。プロバイダーを変更しても両方の入力は保存されたままになります。`ボイスデザイン` または `ボイスクローン` を選択して優先度を設定します。優先した入力に一致するモデルや使用可能な声がない場合は、もう一方の保存された入力を使用できます。ページには、サーバーの選択に対してどのソースが有効かが表示されます。
+
+短いセリフを入力するには `/generate voice-message` を実行するか、ペルソナにボイスメッセージを送信するよう依頼します。このコマンドは、1回限りの説明や参照のアップロードも受け付けます。
+
+任意の `model` パラメーターを使用すると、このメッセージ用の互換性のある音声モデルまたはサーバーエンドポイントを選択できます。個人設定の項目には `（個人のプロバイダー経由）` と表示されます。保存済みのデフォルト設定は維持され、明示的に選択したモデルは生成に失敗しても別のモデルにフォールバックしません。通常のルーティングを使用する場合は空欄のままにしてください。
+
+保存された説明はGeminiの音声IDを再利用します。編集するとそのIDは破棄されます。1回限りの説明では一時的なIDが作成され、生成後にbotによって削除されます。クリーンアップに失敗した場合は、その認証情報が再度使用されたときに再試行されます。クラッシュやあいまいなタイムアウトの後、管理者はプロバイダーのコンソールで音声を手動で削除する必要がある場合があります。
+説明はエクスポートされたPNGやJSONのペルソナカードに含まれます。リモートの音声IDと参照の割り当ては除外されます。Googleは設計された音声IDをAPIプロジェクトに保存します。Geminiの参照音声による音声複製は、botが同意録音を収集できるようになるまで保留されます。
+
+Seed AudioはGeminiとは仕組みが異なります。発話するたびに説明から声を構築するため、同じ説明でもメッセージごとに少し異なって聞こえることがあります。常に同じ声を維持したい場合は、Geminiまたは参照サンプルを使用してください。Seedは英語と中国語で最も効果的であり、1メッセージあたり最大2分の音声を生成するため、セリフは1,100文字で制限されます。また、説明、読み上げ指示、セリフは合計2,048文字を共有するため、説明が長いとセリフに使える文字数が少なくなります。収まらないセリフは送信前に拒否され、botからセリフを短くするよう求められます。
+OpenRouterはSeedを音声の秒数単位で請求するため、Fishと比べて1分あたりおよそ10倍の費用がかかります。Geminiに切り替えるかスロットをクリアするには、`/config` > モデル > モデルの切り替え を使用してください。
+
+個人の音声生成の失敗は、「サーバーモデルのフォールバック」設定とサーバー権限に従います。フォールバックが成功するとコマンドの受信メッセージに表示されます。プロバイダーは失敗した処理やキャンセルされた処理に対しても請求を行う場合があります。セリフや音声の制限は利用金額の上限を設定するものではありません。
 
 ### ElevenLabs（クラウド、最も簡単）
 
-1. [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)からAPIキーを取得します。
-2. `/speech elevenlabs`を実行し、キーを貼り付けます。この1つのコマンドで以下のことが行われます：
-   - ElevenLabsの**音声**エンドポイント（および**文字起こし**エンドポイント）を登録します。
-   - それらをアクティブとして選択します。
-   - その場で1つのペルソナに音声を割り当てることができます。
-3. `/speech voice-assign`を使用して、追加のペルソナに音声を割り当てます。音声の閲覧は[ElevenLabs Voice Library](https://elevenlabs.io/app/voice-library)で行えます。ここから自身の音声をクローンすることもできます。
+1. [ElevenLabs](https://elevenlabs.io/app/settings/api-keys) からAPIキーを取得します。
+2. `/providers`を実行し、`新しいプロバイダーを追加`、`ElevenLabs`を選択して、キーを貼り付けます。このフロー:
+   - ElevenLabs音声エンドポイントと文字起こしエンドポイントを登録します。
+   - 両方のエンドポイントをアクティブ化します。
+   - オプションで、すぐに1人のペルソナに音声を割り当てます。
+3. `/config` > `ペルソナ` > [音声] で追加のペルソナに音声を割り当てます。[ElevenLabsボイスライブラリ](https://elevenlabs.io/app/voice-library) でボイスを参照し、独自のクローンを作成することもできます。
 
-保存されたキーを更新するには、いつでも再度`/speech elevenlabs`を実行してください。
+`/providers`でElevenLabsを選択し、キーを更新する必要がある場合は常に`エンドポイントを編集`を選択します。
 
-注意事項：
+注:
 
-- **無料プランでは、用意された音声（premade voices）のみ機能します**。[用意された音声のリスト](https://elevenlabs-sdk.mintlify.app/voices/premade-voices)を参照してください。
-- 音声メッセージの生成や読み上げ時には文字数がカウントされます。無料プランには月ごとの制限がありますので、ElevenLabsのダッシュボードを確認してください。
-- 音声での返信は`voice_message_enabled`によって制限されており、アクティブなペルソナに音声が割り当てられている必要があります。
+- 無料プランでは、既製の音声のみが機能します。[プリメイドボイスリスト](https://elevenlabs-sdk.mintlify.app/voices/premade-voices)を参照してください。
+- 音声メッセージを生成するときに文字数がカウントされます。無料枠には月ごとの制限があるため、ElevenLabsダッシュボードを監視してください。
+- 音声応答には`/config` > `権限`の`voice_message_enabled`が必要で、アクティブなペルソナには音声が割り当てられている必要があります。
+- `/config` > `ペルソナ` > [音声] を変更するには、サーバーでの [サーバーの管理] 権限が必要ですが、所有者はDMで引き続き使用できます。
 
-Discord上で同じ手順を確認するには、`/help speech`を実行してください。
+`/help`で、`機能`を選択し、次に`音声`を選択して、Discordの対話型ウォークスルーを実行します。
 
 ### ローカルの音声クローンエンジン（セルフホスト）
 
-セルフホストのインスタンスでは、代わりにローカルの音声クローンサーバーを実行できます。一般的なフローは以下の通りです：
-ラッパーサーバーを起動し、`/provider custom-endpoint add`で登録し、`/model speech`で選択し、`/speech voice-add`でサンプルをアップロードし、最後に`/speech voice-assign`で割り当てます。どのような音声形式でも受け入れられます（モノラルのWAVに自動変換されます）。BGMのない10〜20秒のクリップが最適です。
+セルフホスト型インスタンスでは、ローカルの音声クローンサーバーを実行できます。ワークフロー: サーバーを起動し、`/providers`でその接続とモデルを登録し、`/providers`で選択し、`/config` > `モデル` > TTSパラメーターとボイスでリファレンスサンプルをアップロードし、それを`/config` > `ペルソナ` > ボイスで割り当てます。あらゆるオーディオ形式が受け入れられます (モノラルWAVに自動的に変換されます)。BGMなしの10 ～ 20秒のクリップが最適です。
 
-各エンジンにはそれぞれセットアップガイドがあります：
+各エンジンには独自のセットアップガイドがあります。
 
-- [Chatterbox-Turbo](/ja/self-hosting/local-endpoints/text-to-speech/chatterbox/)：高速、英語のみ対応。`[excited]`のような括弧付きの表現タグをサポートします。
-- [Qwen3-TTS](/ja/self-hosting/local-endpoints/text-to-speech/qwen3tts/)：多言語対応（10言語）。自然言語によるVoiceDesignモードを備えています。
-- [IrodoriTTS](/ja/self-hosting/local-endpoints/text-to-speech/irodoritts/)：日本語特化。絵文字を感情の合図として読み取ります。
+- [Chatterbox-Turbo/Nano](/ja/self-hosting/local-endpoints/text-to-speech/chatterbox/): `[laugh]`などの感情タグを使用した高速英語音声クローン作成。
+- [Qwen3-TTS](/ja/self-hosting/local-endpoints/text-to-speech/qwen3tts/): 多言語 (10言語) に加えて、自然言語のVoiceDesignモード。
+- [MOSS-TTS](/ja/self-hosting/local-endpoints/text-to-speech/moss/): 多言語クローンと英語または中国語の音声デザイン。
+- [いろどりTTS](/ja/self-hosting/local-endpoints/text-to-speech/irodoritts/): 絵文字を感情の手がかりとして読み取る日本語に特化したエンジン。
 
-一覧については、[テキスト読み上げ（TTS）](/ja/self-hosting/local-endpoints/text-to-speech/)ハブをご覧ください。
+ハードウェアのガイダンスと完全なエンジンのリストについては、[Text-to-Speech比較表](/ja/self-hosting/local-endpoints/text-to-speech/) を参照してください。
 
 ## 音声認識（STT）
+<!-- anchor: speech-to-text -->
 
-文字起こしのエンドポイントは、ユーザーの音声添付ファイルをテキストに変換し、バックグラウンドでの会話のコンテキストとして機能させます。文字起こしがチャットに**表示して投稿される**かどうかは、`/speech transcripts`で個別に制御されます。
+文字起こしエンドポイントは、ユーザーの音声添付ファイルを会話コンテキストのテキストに変換します。トランスクリプトをチャットに公開するかどうかは、`/config` > `動作` > 通知動作で制御されます。
 
 ### ElevenLabs（クラウド）
 
-上記ですでに説明した通り、`/speech elevenlabs`は音声とともに文字起こしのエンドポイントも登録します。文字起こしのエンドポイントを切り替えるには、`/model transcription`を使用します。
+`/providers`からElevenLabsを追加すると、音声とともに文字起こしエンドポイントが登録されます。`/providers`を使用して、アクティブな転写エンドポイントを切り替えます。
 
 ### ローカルエンジン（セルフホスト）
 
-- [WhisperX](/ja/self-hosting/local-endpoints/speech-to-text/whisperx/)：ローカルでの推奨。約100言語対応、GPUアクセラレーション、複数のモデルサイズ。
-- [KoboldCPP](/ja/self-hosting/local-endpoints/speech-to-text/koboldcpp/)：ご使用のビルドがOpenAI互換の文字起こしエンドポイントを公開している場合に機能します。
-- [whisper.cpp](/ja/self-hosting/local-endpoints/speech-to-text/whispercpp/)。
+- [WhisperX](/ja/self-hosting/local-endpoints/speech-to-text/whisperx/): 推奨されるローカルパス。約100の言語、GPUアクセラレーション、複数のモデルサイズ。
+- [KoboldCPP](/ja/self-hosting/local-endpoints/speech-to-text/koboldcpp/): ビルドがOpenAI互換の転写エンドポイントを公開している場合に機能します。
+- [ささやき.cpp](/ja/self-hosting/local-endpoints/speech-to-text/whispercpp/)。
 
-一覧については、[音声認識（STT）](/ja/self-hosting/local-endpoints/speech-to-text/)ハブをご覧ください。Discordでの概要を確認するには、`/help transcription`を実行してください。
+エンジンの完全なリストについては、[Speech-to-Text](/ja/self-hosting/local-endpoints/speech-to-text/) ハブを参照してください。Discord概要の場合は、`/help`を実行し、`機能`および`文字起こし`を選択します。

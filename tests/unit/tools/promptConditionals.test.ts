@@ -1,9 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, afterEach, describe, expect, it, spyOn } from "bun:test";
+import { getGuildMcpManager, type GuildMcpRouting } from "@/utils/mcp/guildMcpManager";
+import type { GuildMCPConnection } from "@/types/tool/mcpTypes";
+import type { GuildMcpServerRow } from "@/types/db/schema";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AssembledServerConfig } from "@/types/db/schema";
 import type { ToolStateForContext } from "@/tools/toolRegistry";
+import { DOCUMENT_HINT_TEMPLATE } from "@/utils/text/context/dialogueHistory";
+import { CONDITIONING_INTERACTION_RESPONSE_TEMPLATE } from "@/utils/conditioning/conditioningInteractionContext";
+import { systemPromptSections } from "@/db/seed/catalog/systemPrompts";
 import { DEFAULT_SYSTEM_PROMPT } from "@/utils/text/context/templates";
+import { SPACER_TEMPLATE } from "@/utils/text/context/timeAwareness";
 import { findUnsupportedPresetMacros } from "@/utils/text/stPresetEngine";
 import {
   createToolPromptMacroResolver,
@@ -41,6 +48,7 @@ const TOOL_STATE = {
     supports_structoutput: false,
   },
   config: {
+    emoji_usage_enabled: true,
     sticker_usage_enabled: true,
     web_search_enabled: true,
     self_teaching_enabled: true,
@@ -49,7 +57,11 @@ const TOOL_STATE = {
     videogen_enabled: true,
     voice_message_enabled: true,
     user_blocking_enabled: true,
+    user_info_updates_enabled: true,
     thread_creation_enabled: true,
+    conditioning_interactions_enabled: false,
+    dice_rolling_enabled: false,
+    danbooru_enabled: true,
   },
 } satisfies ToolStateForContext;
 
@@ -121,6 +133,41 @@ describe("prompt conditionals", () => {
     expect(unclosed.warnings).toHaveLength(1);
   });
 
+  it("does not leave an empty paragraph where a block rendered to nothing", async () => {
+    const input = "intro.\n\n{{if tool:absent}}skipped{{/if}}\n\noutro.";
+    const result = await render(input, {});
+
+    expect(result.text).toBe("intro.\n\noutro.");
+  });
+
+  it("collapses only one separator when consecutive blocks all render to nothing", async () => {
+    const input = "intro.\n\n{{if tool:absent}}a{{/if}}{{if tool:absent}}b{{/if}}\n\noutro.";
+    const result = await render(input, {});
+
+    expect(result.text).toBe("intro.\n\noutro.");
+  });
+
+  it("keeps the separator when the block renders content", async () => {
+    const input = "intro.\n\n{{if tool:present}}kept{{/if}}\n\noutro.";
+    const result = await render(input, { "tool:present": true });
+
+    expect(result.text).toBe("intro.\n\nkept\n\noutro.");
+  });
+
+  it("preserves authored blank lines inside a selected branch", async () => {
+    const input = "{{if tool:present}}one\n\n\n\ntwo{{/if}}";
+    const result = await render(input, { "tool:present": true });
+
+    expect(result.text).toBe("one\n\n\n\ntwo");
+  });
+
+  it("leaves an inline removal alone when no blank-line separator surrounds it", async () => {
+    const input = "before {{if tool:absent}}gone{{/if}} after";
+    const result = await render(input, {});
+
+    expect(result.text).toBe("before  after");
+  });
+
   it("leaves legacy handlebars conditionals untouched", async () => {
     const input = "{{#if self_teaching}}legacy{{/if}}";
     const result = await render(input, {});
@@ -130,6 +177,14 @@ describe("prompt conditionals", () => {
 });
 
 describe("prompt macro resolver condition integration", () => {
+  let routing: ReturnType<typeof spyOn<ReturnType<typeof getGuildMcpManager>, "getGuildMCPRouting">>;
+  beforeEach(() => {
+    routing = spyOn(getGuildMcpManager(), "getGuildMCPRouting").mockResolvedValue({
+      routes: new Map(),
+      replaced: new Set(),
+    });
+  });
+  afterEach(() => routing.mockRestore());
   it("keeps the migration rollback fallback synchronized", () => {
     const migration = readFileSync(
       join(process.cwd(), "src/db/migrations/061_default_system_prompt_read_time.down.sql"),
@@ -179,6 +234,31 @@ describe("prompt macro resolver condition integration", () => {
     expect(expanded).toBe("no-memory/search");
   });
 
+  it("names a tool in a context hint only when the turn exposes it", async () => {
+    const hints = [
+      { template: DOCUMENT_HINT_TEMPLATE, toolName: "read_file" },
+      { template: SPACER_TEMPLATE, toolName: "reveal_message_metadata" },
+      { template: CONDITIONING_INTERACTION_RESPONSE_TEMPLATE, toolName: "interact_with_target" },
+    ];
+    const failures: string[] = [];
+    for (const { template, toolName } of hints) {
+      for (const allowed of [true, false]) {
+        const resolver = createToolPromptMacroResolver({
+          provider: "google",
+          stateForContext: TOOL_STATE,
+          capabilities: ENABLED_CAPABILITIES,
+          availableToolNames: new Set([toolName, "web_search"]),
+          deliberateToolAllowedNames: allowed ? [toolName] : ["web_search"],
+        });
+        const expanded = await resolver.expand(template);
+        if (expanded.includes(toolName) !== allowed || /\{(?:\{|conditioning_interaction_tool)/u.test(expanded)) {
+          failures.push(`${toolName} allowed=${allowed}: ${expanded}`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
   it("hides tool branches when the active model cannot call tools", async () => {
     const resolver = createToolPromptMacroResolver({
       provider: "google",
@@ -225,6 +305,19 @@ describe("prompt macro resolver condition integration", () => {
     });
 
     const bundled = await bundledResolver.expand(DEFAULT_SYSTEM_PROMPT);
+    const selected: GuildMcpRouting = {
+      routes: new Map([
+        [
+          "read_webpage",
+          {
+            config: { server_type: "url_fetcher" } as GuildMcpServerRow,
+            connection: {} as GuildMCPConnection,
+          },
+        ],
+      ]),
+      replaced: new Set(["url_fetcher"]),
+    };
+    routing.mockResolvedValue(selected);
     const guild = await guildResolver.expand(DEFAULT_SYSTEM_PROMPT);
 
     expect(bundled).toContain("`review_capabilities`");
@@ -234,6 +327,26 @@ describe("prompt macro resolver condition integration", () => {
     expect(bundled).toContain("warrants it.\n\n");
     expect(guild).toContain("`read_webpage`");
     expect(guild).not.toContain("currently available URL fetch tool");
+  });
+
+  it("renders the image generation preset without the tag-based blocks when only generate_image is available", async () => {
+    const preset = systemPromptSections
+      .flatMap((section) => section.rows)
+      .find((row) => row.name === "Default + Image Generation Expert");
+    const resolver = createToolPromptMacroResolver({
+      provider: "google",
+      stateForContext: TOOL_STATE,
+      capabilities: ENABLED_CAPABILITIES,
+      availableToolNames: new Set(["generate_image"]),
+    });
+
+    const expanded = await resolver.expand(preset?.promptText ?? "");
+
+    expect(expanded).toContain("`generate_image`");
+    expect(expanded).not.toContain("generate_image_nai");
+    expect(expanded).not.toContain("danbooru_search");
+    expect(expanded).not.toContain("{{");
+    expect(expanded).not.toMatch(/\n[^\S\n]*\n[^\S\n]*\n/);
   });
 
   it("does not infer URL-fetch availability from unrelated read tools", async () => {
@@ -260,6 +373,9 @@ describe("prompt macro resolver condition integration", () => {
       web_search_enabled: true,
       manage_message_enabled: false,
       thread_creation_enabled: true,
+      conditioning_interactions_enabled: false,
+      dice_rolling_enabled: false,
+      danbooru_enabled: true,
       imagegen_enabled: false,
       videogen_enabled: true,
       voice_message_enabled: false,

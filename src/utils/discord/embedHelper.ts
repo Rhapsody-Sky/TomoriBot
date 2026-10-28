@@ -1,6 +1,8 @@
+import { sendChannelMessageOnce } from "@/utils/discord/webhook/singleAttemptMessage";
 import {
   ActionRowBuilder,
   ButtonBuilder,
+  ButtonStyle,
   ComponentType,
   EmbedBuilder,
   type ButtonInteraction,
@@ -12,13 +14,17 @@ import {
   type BaseGuildTextChannel,
   type BaseGuildVoiceChannel,
   type AnyThreadChannel,
-  type Webhook,
 } from "discord.js";
 import { ColorCode, log } from "../misc/logger";
 import { localizer } from "../text/localizer";
-import { sendWebhookMessageWithIdentity } from "./webhookManager";
+import type { SendableChannel } from "@/utils/discord/resolveSendableChannel";
+import { type PersonaPostContext, recordPersonaDelivery, sendPersonaPost } from "@/utils/discord/webhook/personaPost";
+import { resolveAuthoringWebhook } from "@/utils/discord/webhook/fallback";
+import { attachTextDisplayModalCollector, buildTextDisplayModalRow } from "./textDisplayModal";
+import { withStatusCircle } from "./ui/statusTitle";
+import { resolveFooterLines } from "./ui/noticeFooter";
 import type { StandardEmbedOptions, SummaryEmbedOptions, TranslationEmbedOptions } from "../../types/discord/embed";
-import { TRANSLATOR_COLORS, TRANSLATOR_STYLES, TranslationProvider } from "../../types/discord/embed";
+import { TRANSLATOR_COLORS, TranslationProvider } from "../../types/discord/embed";
 
 type Provider = keyof typeof TRANSLATOR_COLORS;
 
@@ -33,10 +39,12 @@ const MAX_FIELD_VALUE_LENGTH = 1024;
 export const MAX_EMBED_DESCRIPTION_LENGTH = 4096;
 
 /**
- * Tip-item locale key for the Official Support Server link, appended to every rendered tip embed
- * by {@link createTipEmbed}. Exported so tests and callers can reference it without re-typing it.
+ * Tip-item locale key for the Official Support Server link, appended to every rendered tip modal.
  */
 export const SUPPORT_SERVER_TIP_KEY = "genai.tips.support_server";
+export const TIP_DETAILS_BUTTON_ID = "error_tip_details";
+const ERROR_DETAIL_BUTTON_ID = "error_full_detail";
+export const TIP_BUTTON_TIMEOUT_MS = 86_400_000;
 
 /**
  * Truncates text so it fits within Discord's embed description limit, optionally reserving
@@ -52,22 +60,9 @@ export function truncateForEmbedDescription(value: string, reservedChars = 0): s
   return available <= 3 ? value.substring(0, available) : `${value.substring(0, available - 3)}...`;
 }
 
-export type WebhookEmbedContext = {
-  webhook?: Webhook;
-  personaUsername?: string;
-  personaAvatarUrl?: string;
+export type WebhookEmbedContext = Omit<PersonaPostContext, "channel" | "persona"> & {
+  persona?: PersonaPostContext["persona"];
 };
-
-function canUseWebhookForChannel(
-  channel: TextChannel | NewsChannel | DMChannel | BaseGuildTextChannel | AnyThreadChannel | BaseGuildVoiceChannel,
-  webhook: Webhook,
-): boolean {
-  if ("isThread" in channel && typeof channel.isThread === "function" && channel.isThread()) {
-    return channel.parentId === webhook.channelId;
-  }
-
-  return webhook.channelId === channel.id;
-}
 
 /**
  * Truncates a field value to Discord's maximum allowed length.
@@ -97,8 +92,14 @@ export function createStandardEmbed(locale: string, options: StandardEmbedOption
     color = ColorCode.INFO,
     footerKey,
     footerVars = {},
+    configHint,
     thumbnailUrl,
+    minimal,
   } = options;
+
+  if (minimal) {
+    return new EmbedBuilder().setColor(color).setTitle(withStatusCircle(localizer(locale, titleKey, titleVars), color));
+  }
 
   // Use raw description if provided, otherwise use descriptionKey with localization
   const descriptionText = description
@@ -109,12 +110,13 @@ export function createStandardEmbed(locale: string, options: StandardEmbedOption
 
   const embed = new EmbedBuilder()
     .setColor(color)
-    .setTitle(localizer(locale, titleKey, titleVars))
+    .setTitle(withStatusCircle(localizer(locale, titleKey, titleVars), color))
     .setDescription(descriptionText);
 
-  if (footerKey) {
+  const footerLines = resolveFooterLines(locale, footerKey, footerVars, configHint);
+  if (footerLines.length > 0) {
     embed.setFooter({
-      text: localizer(locale, footerKey, footerVars),
+      text: footerLines.join("\n"),
     });
   }
 
@@ -125,29 +127,12 @@ export function createStandardEmbed(locale: string, options: StandardEmbedOption
   return embed;
 }
 
-/**
- * Builds the reusable green "💡 Tip" embed shown alongside error/info embeds.
- *
- * Each entry in `tipKeys` is an atomic locale key resolved independently and rendered as its own
- * dashed bullet. Because the content lives in an embed description (not a footer), markdown and
- * hyperlinks render: which is why tips moved out of footers. Conditional tips are handled by the
- * caller simply including/excluding a key (e.g. an OpenRouter-only item), so no duplicate paragraph
- * strings are needed in the locales.
- *
- * The Official Support Server link (`genai.tips.support_server`) is appended automatically as the
- * last bullet of every rendered tip embed, so callers never list it themselves. It is appended only
- * after at least one caller-supplied tip resolves, which preserves the null return that lets callers
- * skip the tip embed entirely rather than showing a support-link-only embed.
- * @param locale - The locale to localize each tip item with.
- * @param tipKeys - Atomic tip-item locale keys, in display order.
- * @param tipVars - Optional interpolation vars applied to every tip item.
- * @returns A green EmbedBuilder, or null when no tip item resolves to non-empty text.
- */
-export function createTipEmbed(
+/** Builds the localized markdown shown by a "What You Can Do" text modal. */
+export function createTipText(
   locale: string,
   tipKeys: string[],
   tipVars: Record<string, string | number | boolean> = {},
-): EmbedBuilder | null {
+): string | null {
   // Localize every tip item and drop any that resolve to empty text (e.g. an unset optional key).
   const items = tipKeys
     .filter((key) => key !== SUPPORT_SERVER_TIP_KEY)
@@ -157,20 +142,13 @@ export function createTipEmbed(
     return null;
   }
 
-  // Always close with the Official Support Server link so every tip embed offers a way to get help.
+  // The support link gives every recovery modal an escape hatch without burdening each caller.
   const supportItem = localizer(locale, SUPPORT_SERVER_TIP_KEY, tipVars).trim();
   if (supportItem.length > 0) {
     items.push(supportItem);
   }
 
-  // Render as a dashed bullet list, truncated to stay within Discord's embed description limit.
-  const description = truncateForEmbedDescription(items.map((item) => `- ${item}`).join("\n"));
-
-  // Green (SUCCESS) reads as "helpful", visibly distinct from the red/yellow error embed above it.
-  return new EmbedBuilder()
-    .setColor(ColorCode.SUCCESS)
-    .setTitle(localizer(locale, "genai.tips.title"))
-    .setDescription(description);
+  return items.map((item) => `- ${item}`).join("\n");
 }
 
 export function createSummaryEmbed(locale: string, options: SummaryEmbedOptions): EmbedBuilder {
@@ -197,7 +175,7 @@ export function createSummaryEmbed(locale: string, options: SummaryEmbedOptions)
 
   const embed = new EmbedBuilder()
     .setColor(color)
-    .setTitle(localizer(locale, titleKey, titleVars))
+    .setTitle(withStatusCircle(localizer(locale, titleKey, titleVars), color))
     .setDescription(descriptionText)
     .addFields(
       // Map over the fields provided in options
@@ -255,38 +233,128 @@ export async function sendStandardEmbed(
   webhookContext?: WebhookEmbedContext,
 ): Promise<void> {
   const embed = createStandardEmbed(locale, options);
-  // Append the reusable green Tip embed when the caller supplied atomic tip-item keys.
-  const tipEmbed = options.tipKeys?.length ? createTipEmbed(locale, options.tipKeys, options.tipVars) : null;
-  const embeds = tipEmbed ? [embed, tipEmbed] : [embed];
-  if (
-    webhookContext?.webhook &&
-    webhookContext.personaUsername &&
-    canUseWebhookForChannel(channel, webhookContext.webhook)
-  ) {
-    const threadId =
+  const modalButtons = prepareEmbedModalButtons(locale, options, "Error");
+  const { disabledRow: disabledModalRow, components } = modalButtons;
+  let sentMessage: Message | undefined;
+  let sentViaWebhook = false;
+  let threadId: string | undefined;
+
+  if (webhookContext?.persona) {
+    threadId =
       "isThread" in channel && typeof channel.isThread === "function" && channel.isThread() ? channel.id : undefined;
-    try {
-      await sendWebhookMessageWithIdentity(
-        webhookContext.webhook,
-        {
-          embeds,
-          ...(threadId ? { threadId } : {}),
-        },
-        {
-          username: webhookContext.personaUsername,
-          avatarUrl: webhookContext.personaAvatarUrl,
-          avatarDataUri: webhookContext.personaAvatarUrl?.startsWith("data:image/")
-            ? webhookContext.personaAvatarUrl
-            : undefined,
-        },
-      );
+    const outcome = await sendPersonaPost(
+      {
+        channel: channel as unknown as SendableChannel,
+        persona: webhookContext.persona,
+        deliveryMode: webhookContext.deliveryMode,
+        webhook: webhookContext.webhook,
+        impersonatedIdentity: webhookContext.impersonatedIdentity,
+        abortSignal: webhookContext.abortSignal,
+        isExecutionCancelled: webhookContext.isExecutionCancelled,
+        deliveryReceipts: webhookContext.deliveryReceipts,
+        deliveryState: webhookContext.deliveryState,
+        holdResponseText: webhookContext.holdResponseText,
+      },
+      { embeds: [embed], components },
+    );
+    if (outcome.status !== "sent") {
+      log.warn("Failed to send embed through persona delivery", outcome.error, {
+        metadata: { outcome: outcome.status, channelId: channel.id },
+      });
       return;
-    } catch (error) {
-      log.warn("Failed to send embed via webhook, falling back to bot message", error as Error);
     }
+    sentMessage = outcome.message;
+    sentViaWebhook = outcome.receipt.route === "webhook";
+  } else {
+    sentMessage = await sendChannelMessageOnce(channel, { embeds: [embed], components }, () => undefined);
+    recordPersonaDelivery({
+      messageId: sentMessage.id,
+      channelId: sentMessage.channelId,
+      route: "bot",
+      webhookId: null,
+      identity: {
+        username: sentMessage.member?.displayName ?? sentMessage.author?.username,
+        avatarUrl: sentMessage.member?.displayAvatarURL?.() ?? sentMessage.author?.displayAvatarURL?.(),
+      },
+      speaker: null,
+    });
   }
 
-  await channel.send({ embeds });
+  if (!sentMessage) return;
+  const deliveredMessage = sentMessage;
+
+  if (!disabledModalRow) return;
+
+  const disableButtons = async (): Promise<void> => {
+    if (sentViaWebhook) {
+      const author = await resolveAuthoringWebhook(channel, deliveredMessage.webhookId, webhookContext?.webhook);
+      if (!author) throw new Error("Authoring webhook unavailable for embed button edit");
+      await author.editMessage(deliveredMessage.id, {
+        embeds: [embed],
+        components: [disabledModalRow],
+        ...(threadId ? { threadId } : {}),
+      });
+      return;
+    }
+    await deliveredMessage.edit({ embeds: [embed], components: [disabledModalRow] });
+  };
+
+  modalButtons.attach(deliveredMessage, disableButtons);
+}
+
+/**
+ * Builds the tip and full-error buttons an embed offers, plus the collectors that open them once the
+ * message is sent.
+ * @param logLabel - Prefix for the collectors' failure logs.
+ */
+export function prepareEmbedModalButtons(
+  locale: string,
+  options: Pick<StandardEmbedOptions, "tipKeys" | "tipVars" | "restrictedDetail">,
+  logLabel: string,
+): {
+  components: ActionRowBuilder<ButtonBuilder>[];
+  disabledRow?: ActionRowBuilder<ButtonBuilder>;
+  attach(message: Message, disableButtons: () => Promise<void>): void;
+} {
+  const tipText = options.tipKeys?.length ? createTipText(locale, options.tipKeys, options.tipVars) : null;
+  const { restrictedDetail } = options;
+  const buttons = [
+    ...(tipText ? [{ customId: TIP_DETAILS_BUTTON_ID, label: localizer(locale, "genai.tips.button") }] : []),
+    ...(restrictedDetail
+      ? [{ customId: ERROR_DETAIL_BUTTON_ID, label: localizer(locale, "genai.error_detail.button") }]
+      : []),
+  ];
+  if (buttons.length === 0) return { components: [], attach: () => undefined };
+  return {
+    components: [buildTextDisplayModalRow(buttons)],
+    disabledRow: buildTextDisplayModalRow(buttons, true),
+    attach(message, disableButtons) {
+      if (tipText) {
+        attachTextDisplayModalCollector({
+          message,
+          customId: TIP_DETAILS_BUTTON_ID,
+          title: localizer(locale, "genai.tips.title"),
+          content: tipText,
+          timeoutMs: TIP_BUTTON_TIMEOUT_MS,
+          logLabel: `${logLabel} tips`,
+          onExpire: disableButtons,
+        });
+      }
+      if (restrictedDetail) {
+        // Both collectors share one timeout, so only one of them disables the shared row.
+        attachTextDisplayModalCollector({
+          message,
+          customId: ERROR_DETAIL_BUTTON_ID,
+          title: localizer(locale, "genai.error_detail.title"),
+          content: restrictedDetail.content,
+          timeoutMs: TIP_BUTTON_TIMEOUT_MS,
+          logLabel: `${logLabel} detail`,
+          access: restrictedDetail.access,
+          onExpire: tipText ? undefined : disableButtons,
+        });
+      }
+    },
+  };
 }
 
 const TRANSLATION_TIMEOUT = 90000;
@@ -301,7 +369,7 @@ export async function sendTranslationEmbed(message: Message, options: Translatio
     const buttons = Object.values(TranslationProvider).map((provider) => {
       return new ButtonBuilder()
         .setLabel(provider.charAt(0).toUpperCase() + provider.slice(1))
-        .setStyle(TRANSLATOR_STYLES[provider])
+        .setStyle(ButtonStyle.Secondary)
         .setCustomId(`${provider}-trans`)
         .setDisabled(provider === activeProvider);
     });

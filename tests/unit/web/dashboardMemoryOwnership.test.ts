@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import { PrivacyLevel } from "@/types/db/schema";
+import { createServerConfig } from "../../helpers/fixtures";
 import { type DashboardMemoryCore, DashboardMemoryService } from "@/web/dashboard/memoryService";
 import type { DashboardActor, DashboardGuildSnapshot, MemoryMutationInput } from "@/web/dashboard/types";
 
@@ -7,17 +8,20 @@ function createSnapshot(overrides: Record<string, unknown> = {}): DashboardGuild
   return {
     serverId: 42,
     serverDiscordId: "123456789012345678",
-    config: {
+    config: createServerConfig({
       server_memteaching_enabled: true,
       personal_memories_enabled: true,
       ...overrides,
-    },
+    }),
     personas: [
       {
         personaId: 9,
         lineageId: 77,
         nickname: "Tomori",
         isAlter: false,
+        isPointer: false,
+        attributes: [],
+        sampleDialogues: [],
         avatarUrl: null,
         triggerWords: [],
         personaPrompt: null,
@@ -28,7 +32,7 @@ function createSnapshot(overrides: Record<string, unknown> = {}): DashboardGuild
       },
     ],
     rawPersonas: [],
-  } as DashboardGuildSnapshot;
+  };
 }
 
 function createActor(canManage = false, privacyLevel = PrivacyLevel.MINIMAL): DashboardActor {

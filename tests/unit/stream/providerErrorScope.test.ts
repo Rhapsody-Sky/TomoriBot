@@ -1,9 +1,11 @@
+import { REST } from "discord.js";
 import { beforeAll, describe, expect, it, mock } from "bun:test";
-import type { Client, TextChannel } from "discord.js";
+import type { Client, ModalBuilder, TextChannel } from "discord.js";
 import type { TomoriState } from "@/types/db/schema";
 import type { ProviderError, StreamContext, StreamProvider } from "@/types/stream/interfaces";
 import { StreamErrorUi } from "@/utils/discord/stream/errorUi";
 import { initializeLocalizer } from "@/utils/text/localizer";
+import { localizedCopy } from "../../helpers/localeCases";
 
 type SendMock = ReturnType<typeof mock>;
 
@@ -11,12 +13,19 @@ function makeContext(
   send: SendMock,
   textCredentialSource: StreamContext["textCredentialSource"],
   fallbackChain: unknown[] = [],
+  inGuild = true,
 ): StreamContext {
   return {
-    channel: { id: "channel_1", send } as unknown as TextChannel,
+    channel: {
+      id: "channel_1",
+      client: { rest: new REST() },
+      send,
+      ...(inGuild ? { guild: { id: "guild_1" } } : {}),
+    } as unknown as TextChannel,
     client: {} as Client,
     tomoriState: {
       server_id: 1,
+      llm: { llm_provider: "openrouter" },
       persona_nickname: "Tomori",
       trigger_words: [],
       config: {},
@@ -37,7 +46,7 @@ function makeProvider(name = "openrouter"): StreamProvider {
     processChunk() {
       return { type: "text", content: "" };
     },
-    handleProviderError(error) {
+    handleProviderError(error: unknown) {
       return {
         type: "api_error",
         message: error instanceof Error ? error.message : String(error),
@@ -53,26 +62,55 @@ function makeProvider(name = "openrouter"): StreamProvider {
   } as unknown as StreamProvider;
 }
 
-/** Reads the tip embed (the second embed) that `handleProviderError` sends to the channel. */
-function tipText(send: SendMock): string {
-  const payload = send.mock.calls[0]?.[0] as {
-    embeds?: Array<{ data?: { description?: string } }>;
-  };
-  return payload.embeds?.[1]?.data?.description ?? "";
-}
-
 async function renderTips(
   error: ProviderError,
   textCredentialSource: StreamContext["textCredentialSource"],
   options: { providerName?: string; fallbackChain?: unknown[] } = {},
 ): Promise<string> {
-  const send = mock(async () => undefined);
+  let modal: ReturnType<ModalBuilder["toJSON"]> | undefined;
+  const tipClick = {
+    customId: "error_tip_details",
+    user: { bot: false },
+    showModal: async (builtModal: ModalBuilder) => {
+      modal = builtModal.toJSON();
+    },
+  };
+  const makeCollector = (filter: (interaction: typeof tipClick) => boolean) => {
+    const collector = {
+      on(event: string, listener: (interaction: unknown) => Promise<void>) {
+        if (event === "collect" && filter(tipClick)) void listener(tipClick);
+        return collector;
+      },
+    };
+    return collector;
+  };
+  const send = mock(async (_payload: unknown) => ({
+    id: "sent",
+    channelId: "channel_1",
+    webhookId: null,
+    author: { username: "Bot" },
+    createMessageComponentCollector: (options: { filter: (interaction: typeof tipClick) => boolean }) =>
+      makeCollector(options.filter),
+  }));
   await new StreamErrorUi().handleProviderError(
     error,
     makeProvider(options.providerName),
     makeContext(send, textCredentialSource, options.fallbackChain ?? []),
+    "fixture-key",
   );
-  return tipText(send);
+  await Promise.resolve();
+  const payload = send.mock.calls[0]?.[0] as {
+    embeds?: unknown[];
+    components?: Array<{ toJSON(): { components: Array<{ label?: string }> } }>;
+  };
+  expect(payload.embeds).toHaveLength(1);
+  expect(payload.components?.[0]?.toJSON().components[0]?.label).toBe(localizedCopy("en-US", "genai.tips.button"));
+  return (
+    modal?.components
+      ?.map((component) => ("content" in component ? component.content : ""))
+      .filter(Boolean)
+      .join("") ?? ""
+  );
 }
 
 const MODEL_ERROR: ProviderError = {
@@ -104,35 +142,36 @@ describe("provider error tips resolve against the credential source", () => {
   it("keeps recommending server commands when the server's credentials failed", async () => {
     const tips = await renderTips(MODEL_ERROR, "server");
 
-    expect(tips).toContain("/model text");
+    expect(tips).toContain("/config");
     expect(tips).not.toContain("/personal");
   });
 
   it("recommends personal commands when the user's own credentials failed", async () => {
     const tips = await renderTips(MODEL_ERROR, "personal");
 
-    expect(tips).toContain("/personal provider model-text");
-    expect(tips).not.toContain("/model text");
+    expect(tips).toContain("/personal config");
+    // "/personal config" does not contain "/config", so this still discriminates the two scopes.
+    expect(tips).not.toContain("/config");
   });
 
-  it("offers the disable-override recovery path on personal failures", async () => {
+  it("offers the personal provider panel recovery path on personal failures", async () => {
     const tips = await renderTips(API_ERROR, "personal");
 
-    expect(tips).toContain("/personal provider toggle-models");
+    expect(tips).toContain("/personal providers");
   });
 
-  it("never shows the disable-override hint for a server-scoped failure", async () => {
+  it("never shows personal recovery guidance for a server-scoped failure", async () => {
     const tips = await renderTips(API_ERROR, "server");
 
     expect(tips).not.toContain("toggle-models");
-    expect(tips).toContain("Double-check this server's API key");
+    expect(tips).toContain(localizedCopy("en-US", "genai.tips.verify_api_key"));
   });
 
   it("suppresses the manager-only key-rotation tip on personal failures", async () => {
     const serverTips = await renderTips(RATE_LIMIT_ERROR, "server");
     const personalTips = await renderTips(RATE_LIMIT_ERROR, "personal");
 
-    expect(serverTips).toContain("/provider api-key rotation");
+    expect(serverTips).toContain("/providers");
     expect(personalTips).not.toContain("api-key rotation");
   });
 
@@ -143,13 +182,63 @@ describe("provider error tips resolve against the credential source", () => {
     const personalTips = await renderTips(RATE_LIMIT_ERROR, "personal", { fallbackChain: [{ type: "llm", id: 1 }] });
 
     expect(serverTips).not.toContain("fallback");
-    expect(personalTips).toContain("/personal model fallback");
+    expect(personalTips).toContain("/personal config");
   });
 
   it("falls back to server-scoped tips when no credential source was recorded", async () => {
     const tips = await renderTips(MODEL_ERROR, undefined);
 
-    expect(tips).toContain("/model text");
+    expect(tips).toContain("/config");
     expect(tips).not.toContain("/personal");
+  });
+});
+
+describe("error embeds name where the failure came from", () => {
+  beforeAll(async () => {
+    await initializeLocalizer();
+  });
+
+  async function renderFooter(
+    send: (ui: StreamErrorUi, context: StreamContext) => Promise<void>,
+    textCredentialSource: StreamContext["textCredentialSource"],
+    inGuild: boolean,
+  ): Promise<string | undefined> {
+    const channelSend = mock(async (_payload: unknown) => ({
+      id: "sent",
+      channelId: "channel_1",
+      webhookId: null,
+      author: { username: "Bot" },
+      createMessageComponentCollector: () => ({ on() {} }),
+    }));
+    await send(new StreamErrorUi(), makeContext(channelSend, textCredentialSource, [], inGuild));
+    const payload = channelSend.mock.calls[0]?.[0] as { embeds: Array<{ toJSON(): { footer?: { text: string } } }> };
+    return payload.embeds[0]?.toJSON().footer?.text;
+  }
+
+  const providerFailure = (ui: StreamErrorUi, context: StreamContext) =>
+    ui.handleProviderError(API_ERROR, makeProvider(), context, "fixture-key");
+
+  it("attributes provider failures to the provider and the credential that failed", async () => {
+    const vars = { provider: "OpenRouter" };
+    const cases = [
+      { source: "server", inGuild: true, key: "genai.stream.error_footer_server_provider" },
+      { source: undefined, inGuild: false, key: "genai.stream.error_footer_dm_provider" },
+      { source: "personal", inGuild: true, key: "genai.stream.error_footer_personal_provider" },
+      { source: "personal", inGuild: false, key: "genai.stream.error_footer_personal_provider" },
+    ] as const;
+
+    for (const { source, inGuild, key } of cases) {
+      expect(await renderFooter(providerFailure, source, inGuild)).toBe(localizedCopy("en-US", key, vars));
+    }
+  });
+
+  it("attributes unhandled stream failures to TomoriBot", async () => {
+    const footer = await renderFooter(
+      (ui, context) => ui.handleStreamError(new Error("boom"), context),
+      "server",
+      true,
+    );
+
+    expect(footer).toBe(localizedCopy("en-US", "genai.stream.error_footer_tomoribot"));
   });
 });

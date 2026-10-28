@@ -9,6 +9,7 @@
  * - Specializes in creative storytelling and roleplay
  */
 
+import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type {
   BaseGuildTextChannel,
   BaseGuildVoiceChannel,
@@ -20,8 +21,8 @@ import type {
 } from "discord.js";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
 import { buildStreamContext } from "@/utils/provider/streamContext";
-import { NovelaiStreamAdapter, type NovelaiStreamConfig } from "./novelaiStreamAdapter";
-import type { ProviderError, StreamContext } from "@/types/stream/interfaces";
+import { NovelaiStreamAdapter } from "./novelaiStreamAdapter";
+import type { ProviderError, StreamConfig, StreamContext } from "@/types/stream/interfaces";
 import { DISCORD_STREAMING_CONSTANTS } from "@/types/stream/types";
 import type { StreamingContext } from "@/types/tool/interfaces";
 import type { TomoriState } from "@/types/db/schema";
@@ -45,6 +46,7 @@ import { usesOpenAIEndpoint, validateNovelAIApiKey } from "./novelaiService";
 import { novelaiProviderInfo } from "./providerInfo";
 import { getActiveTemperature } from "@/utils/provider/samplingControl";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
 /**
  * Gets the default NovelAI model with a robust fallback chain:
@@ -100,9 +102,6 @@ export interface NovelaiProviderConfig extends ProviderConfig {
   // No provider-specific config needed here
 }
 
-/**
- * NovelAI provider implementation
- */
 export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
   /**
    * Get provider information and capabilities
@@ -172,8 +171,10 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
       return [];
     }
 
-    if (!tomoriState.llm.has_tools) {
-      log.info("NovelAI provider: Model does not support tools (db flag has_tools=false)");
+    if (!resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
+      log.info(
+        `NovelAI provider: Tools unavailable (tool_use_enabled=${tomoriState.config.tool_use_enabled}, has_tools=${tomoriState.llm.has_tools})`,
+      );
       return [];
     }
 
@@ -183,6 +184,9 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
     }
 
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -191,7 +195,11 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -204,6 +212,7 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -212,13 +221,18 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("novelai", toolStateForContext);
 
@@ -235,6 +249,7 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
         providerLabel: "NovelAI provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -275,7 +290,7 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
       apiKey: apiKey,
       temperature: getActiveTemperature(tomoriState.config) ?? tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 2048,
+      maxOutputTokens: await resolveRequestMaxOutputTokens(tomoriState),
       tools: tools,
     };
   }
@@ -308,7 +323,7 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
     log.info(`NovelAIProvider: Starting streaming for server ${tomoriState.server_id}, model ${config.model}`);
 
     try {
-      const streamConfig: NovelaiStreamConfig = {
+      const streamConfig: StreamConfig = {
         ...config,
         maxMessageLength: DISCORD_STREAMING_CONSTANTS.MAX_SINGLE_MESSAGE_LENGTH,
         flushBufferSize: DISCORD_STREAMING_CONSTANTS.FLUSH_BUFFER_SIZE_REGULAR,
@@ -358,6 +373,19 @@ export class NovelaiProvider extends BaseLLMProvider implements LLMProvider {
       // tomoriChat can use it as a prompt continuation on the retry, instead of
       // starting a fresh generation that produces the same truncated output.
       const pendingPrefill = novelaiAdapter.getPendingContinuationPrefill();
+      const emptySuppressedRetry =
+        result.status === "completed" &&
+        streamingContext?.suppressTextOutput === true &&
+        !streamingContext.endTurnAfterTools?.length &&
+        !result.accumulatedText?.trim();
+      if (emptySuppressedRetry) {
+        // A normal GLM tool retry still needs the empty-response path; hidden image turns end independently.
+        return {
+          ...result,
+          status: "empty_response",
+          naiContinuationPrefill: pendingPrefill ?? undefined,
+        };
+      }
       if (result.status === "empty_response" && pendingPrefill) {
         log.info(`NovelAIProvider: Attaching continuation prefill to StreamResult (${pendingPrefill.length} chars)`);
         return { ...result, naiContinuationPrefill: pendingPrefill };

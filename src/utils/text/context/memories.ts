@@ -9,6 +9,7 @@ import {
   preWarmServerStmEntries,
   preWarmStmEntry,
   preWarmUserStmEntries,
+  type ShortTermMemoryEntry,
 } from "@/utils/cache/shortTermMemoryCache";
 import { log } from "@/utils/misc/logger";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
@@ -20,14 +21,12 @@ import { formatMemoryWithId } from "@/utils/memory/memoryId";
 import { shortTermMemoryRepository } from "@/utils/db/repositories/ShortTermMemoryRepository";
 import { sanitizeUnknownTemplatePlaceholders } from "@/utils/text/processors/mentionProcessor";
 import { buildSlugMap } from "@/utils/text/slugifyLabel";
+import { channelScopeAdmits, channelScopeCandidates } from "@/utils/discord/channelScope";
 
 // Default render depth for crude messages (Mode B additive blocks + no-summary
 // fallback listing). Also the fallback when a server has no crude_message_count set.
-const DEFAULT_CRUDE_MESSAGE_COUNT = Number.parseInt(
-  process.env.SHORT_TERM_MEMORY_DEFAULT_CRUDE_MESSAGE_COUNT || "6",
-  10,
-);
-const MAX_OTHER_CHANNEL_MEMORIES = Number.parseInt(process.env.SHORT_TERM_MEMORY_MAX_OTHER_CHANNELS || "3", 10);
+const DEFAULT_CRUDE_MESSAGE_COUNT = 6;
+const MAX_OTHER_CHANNEL_MEMORIES = 3;
 
 // Position in context reads as recency to the model: a summary sitting at the tail
 // implies "this is happening now". While the conversation is still live that is
@@ -35,8 +34,8 @@ const MAX_OTHER_CHANNEL_MEMORIES = Number.parseInt(process.env.SHORT_TERM_MEMORY
 // quiet the same placement would present stale content as current. `lastUpdated` is
 // refreshed by the per-turn crude write (not the cadence-gated summary write), so it
 // tracks the last turn Tomori took part in.
-const STM_FRESH_WINDOW_MS = Number.parseInt(process.env.STM_FRESH_WINDOW_MINUTES || "60", 10) * 60 * 1000;
-const STM_FRESH_INJECTION_DEPTH = Number.parseInt(process.env.STM_FRESH_INJECTION_DEPTH || "2", 10);
+const STM_FRESH_WINDOW_MS = 60 * 60 * 1000;
+const STM_FRESH_INJECTION_DEPTH = 2;
 
 /**
  * Resolves the depth a fresh STM content block should use.
@@ -114,6 +113,34 @@ function formatCategoryLines(categories: Record<string, string>, labelMap?: Map<
 }
 
 /**
+ * Renders the most recent crude turns of one other-channel memory entry.
+ *
+ * The speaker falls back through the stored name, then the triggerer for user turns and the bot for
+ * model turns, so a turn whose author was never recorded still renders with someone recognizable.
+ *
+ * @param messages - Turns held by the cache entry
+ * @param depth - Configured number of most recent turns to keep
+ * @param isSameServerSharedMemory - Whether the entry belongs to the current server
+ * @returns The turn lines, each terminated by a newline
+ */
+function renderCrudeTurns(
+  messages: ShortTermMemoryEntry["messages"],
+  depth: number,
+  isSameServerSharedMemory: boolean,
+  params: { triggererName: string; botName: string },
+): string {
+  let crudeText = "";
+  // Cap the rendered crude turns to the configured depth (most recent N).
+  for (const msg of messages.slice(-depth)) {
+    const speaker =
+      msg.speakerName ||
+      (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
+    crudeText += `${speaker}: "${msg.content}"\n`;
+  }
+  return crudeText;
+}
+
+/**
  * Builds persona-scoped server or DM long-term memory context.
  */
 export async function buildServerMemoryContextItem(params: {
@@ -124,7 +151,8 @@ export async function buildServerMemoryContextItem(params: {
   botName: string;
   personalMemoriesEnabled: boolean;
   conversationCorpus: string | null;
-  channelName: string;
+  channelId: string;
+  parentChannelId?: string | null;
   channelMemoryEnabled: boolean;
   client: Client;
   convertMentions: MentionConverter;
@@ -153,23 +181,19 @@ export async function buildServerMemoryContextItem(params: {
         ? []
         : await serverMemoryRepository.loadServerMemoriesScoped(serverId, personaLineageId);
 
+    const channelCandidates = channelScopeCandidates(params.channelId, params.parentChannelId);
     const filteredServerRows = serverMemoryRows.filter((row) => {
-      const normalized = (row.tags ?? []).map((t) => t.replace(/^["']+|["']+$/g, ""));
-      const channelTags = normalized.filter((t) => t.startsWith("#"));
-      const contentTags = normalized.filter((t) => !t.startsWith("#"));
+      const contentTags = (row.tags ?? []).map((t) => t.replace(/^["']+|["']+$/g, ""));
 
-      // Channel tags gate: if present and channel_memory_enabled, channel must match.
-      // Channel and content filters are independent; channel match does not exempt a memory
-      // from the content/corpus check below (per baetican's intended design).
-      if (params.channelMemoryEnabled && channelTags.length > 0) {
-        const channelAllowed = channelTags.some((t) => t.slice(1).toLowerCase() === params.channelName.toLowerCase());
-        if (!channelAllowed) return false;
+      // The channel scope and the content tags filter independently: a channel match does not
+      // exempt a memory from the corpus check below.
+      if (params.channelMemoryEnabled && !channelScopeAdmits(row.channel_disc_ids, channelCandidates)) {
+        return false;
       }
 
       // Content tags: if corpus filtering is active and the memory has content tags,
-      // at least one must appear in the corpus. Memories with no content tags are
-      // unfiltered by keyword (per /help memory-tagging: "memories without keyword
-      // tags will always be active").
+      // at least one must appear in the corpus. A memory with no content tags is
+      // unfiltered by keyword, so it always stays active.
       if (params.conversationCorpus != null && contentTags.length > 0) {
         return contentTags.some((tag) => params.conversationCorpus?.includes(tag.toLowerCase()));
       }
@@ -320,6 +344,13 @@ export async function buildShortTermMemoryContext(params: {
       );
     }
 
+    // Entries warmed from the DB carry no messages, so a row with a cleared summary has nothing to recall.
+    otherChannelMemories = otherChannelMemories.filter(
+      (memory) =>
+        Boolean(memory.summary) ||
+        memory.messages.length > 0 ||
+        (memory.categories !== undefined && formatCategoryLines(memory.categories) !== ""),
+    );
     otherChannelMemories.sort((a, b) => b.lastUpdated - a.lastUpdated);
 
     const limitedMemories = otherChannelMemories.slice(0, MAX_OTHER_CHANNEL_MEMORIES);
@@ -349,6 +380,13 @@ export async function buildShortTermMemoryContext(params: {
           : params.isUserImpersonation
             ? `[System: Recent conversation with ${params.triggererName} in ${channelReference} (${relativeTime}):\n`
             : `[System: ${params.botName} remembers a recent conversation with ${params.triggererName} in ${channelReference} (${relativeTime}):\n`;
+        const crudeTurnPrefix = isSameServerSharedMemory
+          ? params.isUserImpersonation
+            ? `[System: Recent raw messages from ${channelReference}:\n`
+            : `[System: ${params.botName}'s recent raw messages from ${channelReference}:\n`
+          : params.isUserImpersonation
+            ? `[System: Recent raw messages with ${params.triggererName} in ${channelReference}:\n`
+            : `[System: ${params.botName}'s recent raw messages with ${params.triggererName} in ${channelReference}:\n`;
 
         if (categoryContent) {
           // Category content available: use it as the primary memory representation
@@ -356,55 +394,33 @@ export async function buildShortTermMemoryContext(params: {
 
           // Mode B (crude_summary): also show recent crude messages additively for other-channel
           if (renderMode === "crude_summary" && memory.messages.length > 0) {
-            const crudePrefix = isSameServerSharedMemory
-              ? params.isUserImpersonation
-                ? `[System: Recent raw messages from ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages from ${channelReference}:\n`
-              : params.isUserImpersonation
-                ? `[System: Recent raw messages with ${params.triggererName} in ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages with ${params.triggererName} in ${channelReference}:\n`;
-            let crudeText = crudePrefix;
-            // Cap the rendered crude turns to the configured depth (most recent N).
-            for (const msg of memory.messages.slice(-crudeMessageCount)) {
-              const speaker =
-                msg.speakerName ||
-                (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
-              crudeText += `${speaker}: "${msg.content}"\n`;
-            }
-            otherChannelText += `${crudeText}]\n\n`;
+            otherChannelText += `${crudeTurnPrefix}${renderCrudeTurns(
+              memory.messages,
+              crudeMessageCount,
+              isSameServerSharedMemory,
+              params,
+            )}]\n\n`;
           }
         } else if (memory.summary) {
           // Single-blob summary (fallback / pre-category entries)
           otherChannelText += `${memoryPrefix}${memory.summary}]\n\n`;
 
           if (renderMode === "crude_summary" && memory.messages.length > 0) {
-            const crudePrefix = isSameServerSharedMemory
-              ? params.isUserImpersonation
-                ? `[System: Recent raw messages from ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages from ${channelReference}:\n`
-              : params.isUserImpersonation
-                ? `[System: Recent raw messages with ${params.triggererName} in ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages with ${params.triggererName} in ${channelReference}:\n`;
-            let crudeText = crudePrefix;
-            // Cap the rendered crude turns to the configured depth (most recent N).
-            for (const msg of memory.messages.slice(-crudeMessageCount)) {
-              const speaker =
-                msg.speakerName ||
-                (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
-              crudeText += `${speaker}: "${msg.content}"\n`;
-            }
-            otherChannelText += `${crudeText}]\n\n`;
+            otherChannelText += `${crudeTurnPrefix}${renderCrudeTurns(
+              memory.messages,
+              crudeMessageCount,
+              isSameServerSharedMemory,
+              params,
+            )}]\n\n`;
           }
         } else {
           // No summary or categories: fall back to crude turn listing (capped to depth).
-          otherChannelText += memoryPrefix;
-          for (const msg of memory.messages.slice(-crudeMessageCount)) {
-            const speaker =
-              msg.speakerName ||
-              (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
-            otherChannelText += `${speaker}: "${msg.content}"\n`;
-          }
-          otherChannelText += "]\n\n";
+          otherChannelText += `${memoryPrefix}${renderCrudeTurns(
+            memory.messages,
+            crudeMessageCount,
+            isSameServerSharedMemory,
+            params,
+          )}]\n\n`;
         }
       }
 
@@ -522,10 +538,8 @@ export async function buildShortTermMemoryContext(params: {
         });
       }
 
-      // Unified nudge (cadence-gated): covers BOTH the create case (no STM yet)
-      //     and the update case (refresh existing STM). It is NOT pushed into
-      //     memoryItems; it is returned separately so the caller can inject it at the
-      //     configured dialogue depth (highest-signal tail position by default).
+      // The nudge is NOT pushed into memoryItems; it is returned separately so the caller can
+      // inject it at the configured dialogue depth (highest-signal tail position by default).
       if (isStmToolAvailable && isNudgeDue) {
         let rawHintText: string;
         let rawHintFallback: string;

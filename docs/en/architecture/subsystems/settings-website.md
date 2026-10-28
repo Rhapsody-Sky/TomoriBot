@@ -12,8 +12,10 @@ handling do not depend on it.
 
 Every shared server member can:
 
-- edit personal profile, privacy, trigger/tool mode, timezone, appearance, and
-  cross-server short-term-memory preferences;
+- edit personal profile, pronouns, gender identity, addressing style, privacy,
+  trigger/tool mode, appearance, and quarter-hour timezone offsets;
+- control cross-server short-term-memory sharing, natural-nudge targeting, and
+  whether personal-provider failures may fall back to server providers;
 - manage global personal memories (lineage `0`) from the personal workspace;
 - open a persona workspace that groups their private persona memories with the
   server memories they taught for that same lineage;
@@ -35,6 +37,10 @@ Members with Manage Server or Administrator can additionally:
   model sampling, cooldowns, capabilities, memory policy, channels, autochat,
   speech, NovelAI defaults, BYOK policy, welcome messages, notices, and text
   workarounds;
+- edit short-term-memory refresh cadence, rendering mode, retained message count,
+  injection depths, and tool/reminder prompt overrides;
+- configure response prefill, draft-review context and instructions, new tool
+  capabilities, and compact or detailed notices;
 - manage server provider credentials, custom endpoints, scoped OpenRouter
   models, and the ordered fallback chain.
 
@@ -58,6 +64,10 @@ The two memory tables intentionally have different rules:
 
 Repository writes include exact owner, server, and lineage guards. The
 dashboard never relies only on a row ID supplied by the browser.
+
+Short-term-memory settings are server configuration, not access to members'
+private memory rows. Disabling automatic STM updates stops the update tool and
+cadence reminders; existing memory content can still appear in context.
 
 ## Runtime
 
@@ -101,6 +111,13 @@ The integration is isolated under `src/web`:
   `personaChatService.ts`, and `providerService.ts` contain dashboard policy
   and request validation without direct SQL.
 - `settingsCatalog.ts` maps each settings panel to one split config domain.
+- STM settings use `ShortTermMemoryRepository`, including its upsert path for
+  servers without a stored STM configuration. Other settings retain their own
+  repository domains; the dashboard introduces no schema or migrations.
+- Model selection uses the same config model operations as Discord, including
+  provider ownership and embedding-family changes. Custom connection removal
+  uses provider-panel operations and removes all models on that connection;
+  an active text connection must first be replaced.
 - `assets/app.js` and `assets/app.css` contain the dependency-free browser UI.
 
 There is no dashboard raw-SQL exemption. `bun run audit-sql` must continue to
@@ -144,7 +161,7 @@ report no SQL below `src/web`.
 
 1. Configure the environment values above and the Discord redirect URI.
 2. Run `bun run check`.
-3. Run `bun test tests/unit/web`.
+3. Run `bun --no-env-file test tests/unit/web` for dashboard unit and HTTP tests.
 4. Run `bun run audit-sql`.
 5. Start TomoriBot with `bun run dev`.
 6. Open `http://localhost:3001/settings` or run `/dashboard` in Discord.
@@ -158,5 +175,12 @@ For repository-level memory regression tests, configure a disposable local
 Postgres instance and run:
 
 ```sh
-bun test tests/regression/db/memory.regression.test.ts
+bun run test tests/regression/db/memory.regression.test.ts
 ```
+
+The unit tests do not verify production database upgrades or live provider
+requests. Before upgrading an existing deployment, back up its database and
+stored avatar files and test the upstream migration sequence on a restored copy.
+Draft-review model/checker selection, STM categories and stored STM content,
+persona-specific naming preferences, and advanced natural-nudge schedules still
+use the Discord panels.

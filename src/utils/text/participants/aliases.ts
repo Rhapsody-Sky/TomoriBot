@@ -1,4 +1,5 @@
 import type { UserRow } from "@/types/db/schema";
+import { revealGroupBreakName } from "@/utils/text/groupBreakName";
 import { dedupeTriggerWords, normalizeTriggerWord } from "@/utils/text/triggerWords";
 import {
   serializeParticipantKey,
@@ -33,7 +34,7 @@ export interface PersonaAliasCatalog {
 }
 
 export function normalizeParticipantAlias(value: string): string {
-  return value.trim().replace(/^@+/u, "").trim().toLowerCase().replace(/\s+/gu, " ");
+  return revealGroupBreakName(value).trim().replace(/^@+/u, "").trim().toLowerCase().replace(/\s+/gu, " ");
 }
 
 export function createParticipantAlias(params: {
@@ -186,6 +187,33 @@ export function buildBridgeUserAliases(params: {
     priority: 10,
   });
   return alias ? [alias] : [];
+}
+
+/**
+ * Aliases for a stable message-proxy identity. Exposure stays `lookup_only` because
+ * it is not a mentionable Discord account: the handles exist for tool targeting,
+ * not notifications.
+ */
+export function buildMessageProxyIdentityAliases(params: {
+  owner: Extract<ParticipantKey, { kind: "discord_user" }>;
+  displayName?: string | null;
+  savedNickname?: string | null;
+}): ParticipantAlias[] {
+  const aliases: ParticipantAlias[] = [];
+  for (const [value, priority] of [
+    [params.displayName, 10],
+    [params.savedNickname, 20],
+  ] as const) {
+    appendAlias(aliases, {
+      owner: params.owner,
+      value,
+      source: "message_proxy_display_name",
+      purposes: ["input_reference", "output_mention", "tool_target"],
+      exposure: "lookup_only",
+      priority,
+    });
+  }
+  return aliases;
 }
 
 export function buildWebhookAliases(params: {

@@ -7,7 +7,7 @@ head:
     content: "TomoriBot | Self-Host a Free Open-Source AI Discord Bot"
 # Hand-written search snippet; overrides the auto-derived description from
 # routeData.ts middleware.
-description: "Self-host TomoriBot via setup wizard, Docker Compose, or manual install. Add local LLMs, ComfyUI, and SearXNG for a fully private, free AI Discord bot."
+description: "Easily self-host a fully local and private AI Discord bot with KoboldCPP, ComfyUI, and more."
 aiGenerated: false
 sidebar:
   label: "Overview"
@@ -27,6 +27,3 @@ Start running your own TomoriBot instance through any of these install paths:
 Optional modules (local LLMs, ComfyUI, SearXNG, Crawl4AI, local TTS/STT, ChatMock,
 local MCP servers) each have their own page, see
 [`local-endpoints`](./local-endpoints) for the full directory.
-
-Once she's up and running, [`maintenance`](./maintenance) covers the host-side scripts, updating,
-and backing up/restoring your database.

@@ -2,233 +2,91 @@
 title: "Safe Migration Guide"
 sidebar:
   order: 6
+aiGenerated: true
 ---
 
-When you `git pull` new code and restart TomoriBot, the bot automatically runs database schema migrations on boot. This is powerful — it means you don't have to manually manage SQL updates — but it also means destructive operations can silently affect your data. This guide shows you how to protect yourself before pulling.
+TomoriBot applies pending database migrations when it starts. Some migrations can remove data, and
+they do not roll back automatically. Back up before updating or starting a different branch.
 
-## Why this matters
+## Before updating
 
-TomoriBot's migration runner (in `src/db/migrationRunner.ts`) executes all unapplied migrations in version order. Migrations are **forward-only**: if something goes wrong, the runner does not auto-rollback. Most migrations are safe expansions (new columns, new tables), but per the project's [design policy (OD-R-6)](../../plans/refactor/shared/open-decisions), destructive operations such as `DROP COLUMN` or `DROP TABLE` are permitted. If a destructive migration runs without a backup, you lose data permanently. When in doubt, back up first.
+1. Stop all bot instances.
+2. Back up the database with `bun run backup` and save the media files described below. Docker users
+   can follow [Docker Compose backups](/self-hosting/maintenance/#docker-compose-backups).
+3. Keep all required encryption keys in separate protected storage and test recovery on a disposable
+   database. Database backups do not include the keys.
+4. Record the current commit with `git rev-parse HEAD`, then update and restart.
 
-## Pre-pull checklist
+See [Maintenance & Backups](/self-hosting/maintenance/#database-backups-and-recovery-keys) for
+restoring and checking encryption keys. A persona-only export cannot restore the whole database.
 
-Follow these steps BEFORE running `git pull`:
+## Custom expression media backups
+<!-- anchor: custom-expression-media-backups -->
 
-1. **Stop the bot** — shut down the TomoriBot process so no active database connections interfere with the backup.
-2. **Back up the database** — use one of the two methods below.
-3. **Note the current commit** — run `git rev-parse HEAD` and save the output in case rollback is needed.
-4. **Pull and restart** — once the backup is safely on disk, you're safe to pull and restart.
+Database backups contain expression references. Back up uploaded media separately. Stop the bot and back up the
+local `data/` directory, including avatars, voice samples, and `data/custom-expressions/`, alongside
+the database. Restore files to the same paths.
+
+For GCS or S3 expressions, back up the `custom-expressions/` objects and restore their keys in the
+same configured bucket. Keep `EXPRESSION_STORAGE_BACKEND` and `EXPRESSION_STORAGE_BUCKET` consistent
+with those references. Linked expressions depend on their external hosts.
+
+## Restore requirements
 
 ### Prerequisite: the `pgvector` extension
 
-A full backup is a plain-SQL `pg_dump` (`backupData.ts` runs `pg_dump --clean --if-exists -f`), so it contains the `vector`-typed `document_chunks` table used for RAG. **The target Postgres must have the `pgvector` extension available before you restore**, or the dump's `CREATE EXTENSION IF NOT EXISTS vector` cannot run and the `document_chunks` table fails to create.
+The target database needs the extensions used by the backup, including `pgvector` for document
+memory. Install the package for your PostgreSQL version, for example on PostgreSQL 16:
 
-Install it once on the host (matching your Postgres major version), e.g. for Postgres 16:
-
-```bash
+```sh
 sudo apt-get install -y postgresql-16-pgvector
 ```
 
-Confirm it is available:
+Check that it is available:
 
-```bash
+```sh
 psql -c "SELECT name, default_version FROM pg_available_extensions WHERE name = 'vector';"
 ```
 
-If you restore without it:
+Use `bun run restore-backup --latest` for a TomoriBot backup, or specify a bundle with `--from`.
+Restore can change or remove existing data, so stop every bot instance and follow the
+[recovery procedure](/self-hosting/maintenance/#database-backups-and-recovery-keys). If using `psql`
+to restore a SQL dump manually, enable `ON_ERROR_STOP=1`; otherwise errors can leave an incomplete
+database.
 
-- The project's `restore-backup` (and any `psql -f` run with `ON_ERROR_STOP=1`) **aborts early** with `extension "vector" is not available` — no data is loaded. Install pgvector and retry.
-- A manual `psql -f` run that **ignores errors** (`ON_ERROR_STOP=0`) is worse: the failed `COPY public.document_chunks` desynchronizes psql's input parser, which then mis-parses the following `COPY` data rows as SQL (a `syntax error at or near …` cascade). This silently drops whole tables (observed: `documents` and `llms`), leaving a partially-restored database that looks intact but has lost rows. Always restore with `ON_ERROR_STOP=1` so failures surface immediately.
+## Automatic startup backups
 
-### Option A: Use the project's backup script
+In non-production environments, TomoriBot takes a full database backup before initialization if the
+latest backup is from a different bot version or is at least `TOMORI_AUTO_BACKUP_INTERVAL_HOURS` old
+(default `24`). It retains the newest `TOMORI_AUTO_BACKUP_MAX` automatic backups (default `5`).
+Set `TOMORI_AUTO_BACKUP_ENABLED=false` to disable this check. These backups do not replace separate
+media and encryption-key backups.
 
-TomoriBot includes two backup scripts, each targeting different data:
+## Cloud deployments
 
-- **`bun run backup`** — Full database schema + data dump (personas, memories, configs, everything)
-- **`bun run backup:personas`** — Persona presets and per-persona server memories only
+The AWS and legacy GCP deployment workflows support a pre-deploy snapshot when the head commit
+contains `(Checkpoint)`, or when the backup option is selected for a manual run.
 
-For a safe migration, use the **full backup**:
+The Azure `release` workflow requires a recovery point for migrations that can lose rows. Add
+`(Checkpoint)` to the commit or set `create_db_backup=true` for a manual run. Deploy the new reader
+and backfill before removing a table or column the running bot still uses. If the workflow cannot
+confirm compatibility, it stops the bot during migration; a failed migration can leave it stopped.
 
-```bash
-bun run backup
-```
+On Azure's Burstable tier, the workflow records a point-in-time restore target. Backup data can lag
+behind that target, so take a logical dump when you need a stronger recovery point.
 
-This creates a timestamped bundle in `backups/` (or your `TOMORI_BACKUP_DIR` if overridden in `.env`) containing the entire PostgreSQL database as a plain SQL dump. To restore later, run:
+## If a migration fails
 
-```bash
-bun run restore-backup --latest
-```
+Stop the bot and check the logs for the failed migration. If recovery requires restoring, follow the
+[backup recovery procedure](/self-hosting/maintenance/#database-backups-and-recovery-keys) before
+returning to the previous code version. Report the migration name, error, previous commit, and your
+OS, Bun, and PostgreSQL versions in a [GitHub issue](https://github.com/Bredrumb/TomoriBot/issues).
 
-Or restore from a specific bundle:
+## Testing a branch
 
-```bash
-bun run restore-backup --from backups/backup_2024-01-15_14-30-45
-```
+Use a separate database when testing a branch. Switching Git branches does not undo migrations that
+ran when the bot started; returning to `main` may fail if the branch changed or removed data it needs.
 
-### Automatic local startup backups
-
-In non-production (`RUN_ENV` not set to `production`), TomoriBot also checks for a full data backup before database initialization runs. It creates an automatic `backupData.ts`-compatible bundle when either condition is true:
-
-- the latest full data backup was created by a different `package.json` bot version
-- the latest full data backup is at least `TOMORI_AUTO_BACKUP_INTERVAL_HOURS` old (default: `24`)
-
-Automatic backups are tagged with `backupType: "automatic"` in `bundle_info.json` and named with an `_auto` suffix. Manual `bun run backup` bundles are tagged as `manual`; they can satisfy the latest-backup check, but they never count toward automatic retention. The startup gate keeps the newest `TOMORI_AUTO_BACKUP_MAX` automatic bundles (default: `5`) and deletes older automatic bundles only.
-
-Set `TOMORI_AUTO_BACKUP_ENABLED=false` in `.env` if you need to start a local/dev bot without this safety gate, for example on a machine without `pg_dump`.
-
-### Option B: Direct `pg_dump`
-
-If you prefer manual control, use PostgreSQL's built-in `pg_dump` utility with TomoriBot's own environment variables:
-
-```bash
-pg_dump \
-  -h "$POSTGRES_HOST" \
-  -p "$POSTGRES_PORT" \
-  -U "$POSTGRES_USER" \
-  -d "$POSTGRES_DB" \
-  -F c \
-  -f "tomoribot-backup-$(date +%Y%m%d-%H%M%S).dump"
-```
-
-This saves a custom-format binary dump (more compact than SQL text). The environment variables match your `.env`:
-
-- `POSTGRES_HOST` — default `localhost`
-- `POSTGRES_PORT` — default `5432`
-- `POSTGRES_USER` — your DB user
-- `POSTGRES_DB` — default `tomodb`
-
-To restore:
-
-```bash
-pg_restore \
-  -h "$POSTGRES_HOST" \
-  -p "$POSTGRES_PORT" \
-  -U "$POSTGRES_USER" \
-  -d "$POSTGRES_DB" \
-  tomoribot-backup-20240115-143045.dump
-```
-
-**Note:** `pg_restore` will prompt for your password unless you set it in a `.pgpass` file (PostgreSQL's built-in credential file).
-
-## For contributors deploying via CI: the `(Checkpoint)` convention
-
-If you maintain a fork that deploys to AWS or GCP via the workflows in `.github/workflows/deploy-tomoribot-{aws,gcp}.yml`, those pipelines support an **opt-in pre-deploy snapshot**: when a commit message contains the literal token `(Checkpoint)`, the workflow runs `aws rds create-db-snapshot` (or the GCP Cloud SQL equivalent) **before** any code is deployed and before the migration runner touches the database on boot.
-
-Use it when:
-
-- You're shipping a migration that drops a column, drops a table, alters a column type, or otherwise loses data (the OD-R-6 destructive-migration policy).
-- You're shipping a release-bundle commit that combines several migrations and want a single rollback point.
-- You're not sure whether a queued migration is safe — when in doubt, checkpoint.
-
-Skip it for routine non-destructive deploys (new columns, new indexes, additive seed data) — the snapshot has a real cost and the routine path doesn't need it.
-
-Example commit message:
-
-```
-Refactor | Phase 7 closeout (Checkpoint)
-
-Drops the deprecated tomori_configs table after Phase 6 backfill.
-Snapshot is required because the migration is destructive.
-```
-
-The `(Checkpoint)` token can appear anywhere in the subject or body — it's matched case-sensitively against the head commit's message. Manual workflow dispatch with the workflow's backup input enabled is the same lever for ad-hoc cases.
-
-## What to do if a migration fails partway
-
-If the bot crashes or hangs during migration:
-
-1. **Stop the bot immediately** — do not let it retry migrations blindly.
-
-2. **Check the logs** — TomoriBot logs to stdout/stderr by default (captured by your process manager or Docker logs). Look for an error message naming the migration that failed. Example output:
-
-   ```
-   Migration failed: 042_drop_old_column, error: column "old_column" does not exist
-   ```
-
-3. **Decide whether to restore** — if the error is unrecoverable (e.g., the migration tried to drop a column that doesn't exist), restore from your backup:
-
-   ```bash
-   # Option A restore
-   bun run restore-backup --latest
-
-   # Or Option B restore
-   pg_restore \
-     -h "$POSTGRES_HOST" \
-     -p "$POSTGRES_PORT" \
-     -U "$POSTGRES_USER" \
-     -d "$POSTGRES_DB" \
-     tomoribot-backup-20240115-143045.dump
-   ```
-
-4. **Roll back the code** — revert to the last working commit:
-
-   ```bash
-   git reset --hard <previous-commit-hash>
-   ```
-
-   Use the hash you saved in step 3 of the pre-pull checklist, or find it with:
-
-   ```bash
-   git log --oneline | head -20
-   ```
-
-5. **Report the bug** — file an issue at [github.com/Bredrumb/TomoriBot/issues](https://github.com/Bredrumb/TomoriBot/issues) with:
-   - Failed migration filename (from logs)
-   - Full error message
-   - Last successful commit hash
-   - Your OS, Bun version (`bun --version`), and PostgreSQL version
-
-## What is NOT auto-recoverable
-
-Per the project's design (OD-R-6), **destructive migrations cannot be rolled back** by the migration runner. Examples:
-
-- `DROP COLUMN name_here` — deleted rows are lost forever; no SQL script can recover them
-- `DROP TABLE old_table` — entire table is gone
-- Type narrowing (e.g., `VARCHAR(255) → VARCHAR(100)`) — values longer than 100 characters are truncated
-
-For these operations, **the only recovery is your backup**. Always back up before pulling if you're on an older version and a new refactor has shipped.
-
-The migration runner's forward-only design is intentional: rollback files (`.down.sql`) exist for developer safety during testing, but production recovery relies on backups, not re-execution of undoable operations.
-
-## Trying out a feature branch, then returning to `main`
-
-A common case: someone asks you to test a branch on your existing install, and you want to know whether checking out the branch, booting it, then switching back to `main` will harm your database.
-
-**The key facts:**
-
-- Git and PostgreSQL are separate worlds. `git checkout` only swaps files on disk; it never connects to or modifies your database. Your applied-migration state lives in the `schema_migrations` table, not in git.
-- Migrations run **automatically on boot** (via `initializeDatabase.ts`), so the moment you start the branch, its new migrations are applied to whatever database you pointed at.
-- The forward runner **never auto-rolls-back**. When you return to `main`, it scans the files on disk, finds nothing pending, and does nothing. Migrations the branch applied stay applied.
-
-**So is it safe?** It depends entirely on what the branch's migrations did:
-
-- **Additive only** (new tables / new columns) → safe. The new objects simply sit unused; `main`'s code never references them, so they cannot cause wrong results or crashes. They are harmless dead weight.
-- **Destructive** (`DROP`/`RENAME`/`ALTER` on a table `main` still uses) → not safe. The branch's change strands `main`'s code against a column/table that is now gone or altered.
-
-**Safest approach:** point the branch at a throwaway database (a separate `POSTGRES_DB`), so your real data is never touched. You already build the connection from `POSTGRES_*` vars, and `bun run nuke-db` can reset a scratch database.
-
-### Manually rolling back a test migration
-
-If you tested a branch against your **real** database and want to undo its migrations afterward, use the rollback runner. Unlike the forward runner, it **never runs automatically** — rollback is always a deliberate manual act because `.down.sql` files are typically lossy.
-
-```bash
-# Preview only (dry run): show what would be rolled back
-bun run migrate:down 034          # this migration + every newer applied one
-bun run migrate:down --last       # only the most recently applied migration
-bun run migrate:down --last=2     # the two most recently applied migrations
-
-# Execute the rollback (runs the .down.sql files, removes schema_migrations rows)
-bun run migrate:down 034 --yes
-```
-
-The command runs the selected `.down.sql` files in **descending** version order (so a migration's dependents are undone before it), then deletes the matching `schema_migrations` rows. With those rows gone, the forward runner will re-apply the migrations the next time you boot a branch that still ships them.
-
-> **Run it while still on the branch.** The rollback reads `NNN_description.down.sql` from disk. Once you `git checkout main`, those files are gone and the rollback can no longer execute. Roll back first, then switch branches.
-
-> **It is still lossy.** Rolling back `034` here runs `DROP TABLE short_term_memories` — any data created while testing is gone. That is expected for a test cleanup, but never run `migrate:down` against data you want to keep without a backup.
-
-## See also
-
-- [Database schema documentation](../systems/database-schema) — learn the current schema structure
-- [Design Decision OD-R-6 (Down-migration shape)](../../plans/refactor/shared/open-decisions.md#od-r-6-down-migration-shape) — technical rationale for migration safety policy
-- [Bun documentation](https://bun.sh) — learn Bun runtime fundamentals
+For a disposable database, `bun run migrate:down --last` previews rollback and
+`bun run migrate:down --last --yes` executes it. Run it while the branch's `.down.sql` files are
+still present. Rollbacks can delete data; back up anything you need to keep first.

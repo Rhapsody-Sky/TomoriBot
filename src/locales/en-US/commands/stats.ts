@@ -9,12 +9,12 @@ export default {
     },
     persona: {
       description: `View a persona's usage statistics on this server.`,
+      persona_description: `The persona to view statistics for.`,
       timeframe_description: `The time window to summarize.`,
-      picker_title: `Pick a Persona`,
-      picker_description: `Select a persona to view its statistics.`,
       no_personas_title: `No Personas`,
       no_personas_description: `This server has no personas to show statistics for yet.`,
-      chosen_title: `{name} has been selected`,
+      not_found_title: `Persona Not Found`,
+      not_found_description: `The selected persona could not be found on this server.`,
     },
     server: {
       description: `View server-wide usage statistics.`,
@@ -112,11 +112,9 @@ export default {
     },
 
     // Standalone "days" unit used by the streak block on cards (no leading number).
-    days_unit: `days`,
 
     // Labels used only on the rendered infographic cards (not the text dashboard).
     infographic: {
-      personal_title: `Wrapped`,
       no_data: `No stats yet`,
       server_title: `Server Leaderboard`,
       server_subtitle: `{personas} Personas serving {members} Members`,
@@ -137,12 +135,7 @@ export default {
       persona_affinity_footer: `PERSONA AFFINITY ({timeframe})`,
       personal_total_tokens: `Total Tokens`,
       favorite_model: `Favorite Model`,
-      weekly_activity: `Weekly Activity`,
-      hourly_activity: `Hourly Activity`,
       top_personas: `Top Personas`,
-      top_humans: `Top Humans`,
-      top_model: `Top Model`,
-      top_persona_emojis: `Top Persona Emojis`,
       most_active_members: `Most Active Members`,
       top_models: `Top Models`,
       model_tokens_cost: `{count} tokens | {cost}`,
@@ -152,18 +145,24 @@ export default {
 
     generate: {
       description: `Generate a shareable stats image card.`,
-      type_description: `The type of card to generate.`,
-      timeframe_description: `The time window to summarize.`,
-      scope_description: `Count this server only, or across all servers. Only applies to Personal.`,
-      personal_option: `Personal Wrapped`,
-      persona_option: `Persona Affinity`,
-      server_option: `Server Leaderboard`,
-      privacy_title: `Stats Unavailable`,
-      privacy_description: `Personal stats cards are not available for fully-private users.`,
-      picker_title: `Pick a Persona`,
-      picker_description: `Select a persona to generate a stats card for.`,
-      no_personas_title: `No Personas`,
-      no_personas_description: `This server has no personas to generate a stats card for yet.`,
+      personal: {
+        description: `Generate your Personal Wrapped card.`,
+        timeframe_description: `The time window to summarize.`,
+        scope_description: `Count activity on this server only, or across all servers.`,
+        privacy_title: `Stats Unavailable`,
+        privacy_description: `Personal stats cards are not available for fully-private users.`,
+      },
+      persona: {
+        description: `Generate your Persona Affinity card with one persona.`,
+        persona_description: `The persona to generate a card for.`,
+        timeframe_description: `The time window to summarize.`,
+        no_personas_title: `No Personas`,
+        no_personas_description: `This server has no personas to generate a stats card for yet.`,
+      },
+      server: {
+        description: `Generate this server's Server Leaderboard card.`,
+        timeframe_description: `The time window to summarize.`,
+      },
     },
   },
 };

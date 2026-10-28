@@ -52,7 +52,7 @@ describe("dashboard Discord guild cache", () => {
         },
       ]),
     );
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
     const session = createSession();
 
     const [first, second] = await Promise.all([
@@ -71,7 +71,7 @@ describe("dashboard Discord guild cache", () => {
 
   it("uses a recently verified guild list when Discord rate-limits the refresh", async () => {
     const fetchMock = mock(async () => new Response("rate limited", { status: 429 }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
     const session = createSession();
     const cachedGuilds = [
       {

@@ -9,11 +9,18 @@
  * To run only DB regression tests (assumes wrapper has provisioned the DB):
  *   bun run test
  *
- * To target a specific pre-existing database manually:
+ * To run one file with a disposable database, pass it to the wrapper:
+ *   bun run test tests/regression/db/<file>.regression.test.ts
+ *
+ * Bypassing the wrapper (bare `bun test`) skips these suites unless you set the variables yourself:
  *   TEST_DB_READY=1 POSTGRES_DB=<name> POSTGRES_PASSWORD=<pw> bun test tests/regression/db/
  */
 import { SQL } from "bun";
+import { readFile } from "node:fs/promises";
 import { initializeDatabase } from "@/utils/db/initializeDatabase";
+import { splitSqlStatements } from "@/utils/db/sqlSplitter";
+import { keyManager } from "@/utils/security/keyManager";
+import { resetDatabaseConnection, sql } from "@/utils/db/client";
 
 const effectiveHost = process.env.TEST_POSTGRES_HOST ?? process.env.POSTGRES_HOST ?? "localhost";
 const effectivePort = process.env.TEST_POSTGRES_PORT ?? process.env.POSTGRES_PORT ?? "5432";
@@ -50,7 +57,29 @@ export const testSql = new SQL({
   username: effectiveUser,
   password: effectivePassword ?? "dummy",
   database: effectiveDatabase,
+  idleTimeout: 180,
+  maxLifetime: 1800,
 });
+
+/** Executes a migration script on one reserved transaction connection. */
+export async function executeTestSqlFile(filePath: string): Promise<void> {
+  const sqlText = await readFile(filePath, "utf-8");
+  const statements = splitSqlStatements(sqlText);
+  const executableStatements = statements.filter((statement) => {
+    const command = statement
+      .replace(/^\s*(?:--[^\r\n]*(?:\r?\n|$)\s*)*/g, "")
+      .trim()
+      .replace(/;$/, "")
+      .toUpperCase();
+    return command !== "BEGIN" && command !== "COMMIT";
+  });
+
+  await testSql.begin(async (tx) => {
+    for (const statement of executableStatements) {
+      await tx.unsafe(statement);
+    }
+  });
+}
 
 /** Memoized bootstrap, shared by every `beforeAll` in the process. */
 let bootstrapPromise: Promise<void> | null = null;
@@ -67,6 +96,22 @@ let bootstrapPromise: Promise<void> | null = null;
  * is argument-invariant, so no cache key is needed.
  */
 export async function setupTestDb(): Promise<void> {
-  bootstrapPromise ??= initializeDatabase({ client: testSql, includeRag: false });
+  bootstrapPromise ??= bootstrap();
   await bootstrapPromise;
+  // Retire the application pool between suites because migration replays invalidate its prepared result shapes.
+  await sql.close();
+  resetDatabaseConnection();
+}
+
+/**
+ * Repository writes that encrypt a credential read the key manager singleton, which the bot
+ * populates during secret loading rather than lazily. Without this the harness leaves it at
+ * version 0 and every such insert fails inside its own catch, surfacing as a null row instead
+ * of an error. The fallback keeps the suite runnable on a machine that has Postgres but no
+ * CRYPTO_SECRET; it is a disposable test value and never reaches a real database.
+ */
+async function bootstrap(): Promise<void> {
+  process.env.CRYPTO_SECRET ??= "tomoribot_regression_harness_crypto_secret";
+  keyManager.initialize();
+  await initializeDatabase({ client: testSql, includeRag: false });
 }

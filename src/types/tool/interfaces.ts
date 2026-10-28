@@ -1,9 +1,11 @@
+import type { GenerationModelSelection } from "@/types/provider/generationModels";
+import type { ProviderUsageContext } from "@/utils/provider/providerUsage";
 /**
  * Generic tool interface for provider-agnostic function calling
  * This abstracts tools away from specific LLM provider formats
  */
 
-import type { LlmRow, TomoriState } from "../db/schema";
+import type { LlmRow, TomoriState } from "@/types/db/schema";
 import type { StructuredContextItem } from "../misc/context";
 import type {
   BaseGuildTextChannel,
@@ -16,7 +18,6 @@ import type {
   AnyThreadChannel,
   Webhook,
 } from "discord.js";
-import type { TypedMCPToolResult } from "./mcpTypes";
 import type { FunctionResponseImageMetadata } from "../provider/interfaces";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
 
@@ -70,26 +71,33 @@ export interface ToolParameterSchema extends ToolObjectParameterSchema {
 
 /**
  * A single Discord message the streaming layer has already committed to the channel.
- * Collected into {@link StreamingContext.deliveredMessageRefs} so the fallback orchestrator
- * can delete the partial output of a superseded (timed-out / errored) generation attempt.
+ * Collected into {@link StreamingContext.deliveredMessageRefs}.
  */
 export interface DeliveredStreamMessage {
   /** Discord snowflake ID of the delivered message. */
   messageId: string;
   /** Channel (or thread) ID the message was delivered to. */
   channelId: string;
-  /** True when delivered through a persona/alter webhook (deleted via `webhook.deleteMessage`). */
-  isWebhook: boolean;
+  webhookId: string | null;
 }
 
 /**
  * Streaming context for enhanced functionality during streaming
  */
 export interface StreamingContext {
+  deliveryMode?: import("@/utils/discord/webhook/personaPost").PersonaDeliveryMode;
+  deliveryReceipts?: import("@/utils/discord/webhook/personaPost").PersonaDeliveryReceipt[];
+  deliveryState?: { unconfirmed: boolean };
+  imageModelSelection?: GenerationModelSelection;
+  /** When set, delivered text may ping only these users: no roles, no everyone, nobody else. */
+  mentionableUserIds?: readonly string[];
+  usageContext?: ProviderUsageContext;
+  speechToolState?: { userId?: number; selection?: string };
   disableYouTubeProcessing: boolean; // Flag to temporarily disable YouTube function during enhanced context restart
   disableProfilePictureProcessing?: boolean; // Flag to temporarily disable profile picture processing during enhanced context restart
   disableGifProcessing?: boolean; // Flag to temporarily disable GIF processing during enhanced context restart
   disableShortTermMemoryUpdate?: boolean; // Flag to prevent update_short_term_memory from being called more than once per turn
+  disableConditioningInteraction?: boolean;
   disableCrossChannelMessage?: boolean; // Flag to prevent nested cross-channel dispatch during tool-driven cross-channel turns
   explicitLongTermMemoryIntent?: boolean; // Flag to suppress STM tool nudges when the current user message explicitly asks for persistent memory
   disableMessageMetadataContext?: boolean; // Flag to prevent reveal_message_metadata from being called more than once per turn
@@ -105,17 +113,35 @@ export interface StreamingContext {
    */
   textCredentialSource?: "server" | "personal";
   forceModelFallback?: boolean; // Force suppress errors regardless of key availability (model fallback retries)
+  /**
+   * Timeout notice an attempt held back because a model fallback might still answer. The
+   * generation-turn loop sends it when no later attempt materialized, and each attempt clears it.
+   */
+  deferredTimeoutNotice?: { providerName: string; sawStreamProgress: boolean };
   rotationKeyRetriesUsed?: boolean; // True if one or more rotation-key retries were attempted
   disableAllTools?: boolean; // Flag to disable all tool calling (e.g., during user impersonation)
   deliberateToolAllowedNames?: string[]; // Optional per-turn allowlist when deliberate tool mode detects scoped intent
   disableReminderTool?: boolean; // Flag to prevent create_task from being called during a reminder-triggered turn
-  outputPrefill?: string; // Optional prefill to output before streaming (hybrid prefix)
-  outputPrefillState?: { sent: boolean }; // Tracks if prefill was already output (avoid duplicates on retry)
+  /** Set per attempt by `applyAssistantPrefill`; the stream strips an echo of it and never displays it. */
+  outputPrefill?: string;
   replyNoticeState?: { attempted: boolean; sent: boolean }; // Tracks the standalone alter reply notice across tool-call stream retries
+  /**
+   * True once the turn has logged its generation failure. One failed turn reaches the emitter
+   * twice (the stream result carries the error, and the turn's catch block reports it again), and
+   * a second row for the same message id reads as a second failure.
+   */
+  generationErrorReported?: boolean;
   forcedMentions?: Array<{
     handle: string;
     userId: string;
   }>; // Additional mention handles to force-resolve (e.g., reminder recipients)
+  /**
+   * The speaker label the user-impersonation prompt tells the model to open with. It can differ from
+   * the webhook display name (the Discord name), so the output cleaner must strip both.
+   */
+  impersonatedSpeakerLabel?: string;
+  holdResponseText?: boolean;
+  pendingResponseLimit?: import("@/types/stream/pendingResponse").PendingResponseLimit;
   suppressTextOutput?: boolean; // Suppress text output to Discord (NAI tool retry mode : keeps model state coherent but hides repeated text)
   /** NAI GLM-4.6: incomplete trailing fragment from previous stream, to append as prompt continuation on retry */
   naiContinuationPrefill?: string;
@@ -140,12 +166,22 @@ export interface StreamingContext {
   messageIdMap?: MessageIdMap;
 
   /**
+   * Internal `users` FK of whoever triggered this turn, carried so the streaming layer can scope
+   * telemetry without a DB lookup on a hot path. Absent for turns with no resolved triggerer
+   * (scheduler-driven jobs, some manual flows), which simply record nothing.
+   */
+  triggererUserId?: number;
+
+  /** Discord ID of the same triggerer; only they may open the raw error of their own personal key. */
+  triggererDiscId?: string;
+
+  /**
    * Shared, mutable sink of messages the streaming layer has committed to Discord this turn.
    * The orchestrator pushes one entry per successful send (see uiUpdater's `recordSuccessfulSend`);
    * because it is a reference threaded through {@link buildStreamContext} onto the per-attempt
    * StreamContext, entries survive even when a timed-out `streamToDiscord` promise is abandoned by
-   * the SDK-call-timeout race. `runGenerationTurn` reads it to delete the partial output of a
-   * superseded generation attempt so only the surviving (fallback) response remains visible.
+   * the SDK-call-timeout race. Failed attempts keep their messages, so it spans every attempt, and
+   * expression delivery reads it to tell whether this turn has already posted text.
    */
   deliveredMessageRefs?: DeliveredStreamMessage[];
 }
@@ -155,6 +191,8 @@ export interface StreamingContext {
  * Contains all necessary Discord and Tomori state information
  */
 export interface ToolContext {
+  deliveryMode?: import("@/utils/discord/webhook/personaPost").PersonaDeliveryMode;
+  usageContext?: ProviderUsageContext;
   channel: BaseGuildTextChannel | BaseGuildVoiceChannel | DMChannel | NewsChannel | TextChannel | AnyThreadChannel;
   client: Client;
   message?: Message;
@@ -177,32 +215,48 @@ export interface ToolContext {
   isUserImpersonation?: boolean; // True when the active turn is a user impersonation session
   impersonatedUserId?: string; // Discord user ID currently being impersonated, if any
   suppressProgressNotices?: boolean; // Skip public "working..." embeds for fire-and-forget flows
-  showKillHint?: boolean; // When true, tool notice footers include the /bot kill hint (set after SOFT_WARN_ITERATION_THRESHOLD)
+  suppressFailureNotices?: boolean;
+  /** Shared across search-engine attempts, so fallback notices are deduplicated without hiding error embeds. */
+  progressNoticeState?: { attempted: boolean };
+  showKillHint?: boolean; // When true, tool notice footers include the /kill hint (set after SOFT_WARN_ITERATION_THRESHOLD)
   contextItems?: StructuredContextItem[]; // Current LLM context for tools that need hidden resolution metadata
 
   messageIdMap?: MessageIdMap;
 
-  /** Turn-level AbortSignal. Tools should forward this to their fetch/HTTP calls for true cancellation on /bot kill. */
+  /** Turn-level AbortSignal. Tools should forward this to their fetch/HTTP calls for true cancellation on /kill. */
   abortSignal?: AbortSignal;
+  /** Review fixes normalization before dispatch; internal calls retain ordinary normalization. */
+  preparedToolRequest?: { name: string; args: Record<string, unknown> };
+  /** Rechecked after asynchronous routing and immediately before invoking a transport. */
+  isExecutionCancelled?: () => boolean;
 }
 
-/**
- * Result returned by tool execution
- */
+export interface ToolFailure {
+  code: string;
+  reason: string;
+  suggestedActions: string[];
+}
+
 export interface ToolResult {
   success: boolean;
+  failure?: ToolFailure;
+  /** A resolved expression the tool loop sends before building history. Never shown to the model. */
+  stickerSelection?: StickerSelection;
   data?: unknown;
+  /**
+   * Returned to the model as context. Keep provider response text out of it and log that text
+   * instead: an endpoint can echo the request credential in its error body.
+   */
   error?: string;
   message?: string;
   imageMetadata?: FunctionResponseImageMetadata;
+  /** True when the tool successfully delivered the persona's response directly to the user. */
+  responseDelivered?: boolean;
   /** When true, the streaming loop should end the LLM's turn immediately after processing
    *  this tool result. Used by tools that trigger async follow-up work (e.g., boomerang). */
   endTurn?: boolean;
 }
 
-/**
- * Tool category classification
- */
 export type ToolCategory = "discord" | "search" | "memory" | "utility" | "mcp";
 
 /**
@@ -219,18 +273,21 @@ export type ToolAvailabilityLlmState = Pick<LlmRow, "llm_codename" | ToolModelCa
  * provider-specific adapters serialize it.
  */
 export interface ToolAssemblyState {
+  speechToolState?: { userId?: number; selection?: string };
   server_id: string;
   /** True when the active persona has either a local voice sample or provider-hosted voice assigned. */
   activePersonaHasElevenlabsVoice: boolean;
   /** Present when the active persona should use instruct-based VoiceDesign synthesis. */
   activePersonaVoiceDesignPrompt?: string | null;
-  /** Display/name marker for the active speech voice selection. */
-  activePersonaVoiceName?: string | null;
+  activePersonaVoiceSampleId?: number | null;
+  activePersonaVoiceId?: string | null;
+  activePersonaVoiceSourcePriority?: "design" | "clone";
   llm: ToolAvailabilityLlmState;
   diffusion_model_id?: number | null;
   nai_diffusion_model_id?: number | null;
   video_model_id?: number | null;
   config: {
+    emoji_usage_enabled: boolean;
     sticker_usage_enabled: boolean;
     web_search_enabled: boolean;
     self_teaching_enabled: boolean;
@@ -239,7 +296,14 @@ export interface ToolAssemblyState {
     videogen_enabled: boolean;
     voice_message_enabled: boolean;
     user_blocking_enabled: boolean;
+    // Required, not optional: every construction site copies these fields by hand, and an
+    // optional flag here silently reads as enabled through the mapper's fallback, leaving
+    // the capability toggle with no effect and no compile error.
+    user_info_updates_enabled: boolean;
     thread_creation_enabled: boolean;
+    conditioning_interactions_enabled: boolean;
+    dice_rolling_enabled: boolean;
+    danbooru_enabled: boolean;
   };
 }
 
@@ -408,8 +472,8 @@ interface ToolAdapter {
 }
 
 /**
- * Enhanced tool adapter interface that includes MCP capabilities
- * Provides provider-agnostic access to both built-in and MCP tools
+ * Tool adapter that also declares the server's guild MCP tools
+ * Provides provider-agnostic access to both built-in and guild MCP tools
  */
 export interface MCPCapableToolAdapter extends ToolAdapter {
   /**
@@ -422,27 +486,8 @@ export interface MCPCapableToolAdapter extends ToolAdapter {
     serverId?: number,
     allowedMCPFunctions?: string[],
   ): Promise<Array<Record<string, unknown>>>;
-
-  /**
-   * Check if a function name belongs to an MCP tool
-   * @returns Promise<boolean> - True if this is an MCP tool function
-   */
-  isMCPFunction(functionName: string): Promise<boolean>;
-
-  /**
-   * Execute an MCP tool function
-   * @param context - Tool execution context for Discord operations
-   */
-  executeMCPFunction(
-    functionName: string,
-    args: Record<string, unknown>,
-    context?: ToolContext,
-  ): Promise<TypedMCPToolResult>;
 }
 
-/**
- * Tool execution event for monitoring and debugging
- */
 export interface ToolExecutionEvent {
   toolName: string;
   provider: string;
@@ -454,9 +499,6 @@ export interface ToolExecutionEvent {
   timestamp: Date;
 }
 
-/**
- * Tool registry interface for managing all available tools
- */
 export interface ToolRegistryInterface {
   registerTool(tool: Tool): void;
 
@@ -480,3 +522,4 @@ export interface ToolRegistryInterface {
    */
   executeTool(toolName: string, args: Record<string, unknown>, context: ToolContext): Promise<ToolResult>;
 }
+import type { StickerSelection } from "@/types/discord/stickerSelection";

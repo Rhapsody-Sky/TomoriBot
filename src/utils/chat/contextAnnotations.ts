@@ -1,4 +1,6 @@
+import { getCachedImpersonatedUserIdForWebhook, verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
 import type { Embed, Message, MessageReaction } from "discord.js";
+import { MessageType } from "discord.js";
 import type { TomoriState } from "@/types/db/schema";
 import type { ForcedMention } from "@/types/discord/mentions";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
@@ -6,36 +8,27 @@ import { getCachedBlacklistStatus, getCachedUserRow } from "@/utils/cache/userCa
 import { stripBridgePrefix } from "@/utils/bridges";
 import { resolvePreferredDiscordDisplayName } from "@/utils/discord/displayName";
 import { normalizeRenderModifierName, resolveRenderModifierSourcePersona } from "@/utils/discord/renderModifierParser";
+import type { MessageProxyHistoryIdentity } from "@/utils/messageProxy/historyAttribution";
+import { extractMessageProxyReplyTargetFromEmbed } from "@/utils/messageProxy/registry";
 import { resolveSpriteMessageDisplayName } from "@/utils/discord/spriteMessageLabel";
 import { log } from "@/utils/misc/logger";
 import { compactWhitespace, normalizeTailDirective } from "@/utils/chat/contextDirectives";
 import type { SimplifiedMessageForContext } from "@/utils/text/contextBuilder";
 import { formatTimestampInline } from "@/utils/text/contextBuilder";
-import { getSupportedLocales, localizer } from "@/utils/text/localizer";
+import { matchesProtocolTemplateKey, classifyProtocolEmbed } from "@/utils/discord/embedProtocol";
 import { escapeRegExp } from "@/utils/text/processors/regexUtils";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
 import { normalizeTriggerWord } from "@/utils/text/triggerWords";
 
 const REACTION_CONTEXT_ENABLED = parseBooleanEnvFlag(process.env.REACTION_CONTEXT_ENABLED, true);
-const REACTION_CONTEXT_MAX_API_CALLS_PER_TURN = parseIntegerEnvFlag(
-  process.env.REACTION_CONTEXT_MAX_API_CALLS_PER_TURN,
-  20,
-  0,
-);
-const REACTION_CONTEXT_MAX_REACTIONS_PER_MESSAGE = parseIntegerEnvFlag(
-  process.env.REACTION_CONTEXT_MAX_REACTIONS_PER_MESSAGE,
-  4,
-  1,
-);
-const REACTION_CONTEXT_MAX_USERS_PER_REACTION = parseIntegerEnvFlag(
-  process.env.REACTION_CONTEXT_MAX_USERS_PER_REACTION,
-  5,
-  0,
-);
+const REACTION_CONTEXT_MAX_API_CALLS_PER_TURN = 20;
+const REACTION_CONTEXT_MAX_REACTIONS_PER_MESSAGE = 4;
+const REACTION_CONTEXT_MAX_USERS_PER_REACTION = 5;
 const SUPPORTED_VIDEO_MIME_TYPES = [
   "video/mp4",
   "video/mpeg",
   "video/mov",
+  "video/quicktime",
   "video/avi",
   "video/x-flv",
   "video/mpg",
@@ -44,8 +37,6 @@ const SUPPORTED_VIDEO_MIME_TYPES = [
   "video/3gpp",
 ];
 const DISCORD_MESSAGE_LINK_PATTERN = /discord(?:app)?\.com\/channels\/(?:@me|\d+)\/(\d+)\/(\d+)/;
-const REPLY_CONTEXT_URL_SENTINEL = "https://discord.com/channels/0/0";
-const REPLY_CONTEXT_USER_SENTINEL = "__tomori_user__";
 
 export type ReactionContextBudgetState = {
   callsUsed: number;
@@ -126,12 +117,18 @@ export function buildTailDirectiveMessage(directive: string | null | undefined):
   return buildCombinedTailDirectiveMessage([directive]);
 }
 
-export function buildSpeakerGuardRetryDirective(activePersonaName?: string | null): StructuredContextItem | null {
+export function buildSpeakerGuardRetryDirective(
+  activePersonaName?: string | null,
+  allowSpriteLabel = false,
+): StructuredContextItem | null {
   const normalizedPersonaName = compactWhitespace(activePersonaName ?? "") || process.env.DEFAULT_BOTNAME || "Tomori";
   const sanitizedPersonaName = normalizedPersonaName.replaceAll('"', "'");
 
+  const opening = allowSpriteLabel
+    ? `Start with "${sanitizedPersonaName}:", or with "${sanitizedPersonaName} ({sprite label}):" if you are using a listed sprite.`
+    : `Start exactly with "${sanitizedPersonaName}:".`;
   return buildTailDirectiveMessage(
-    `Your previous attempt started as the wrong speaker and was discarded. Reply only as ${sanitizedPersonaName}. Start exactly with "${sanitizedPersonaName}:". Do not start with any other speaker name or write dialogue for anyone else.`,
+    `Your previous attempt started as the wrong speaker and was discarded. Reply only as ${sanitizedPersonaName}. ${opening} Do not start with any other speaker name or write dialogue for anyone else.`,
   );
 }
 
@@ -209,7 +206,7 @@ export function insertBeforeLatestDialoguePair(
  * (sample/example dialogues) are intentionally excluded from the depth walk
  * so they don't interfere with nudge positioning in real conversation history.
  *
- * If fewer DIALOGUE_HISTORY items exist than requested depth, clamps to the
+ * If fewer real dialogue turns exist than requested depth, clamps to the
  * earliest available position (just before the first real dialogue turn) rather
  * than jumping to tail, keeping the nudge within the conversation area.
  */
@@ -257,29 +254,25 @@ export function findReplyContextTargetInMessage(
 }
 
 function extractReplyContextTargetFromEmbed(embed: Embed): { channelId: string; messageId: string } | null {
+  // The proxy record that restores `message.reference` is memory-resident, so a
+  // refetched proxy arrives with the embed as its only reply evidence.
+  const messageProxyReplyTarget = extractMessageProxyReplyTargetFromEmbed(embed);
+  if (messageProxyReplyTarget) {
+    return messageProxyReplyTarget;
+  }
+
   const description = embed.description?.trim() ?? "";
   const authorName = embed.author?.name?.trim() ?? "";
   const footerText = embed.footer?.text?.trim() ?? "";
-  const hasReplyDescription = matchesLocalizedReplyContextTemplate(
-    description,
+  const hasReplyMarker = classifyProtocolEmbed(embed) === "reply_context";
+  const hasReplyDescription = matchesProtocolTemplateKey(
     "genai.message_interaction.reply_context_description",
-    { message_url: REPLY_CONTEXT_URL_SENTINEL },
+    description,
   );
-  const hasReplyAuthor = matchesLocalizedReplyContextTemplate(
-    authorName,
-    "genai.message_interaction.reply_context_author",
-    { user: REPLY_CONTEXT_USER_SENTINEL },
-  );
-  const hasReplyFooter = matchesLocalizedReplyContextTemplate(
-    footerText,
-    "genai.message_interaction.reply_context_footer",
-    {
-      user: REPLY_CONTEXT_USER_SENTINEL,
-      message_url: REPLY_CONTEXT_URL_SENTINEL,
-    },
-  );
+  const hasReplyAuthor = matchesProtocolTemplateKey("genai.message_interaction.reply_context_author", authorName);
+  const hasReplyFooter = matchesProtocolTemplateKey("genai.message_interaction.reply_context_footer", footerText);
 
-  if (!hasReplyDescription && !hasReplyAuthor && !hasReplyFooter) {
+  if (!hasReplyMarker && !hasReplyDescription && !hasReplyAuthor && !hasReplyFooter) {
     return null;
   }
 
@@ -292,24 +285,6 @@ function extractReplyContextTargetFromEmbed(embed: Embed): { channelId: string; 
     channelId: match[1],
     messageId: match[2],
   };
-}
-
-function matchesLocalizedReplyContextTemplate(
-  text: string,
-  templateKey: string,
-  placeholderValues: Record<string, string>,
-): boolean {
-  for (const locale of getSupportedLocales()) {
-    const template = localizer(locale, templateKey, placeholderValues);
-    let pattern = escapeRegExp(template);
-    for (const placeholderValue of Object.values(placeholderValues)) {
-      pattern = pattern.replaceAll(escapeRegExp(placeholderValue), ".+?");
-    }
-    if (new RegExp(`^${pattern}$`).test(text)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 export function annotateRecentMessageMetadataInContext(params: {
@@ -419,6 +394,7 @@ export async function buildReplyReferenceContextAnnotation(params: {
   serverDiscId: string;
   serverPersonalizationDisabled: boolean;
   messageIdMap: MessageIdMap;
+  messageProxyIdentitiesByMessageId?: Map<string, MessageProxyHistoryIdentity>;
 }): Promise<string> {
   const replyAuthorName = await resolveMessageAuthorDisplayName({
     message: params.replyMessage,
@@ -427,6 +403,7 @@ export async function buildReplyReferenceContextAnnotation(params: {
     personaByNickname: params.personaByNickname,
     serverDiscId: params.serverDiscId,
     serverPersonalizationDisabled: params.serverPersonalizationDisabled,
+    messageProxyIdentitiesByMessageId: params.messageProxyIdentitiesByMessageId,
   });
   const referencedAuthorName = await resolveMessageAuthorDisplayName({
     message: params.referencedMessage,
@@ -435,12 +412,18 @@ export async function buildReplyReferenceContextAnnotation(params: {
     personaByNickname: params.personaByNickname,
     serverDiscId: params.serverDiscId,
     serverPersonalizationDisabled: params.serverPersonalizationDisabled,
+    messageProxyIdentitiesByMessageId: params.messageProxyIdentitiesByMessageId,
   });
 
   const replyRef = params.messageIdMap.register(params.replyMessage.id, "ref");
   const referencedRef = params.messageIdMap.register(params.referencedMessage.id, "ref");
+  const referencedSummary = `${formatInlineSystemContent(params.referencedMessage.content)}${buildReplyReferenceAttachmentInfo(params.referencedMessage)}`;
 
-  return `[System: This message (ID: ${replyRef}) by ${replyAuthorName} is referring to a previous message (ID: ${referencedRef}) by ${referencedAuthorName} saying: ${formatInlineSystemContent(params.referencedMessage.content)}${buildReplyReferenceAttachmentInfo(params.referencedMessage)}]`;
+  if (params.replyMessage.type === MessageType.ChannelPinnedMessage) {
+    return `[System: ${replyAuthorName} pinned a previous message (ID: ${referencedRef}) by ${referencedAuthorName} saying: ${referencedSummary}]`;
+  }
+
+  return `[System: This message (ID: ${replyRef}) by ${replyAuthorName} is referring to a previous message (ID: ${referencedRef}) by ${referencedAuthorName} saying: ${referencedSummary}]`;
 }
 
 export async function buildReactionContextAnnotation(
@@ -529,13 +512,6 @@ function parseBooleanEnvFlag(value: string | undefined, defaultValue: boolean): 
   return defaultValue;
 }
 
-function parseIntegerEnvFlag(value: string | undefined, defaultValue: number, minimum: number): number {
-  if (typeof value !== "string") return defaultValue;
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) return defaultValue;
-  return Math.max(minimum, parsed);
-}
-
 function buildRecentMessageMetadataInline(createdAt: number): string {
   return `sent ${formatTimestampInline(createdAt)}`;
 }
@@ -561,34 +537,52 @@ async function resolveMessageAuthorDisplayName(params: {
   personaByNickname: Map<string, TomoriState>;
   serverDiscId: string;
   serverPersonalizationDisabled: boolean;
+  messageProxyIdentitiesByMessageId?: Map<string, MessageProxyHistoryIdentity>;
 }): Promise<string> {
-  const webhookName = stripBridgePrefix(params.message.author.username);
-  const renderModifierSource = params.message.webhookId
+  if (params.message.author.id === params.clientUserId) {
+    return params.botDisplayName || "Bot";
+  }
+
+  // A verified, indexed proxy message carries a stable member identity, so it is named from the
+  // same source ordinary history uses. The webhook name is the service's configurable veneer
+  // (PluralKit's name_format can add system tags or drop the member name), so it is never
+  // treated as the member label. Deliberately not gated on personalization: a member name is
+  // identity rather than a saved user nickname, matching how history and participants use it.
+  const messageProxyIdentity = params.messageProxyIdentitiesByMessageId?.get(params.message.id);
+  if (messageProxyIdentity) {
+    const identityRow = await getCachedUserRow(messageProxyIdentity.userDiscId);
+    return identityRow?.user_nickname?.trim() || messageProxyIdentity.displayName;
+  }
+
+  const trustedWebhook = await verifyMessageWebhook(params.message);
+  const webhookName = trustedWebhook
+    ? stripBridgePrefix(params.message.author.username)
+    : params.message.author.username;
+  const renderModifierSource = trustedWebhook
     ? resolveRenderModifierSourcePersona(webhookName, params.personaByNickname)
     : null;
-  const matchedPersona = params.message.webhookId
+  const matchedPersona = trustedWebhook
     ? (renderModifierSource?.persona ?? params.personaByNickname.get(normalizeRenderModifierName(webhookName)))
     : undefined;
+  // A user-impersonation webhook's author id is the webhook's, so its speaker's saved nickname
+  // is only reachable through the relay cache.
+  const nicknameOwnerId =
+    (trustedWebhook ? getCachedImpersonatedUserIdForWebhook(params.message.webhookId) : null) ??
+    params.message.author.id;
   const userRow =
     params.message.author.id !== params.clientUserId && !matchedPersona
-      ? await getCachedUserRow(params.message.author.id)
+      ? await getCachedUserRow(nicknameOwnerId)
       : null;
   const userBlacklisted =
-    userRow !== null ? await getCachedBlacklistStatus(params.serverDiscId, params.message.author.id) : false;
+    userRow !== null ? await getCachedBlacklistStatus(params.serverDiscId, nicknameOwnerId) : false;
   const fallbackName = resolvePreferredDiscordDisplayName({
     memberDisplayName: params.message.member?.displayName,
     user: params.message.author,
     fallback: webhookName,
   });
 
-  if (params.message.author.id === params.clientUserId) {
-    return params.botDisplayName || "Bot";
-  }
-
-  // Clean-named sprite messages carry no "(sprite)" suffix in the webhook name;
-  // recover the decorated label from the persisted mapping.
   const spriteDisplayName =
-    !renderModifierSource && matchedPersona
+    (!renderModifierSource || renderModifierSource.isNeutralAppearance) && matchedPersona
       ? await resolveSpriteMessageDisplayName(
           params.message.id,
           matchedPersona.persona_id,
@@ -597,8 +591,8 @@ async function resolveMessageAuthorDisplayName(params: {
       : null;
 
   return (
-    renderModifierSource?.displayName ??
     spriteDisplayName ??
+    renderModifierSource?.displayName ??
     matchedPersona?.persona_nickname ??
     (userBlacklisted || params.serverPersonalizationDisabled || !userRow?.user_nickname
       ? fallbackName

@@ -24,8 +24,12 @@ import {
   type ThinkingConfig,
 } from "@google/genai";
 import type { FunctionCall, ThoughtLogEntry } from "../../types/provider/interfaces";
-import { ContextItemTag, type StructuredContextItem } from "../../types/misc/context";
+import type { StructuredContextItem } from "../../types/misc/context";
 import { log } from "../../utils/misc/logger";
+import {
+  formatProviderErrorCodeForDisplay,
+  isProviderTimeoutMessage,
+} from "@/utils/provider/providerErrorClassification";
 import { localizer } from "../../utils/text/localizer";
 import { truncateBeforeGenericSpeakerLine } from "@/utils/text/processors/llmOutputProcessor";
 import {
@@ -34,7 +38,13 @@ import {
 } from "@/utils/discord/renderModifierParser";
 import { collectPersonaNameAliases } from "@/utils/discord/stream/textConfig";
 import { safeDownload } from "@/utils/security/safeDownload";
-import { relocateAssistantMediaContextItems, unseenToolImageNotice } from "@/providers/utils/strictChatCompat";
+import { isSystemInstructionContextItem, relocateAssistantMediaContextItems } from "@/providers/utils/strictChatCompat";
+import {
+  buildGifToolHint,
+  buildGifUrlPlaceholder,
+  buildInlineGifPlaceholder,
+} from "@/providers/utils/gifContextPlaceholders";
+import { buildGeminiToolMediaParts } from "@/providers/utils/geminiToolMediaParts";
 import { buildProviderStopStrings } from "../utils/stopStrings";
 import { BaseStreamAdapter } from "../../types/stream/interfaces";
 import type {
@@ -52,11 +62,47 @@ const VIDEO_CONTEXT_MAX_INLINE_MB = Math.max(
   Number.parseInt(process.env.VIDEO_CONTEXT_MAX_INLINE_MB ?? "20", 10) || 20,
 );
 
-// Anchored on a word boundary because every Gemini method name embeds "rate" (the streaming method
-// is named "StreamGenerateContent"), and Google echoes the called method back in ErrorInfo metadata.
-// A bare `includes("rate")` therefore matched every error payload and filed unmapped status codes
-// such as 401 as rate limits.
+// The word boundary is load-bearing: every Gemini method name embeds "rate" (the streaming
+// method is "StreamGenerateContent") and Google echoes the called method back in ErrorInfo
+// metadata, so a bare `includes("rate")` matched every error payload and filed unmapped
+// status codes such as 401 as rate limits.
 const GOOGLE_RATE_LIMIT_MESSAGE_PATTERN = /\brate[-\s]?limit|\bquota/i;
+
+/**
+ * Localized headline for a Gemini or Vertex API error. Upstream text stays in the operator log
+ * (see StreamErrorUi), so `userMessage` and `message` only steer which key is chosen.
+ */
+export function createGoogleApiErrorDescription(error: ProviderError, locale: string): string {
+  const errorCode = formatProviderErrorCodeForDisplay(error.code);
+  let messageKey: string;
+  switch (error.type) {
+    case "content_blocked":
+      messageKey = "content_blocked_default_message";
+      break;
+    case "rate_limit":
+      messageKey = "429_default_message";
+      break;
+    case "timeout":
+      messageKey = "504_default_message";
+      break;
+    case "provider_overloaded":
+      messageKey = "503_default_message";
+      break;
+    case "api_error":
+      messageKey =
+        errorCode === "400" && error.message.includes("billing")
+          ? "400_billing_default_message"
+          : `${errorCode}_default_message`;
+      break;
+    default:
+      messageKey = "unknown_default_message";
+      break;
+  }
+  const localeKey = `genai.google.${messageKey}`;
+  const localized = localizer(locale, localeKey);
+  const message = localized === localeKey ? localizer(locale, "genai.google.unknown_default_message") : localized;
+  return `Error Code ${errorCode}: ${message}`;
+}
 
 /**
  * Google-specific stream configuration extending the base StreamConfig
@@ -73,9 +119,6 @@ export interface GoogleTokenCountPayload {
   contents: Content[];
 }
 
-/**
- * Raw chunk from Google's streaming API
- */
 interface GoogleStreamChunk {
   text?: string;
   functionCalls?: GoogleFunctionCall[];
@@ -103,15 +146,6 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
   private static readonly SPEAKER_GUARD_HOLDBACK_CHARS = 32;
   private static readonly STREAM_TEXT_TAIL_CHARS = 4096;
   private static readonly STREAM_TEXT_MIN_DEDUP_CHARS = 8;
-  private static readonly SYSTEM_INSTRUCTION_TAGS: ContextItemTag[] = [
-    ContextItemTag.SYSTEM_HUMANIZER_RULES,
-    ContextItemTag.SYSTEM_PERSONA_PROMPT,
-    ContextItemTag.SYSTEM_PERSONALITY,
-    ContextItemTag.KNOWLEDGE_SERVER_INFO,
-    ContextItemTag.KNOWLEDGE_SERVER_EMOJIS, // Text-based with semantic metadata (deterministic ordering)
-    ContextItemTag.KNOWLEDGE_SERVER_STICKERS, // Text-based with semantic metadata (deterministic ordering)
-    ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
-  ];
   private speakerGuardPendingTail = "";
   private streamedTextTail = "";
   private speakerGuardEnabled = false;
@@ -184,7 +218,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
     const botName = context.prefixStrippingName ?? context.personaUsername ?? context.tomoriState.persona_nickname;
     this.speakerGuardAllowedSourceNames = collectRenderModifierSourceNames(
       botName,
-      collectPersonaNameAliases(context.tomoriState, botName),
+      collectPersonaNameAliases(context.tomoriState, botName, context.impersonatedSpeakerLabel),
     );
     const speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
     this.speakerGuardEnabled = speakerStopPatternEnabled;
@@ -266,48 +300,12 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
           parts: [item.functionResponse as Part],
         });
 
-        const toolMediaParts: Part[] = [];
-
-        // Add image parts if present (for tools that send images like brave_image_search)
-        if (item.imageMetadata?.imageUrls?.length) {
-          if (context.tomoriState.llm.sees_images) {
-            log.info(`Adding ${item.imageMetadata.imageUrls.length} image(s) to function response for LLM visibility`);
-
-            for (const imageInfo of item.imageMetadata.imageUrls) {
-              try {
-                // Fetch and optimize image for LLM context (downscales oversized images)
-                const optimized = await fetchAndOptimizeImage(imageInfo.url, imageInfo.mimeType || "image/jpeg");
-
-                toolMediaParts.push({
-                  inlineData: {
-                    mimeType: optimized.mimeType,
-                    data: optimized.data,
-                  },
-                });
-
-                log.success(`Successfully added image to function response: ${imageInfo.url}`);
-              } catch (imgErr) {
-                log.warn(`Error processing image for function response: ${imageInfo.url}`, {
-                  error: imgErr instanceof Error ? imgErr.message : String(imgErr),
-                });
-              }
-            }
-          } else {
-            // The tool response already told the model it delivered images, so dropping them
-            // silently invites it to describe pictures it never received.
-            toolMediaParts.push({
-              text: unseenToolImageNotice(item.imageMetadata.imageUrls.length),
-            });
-            log.info("GoogleStreamAdapter: Skipping tool images (model does not support images)");
-          }
-        }
-
-        // Surface Discord message IDs where images were sent so tools can reference them
-        if (item.imageMetadata?.messageIds && item.imageMetadata.messageIds.length > 0) {
-          toolMediaParts.push({
-            text: `[System: Images were sent to Discord in message ID(s): ${item.imageMetadata.messageIds.map((id) => context.messageIdMap?.register(id, "media") ?? id).join(", ")}]`,
-          });
-        }
+        const toolMediaParts = await buildGeminiToolMediaParts({
+          adapterName: "GoogleStreamAdapter",
+          imageMetadata: item.imageMetadata,
+          seesImages: context.tomoriState.llm.sees_images,
+          messageIdMap: context.messageIdMap,
+        });
 
         if (toolMediaParts.length > 0) {
           finalContents.push({
@@ -324,7 +322,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
 
     log.info(`Generating content with model ${config.model}`);
 
-    this.logSanitizedRequest(requestConfig, finalContents);
+    if (!context.holdResponseText) this.logSanitizedRequest(requestConfig, finalContents);
 
     try {
       const stream = await genAI.models.generateContentStream({
@@ -414,7 +412,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
         }
       }
 
-      yield this.createProviderErrorChunk(error);
+      yield this.createProviderErrorChunk(error, context);
     }
   }
 
@@ -928,7 +926,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
         ) {
           errorType = "rate_limit";
           retryable = true;
-        } else if (errorMessage.includes("timeout") || errorMessage.includes("DEADLINE_EXCEEDED")) {
+        } else if (isProviderTimeoutMessage(errorMessage) || errorMessage.includes("DEADLINE_EXCEEDED")) {
           errorType = "timeout";
           retryable = true;
         } else if (errorMessage.includes("overloaded") || errorMessage.includes("UNAVAILABLE")) {
@@ -966,58 +964,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
    * Formats errors as "Error Code {code}: {Google message}"
    */
   createErrorDescription(error: ProviderError, locale: string): string | null {
-    let googleMessage = error.userMessage;
-
-    if (!googleMessage) {
-      const errorCode = error.code;
-      let messageKey: string;
-
-      switch (error.type) {
-        case "content_blocked":
-          messageKey = "content_blocked_default_message";
-          break;
-        case "rate_limit":
-          messageKey = "429_default_message";
-          break;
-        case "timeout":
-          messageKey = "504_default_message";
-          break;
-        case "provider_overloaded":
-          messageKey = "503_default_message";
-          break;
-        case "api_error":
-          if (errorCode === "400" && error.message.includes("billing")) {
-            messageKey = "400_billing_default_message";
-          } else {
-            messageKey = `${errorCode}_default_message`;
-          }
-          break;
-        default:
-          messageKey = "unknown_default_message";
-          break;
-      }
-
-      try {
-        googleMessage = localizer(locale, `genai.google.${messageKey}`);
-
-        if (messageKey === "unknown_default_message") {
-          // Truncate error message to avoid Discord embed limits
-          const maxErrorLength = 1000;
-          const apiErrorSnippet =
-            error.message.length > maxErrorLength ? `${error.message.substring(0, maxErrorLength)}...` : error.message;
-          googleMessage += `\n\n**API Response:**\n${apiErrorSnippet}`;
-        }
-      } catch {
-        googleMessage = localizer(locale, "genai.google.unknown_default_message");
-        const maxErrorLength = 1000;
-        const apiErrorSnippet =
-          error.message.length > maxErrorLength ? `${error.message.substring(0, maxErrorLength)}...` : error.message;
-        googleMessage += `\n\n**API Response:**\n${apiErrorSnippet}`;
-      }
-    }
-
-    const errorCode = error.code || "unknown";
-    return `Error Code ${errorCode}: ${googleMessage}`;
+    return createGoogleApiErrorDescription(error, locale);
   }
 
   /**
@@ -1048,17 +995,9 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
           .join("\n");
       }
 
-      if (
-        item.role === "system" ||
-        (item.role === "user" &&
-          item.metadataTag &&
-          GoogleStreamAdapter.SYSTEM_INSTRUCTION_TAGS.includes(item.metadataTag))
-      ) {
+      if (isSystemInstructionContextItem(item)) {
         if (itemTextContent) systemInstructionParts.push(itemTextContent);
       } else if (item.role === "user" || item.role === "model") {
-        // CRITICAL: ALL user/model items go to dialogue (unless in SYSTEM_INSTRUCTION_TAGS)
-        // This handles DIALOGUE_HISTORY, DIALOGUE_SAMPLE, and new tags like KNOWLEDGE_USERS_IN_CONVERSATION
-
         const geminiParts: Part[] = [];
         for (const part of item.parts) {
           if (part.type === "text") {
@@ -1074,33 +1013,19 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
           } else if (part.type === "image" && part.uri && part.mimeType) {
             try {
               if (part.mimeType === "image/gif") {
-                const isProduction = process.env.RUN_ENV === "production";
-
-                if (isProduction) {
-                  // Production: Replace with text placeholder
-                  // Check if this is a Tenor link (has descriptive slug)
-                  if (part.uri.includes("tenor.com")) {
-                    // Keep Tenor link intact for context (descriptive slug)
-                    geminiParts.push({
-                      text: `[System: This message contains a GIF from Tenor: ${part.uri}. GIF processing disabled in production.]`,
-                    });
-                  } else {
-                    geminiParts.push({
-                      text: "[System: This message contains a GIF. GIF processing disabled in production.]",
-                    });
-                  }
+                if (process.env.RUN_ENV === "production") {
+                  geminiParts.push({ text: buildGifUrlPlaceholder(part.uri) });
 
                   log.info(
                     `GoogleStreamAdapter: GIF detected in production mode, replaced with placeholder: ${part.uri}`,
                   );
                 } else {
-                  // Development: Replace with message ID hint for process_gif tool
-                  // Note: URL intentionally omitted to prevent hallucinations - AI should use the tool
-                  const mediaMessageId = item.messageId
-                    ? (messageIdMap?.register(item.messageId, "media") ?? item.messageId)
-                    : "unknown";
                   geminiParts.push({
-                    text: `[System: This message (ID: ${mediaMessageId}) contains a GIF. Use process_gif tool with this message ID to process it if needed for context.]`,
+                    text: buildGifToolHint({
+                      messageId: item.messageId,
+                      messageIdMap,
+                      subject: "a GIF",
+                    }),
                   });
 
                   log.info(
@@ -1143,13 +1068,8 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
             };
             if (typeof inlineData === "object" && inlineData.mimeType && inlineData.data) {
               if (inlineData.mimeType === "image/gif") {
-                const isProduction = process.env.RUN_ENV === "production";
-
-                if (isProduction) {
-                  // Production: Replace with text placeholder (memory protection)
-                  geminiParts.push({
-                    text: "[System: This context contains inline GIF data. GIF processing disabled in production.]",
-                  });
+                if (process.env.RUN_ENV === "production") {
+                  geminiParts.push({ text: buildInlineGifPlaceholder() });
 
                   log.info("GoogleStreamAdapter: Inline GIF detected in production mode, replaced with placeholder");
                 } else {

@@ -1,139 +1,104 @@
 ---
 title: "Localization System"
+aiGenerated: true
 ---
 
-TomoriBot localizes user-facing text through locale files in `src/locales/`.
+TomoriBot localizes user-facing text through modular category files in `src/locales/`. The localization system handles translation loading, key resolution, fallback chains, Discord command metadata, embed protocols, and UI status formatting.
 
-## Supported Locales
+## Supported locales
 
-Currently loaded from source:
+The runtime discovers authored locale directories under `src/locales/`:
 
-- `en-US` (default fallback)
-- `ja`
+- `en-US` (canonical default and fallback)
+- `es-419` (Latin American Spanish, serving `es-ES` as an alias)
+- `ja` (Japanese)
+- `pt-BR` (Brazilian Portuguese)
+- `vi` (Vietnamese)
+- `zh-CN` (Simplified Chinese)
+- `zh-TW` (Traditional Chinese)
 
-## Runtime Architecture
+## Runtime architecture
 
-- Loader: `src/utils/text/localizer.ts`
-- Locale structure: `src/locales/{locale}/` directories, one `.ts` file per category
-- Categories: `general`, `commands`, `providers`, `tools`, `bridges`
-- At boot, `initializeLocalizer()` scans each locale directory, imports all category slices, and merges them into a single tree via `Object.assign`
-- Locale values are nested objects, accessed through dot-path keys
+The loader and resolver live in `src/utils/text/localizer.ts`.
 
-Example lookup:
+- **Module structure:** Each locale directory (`src/locales/{locale}/`) organizes strings into category slices (`general.ts`, `commands.ts`, `providers.ts`, `tools.ts`, `bridges.ts`, and subdirectories under `commands/`).
+- **Startup merging:** `initializeLocalizer()` scans authored locale directories, dynamically imports each slice, and merges them into a single nested tree via `Object.assign`. Duplicate top-level keys within a locale emit a warning.
+- **Indentation normalization:** Multi-line template strings are automatically dedented on import, preserving code formatting in source files without leaking excess indentation to Discord messages.
+- **Single-flight initialization:** Concurrent callers share one initialization promise. The runtime state lives on `globalThis` under a unique symbol (`tomoribot-localizer-runtime-state`) so multiple module instances across Bun share readiness state.
+- **Protocol and intent setup:** Once locale trees load, initialization binds the embed protocol (`initializeEmbedProtocol()`) and keyword detectors (`initializeIntentPacks()`). Multi-locale intent packs union keyword lists across all authored locales so bilingual servers match triggers in any supported language.
 
 ```ts
+// Example lookup
 localizer(locale, "commands.config.setup.description")
 ```
 
-## Important Behaviors
+## Resolution and fallback chain
 
-- `initializeLocalizer()` must run during startup before lookups.
-- Missing locale code falls back to `en-US`.
-- Missing key falls back to returning the key string.
-- Multi-line strings are dedented automatically on load.
+Locale resolution follows three stages:
 
-## Locale File Shape
+1. **Locale mapping:** The input code resolves via `resolveSupportedLocale()`. It tests an exact match among loaded locales, then checks `LOCALE_ALIASES` in `src/constants/locales.ts` (mapping `es-ES` to `es-419`), then an unambiguous base-language match. If no match exists, it resolves to `en-US`.
+2. **Key lookup:** The runtime resolves the dot-path against the chosen locale tree. If the key exists, variables (`{placeholder}`) interpolate into the string.
+3. **Per-key fallback:** When a key is missing from the chosen locale, `localizer()` falls back to `en-US` for that specific key. A rate-limited warning logs once per `locale:key` per process, keeping gaps visible in development without flooding production logs.
+4. **Verbatim key return:** If the key is absent in both the requested locale and `en-US`, the dot-path string returns unchanged. Callers verify unknown keys by checking equality against the queried path.
 
-Each locale exports a nested object (not a flat key-value map).
+Callers must not test translation presence by checking the returned string, because missing keys resolve to English. Instead, `hasLocaleKey(locale, key)` walks the requested locale tree strictly without fallback. `getLocaleSubKeys(locale, path)` enumerates child keys strictly defined within that locale.
 
-```ts
-export default {
-	commands: {
-		config: {
-			setup: {
-				description: "...",
-			},
-		},
-	},
-};
-```
+`getSupportedLocales()` returns authored directories ordered by `LOCALE_DISPLAY_ORDER`. `getRegisterableLocales()` includes valid aliases (such as `es-ES`) when their underlying authored source tree is active.
 
-## Slash Command Metadata Localization
+## Slash command metadata
 
-`commandLoader.ts` auto-generates description/choice localizations from locale keys.
+Slash command names, descriptions, and choices are localized during discovery in `src/utils/discord/commandLoader.ts`:
 
-Recommended pattern in command files:
+- Command descriptions: `commands.{category}.{path}.description`
+- Option descriptions: `commands.{category}.{path}.{option_name}_description`
+- Choice labels: `commands.{category}.{path}.{choice_value}_option` (or `{option_name}_choice_{choice_value}`)
 
-- set base metadata with `localizer("en-US", key)`
-- do not hardcode localized `setDescriptionLocalizations(...)` per command
+Command builders set English baseline copy with `localizer("en-US", key)`. During command compilation, `commandLoader.ts` applies localized descriptions and choices across all loaded registerable locales. Translations are registered with Discord only when the authored locale defines the key; English runtime fallback is omitted from registration metadata.
 
-Key conventions:
+## Status circles
+<!-- anchor: status-circles -->
 
-- Subcommand description:
-  - `commands.{category}.{path}.description`
-- Option description:
-  - `commands.{category}.{path}.{option_name}_description`
-- Choice label:
-  - `commands.{category}.{path}.{option_name}_choice_{choice_value}`
+Status title circles are owned by the surface accent color rather than authored in locale strings. This constraint prevents title copy from contradicting its adjacent card color. `src/utils/discord/ui/statusTitle.ts` manages this behavior:
 
-## Tip-item keys (`genai.tips.*`)
+- Surface colors map to tones: `ColorCode.ERROR` maps to `🔴`, `WARN` to `🟡`, and `SUCCESS` to `🟢`.
+- `withStatusCircle()` strips any existing leading circle with `stripStatusCircle()` before applying the tone circle, preventing double markers on legacy strings.
+- Titles opening with author-chosen emojis (such as `⏳` or `✅`) retain their custom emoji without prepending a circle.
+- Minimal notices render the same title as their Verbose form, circle included, and drop only the body. The embed protocol still matches emoji-free titles for Minimal kinds, because older Minimal notices that dropped the emoji remain in channel history.
+- Non-status colors (info, neutral) and question surfaces remain bare. Components V2 panels convey tone through accent bars and do not render status circles in headings.
 
-User-facing hints ("Tips") are stored as **atomic, single-sentence** keys under `genai.tips.*`
-(defined in `providers.ts`, which exports the `genai` tree). Each key is one self-contained bullet —
-never a multi-hint paragraph:
+## Embed protocol persistence
+<!-- anchor: embed-protocol-persistence -->
 
-```ts
-genai: {
-  tips: {
-    title: "💡 Tip",
-    wait_and_retry: "Please wait a few minutes before trying again.",
-    openrouter_models: "Browse the [OpenRouter model list](https://openrouter.ai/models) and switch models with `/openrouter model add`.",
-    // ...one key per bullet
-  },
-}
-```
+Discord embeds persist in channels across restarts and conversation turns. The bot classifies past embeds by matching rendered titles and author templates registered in `src/utils/discord/embedProtocol.ts`:
 
-Callers compose the bullet list by passing an ordered `tipKeys` array to `createTipEmbed()` (see
-[Tip embeds](./utils.md#tip-embeds)), including or omitting keys per branch. This is why tips are
-atomic: a conditional hint (e.g. an OpenRouter-only tip) is added by including its key in one branch,
-not by duplicating a whole paragraph string. Descriptions render markdown and hyperlinks.
+- Registered categories include memories learned, conversation resets, scene directives, compact summaries, and moderation notices.
+- Startup validates reverse lookups across all authored locales, failing fast if distinct protocol keys produce identical titles.
+- Once a locale ships, its protocol title values must remain immutable. Modifying a title template breaks historical recognition of existing messages in Discord channels.
+- Legacy `[tomori:v1:<kind>]` footer tokens are recognized during classification for backward compatibility with older embeds.
 
-`genai.tips.support_server` is the one reserved key: `createTipEmbed()` appends it as the closing
-bullet of every rendered tip embed so the Official Support Server link is always offered. Do not put
-it in a caller's `tipKeys` array.
+## Tip-item keys
+<!-- anchor: tip-item-keys-genaitips -->
 
-When adding a tip:
+User hints are stored as atomic, single-sentence bullet keys under `genai.tips.*` in `providers.ts`.
 
-1. Add the atomic key under `genai.tips` in both `src/locales/en-US/providers.ts` and
-   `src/locales/ja/providers.ts`.
-2. Reference it by dot-path from the calling `tipKeys` array — do not inline hint text in code.
-3. Run `bun run check-locales` for parity.
+- `createTipText()` in `src/utils/discord/embedHelper.ts` resolves an array of `tipKeys` into formatted markdown rendered in a read-only Discord modal (`textDisplayModal.ts`).
+- Callers compose tips conditionally by passing different key arrays across branches, avoiding duplicated multi-sentence copy.
+- `genai.tips.support_server` is reserved. `createTipText()` appends it as the closing bullet of non-empty tip modals, so the support link is always present without manual caller inclusion.
 
-## User Language Preference
+## User preference routing
 
-- User preference is stored in `users.language_pref`.
-- Most interaction replies receive `locale`/`userData.language_pref` and should use that for response text.
+User language preferences are stored in `users.language_pref`:
 
-## Adding or Changing Locale Keys
+- User registration records the observed interaction locale or guild preferred locale into `language_pref`.
+- Command handlers pass `userData.language_pref` (falling back to interaction locale) into replies and panels.
+- Unsupported stored preferences remain intact in storage. If an authored locale for that language is added later, the localizer resolves it automatically without requiring a database migration.
 
-1. Update the appropriate category file under `src/locales/en-US/` (e.g. `commands.ts`, `general.ts`).
-2. Mirror the same key structure in the corresponding `src/locales/ja/` file.
-3. Run:
+## Source pointers and recipes
 
-```bash
-bun run check-locales
-```
-
-This validates cross-locale key parity and catches missing keys.
-
-## Discord Length Limits
-
-Discord silently truncates several text slots past their cap, so a separate strict gate
-(`bun run check-locale-lengths`, also run as a fatal step in `bun run vl`) source-traces each
-locale key to the Discord component it feeds and flags any value that overruns:
-
-- Command descriptions — ≤100 chars
-- Modal titles / input labels — ≤45 chars
-- Modal placeholders / Label descriptions — ≤100 chars
-- **Select / checkbox option `label` and `description`** — ≤100 chars (traced from
-  `{ value, label: localizer(...), description: localizer(...) }` option literals)
-
-Both the `en-US` and `ja` values must fit. Shorten the reported string rather than relying on
-Discord's truncation — the cap is counted in characters (code points), so compact Japanese text
-usually fits where English does not.
-
-## Best Practices
-
-- Localize all user-facing command/embed strings.
-- Keep command metadata keys aligned with command path conventions.
-- Avoid hardcoded strings in command implementations.
+- `src/utils/text/localizer.ts`: loader, cache, and lookup implementation.
+- `src/constants/locales.ts`: Discord locale definitions and aliases.
+- `src/utils/discord/commandLoader.ts`: command metadata auto-localization.
+- `src/utils/discord/ui/statusTitle.ts`: status circle and tone helpers.
+- `src/utils/discord/embedProtocol.ts`: embed protocol title registry.
+- Contributor guide for adding translations: [Adding a Locale](/contributing/localization/new-locale/).
+- Documentation site translation guide: [Docs Site Localization](/contributing/localization/docs-site/).

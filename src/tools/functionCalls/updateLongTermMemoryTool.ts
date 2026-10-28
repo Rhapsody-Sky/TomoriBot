@@ -16,7 +16,9 @@ import { convertMentions } from "../../utils/text/contextBuilder";
 import { buildTextPreview } from "@/utils/text/textPreview";
 import { sanitizeUnknownTemplatePlaceholders } from "@/utils/text/processors/mentionProcessor";
 import { personalMemoryRepository, serverMemoryRepository, userRepository } from "@/utils/db/repositories";
-import { resolveUserTarget } from "@/utils/discord/targetResolver";
+import { resolveTriggererDiscordId, resolveUserTarget } from "@/utils/discord/targetResolver";
+import { isMessageProxyIdentityUserId } from "@/utils/messageProxy/identityUserId";
+import { getMessageProxyHostProtection } from "@/utils/messageProxy/hostProtection";
 
 export class UpdateLongTermMemoryTool extends BaseTool {
   name = "update_long_term_memory";
@@ -206,7 +208,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
     try {
       if (!isPersonalUpdate) {
         if (isDeleteRequested) {
-          const resolvedTriggererUserId = context.message?.author?.id || context.userId;
+          const resolvedTriggererUserId = resolveTriggererDiscordId(context);
           const triggererRow = resolvedTriggererUserId
             ? await userRepository.loadByDiscordId(resolvedTriggererUserId)
             : null;
@@ -221,15 +223,14 @@ export class UpdateLongTermMemoryTool extends BaseTool {
               deletedServerMemory.content,
               context.client,
               serverDiscId,
-              triggererRow?.user_nickname,
+              triggererRow?.user_nickname ?? undefined,
               tomoriState.persona_nickname,
               tomoriState?.config.personal_memories_enabled,
             );
             const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
             await sendMemoryEmbedWithExpand(
-              context.channel,
-              context.locale,
+              context,
               {
                 color: ColorCode.ERROR,
                 titleKey: "genai.self_teach.server_memory_deleted_title",
@@ -244,11 +245,6 @@ export class UpdateLongTermMemoryTool extends BaseTool {
                 footerKey: "genai.self_teach.server_memory_footer",
               },
               processedMemoryContent,
-              {
-                webhook: context.webhook,
-                personaUsername: context.personaUsername,
-                personaAvatarUrl: context.personaAvatarUrl,
-              },
             );
 
             invalidateTomoriStateCache(serverDiscId);
@@ -283,7 +279,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
         );
 
         if (updatedServerMemory) {
-          const resolvedTriggererUserId = context.message?.author?.id || context.userId;
+          const resolvedTriggererUserId = resolveTriggererDiscordId(context);
           const triggererRow = resolvedTriggererUserId
             ? await userRepository.loadByDiscordId(resolvedTriggererUserId)
             : null;
@@ -291,15 +287,14 @@ export class UpdateLongTermMemoryTool extends BaseTool {
             newContent,
             context.client,
             serverDiscId,
-            triggererRow?.user_nickname,
+            triggererRow?.user_nickname ?? undefined,
             tomoriState.persona_nickname,
             tomoriState?.config.personal_memories_enabled,
           );
           const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
           await sendMemoryEmbedWithExpand(
-            context.channel,
-            context.locale,
+            context,
             {
               color: ColorCode.MEMORY_UPDATE,
               titleKey: "genai.self_teach.server_memory_updated_title",
@@ -314,11 +309,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
               footerKey: "genai.self_teach.server_memory_footer",
             },
             processedMemoryContent,
-            {
-              webhook: context.webhook,
-              personaUsername: context.personaUsername,
-              personaAvatarUrl: context.personaAvatarUrl,
-            },
+            { kind: "server_memory", id: memoryId },
           );
 
           invalidateTomoriStateCache(serverDiscId);
@@ -370,7 +361,8 @@ export class UpdateLongTermMemoryTool extends BaseTool {
 
       const guild = "guild" in context.channel ? context.channel.guild : undefined;
       let guildMember = null;
-      if (guild) {
+      const isMessageProxyTarget = isMessageProxyIdentityUserId(resolvedTargetUserId as string);
+      if (guild && !isMessageProxyTarget) {
         guildMember =
           guild.members.cache.get(resolvedTargetUserId as string) ||
           (await guild.members.fetch(resolvedTargetUserId as string).catch(() => null));
@@ -384,8 +376,8 @@ export class UpdateLongTermMemoryTool extends BaseTool {
             },
           };
         }
-      } else {
-        const triggererDiscId = context.message?.author?.id || context.userId;
+      } else if (!guild) {
+        const triggererDiscId = resolveTriggererDiscordId(context);
         if (!triggererDiscId || triggererDiscId !== resolvedTargetUserId) {
           return {
             success: false,
@@ -416,6 +408,26 @@ export class UpdateLongTermMemoryTool extends BaseTool {
             },
           };
         }
+
+        const messageProxyHostProtection = await getMessageProxyHostProtection(
+          resolvedTargetUserId as string,
+          serverDiscId,
+        );
+        if (messageProxyHostProtection.protected) {
+          return {
+            success: false,
+            error: `Cannot update personal memory: ${resolvedTargetUserLabel} has privacy restrictions.`,
+            data: {
+              status: "memory_update_failed_privacy_restricted",
+              reason:
+                messageProxyHostProtection.reason === "host_unresolved"
+                  ? `The host accounts for ${resolvedTargetUserLabel} could not be resolved. I cannot update personal memories until their privacy restrictions can be checked.`
+                  : messageProxyHostProtection.reason === "host_blacklisted"
+                    ? `The host account for ${resolvedTargetUserLabel} is blacklisted in this server. I cannot update personal memories for its message-proxy identities.`
+                    : `The host account for ${resolvedTargetUserLabel} has full privacy enabled. I cannot update personal memories for its message-proxy identities.`,
+            },
+          };
+        }
       }
 
       const personaLineageId = tomoriState.persona_lineage_id ?? 0;
@@ -437,7 +449,8 @@ export class UpdateLongTermMemoryTool extends BaseTool {
       }
 
       const isUserBlacklisted = guild
-        ? await userRepository.isBlacklisted(serverDiscId, resolvedTargetUserId as string)
+        ? (await userRepository.isBlacklisted(serverDiscId, resolvedTargetUserId as string)) ||
+          (await getMessageProxyHostProtection(resolvedTargetUserId as string, serverDiscId)).protected
         : false;
       const footerKey = !tomoriState.config.personal_memories_enabled
         ? "genai.self_teach.personal_memory_footer_personalization_disabled"
@@ -477,8 +490,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
         const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
         await sendMemoryEmbedWithExpand(
-          context.channel,
-          context.locale,
+          context,
           {
             color: ColorCode.ERROR,
             titleKey: "genai.self_teach.personal_memory_deleted_title",
@@ -495,11 +507,6 @@ export class UpdateLongTermMemoryTool extends BaseTool {
             footerKey,
           },
           processedMemoryContent,
-          {
-            webhook: context.webhook,
-            personaUsername: context.personaUsername,
-            personaAvatarUrl: context.personaAvatarUrl,
-          },
         );
 
         return {
@@ -547,8 +554,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
       const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
 
       await sendMemoryEmbedWithExpand(
-        context.channel,
-        context.locale,
+        context,
         {
           color: ColorCode.MEMORY_UPDATE,
           titleKey: "genai.self_teach.personal_memory_updated_title",
@@ -565,11 +571,7 @@ export class UpdateLongTermMemoryTool extends BaseTool {
           footerKey,
         },
         processedMemoryContent,
-        {
-          webhook: context.webhook,
-          personaUsername: context.personaUsername,
-          personaAvatarUrl: context.personaAvatarUrl,
-        },
+        { kind: "personal_memory", id: memoryId },
       );
 
       return {

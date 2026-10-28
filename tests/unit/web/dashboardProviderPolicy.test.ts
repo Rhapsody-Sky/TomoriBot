@@ -1,6 +1,11 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { TomoriDashboardCore } from "@/web/dashboard/core";
+import { configModelOperations } from "@/utils/discord/interactions/configModelOperations";
+import { providerPanelOperations } from "@/utils/provider/providerPanelOperations";
+import { personaRepository } from "@/utils/db/repositories";
 import { type DashboardProviderCore, DashboardProviderService } from "@/web/dashboard/providerService";
 import type { DashboardActor, DashboardGuildSnapshot } from "@/web/dashboard/types";
+import { createPersona, createServerConfig } from "../../helpers/fixtures";
 
 function createActor(): DashboardActor {
   return {
@@ -19,17 +24,68 @@ function createSnapshot(): DashboardGuildSnapshot {
   return {
     serverId: 42,
     serverDiscordId: "123456789012345678",
-    config: {
+    config: createServerConfig({
       llm_id: 1,
       fallback_model_refs: [],
       user_byok_mode: true,
-    },
+    }),
     personas: [],
     rawPersonas: [],
-  } as DashboardGuildSnapshot;
+  };
 }
 
 describe("dashboard provider policy", () => {
+  afterEach(() => mock.restore());
+
+  it("uses the Discord model operation with a fresh state when switching a server model", async () => {
+    const core = new TomoriDashboardCore();
+    const persona = createPersona({ server_id: 42 });
+    spyOn(personaRepository, "loadState").mockResolvedValue(persona);
+    spyOn(core, "loadServerModelWorkspace").mockResolvedValue({
+      options: {
+        text: [],
+        vision: [],
+        embedding: [{ id: 21, label: "Embedding", provider: "openrouter" }],
+        image: [],
+        imageNai: [],
+        video: [],
+      },
+      selected: { text: 1, vision: null, embedding: 20, image: null, imageNai: null, video: null },
+    });
+    const write = spyOn(configModelOperations, "setCapabilityModel").mockResolvedValue({
+      status: "success",
+      modelName: "embedding",
+      reembedded: true,
+    });
+    expect(await core.setServerPrimaryModel(createSnapshot(), "embedding", 21)).toBe(true);
+    expect(write).toHaveBeenCalledWith({
+      tomoriState: persona,
+      serverDiscId: createSnapshot().serverDiscordId,
+      capability: "embedding",
+      provider: "openrouter",
+      modelId: 21,
+    });
+    expect(await core.setServerPrimaryModel(createSnapshot(), "embedding", 999)).toBe(false);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report an active endpoint connection as removed", async () => {
+    const core = new TomoriDashboardCore();
+    const persona = createPersona({ server_id: 42 });
+    const entry = { kind: "endpoint" as const, id: "endpoint:6", connectionIds: [6], displayName: "Local" };
+    const panel = { state: persona, data: { entries: [entry] } } as unknown as NonNullable<
+      Awaited<ReturnType<typeof providerPanelOperations.loadServerProviderPanelScope>>
+    >;
+    spyOn(providerPanelOperations, "loadServerProviderPanelScope").mockResolvedValue(panel);
+    const remove = spyOn(providerPanelOperations, "removeServerProviderEntry").mockResolvedValue({ status: "active" });
+    await expect(
+      core.removeDashboardCustomEndpoint(
+        { kind: "server", snapshot: createSnapshot() },
+        { custom_endpoint_id: 9, connection_id: 6 },
+      ),
+    ).rejects.toMatchObject({ code: "provider_active", status: 409 });
+    expect(remove).toHaveBeenCalledWith({ ...panel, serverDiscId: createSnapshot().serverDiscordId, entry });
+  });
   it("never serializes encrypted provider credentials", async () => {
     const core = {
       getProviderChoices: () => [{ name: "OpenRouter", value: "openrouter" }],
@@ -72,7 +128,6 @@ describe("dashboard provider policy", () => {
         capability: "image",
         apiStyle: "comfyui",
         endpointUrl: "http://127.0.0.1:8188",
-        displayName: "Local ComfyUI",
         modelName: null,
         authToken: null,
         numCtx: null,

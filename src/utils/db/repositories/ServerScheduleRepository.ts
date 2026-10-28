@@ -43,6 +43,19 @@ type ServerScheduleExportShape = {
   auto_trigger: ServerAutoTriggerConfigsRow | null;
 };
 
+/**
+ * Pending reminders and scheduled tasks one server may hold. A model tool call creates them from
+ * ordinary chat, and every recurring self-task runs a paid generation on its schedule, so the
+ * count is what bounds both storage and scheduled spend.
+ */
+export const MAX_REMINDERS_PER_SERVER = 100;
+
+export class ReminderLimitError extends Error {
+  constructor() {
+    super(`A server can hold at most ${MAX_REMINDERS_PER_SERVER} pending reminders`);
+  }
+}
+
 export type ReminderSelectionRow = {
   reminder_id: number;
   reminder_purpose: string;
@@ -113,10 +126,6 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
     return this.sqlGetUserReminderCount(userDiscordId);
   }
 
-  /**
-   * Deletes a reminder by ID.
-   *
-   */
   async deleteReminderById(reminderId: number): Promise<boolean> {
     return this.sqlDeleteReminderById(reminderId);
   }
@@ -169,9 +178,14 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
    * Reschedules an existing reminder to a new time.
    *
    * @param nextReminderTime - New fire time
+   * @param failedOccurrenceCount - Consecutive failed occurrences to carry forward; 0 after a delivered one
    */
-  async rescheduleReminder(reminderId: number, nextReminderTime: Date): Promise<ReminderRow | null> {
-    return this.sqlRescheduleReminder(reminderId, nextReminderTime);
+  async rescheduleReminder(
+    reminderId: number,
+    nextReminderTime: Date,
+    failedOccurrenceCount = 0,
+  ): Promise<ReminderRow | null> {
+    return this.sqlRescheduleReminder(reminderId, nextReminderTime, failedOccurrenceCount);
   }
 
   /** Defers delivery without changing the reminder's canonical occurrence time. */
@@ -276,10 +290,6 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
     return this.sqlUpsertRandomTrigger(triggerId, data);
   }
 
-  /**
-   * Deletes a random trigger by ID.
-   *
-   */
   async deleteTrigger(triggerId: number): Promise<boolean> {
     return this.sqlDeleteRandomTrigger(triggerId);
   }
@@ -545,10 +555,11 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
             r.created_by_user_id,
             r.user_discord_id,
             r.user_nickname,
-            u.user_nickname AS created_by_nickname,
+            upc.user_nickname AS created_by_nickname,
             t.persona_nickname AS persona_nickname
           FROM reminders r
           LEFT JOIN users u ON r.created_by_user_id = u.user_id
+          LEFT JOIN user_personalization_configs upc ON upc.user_id = u.user_id
           LEFT JOIN personas t ON r.persona_id = t.persona_id
           WHERE r.server_id = ${serverId}
             AND r.created_by_user_id = ${ownerUserId}
@@ -567,10 +578,11 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
           r.created_by_user_id,
           r.user_discord_id,
           r.user_nickname,
-          u.user_nickname AS created_by_nickname,
+          upc.user_nickname AS created_by_nickname,
           t.persona_nickname AS persona_nickname
         FROM reminders r
         LEFT JOIN users u ON r.created_by_user_id = u.user_id
+        LEFT JOIN user_personalization_configs upc ON upc.user_id = u.user_id
         LEFT JOIN personas t ON r.persona_id = t.persona_id
         WHERE r.server_id = ${serverId}
         ORDER BY r.reminder_time ASC
@@ -599,32 +611,41 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
           `in server ${reminderData.server_id} at ${reminderData.reminder_time.toISOString()}`,
       );
 
-      const [reminderResult] = await sql`
-        INSERT INTO reminders (
-          server_id,
-          channel_disc_id,
-          user_discord_id,
-          user_nickname,
-          reminder_purpose,
-          reminder_time,
-          repetition_interval_hours,
-          self_reminder,
-          created_by_user_id,
-          persona_id
-        ) VALUES (
-          ${reminderData.server_id},
-          ${reminderData.channel_disc_id},
-          ${reminderData.user_discord_id},
-          ${reminderData.user_nickname},
-          ${reminderData.reminder_purpose},
-          ${reminderData.reminder_time},
-          ${reminderData.repetition_interval_hours ?? null},
-          ${reminderData.self_reminder ?? false},
-          ${reminderData.created_by_user_id},
-          ${reminderData.persona_id ?? null}
-        )
-        RETURNING *
-      `;
+      const reminderResult = await sql.transaction(async (tx) => {
+        // The server lock serializes count checks across concurrent creations.
+        await tx`SELECT server_id FROM servers WHERE server_id = ${reminderData.server_id} FOR UPDATE`;
+        const [pending] = await tx<Array<{ count: number }>>`
+          SELECT COUNT(*)::int AS count FROM reminders WHERE server_id = ${reminderData.server_id}
+        `;
+        if ((pending?.count ?? 0) >= MAX_REMINDERS_PER_SERVER) throw new ReminderLimitError();
+        const [inserted] = await tx`
+          INSERT INTO reminders (
+            server_id,
+            channel_disc_id,
+            user_discord_id,
+            user_nickname,
+            reminder_purpose,
+            reminder_time,
+            repetition_interval_hours,
+            self_reminder,
+            created_by_user_id,
+            persona_id
+          ) VALUES (
+            ${reminderData.server_id},
+            ${reminderData.channel_disc_id},
+            ${reminderData.user_discord_id},
+            ${reminderData.user_nickname},
+            ${reminderData.reminder_purpose},
+            ${reminderData.reminder_time},
+            ${reminderData.repetition_interval_hours ?? null},
+            ${reminderData.self_reminder ?? false},
+            ${reminderData.created_by_user_id},
+            ${reminderData.persona_id ?? null}
+          )
+          RETURNING *
+        `;
+        return inserted;
+      });
 
       if (!reminderResult) {
         log.warn("Failed to create reminder: No result returned from database");
@@ -660,6 +681,7 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
       emitScheduledWorkNudge(`reminder-create:${validatedReminder.data.reminder_id ?? "unknown"}`);
       return validatedReminder.data;
     } catch (error) {
+      if (error instanceof ReminderLimitError) throw error;
       const context: ErrorContext = {
         serverId: reminderData.server_id,
         userId: reminderData.created_by_user_id,
@@ -675,13 +697,18 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
     }
   }
 
-  private async sqlRescheduleReminder(reminderId: number, nextReminderTime: Date): Promise<ReminderRow | null> {
+  private async sqlRescheduleReminder(
+    reminderId: number,
+    nextReminderTime: Date,
+    failedOccurrenceCount: number,
+  ): Promise<ReminderRow | null> {
     try {
       const [updatedReminder] = await sql`
         UPDATE reminders
         SET reminder_time = ${nextReminderTime},
             next_attempt_at = NULL,
             delivery_retry_count = 0,
+            failed_occurrence_count = ${failedOccurrenceCount},
             updated_at = CURRENT_TIMESTAMP
         WHERE reminder_id = ${reminderId}
         RETURNING *
@@ -799,6 +826,7 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
           reminder_time = ${reminderData.reminder_time},
           next_attempt_at = NULL,
           delivery_retry_count = 0,
+          failed_occurrence_count = 0,
           repetition_interval_hours = ${reminderData.repetition_interval_hours},
           self_reminder = ${reminderData.self_reminder},
           user_discord_id = ${reminderData.user_discord_id},
@@ -889,6 +917,7 @@ class ServerScheduleRepository implements IRepository<ServerScheduleExportShape>
           reminder_time = ${reminderData.reminder_time},
           next_attempt_at = NULL,
           delivery_retry_count = 0,
+          failed_occurrence_count = 0,
           repetition_interval_hours = ${reminderData.repetition_interval_hours},
           updated_at = CURRENT_TIMESTAMP
         WHERE reminder_id = ${reminderData.reminder_id}

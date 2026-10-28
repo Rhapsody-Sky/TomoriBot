@@ -1,4 +1,6 @@
-import type { UserRow } from "@/types/db/schema";
+import { utcOffsetSchema, type UserRow } from "@/types/db/schema";
+import { resolvePrefillBlocker } from "@/utils/chat/assistantPrefill";
+import { addressingStyleSchema, USER_IDENTITY_FIELD_MAX_LENGTH, USER_NICKNAME_MAX_LENGTH } from "@/types/personaNaming";
 import { z } from "zod";
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { normalizeTriggerWord } from "@/utils/text/triggerWords";
@@ -13,13 +15,23 @@ import { DashboardServiceError } from "./errors";
 import { type SettingsSectionId, parseSettingsPatch } from "./settingsCatalog";
 import type { DashboardGuildSnapshot, RegisteredDashboardUser } from "./types";
 
+const optionalProfileText = (limit: number) =>
+  z
+    .preprocess((value) => (typeof value === "string" ? value.trim() || null : value), z.string().max(limit).nullable())
+    .optional();
+
 const profileSchema = z
   .object({
-    user_nickname: z.string().trim().min(1).max(80).optional(),
+    user_nickname: optionalProfileText(USER_NICKNAME_MAX_LENGTH),
+    gender_identity: optionalProfileText(USER_IDENTITY_FIELD_MAX_LENGTH),
+    pronouns: optionalProfileText(USER_IDENTITY_FIELD_MAX_LENGTH),
+    addressing_style: addressingStyleSchema.nullable().optional(),
     privacy_level: z.number().int().min(0).max(2).optional(),
     personal_dtm: z.enum(["off", "follow", "on"]).optional(),
     personal_deliberate_tool_mode: z.enum(["off", "follow", "on"]).optional(),
-    timezone_offset: z.number().int().min(-12).max(14).nullable().optional(),
+    timezone_offset: utcOffsetSchema.nullable().optional(),
+    personal_server_fallback_enabled: z.boolean().optional(),
+    natural_nudge_opt_out: z.boolean().optional(),
     shortterm_cache_crossserver_opt_in: z.boolean().optional(),
     impersonation_prompt: z
       .preprocess(
@@ -97,6 +109,16 @@ export class DashboardSettingsService {
     if (!patch) throw new DashboardServiceError("invalid_settings", 422, "The settings are invalid.");
 
     this.assertDiscordReferences(snapshot, sectionId, patch, validChannelIds);
+    if (sectionId === "chat" && patch.response_prefill) {
+      const mainPersona = snapshot.rawPersonas.find((persona) => !persona.is_alter);
+      if (!mainPersona || resolvePrefillBlocker(mainPersona) === "model") {
+        throw new DashboardServiceError(
+          "prefill_unsupported",
+          422,
+          "The active model does not support assistant prefill.",
+        );
+      }
+    }
     const config = await this.core.updateSettings(snapshot, sectionId, patch);
     if (!config) throw new DashboardServiceError("settings_update_failed", 500, "The settings were not saved.");
     return config;

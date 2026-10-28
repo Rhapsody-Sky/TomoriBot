@@ -14,6 +14,7 @@ const SUPPORTED_VIDEO_MIME_TYPES = [
   "video/mp4",
   "video/mpeg",
   "video/mov",
+  "video/quicktime",
   "video/avi",
   "video/x-flv",
   "video/mpg",
@@ -84,7 +85,7 @@ function inferMimeTypeFromFilename(filename: string | null | undefined): string 
   if (lower.endsWith(".heif")) return "image/heif";
   if (lower.endsWith(".mp4")) return "video/mp4";
   if (lower.endsWith(".webm")) return "video/webm";
-  if (lower.endsWith(".mov")) return "video/mov";
+  if (lower.endsWith(".mov")) return "video/quicktime";
   return null;
 }
 
@@ -312,8 +313,25 @@ export function appendComponentMediaFromMessage(
   return { imageCount, videoCount };
 }
 
-function formatAttachmentSystemHint(filename: string, messageId: string): string {
-  return `[System: A file named \`${filename}\` is attached (message ID: ${messageId}). Use \`read_file\` with this message ID to read its contents, only if needed.]`;
+/** Anything that is not image, video, or audio media falls to `read_file`, which rejects what it cannot parse. */
+function isDocumentAttachment(attachment: Attachment): boolean {
+  const effectiveContentType = getEffectiveAttachmentContentType(attachment);
+  return (
+    !isSupportedImageAttachmentContentType(effectiveContentType) &&
+    !isSupportedVideoAttachmentContentType(effectiveContentType) &&
+    !isAudioAttachment(attachment)
+  );
+}
+
+export function appendDocumentAttachmentsFromMessage(
+  message: Pick<Message, "attachments">,
+  documentAttachments: NonNullable<SimplifiedMessageForContext["documentAttachments"]>,
+  sourceMessageId?: string,
+): void {
+  for (const attachment of message.attachments.values()) {
+    if (!isDocumentAttachment(attachment)) continue;
+    documentAttachments.push({ filename: attachment.name ?? "file", ...(sourceMessageId && { sourceMessageId }) });
+  }
 }
 
 function formatAudioAttachmentHint(filename: string): string {
@@ -466,7 +484,7 @@ export function appendDirectMediaFromMessage(args: {
   message: Message;
   imageAttachments: SimplifiedMessageForContext["imageAttachments"];
   videoAttachments: SimplifiedMessageForContext["videoAttachments"];
-  messageIdMap: MessageIdMap;
+  documentAttachments: NonNullable<SimplifiedMessageForContext["documentAttachments"]>;
   voiceTranscriptChatMode: boolean;
   appendTextHint: (hint: string) => void;
 }): void {
@@ -478,28 +496,15 @@ export function appendDirectMediaFromMessage(args: {
 
   appendSupportedMediaFromMessage(args.message, args.imageAttachments, args.videoAttachments);
   appendComponentMediaFromMessage(args.message, args.imageAttachments, args.videoAttachments);
+  appendDocumentAttachmentsFromMessage(args.message, args.documentAttachments);
+  if (args.voiceTranscriptChatMode) return;
   for (const attachment of args.message.attachments.values()) {
-    const effectiveContentType = getEffectiveAttachmentContentType(attachment);
-    if (
-      isSupportedImageAttachmentContentType(effectiveContentType) ||
-      isSupportedVideoAttachmentContentType(effectiveContentType)
-    ) {
-      continue;
-    }
-    if (isAudioAttachment(attachment)) {
-      if (args.voiceTranscriptChatMode) {
-        continue;
-      }
-      const cached = getCachedVoiceTranscript(args.message.id);
-      args.appendTextHint(
-        cached?.source === "user_stt"
-          ? `[System: This was sent as a voice message.]\n${cached.transcript}`
-          : formatAudioAttachmentHint(attachment.name ?? "audio"),
-      );
-      continue;
-    }
+    if (!isAudioAttachment(attachment)) continue;
+    const cached = getCachedVoiceTranscript(args.message.id);
     args.appendTextHint(
-      formatAttachmentSystemHint(attachment.name ?? "file", args.messageIdMap.register(args.message.id, "media")),
+      cached?.source === "user_stt"
+        ? `[System: This was sent as a voice message.]\n${cached.transcript}`
+        : formatAudioAttachmentHint(attachment.name ?? "audio"),
     );
   }
 }

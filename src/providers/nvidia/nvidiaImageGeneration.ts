@@ -6,24 +6,12 @@ import { log } from "@/utils/misc/logger";
 import { NVIDIA_IMAGE_GENERATION_BASE_URL } from "@/providers/nvidia/nvidiaConstants";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { readProviderErrorBody } from "@/utils/provider/providerErrorMetrics";
 
-function parseNumberEnv(name: string, fallbackValue: number, min: number, max: number): number {
-  const rawValue = process.env[name];
-  if (!rawValue) {
-    return fallbackValue;
-  }
+const FLUX_STEPS = 30;
 
-  const parsedValue = Number(rawValue);
-  if (!Number.isFinite(parsedValue) || parsedValue < min || parsedValue > max) {
-    log.warn(`[NVIDIA] Invalid ${name} value "${rawValue}". Falling back to ${fallbackValue}.`);
-    return fallbackValue;
-  }
-
-  return parsedValue;
-}
-
-const FLUX_STEPS = parseNumberEnv("NVIDIA_IMAGE_STEPS", 30, 1, 50);
-const FLUX_CFG_SCALE = parseNumberEnv("NVIDIA_IMAGE_CFG_SCALE", 3.5, 0, 10);
+/** Guidance scale used when the caller supplies none; `request.cfg` takes precedence. */
+const FLUX_CFG_SCALE = 3.5;
 
 interface ImageDimensions {
   width: number;
@@ -70,7 +58,7 @@ const NVIDIA_IMAGE_MODEL_SPECS: Record<string, NvidiaImageModelSpec> = {
       const dimensions = FLUX_DIMENSIONS[request.aspectRatio] ?? FLUX_DIMENSIONS["1:1"];
       return {
         prompt: request.prompt,
-        mode: "text-to-image",
+        mode: "base",
         cfg_scale: request.cfg ?? FLUX_CFG_SCALE,
         width: dimensions.width,
         height: dimensions.height,
@@ -292,18 +280,15 @@ export async function generateNvidiaNativeImage(
   });
 
   if (!response.ok) {
-    const errorBody = await response.text();
-    log.error("NVIDIA image generation request failed", new Error(errorBody), {
-      errorType: "NvidiaImageGenerationHttpError",
-      metadata: {
-        model: request.model,
-        status: response.status,
-        aspectRatio: request.aspectRatio,
-      },
-    });
+    const errorBody = await readProviderErrorBody(response, request.apiKey);
     // NVIDIA puts the only actionable detail (retired function, missing account entitlement,
     // rejected dimensions) in the body, so a bare status line strands the user with no next step.
-    throw new Error(`NVIDIA image generation failed: ${response.status} ${response.statusText}. ${errorBody}`);
+    throw Object.assign(
+      new Error(`NVIDIA image generation failed: ${response.status} ${response.statusText}. ${errorBody}`),
+      {
+        status: response.status,
+      },
+    );
   }
 
   const contentType = response.headers.get("Content-Type") ?? "";

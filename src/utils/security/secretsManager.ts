@@ -23,7 +23,8 @@ export interface TomoriSecrets {
   POSTGRES_USER: string;
   POSTGRES_PASSWORD: string;
   POSTGRES_DB: string;
-  CRYPTO_SECRET: string;
+  CRYPTO_SECRET?: string;
+  CRYPTO_SECRET_CURRENT?: string;
   CRYPTO_SECRET_V1?: string; // Optional: Key rotation support
   CRYPTO_SECRET_V2?: string; // Optional: Key rotation support
   CRYPTO_SECRET_V3?: string; // Optional: Key rotation support
@@ -80,6 +81,53 @@ const OPTIONAL_WEB_SETTINGS_SECRET_KEYS = [
   "WEB_SETTINGS_COOKIE_SECURE",
 ] as const;
 
+const OPTIONAL_SECRET_FIELDS = [
+  "DISCORD_WEBHOOK_URL",
+  "AVATAR_GCS_BUCKET",
+  "AVATAR_PUBLIC_BASE_URL",
+  "VOICE_SAMPLE_GCS_BUCKET",
+  "VOICE_SAMPLE_GCS_PREFIX",
+  "VOICE_SAMPLE_PUBLIC_BASE_URL",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "S3_ENDPOINT",
+  "AVATAR_S3_BUCKET",
+  "AVATAR_S3_REGION",
+  "AVATAR_S3_PREFIX",
+  "VOICE_SAMPLE_S3_BUCKET",
+  "VOICE_SAMPLE_S3_REGION",
+  "VOICE_SAMPLE_S3_PREFIX",
+  "CHARREF_S3_BUCKET",
+  "CHARREF_S3_REGION",
+  "CHARREF_S3_PREFIX",
+  "CHARREF_PUBLIC_BASE_URL",
+  "MATRIX_HOMESERVER_URL",
+  "MATRIX_ACCESS_TOKEN",
+  "MATRIX_BOT_USER_ID",
+  "MATRIX_SERVER_NAME",
+  "MATRIX_HS_TOKEN",
+  "MATRIX_APPSERVICE_PUBLIC_URL",
+  "TOPGG_TOKEN",
+  "CONTAINER_MEMORY_LIMIT_MB",
+] as const;
+
+const registeredSecretNames = new Set<string>();
+
+let secretsLoaded = false;
+
+/** @public Release-only `src/init/secrets.ts` registers the supporter billing secrets through this. */
+export function registerSecretEnvKeys(names: readonly string[]): void {
+  if (secretsLoaded) {
+    throw new Error("Secret names must be registered before getAppSecrets() loads application secrets.");
+  }
+
+  for (const name of names) registeredSecretNames.add(name);
+}
+
+function optionalSecretFields(): string[] {
+  return [...OPTIONAL_SECRET_FIELDS, ...registeredSecretNames];
+}
+
 /**
  * Fetches application secrets from the appropriate backend based on environment.
  *
@@ -119,6 +167,8 @@ const OPTIONAL_WEB_SETTINGS_SECRET_KEYS = [
  * process.env.POSTGRES_HOST = secrets.POSTGRES_HOST;
  */
 export async function getAppSecrets(): Promise<TomoriSecrets> {
+  secretsLoaded = true;
+
   const runEnv = process.env.RUN_ENV || "development";
   const isProduction = runEnv === "production";
   const isTestProduction = process.env.TEST_PRODUCTION === "true";
@@ -139,44 +189,14 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
     };
 
     // Auto-detect key versions (CRYPTO_SECRET_V1, V2, V3, etc.)
-    for (const key of ["CRYPTO_SECRET_V1", "CRYPTO_SECRET_V2", "CRYPTO_SECRET_V3"]) {
-      if (process.env[key]) {
+    for (const key of Object.keys(process.env)) {
+      if ((/^CRYPTO_SECRET_V[1-9]\d*$/.test(key) || key === "CRYPTO_SECRET_CURRENT") && process.env[key]) {
         secrets[key] = process.env[key];
       }
     }
 
     // Optional fields: read from process.env matching the same keys as the JSON secret blob
-    const optionalEnvFields: (keyof TomoriSecrets)[] = [
-      "DISCORD_WEBHOOK_URL",
-      "AVATAR_GCS_BUCKET",
-      "AVATAR_PUBLIC_BASE_URL",
-      "VOICE_SAMPLE_GCS_BUCKET",
-      "VOICE_SAMPLE_GCS_PREFIX",
-      "VOICE_SAMPLE_PUBLIC_BASE_URL",
-      "AWS_ACCESS_KEY_ID",
-      "AWS_SECRET_ACCESS_KEY",
-      "S3_ENDPOINT",
-      "AVATAR_S3_BUCKET",
-      "AVATAR_S3_REGION",
-      "AVATAR_S3_PREFIX",
-      "VOICE_SAMPLE_S3_BUCKET",
-      "VOICE_SAMPLE_S3_REGION",
-      "VOICE_SAMPLE_S3_PREFIX",
-      "CHARREF_S3_BUCKET",
-      "CHARREF_S3_REGION",
-      "CHARREF_S3_PREFIX",
-      "CHARREF_PUBLIC_BASE_URL",
-      "MATRIX_HOMESERVER_URL",
-      "MATRIX_ACCESS_TOKEN",
-      "MATRIX_BOT_USER_ID",
-      "MATRIX_SERVER_NAME",
-      "MATRIX_HS_TOKEN",
-      "MATRIX_APPSERVICE_PUBLIC_URL",
-      "TOPGG_TOKEN",
-      "CONTAINER_MEMORY_LIMIT_MB",
-    ];
-
-    for (const field of optionalEnvFields) {
+    for (const field of optionalSecretFields()) {
       if (process.env[field]) {
         secrets[field] = process.env[field];
       }
@@ -206,7 +226,7 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
         throw new Error(`Secret file "${secretFile}" is empty. Ensure the secret version is populated.`);
       }
 
-      const rawSecrets = JSON.parse(fileContent);
+      const rawSecrets = parseSecretObject(fileContent);
 
       const secrets: TomoriSecrets = {
         DISCORD_TOKEN: rawSecrets.DISCORD_TOKEN,
@@ -220,44 +240,14 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
 
       // Auto-detect key versions (CRYPTO_SECRET_V1, V2, V3, etc.)
       for (const key of Object.keys(rawSecrets)) {
-        if (key.startsWith("CRYPTO_SECRET_V")) {
+        if (/^CRYPTO_SECRET_V[1-9]\d*$/.test(key) || key === "CRYPTO_SECRET_CURRENT") {
           secrets[key] = rawSecrets[key];
           log.info(`Detected key version: ${key}`);
         }
       }
 
       // Optional fields: same shape as AWS secret blob
-      const optionalFields: (keyof TomoriSecrets)[] = [
-        "DISCORD_WEBHOOK_URL",
-        "AVATAR_GCS_BUCKET",
-        "AVATAR_PUBLIC_BASE_URL",
-        "VOICE_SAMPLE_GCS_BUCKET",
-        "VOICE_SAMPLE_GCS_PREFIX",
-        "VOICE_SAMPLE_PUBLIC_BASE_URL",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "S3_ENDPOINT",
-        "AVATAR_S3_BUCKET",
-        "AVATAR_S3_REGION",
-        "AVATAR_S3_PREFIX",
-        "VOICE_SAMPLE_S3_BUCKET",
-        "VOICE_SAMPLE_S3_REGION",
-        "VOICE_SAMPLE_S3_PREFIX",
-        "CHARREF_S3_BUCKET",
-        "CHARREF_S3_REGION",
-        "CHARREF_S3_PREFIX",
-        "CHARREF_PUBLIC_BASE_URL",
-        "MATRIX_HOMESERVER_URL",
-        "MATRIX_ACCESS_TOKEN",
-        "MATRIX_BOT_USER_ID",
-        "MATRIX_SERVER_NAME",
-        "MATRIX_HS_TOKEN",
-        "MATRIX_APPSERVICE_PUBLIC_URL",
-        "TOPGG_TOKEN",
-        "CONTAINER_MEMORY_LIMIT_MB",
-      ];
-
-      for (const field of optionalFields) {
+      for (const field of optionalSecretFields()) {
         if (rawSecrets[field]) {
           secrets[field] = rawSecrets[field];
         }
@@ -308,7 +298,7 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
       throw new Error("AWS Secrets Manager returned empty SecretString. Ensure the secret contains a JSON object.");
     }
 
-    const rawSecrets = JSON.parse(response.SecretString);
+    const rawSecrets = parseSecretObject(response.SecretString);
 
     const secrets: TomoriSecrets = {
       DISCORD_TOKEN: rawSecrets.DISCORD_TOKEN,
@@ -323,43 +313,13 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
     // Auto-detect key versions (CRYPTO_SECRET_V1, V2, V3, etc.)
     // This allows for unlimited key rotation versions
     for (const key of Object.keys(rawSecrets)) {
-      if (key.startsWith("CRYPTO_SECRET_V")) {
+      if (/^CRYPTO_SECRET_V[1-9]\d*$/.test(key) || key === "CRYPTO_SECRET_CURRENT") {
         secrets[key] = rawSecrets[key];
         log.info(`Detected key version: ${key}`);
       }
     }
 
-    const optionalFields: (keyof TomoriSecrets)[] = [
-      "DISCORD_WEBHOOK_URL",
-      "AVATAR_GCS_BUCKET",
-      "AVATAR_PUBLIC_BASE_URL",
-      "VOICE_SAMPLE_GCS_BUCKET",
-      "VOICE_SAMPLE_GCS_PREFIX",
-      "VOICE_SAMPLE_PUBLIC_BASE_URL",
-      "AWS_ACCESS_KEY_ID",
-      "AWS_SECRET_ACCESS_KEY",
-      "S3_ENDPOINT",
-      "AVATAR_S3_BUCKET",
-      "AVATAR_S3_REGION",
-      "AVATAR_S3_PREFIX",
-      "VOICE_SAMPLE_S3_BUCKET",
-      "VOICE_SAMPLE_S3_REGION",
-      "VOICE_SAMPLE_S3_PREFIX",
-      "CHARREF_S3_BUCKET",
-      "CHARREF_S3_REGION",
-      "CHARREF_S3_PREFIX",
-      "CHARREF_PUBLIC_BASE_URL",
-      "MATRIX_HOMESERVER_URL",
-      "MATRIX_ACCESS_TOKEN",
-      "MATRIX_BOT_USER_ID",
-      "MATRIX_SERVER_NAME",
-      "MATRIX_HS_TOKEN",
-      "MATRIX_APPSERVICE_PUBLIC_URL",
-      "TOPGG_TOKEN",
-      "CONTAINER_MEMORY_LIMIT_MB",
-    ];
-
-    for (const field of optionalFields) {
+    for (const field of optionalSecretFields()) {
       if (rawSecrets[field]) {
         secrets[field] = rawSecrets[field];
       }
@@ -421,7 +381,7 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
  * - POSTGRES_USER (Database user)
  * - POSTGRES_PASSWORD (Database password)
  * - POSTGRES_DB (Database name)
- * - CRYPTO_SECRET (Encryption key for database-stored API keys)
+ * - CRYPTO_SECRET or a versioned field (encryption key for database-stored credentials)
  *
  * @param {TomoriSecrets} secrets - Secrets object to validate
  * @throws {Error} If any required secret is missing or empty
@@ -434,10 +394,19 @@ function validateRequiredSecrets(secrets: TomoriSecrets): void {
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "POSTGRES_DB",
-    "CRYPTO_SECRET",
   ];
 
   const missingFields = requiredFields.filter((field) => !secrets[field] || secrets[field] === "");
+
+  if (
+    !secrets.CRYPTO_SECRET &&
+    !Object.entries(secrets).some(
+      ([name, value]) =>
+        /^CRYPTO_SECRET_V[1-9]\d*$/.test(name) && Number.isSafeInteger(Number(name.slice(15))) && value,
+    )
+  ) {
+    missingFields.push("CRYPTO_SECRET or CRYPTO_SECRET_V<version>");
+  }
 
   if (missingFields.length > 0) {
     throw new Error(
@@ -445,4 +414,33 @@ function validateRequiredSecrets(secrets: TomoriSecrets): void {
         `Ensure all required fields are present in AWS Secrets Manager (production) or .env (development).`,
     );
   }
+}
+
+/** Scalar config values retain their environment form, but master keys must be strings. */
+function parseSecretObject(content: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error("Secret source contains invalid JSON.");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    Object.values(parsed).some((value) => !["string", "number", "boolean"].includes(typeof value))
+  ) {
+    throw new Error("Secret source must be a flat JSON object containing scalar values.");
+  }
+  const fields: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed)) {
+    if ((name === "CRYPTO_SECRET" || name.startsWith("CRYPTO_SECRET_V")) && typeof value !== "string") {
+      throw new Error("Encryption secret fields must contain string values.");
+    }
+    if (name === "CRYPTO_SECRET_CURRENT" && typeof value === "number" && (!Number.isSafeInteger(value) || value < 1)) {
+      throw new Error("CRYPTO_SECRET_CURRENT must be a positive integer version.");
+    }
+    fields[name] = String(value);
+  }
+  return fields;
 }

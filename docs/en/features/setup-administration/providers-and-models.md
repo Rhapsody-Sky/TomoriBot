@@ -4,137 +4,167 @@ sidebar:
   order: 1
 ---
 
-TomoriBot doesn't have a built-in AI model, you connect one from a provider. A **provider** is an AI
-service (Google Gemini, OpenRouter, NovelAI, a local endpoint, …), and a **model** is a
-specific model on that provider. You need at least one provider to use her at all.
+TomoriBot connects to external AI providers rather than hosting a built-in model. You can
+connect hosted services like Google Gemini, OpenRouter, and NovelAI, or point her at local
+self-hosted endpoints. You need at least one provider to start chatting.
 
 ## API Keys
+<!-- anchor: api-keys -->
 
-Add a provider key during first-time setup with `/config setup`, or later with
-`/config api-key set`. Keys are **encrypted at rest** — no one, including server admins, can
-read them back.
+Add a provider key during first-time setup with `/setup`, or later from `/providers` by choosing
+`+ Add new Provider`. Keys are encrypted at rest, so no one, including server admins, can read
+them back.
 
-Each provider has its own key-generation steps. Run **`/help api-key`** and pick your
-provider for the exact walkthrough, or use these starting points:
+In `/setup`, choose a hosted provider, a custom endpoint, or User BYOK for a server where members
+supply their own providers. Setup saves changes when you finish. Use `/providers` to replace a key;
+saved sampler settings are preserved.
+
+Each provider has its own key-generation steps. In `/help`, choose `Setup`, then
+`Get an API Key`, and pick your provider for a step-by-step walkthrough, or use these starting points:
 
 | Provider | Notes | Get a key |
 |---|---|---|
-| **Google Gemini** | Free tier, runs every feature. Recommended first setup. | [AI Studio](https://aistudio.google.com/apikey) |
-| **OpenRouter** | One key, many models (some free). | [OpenRouter keys](https://openrouter.ai/settings/keys) |
-| **NovelAI** | Subscription; uncensored storytelling/roleplay (text only). | [NovelAI](https://novelai.net/) |
-| **DeepSeek** | Pay-as-you-go reasoning models. | [DeepSeek](https://platform.deepseek.com/api_keys) |
-| **NVIDIA NIM** | Hosted text, embeddings, and image. | [NVIDIA Build](https://build.nvidia.com/) |
-| **Anthropic** | Claude models via the API (not Claude Code). | — |
-| **Z.ai** | GLM family. ⚠️ ToS restricts usage to coding/agent scenarios. | [Z.ai](https://z.ai/) |
-| **Vertex AI** | Google Cloud via `gcloud` ADC — best for locally-run/dev setups. | see below |
-| **Vertex AI Express** | Google Cloud API-key BYOK (Preview, Gemini subset). | [Express Mode](https://console.cloud.google.com/expressmode) |
-| **Custom** | Any OpenAI-compatible endpoint (Ollama, vLLM, LiteLLM, …). | see [Custom Endpoints](#custom-endpoints) |
+| Google Gemini | Free tier, runs every feature. Recommended first setup. | [AI Studio](https://aistudio.google.com/apikey) |
+| OpenRouter | One key, many models (some free). | [OpenRouter keys](https://openrouter.ai/settings/keys) |
+| NovelAI | Subscription; uncensored storytelling and roleplay (text only). | [NovelAI](https://novelai.net/) |
+| DeepSeek | Pay-as-you-go reasoning models. | [DeepSeek](https://platform.deepseek.com/api_keys) |
+| NVIDIA NIM | Hosted text, embeddings, and image. | [NVIDIA Build](https://build.nvidia.com/) |
+| Anthropic | Claude models via the API (not Claude Code). | [Anthropic](https://console.anthropic.com/) |
+| Z.ai | GLM family. ⚠️ ToS restricts usage to coding and agent scenarios. | [Z.ai](https://z.ai/) |
+| Vertex AI | Google Cloud via `gcloud` ADC (best for locally-run or dev setups). | see below |
+| Vertex AI Express | Google Cloud API-key BYOK (Preview, Gemini subset). | [Express Mode](https://console.cloud.google.com/expressmode) |
+| Custom | Any OpenAI-compatible endpoint (Ollama, vLLM, LiteLLM, …). | see [Custom Endpoints](#custom-endpoints) |
 
 :::caution
-Never share your API key with anyone else. Custom endpoints can add a Bearer auth token after setup with
-`/config api-key set`.
+Never share your API key with anyone else. Add or replace a custom endpoint's Bearer auth token
+from its `Edit Endpoint` action in `/providers`.
 :::
 
-**Vertex AI** authenticates with Application Default Credentials rather than a stored secret.
+Vertex AI authenticates with Application Default Credentials (ADC) rather than a stored secret.
 For local hosting, ADC can come from `gcloud`; hosted deployments should use a workload identity
 or service account. An AI Studio API key alone does not authenticate full Vertex AI. The selected
-project must have billing and the Vertex AI API enabled, and the host identity needs Vertex access.
-The full setup guide lives in `/help api-key provider:Google Vertex AI`.
+Google Cloud project must have billing and the Vertex AI API enabled, and the host identity needs
+Vertex access. The setup guide is available from Google Vertex AI on the `API Keys` page in `/help`.
 
-Google-backed provider setup validates credentials through the authenticated model-listing
-endpoint. It does not generate text or depend on whichever chat model is currently marked as
-the catalog default, so a retired default cannot prevent a valid credential from being saved.
-
-### Optional: Brave Search key
-
-Brave Search is separate from your AI provider and only enhances web search (adds image,
-video, and news search). Set it with `/optional-key brave set`. ⚠️ Brave includes $5/month
-free credit — set a $5 usage limit in the Brave dashboard to avoid charges.
+Brave Search is separate from your AI provider. Add its key in `/providers` to enable more search
+categories; see [Web search](/features/capabilities/tools-and-extensions/web-search/).
 
 ## Choosing Models
 
-`/provider` and `/model` are **server-scoped**: they set the shared defaults every member of
-this server uses, and they need the required server permission. Individual members can override
-those defaults for their own requests with `/personal provider`, which follows them across every
-server they use TomoriBot in. See
-[Personalization](/features/knowledge/personalization/#your-own-providers) for that side.
+Use `/providers` to manage server credentials, model catalogs, and endpoint registrations.
+Then use `/config` > Models > Switch Models to select the shared capability assignments every
+member of the server uses. Both commands require server management permissions.
 
-After a provider is set, pick which model each capability uses for this server:
+Members can set up their own providers and models with `/personal providers` and `/personal config`.
+Personal settings follow them across servers; see
+[Personalization](/features/knowledge/personalization/#your-own-providers).
 
-- `/model text` — the main chat model
-- `/model vision` — a vision model (for reading images when the chat model can't)
-- `/model image` — image generation (see [Image Generation](/features/capabilities/media-generation/image-generation/))
-- `/model video` — video generation
-- `/model embedding` — embeddings for the [document knowledge base](/features/knowledge/memory/#document-knowledge-base-rag)
-- `/model speech` / `/model transcription` — [voice](/features/capabilities/media-generation/tts-and-stt/)
+In `/config` > Models > Switch Models, you can assign models and endpoints across these capability slots:
 
-You can also manage this server's backup keys for automatic failover and load balancing with
-`/provider api-key rotation`.
+- **Text**: the main chat model.
+- **Vision**: reads images when the chat model cannot.
+- **Embeddings**: powers the [document knowledge base](/features/knowledge/memory/#document-knowledge-base-rag).
+- **Decision**: a registered [Decision model](#decision-models). [Natural Nudges](/features/chatting-personality/natural-nudges/#active-nudges) uses it to decide when to join a conversation.
+- **Standard Image**: standard image generation (see [Image Generation](/features/capabilities/media-generation/image-generation/)).
+- **NovelAI Image**: NovelAI image generation.
+- **Video**: video generation.
+- **TTS (Voice Design)**: speaks using a saved voice description.
+- **TTS (Voice Clone)**: speaks using a reference sample or provider voice.
+- **STT Endpoint**: speech-to-text audio transcription endpoint.
+
+:::tip
+`- No Model` in the Vision slot does not make a vision-capable chat model blind: it can still read
+images directly. The Vision slot provides a separate model for image analysis when the chat model
+cannot see images.
+:::
+
+Speech has separate voice design and voice clone slots. See
+[Voice: TTS & STT](/features/capabilities/media-generation/tts-and-stt/) for setup and provider
+support. You can also manage backup keys in `/providers`.
+
+:::tip
+Adding one backup key to an AI provider turns on rotation for that provider. Requests rotate across
+the primary key and its backups, and a key that hits a rate limit is skipped for 60 seconds.
+:::
+
+## Decision Models
+<!-- anchor: decision-models -->
+
+Decision models answer structured questions, such as yes/no or a choice from a list. They are separate
+from the chat model. [Natural Nudges](/features/chatting-personality/natural-nudges/#active-nudges)
+can use one to decide when a persona should join a conversation.
+
+Register an OpenRouter Decision model or a compatible custom endpoint in `/providers` or
+`/personal providers`. Select the server's model under `/config` > `Models` > `Switch Models`.
+Custom services must support System One or OpenAI Decisions compatibility. Register models from the
+service's documentation; a successful connection does not verify their capabilities.
 
 ## Custom Endpoints
+<!-- anchor: custom-endpoints -->
 
-Custom endpoints let you register self-hosted or proxy-backed services — Ollama, LM Studio,
-LiteLLM, vLLM, ComfyUI, local TTS/STT — as **labeled provider bundles**.
+Custom endpoints connect self-hosted or proxy-backed services such as Ollama, LM Studio, vLLM,
+ComfyUI, and local speech servers. Register a server endpoint in `/providers` or a personal endpoint
+in `/personal providers`.
 
-- **Server scope:** `/provider custom-endpoint add` / `remove`.
-- **Personal scope:** `/personal custom-endpoint add` / `remove` (just you — see
-  [Personalization](/features/knowledge/personalization/#your-own-providers)).
+Choose the API compatibility supported by your service, then register its exact model and supported
+capabilities. A connection can group models that share one endpoint URL. Personal local speech
+endpoints are not supported.
 
-A **label** groups every capability under one bundle. After registering, select the label
-from `/model text`, `/model image`, `/model video`, etc.; if a label has several models for a
-capability, a picker lets you choose. Re-run the add command with the same label and
-capability but a different model name to register an additional model on that connection (its
-URL and API style are inherited).
-
-For full walkthroughs of running the servers, see:
-
-- [Setup: Local LLM](/self-hosting/local-endpoints/setup-local-llm/) — Ollama, KoboldCPP, LM Studio, vLLM, LiteLLM.
-- [Setup: ComfyUI](/self-hosting/local-endpoints/setup-comfyui/) — local image/video generation.
-- [Setup: ChatMock](/self-hosting/local-endpoints/setup-chatmock/) — ChatGPT account / Codex CLI.
+For setup instructions, see [Local LLM](/self-hosting/local-endpoints/setup-local-llm/),
+[ComfyUI](/self-hosting/local-endpoints/setup-comfyui/), and
+[ChatMock](/self-hosting/local-endpoints/setup-chatmock/).
 
 ## Supported Providers
+<!-- anchor: supported-providers -->
 
-If you don't have the hardware to host your own models, TomoriBot supports a wide range of
-services. Not every feature is available on every provider.
+If you do not have the hardware to host your own models, TomoriBot supports a wide range of
+cloud services. Not every feature is available on every provider.
 
 ### LLM Providers
 
 | Provider | Streaming | Tool Calling | Image Input | Embeddings | Notes |
 |---|---|---|---|---|---|
-| **Google Gemini** | ✅ | ✅ | ✅ | ✅ | Free models available |
-| **OpenRouter** | ✅ | ✅ | ✅ | ✅ | Free models available |
-| **Anthropic (API)** | ✅ | ✅ | ✅ | – | Not Claude Code |
-| **NovelAI** | ✅ | ✅ | – | – | Only GLM 4.6 can use tools |
-| **NVIDIA NIM** | ✅ | ✅ | ✅ | ✅ | Free models available |
-| **DeepSeek** | ✅ | ✅ | – | – | – |
-| **Z.ai** | ✅ | ✅ | ✅ | – | Free models; ⚠️ ToS = coding/agent use only |
-| **Z.ai Coding** | ✅ | ✅ | – | – | Subscription plan |
-| **Google Vertex AI** | ✅ | ✅ | ✅ | ✅ | Includes 'free' Express version |
-| **Codex CLI (via ChatMock)** | ✅ | ✅ | ✅ | – | [Setup](/self-hosting/local-endpoints/setup-chatmock/) |
+| Google Gemini | ✅ | ✅ | ✅ | ✅ | Free models available |
+| OpenRouter | ✅ | ✅ | ✅ | ✅ | Free models available |
+| Anthropic (API) | ✅ | ✅ | ✅ | - | Not Claude Code |
+| NovelAI | ✅ | ✅ | - | - | Only GLM 4.6 can use tools |
+| NVIDIA NIM | ✅ | ✅ | ✅ | ✅ | Free models available |
+| DeepSeek | ✅ | ✅ | - | - | - |
+| Z.ai | ✅ | ✅ | ✅ | - | Free models; ⚠️ ToS = coding and agent use only |
+| Z.ai Coding | ✅ | ✅ | - | - | Subscription plan |
+| Google Vertex AI | ✅ | ✅ | ✅ | ✅ | Includes 'free' Express version |
+| Codex CLI (via ChatMock) | ✅ | ✅ | ✅ | - | [Setup](/self-hosting/local-endpoints/setup-chatmock/) |
 
 ### Image Generation
 
 | Provider | Text-to-Image | Image-to-Image | Inpainting | Notes |
 |---|---|---|---|---|
-| **Google** | ✅ | ✅ | – | – |
-| **OpenRouter** | ✅ | ✅ | – | – |
-| **NovelAI** | ✅ | ✅ | ✅ | Can combine with other providers |
-| **NVIDIA** | ✅ | – | – | Text-to-image only; reference images are ignored |
-| **Z.ai** | ✅ | – | – | – |
+| Google | ✅ | ✅ | - | - |
+| OpenRouter | ✅ | ✅ | - | - |
+| NovelAI | ✅ | ✅ | ✅ | Can combine with other providers |
+| NVIDIA | ✅ | - | - | Text-to-image only; reference images are ignored |
+| Z.ai | ✅ | - | - | - |
+
+These are default capabilities. When registering an image model, declare the modes its API supports;
+unsupported modes fail at generation time. NovelAI uses its own image pipeline.
 
 ### Video Generation
 
 | Provider | Text-to-Video | Image-to-Video | Notes |
 |---|---|---|---|
-| **Google** | ✅ | ✅ | Async polling workflow |
-| **OpenRouter** | ✅ | ✅ | Async polling workflow |
-| **Z.ai** | ✅ | ✅ | Async polling workflow |
+| Google | ✅ | ✅ | Async polling workflow |
+| OpenRouter | ✅ | ✅ | Async polling workflow |
+| Z.ai | ✅ | ✅ | Async polling workflow |
 
 ### Voice & Audio
 
 | Provider | Text-to-Speech | Speech-to-Text |
 |---|---|---|
-| **ElevenLabs** | ✅ | ✅ |
+| ElevenLabs | ✅ | ✅ |
+| Google Gemini | Voice Design | No |
+| Vertex AI (standard, global) | Voice Design | No |
+| OpenRouter Fish | Voice Clone | No |
+| OpenRouter Seed Audio | Voice Design | No |
 
-Local voice engines are covered under [Self-Hosting](/self-hosting/). For the built-in web
-search and URL-fetch engines, see [Tools & Extensions](/features/capabilities/tools-and-extensions/#web-search--url-reading).
+Local voice engines are covered under [Self-Hosting](/self-hosting/). For built-in web search and
+URL reading, see [Tools & Extensions](/features/capabilities/tools-and-extensions/web-search/).

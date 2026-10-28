@@ -41,6 +41,10 @@ export interface TtsCloneResult {
   /** Script text with markup stripped, suitable for transcript display. */
   cleanedCaptionText?: string;
   errorKind?: TtsCloneErrorKind;
+  /**
+   * Shown in the command reply and returned to the model by the voice tool. An endpoint can echo the
+   * request key in its error body or headers, so those stay in the log and only the status goes here.
+   */
   details?: string;
 }
 
@@ -50,11 +54,15 @@ export interface TtsCloneRequest {
   script: string;
   /** Empty string for local endpoints that don't require auth. */
   apiKey: string;
+  /** Optional per-message delivery direction for clone engines that advertise instruction support. */
+  voiceInstructions?: string;
   chatterbox?: {
     turboEnabled: boolean;
     cfgWeight: number;
     exaggeration: number;
   };
+  /** Turn-level cancellation from /kill, merged with the synthesis timeout. */
+  abortSignal?: AbortSignal;
 }
 
 function resolveExtensionFromContentType(contentType: string): string {
@@ -106,9 +114,178 @@ function stripUnsupportedChatterboxTurboTags(text: string): string {
 }
 
 function isIrodoriTtsEndpoint(endpoint: CustomEndpointRow): boolean {
-  return [endpoint.label, endpoint.display_name, endpoint.model_name, endpoint.endpoint_url].some((value) =>
+  return [endpoint.label, endpoint.model_name, endpoint.endpoint_url].some((value) =>
     value?.toLowerCase().includes("irodori"),
   );
+}
+
+/**
+ * Label sniff for Chatterbox deployments, mirroring `isIrodoriTtsEndpoint`.
+ *
+ * The endpoint schema carries no engine identifier, so the only available signal is what the
+ * server manager typed into `/config`. Callers that expose a Chatterbox-only control gate on
+ * this: a control that silently changes nothing is worse than an absent one, and the absence
+ * is recoverable by renaming the endpoint.
+ */
+export function isChatterboxEndpoint(endpoint: CustomEndpointRow | null | undefined): boolean {
+  if (!endpoint) return false;
+  return [endpoint.label, endpoint.model_name, endpoint.endpoint_url].some((value) =>
+    value?.toLowerCase().includes("chatterbox"),
+  );
+}
+
+export interface TtsCloneBufferRequest {
+  endpoint: CustomEndpointRow;
+  /** Reference audio bytes, already normalized by the caller. */
+  refAudio: Buffer;
+  refText: string | null;
+  script: string;
+  /** Empty string for local endpoints that don't require auth. */
+  apiKey: string;
+  /** Optional per-message delivery direction for clone engines that advertise instruction support. */
+  voiceInstructions?: string;
+  chatterbox?: {
+    turboEnabled: boolean;
+    cfgWeight: number;
+    exaggeration: number;
+  };
+  /** Turn-level cancellation from /kill, merged with the synthesis timeout. */
+  abortSignal?: AbortSignal;
+}
+
+/**
+ * Calls a local TTS clone server with reference audio supplied directly.
+ *
+ * This is the core path: `/generate voice-message` synthesizes from an ad-hoc upload that has
+ * no `voice_samples` row, so it cannot go through the sample-loading wrapper below.
+ *
+ * 1. Strips markup from script according to the endpoint's `script_markup`.
+ * 2. POSTs to {endpoint_url}/synthesize with the base64 reference audio.
+ * 3. Returns the raw audio buffer and content-type.
+ */
+export async function synthesizeSpeechViaTtsCloneBuffer(request: TtsCloneBufferRequest): Promise<TtsCloneResult> {
+  const { endpoint, refAudio, refText, script, apiKey, voiceInstructions, chatterbox, abortSignal } = request;
+
+  const scriptMarkup = (endpoint.extra_config.script_markup as string | undefined) ?? "plain";
+  const supportsInstruct = Boolean(endpoint.extra_config.supports_instruct);
+  const preserveUnicodeEmojis = scriptMarkup === "emoji" || isIrodoriTtsEndpoint(endpoint);
+
+  // Prepare script: strip all bracket tags for "plain" endpoints and
+  //    standard Chatterbox, because only Turbo handles bracket descriptors.
+  //    Turbo gets a conservative whitelist so unsupported bracket text is not spoken aloud.
+  //    For other bracket-tags/emoji endpoints, strip only for the caption text.
+  let processedScript: string;
+  let captionText: string;
+  // Callers attach the persona's Chatterbox settings to every clone request, with Turbo defaulting
+  // on, so applying them unconditionally would strip Fish S2 Pro's free-form expression tags down
+  // to Turbo's whitelist.
+  const chatterboxTagRules = isChatterboxEndpoint(endpoint) ? chatterbox : undefined;
+  const shouldStripBracketTagsForTts = scriptMarkup === "plain" || chatterboxTagRules?.turboEnabled === false;
+  if (shouldStripBracketTagsForTts) {
+    processedScript = stripAllBracketTags(script);
+    captionText = processedScript;
+  } else if (chatterboxTagRules?.turboEnabled === true) {
+    processedScript = stripUnsupportedChatterboxTurboTags(script);
+    captionText = stripElevenLabsExpressionTags(processedScript);
+  } else {
+    processedScript = script;
+    captionText = stripElevenLabsExpressionTags(script);
+  }
+
+  processedScript = stripTtsUnsupportedEmojiAttempts(processedScript, { preserveUnicodeEmojis });
+  captionText = stripTtsUnsupportedEmojiAttempts(captionText, { preserveUnicodeEmojis });
+
+  if (!processedScript) {
+    return {
+      success: false,
+      errorKind: "invalid_request",
+      details: "Voice script was empty after removing unsupported emoji markup.",
+    };
+  }
+
+  const body: Record<string, unknown> = {
+    text: processedScript,
+    ref_audio: refAudio.toString("base64"),
+    ref_text: refText,
+    language: null,
+  };
+
+  if (chatterbox) {
+    body.chatterbox_turbo = chatterbox.turboEnabled;
+    body.cfg_weight = chatterbox.cfgWeight;
+    body.exaggeration = chatterbox.exaggeration;
+  }
+
+  if (supportsInstruct) {
+    body.instruct = voiceInstructions?.trim() || null;
+  }
+
+  const endpointUrl = endpoint.endpoint_url.replace(/\/+$/, "");
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  let response: Response;
+  try {
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), TTS_SYNTHESIZE_TIMEOUT_MS);
+    try {
+      response = await fetchUserRemoteUrl(`${endpointUrl}/synthesize`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: abortSignal ? AbortSignal.any([abortController.signal, abortSignal]) : abortController.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (error) {
+    const isTimeout = error instanceof Error && error.name === "AbortError" && !abortSignal?.aborted;
+    log.warn(`[TtsClone] Request to ${endpointUrl}/synthesize ${isTimeout ? "timed out" : "failed"}`, error);
+    return {
+      success: false,
+      errorKind: isTimeout ? "timeout" : "request_failed",
+      details: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (!response.ok) {
+    let errorDetails = `HTTP ${response.status}`;
+    try {
+      const errorBody = (await response.json()) as { error?: unknown; detail?: unknown };
+      const structuredDetail = stringifyErrorDetail(errorBody.error ?? errorBody.detail);
+      if (structuredDetail) errorDetails += `: ${structuredDetail}`;
+    } catch {}
+    log.warn(`[TtsClone] ${endpointUrl}/synthesize returned error: ${errorDetails}`);
+    return { success: false, errorKind: "request_failed", details: `HTTP ${response.status}` };
+  }
+
+  const rawContentType = response.headers.get("content-type") ?? "audio/wav";
+  // Bare MIME type only: Discord rejects waveform metadata for non-bare types.
+  const contentType = rawContentType.split(";")[0].trim();
+
+  if (!contentType.startsWith("audio/")) {
+    log.warn(`[TtsClone] Unexpected content-type from /synthesize: ${rawContentType}`);
+    return {
+      success: false,
+      errorKind: "invalid_response",
+      details: "The TTS server did not return audio.",
+    };
+  }
+
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+  if (audioBuffer.length === 0) {
+    return { success: false, errorKind: "invalid_response", details: "Empty audio response from TTS server." };
+  }
+
+  return {
+    success: true,
+    audioBuffer,
+    contentType,
+    extension: resolveExtensionFromContentType(contentType),
+    cleanedCaptionText: captionText,
+  };
 }
 
 /**
@@ -121,7 +298,7 @@ function isIrodoriTtsEndpoint(endpoint: CustomEndpointRow): boolean {
  * 5. Returns the raw audio buffer and content-type.
  */
 export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Promise<TtsCloneResult> {
-  const { endpoint, voiceSampleId, script, apiKey, chatterbox } = request;
+  const { endpoint, voiceSampleId, script, apiKey, voiceInstructions, chatterbox, abortSignal } = request;
 
   const voiceSample = await loadVoiceSampleById(voiceSampleId);
 
@@ -146,120 +323,14 @@ export async function synthesizeSpeechViaTtsClone(request: TtsCloneRequest): Pro
     };
   }
 
-  const scriptMarkup = (endpoint.extra_config.script_markup as string | undefined) ?? "plain";
-  const supportsInstruct = Boolean(endpoint.extra_config.supports_instruct);
-  const preserveUnicodeEmojis = scriptMarkup === "emoji" || isIrodoriTtsEndpoint(endpoint);
-
-  // Prepare script: strip all bracket tags for "plain" endpoints and
-  //    standard Chatterbox, because only Turbo handles bracket descriptors.
-  //    Turbo gets a conservative whitelist so unsupported bracket text is not spoken aloud.
-  //    For other bracket-tags/emoji endpoints, strip only for the caption text.
-  let processedScript: string;
-  let captionText: string;
-  const shouldStripBracketTagsForTts = scriptMarkup === "plain" || chatterbox?.turboEnabled === false;
-  if (shouldStripBracketTagsForTts) {
-    processedScript = stripAllBracketTags(script);
-    captionText = processedScript;
-  } else if (chatterbox?.turboEnabled === true) {
-    processedScript = stripUnsupportedChatterboxTurboTags(script);
-    captionText = stripElevenLabsExpressionTags(processedScript);
-  } else {
-    processedScript = script;
-    captionText = stripElevenLabsExpressionTags(script);
-  }
-
-  processedScript = stripTtsUnsupportedEmojiAttempts(processedScript, { preserveUnicodeEmojis });
-  captionText = stripTtsUnsupportedEmojiAttempts(captionText, { preserveUnicodeEmojis });
-
-  if (!processedScript) {
-    return {
-      success: false,
-      errorKind: "invalid_request",
-      details: "Voice script was empty after removing unsupported emoji markup.",
-    };
-  }
-
-  const body: Record<string, unknown> = {
-    text: processedScript,
-    ref_audio: refAudioBuffer.toString("base64"),
-    ref_text: sample.ref_text ?? null,
-    language: null,
-  };
-
-  if (chatterbox) {
-    body.chatterbox_turbo = chatterbox.turboEnabled;
-    body.cfg_weight = chatterbox.cfgWeight;
-    body.exaggeration = chatterbox.exaggeration;
-  }
-
-  if (supportsInstruct) {
-    body.instruct = null;
-  }
-
-  const endpointUrl = endpoint.endpoint_url.replace(/\/+$/, "");
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
-  }
-
-  let response: Response;
-  try {
-    const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), TTS_SYNTHESIZE_TIMEOUT_MS);
-    try {
-      response = await fetchUserRemoteUrl(`${endpointUrl}/synthesize`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: abortController.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (error) {
-    const isTimeout = error instanceof Error && error.name === "AbortError";
-    log.warn(`[TtsClone] Request to ${endpointUrl}/synthesize ${isTimeout ? "timed out" : "failed"}`, error);
-    return {
-      success: false,
-      errorKind: isTimeout ? "timeout" : "request_failed",
-      details: error instanceof Error ? error.message : String(error),
-    };
-  }
-
-  if (!response.ok) {
-    let errorDetails = `HTTP ${response.status}`;
-    try {
-      const errorBody = (await response.json()) as { error?: unknown; detail?: unknown };
-      const structuredDetail = stringifyErrorDetail(errorBody.error ?? errorBody.detail);
-      if (structuredDetail) errorDetails += `: ${structuredDetail}`;
-    } catch {}
-    log.warn(`[TtsClone] ${endpointUrl}/synthesize returned error: ${errorDetails}`);
-    return { success: false, errorKind: "request_failed", details: errorDetails };
-  }
-
-  const rawContentType = response.headers.get("content-type") ?? "audio/wav";
-  // Bare MIME type only: Discord rejects waveform metadata for non-bare types.
-  const contentType = rawContentType.split(";")[0].trim();
-
-  if (!contentType.startsWith("audio/")) {
-    log.warn(`[TtsClone] Unexpected content-type from /synthesize: ${rawContentType}`);
-    return {
-      success: false,
-      errorKind: "invalid_response",
-      details: `Expected audio/* content-type, got: ${rawContentType}`,
-    };
-  }
-
-  const audioBuffer = Buffer.from(await response.arrayBuffer());
-  if (audioBuffer.length === 0) {
-    return { success: false, errorKind: "invalid_response", details: "Empty audio response from TTS server." };
-  }
-
-  return {
-    success: true,
-    audioBuffer,
-    contentType,
-    extension: resolveExtensionFromContentType(contentType),
-    cleanedCaptionText: captionText,
-  };
+  return synthesizeSpeechViaTtsCloneBuffer({
+    endpoint,
+    refAudio: refAudioBuffer,
+    refText: sample.ref_text ?? null,
+    script,
+    apiKey,
+    ...(voiceInstructions ? { voiceInstructions } : {}),
+    ...(chatterbox ? { chatterbox } : {}),
+    ...(abortSignal ? { abortSignal } : {}),
+  });
 }

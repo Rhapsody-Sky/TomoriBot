@@ -18,7 +18,6 @@ for you.
 ## Prerequisites
 
 - [Bun](https://bun.sh/)
-- Node.js v20+ (used for MCP tooling)
 - PostgreSQL installed natively, or run in a Docker container (see step 2)
 
 PostgreSQL schema, `pgcrypto`, seeds, and migrations initialize automatically on bot startup.
@@ -41,11 +40,15 @@ cp .env.example .env
 
 Required:
 
-- `DISCORD_TOKEN` — your Discord bot token (enable the `GuildMembers`, `MessageContent`, and
+- `DISCORD_TOKEN`: your Discord bot token (enable the `GuildMembers`, `MessageContent`, and
   `GuildPresences` privileged intents).
-- `CRYPTO_SECRET` — a 32-character encryption key (used to encrypt stored API keys).
+- `CRYPTO_SECRET`: a 32-character encryption key (used to encrypt stored API keys).
 - PostgreSQL connection: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`,
   `POSTGRES_PASSWORD`, `POSTGRES_DB`.
+
+Keep a protected copy of your encryption secret separately from database backups. New backups contain no `.env`. For rotation, use `CRYPTO_SECRET_V1`, `CRYPTO_SECRET_V2`, or any later positive integer version, with optional `CRYPTO_SECRET_CURRENT` selection. `CRYPTO_SECRET` remains V1. Startup and maintenance commands load the same source: local environment values in development, or mounted JSON / AWS Secrets Manager in production. See [Rotating encryption keys](/self-hosting/maintenance/#rotating-encryption-keys) before replacing a secret.
+
+In JSON secret sources, master keys must be strings. `CRYPTO_SECRET_CURRENT` accepts a string such as `"2"` or a numeric positive safe integer such as `2` that names an available version.
 
 :::note[No native PostgreSQL?]
 Run just the database in a container, then point the `POSTGRES_*` values at it:
@@ -64,7 +67,11 @@ still runs on host Bun. For a fully containerized bot and database, use
 :::
 
 Optional tuning lives in `.env.optional.example`. Copy over any values you want to
-customize (limits, timeouts, feature toggles, sidecar URLs, etc.).
+customize (limits, timeouts, feature toggles, local server URLs, etc.).
+
+Keep the `data/` directory on persistent storage. Local files can include persona avatars and sprites
+in `data/avatars/`, voice samples in `data/voice-samples/`, and custom expressions in
+`data/custom-expressions/`. The database is stored separately, so back it up alongside these files.
 
 ## 3. Run
 
@@ -72,11 +79,12 @@ customize (limits, timeouts, feature toggles, sidecar URLs, etc.).
 bun run dev
 ```
 
-When you see `TomoriBot up and running!`, go to Discord and run `/config setup` in your
-server to add your AI provider key and initialize the bot. See the
-[Quickstart](/introduction/quickstart/) for the in-Discord side.
+When you see `TomoriBot up and running!`, go to Discord and run `/setup` in your
+server to connect an AI provider and initialize the bot. The command opens a guided
+checklist panel, and nothing is written until you press `Finish Setup`; see the
+[Quickstart](/introduction/quickstart/) for the steps.
 
-Use `bun run launch` instead of `bun run dev` if you want optional sidecars (SearXNG, Crawl4AI, local TTS/STT) launched alongside the bot:
+Use `bun run launch` instead of `bun run dev` if you want optional local servers (SearXNG, Crawl4AI, local TTS/STT) launched alongside the bot:
 
 ```sh
 bun run launch --searxng --crawl4ai
@@ -84,8 +92,9 @@ bun run launch --help        # see all flags
 ```
 
 ## Optional extras (the manual "Full Install")
+<!-- anchor: optional-extras-the-manual-full-install -->
 
-The [setup wizard](/self-hosting/setup-wizard/)'s **Full Install** path layers four lightweight extras on
+The [setup wizard](/self-hosting/setup-wizard/)'s `Full Install` path layers four lightweight extras on
 top of the base install. None are required to run the bot, but each unlocks a feature. If
 you're installing by hand, add whichever you want:
 
@@ -101,7 +110,7 @@ sudo apt-get install -y postgresql-16-pgvector
 ```
 
 Then enable it once on your database. Connect with `psql` using the `POSTGRES_*` values from
-your `.env` — it prompts for `POSTGRES_PASSWORD`:
+your `.env`: it prompts for `POSTGRES_PASSWORD`:
 
 :::note[Windows]
 There is no prebuilt pgvector package for native Windows PostgreSQL. Installing it means
@@ -135,7 +144,7 @@ also required on the target database before restoring a backup; see
 Docker Compose from this repo already configures it.
 
 :::caution[Not required for reminders or triggers]
-`pg_cron` is **purely housekeeping** as it only cleans up stale rows. Reminder delivery and
+`pg_cron` performs purely housekeeping as it only cleans up stale rows. Reminder delivery and
 random triggers run in the app itself, so those features work with or without `pg_cron`.
 :::
 
@@ -145,7 +154,7 @@ For a self-managed PostgreSQL, find your active config file:
 SHOW config_file;
 ```
 
-Enable the extension in `postgresql.conf` — append to `shared_preload_libraries` if it
+Enable the extension in `postgresql.conf`: append to `shared_preload_libraries` if it
 already lists other libraries:
 
 ```ini
@@ -180,8 +189,8 @@ HF_TOKEN=hf_xxx bun run setup:tokenizers
 
 Without this step logit bias is silently disabled and everything else works normally.
 
-The secure `fetch_url` fallback runs in process and needs no Python package. DuckDuckGo/IAsk
-`web_search` ships with `bun install --frozen-lockfile`, so it also needs no extra installation.
+The secure `fetch_url` fallback and the DuckDuckGo `web_search` fallback both run in process, so
+neither needs an extra installation.
 
 ## Maintenance, updating & backups
 

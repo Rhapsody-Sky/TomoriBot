@@ -6,6 +6,7 @@ export type RemoteUrlPolicyFailureCode =
   | "REDIRECT_FORBIDDEN"
   | "REDIRECT_LIMIT_EXCEEDED"
   | "REDIRECT_LOCATION_MISSING"
+  | "REDIRECT_CREDENTIALS_WITHHELD"
   | "ADDRESS_NOT_PINNABLE";
 
 /**
@@ -131,9 +132,48 @@ function isRedirectStatus(status: number): status is 301 | 302 | 303 | 307 | 308
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-function buildRedirectRequestInit(requestInit: RequestInit, status: number): RequestInit {
+function isConnectionRefusedTransportError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as Record<string, unknown>;
+  if (record.code === "ConnectionRefused" || record.code === "ECONNREFUSED") return true;
+  return isConnectionRefusedTransportError(record.cause);
+}
+
+/**
+ * Headers that carry no credential and may follow a redirect to another origin. Every other header
+ * is dropped at an origin change, because callers attach provider keys under custom names
+ * (`x-api-key`, `x-goog-api-key`) and a denylist would forward the next one somebody adds.
+ */
+const CROSS_ORIGIN_REDIRECT_HEADERS = new Set([
+  "accept",
+  "accept-language",
+  "content-language",
+  "content-type",
+  "user-agent",
+]);
+
+/** Statuses that mean the redirected origin wanted the credential this fetcher withheld. */
+const CREDENTIAL_CHALLENGE_STATUSES = new Set([401, 403, 407]);
+
+function hasUrlCredentials(url: URL): boolean {
+  return url.username !== "" || url.password !== "";
+}
+
+function hasCrossOriginUnsafeHeaders(headers: Headers): boolean {
+  for (const name of headers.keys()) {
+    if (!CROSS_ORIGIN_REDIRECT_HEADERS.has(name)) return true;
+  }
+  return false;
+}
+
+function buildRedirectRequestInit(requestInit: RequestInit, status: number, crossOrigin: boolean): RequestInit {
   const currentMethod = (requestInit.method ?? "GET").toUpperCase();
   const headers = mergeHeaders(requestInit.headers);
+  if (crossOrigin) {
+    for (const name of [...headers.keys()]) {
+      if (!CROSS_ORIGIN_REDIRECT_HEADERS.has(name)) headers.delete(name);
+    }
+  }
 
   if (status === 303 || ((status === 301 || status === 302) && currentMethod === "POST")) {
     headers.delete("content-length");
@@ -154,6 +194,35 @@ function buildRedirectRequestInit(requestInit: RequestInit, status: number): Req
   };
 }
 
+function credentialsWithheldError(url: URL, reason: string): RemoteUrlPolicyError {
+  return new RemoteUrlPolicyError(
+    `Credentials were not forwarded to '${url.origin}' because ${reason}. Configure the endpoint with its final URL directly.`,
+    url.hostname,
+    "REDIRECT_CREDENTIALS_WITHHELD",
+  );
+}
+
+/**
+ * Refuses a cross-origin hop that cannot be made anonymous, before anything is sent to it.
+ *
+ * Origin equality (scheme, hostname, effective port) is the trust unit: the operator configured
+ * one origin, and a redirect response cannot extend that trust. Other cross-origin hops continue
+ * anonymously so signed asset URLs still download.
+ *
+ * @returns Whether the hop drops credentials the request carried.
+ */
+export function checkCrossOriginRedirect(currentUrl: URL, nextUrl: URL, requestInit: RequestInit): boolean {
+  if (hasUrlCredentials(nextUrl)) {
+    throw credentialsWithheldError(nextUrl, "the redirect target embeds a username or password");
+  }
+  const carriesCredentials =
+    hasUrlCredentials(currentUrl) || hasCrossOriginUnsafeHeaders(mergeHeaders(requestInit.headers));
+  if (carriesCredentials && currentUrl.protocol === "https:" && nextUrl.protocol === "http:") {
+    throw credentialsWithheldError(nextUrl, "the redirect downgrades HTTPS to HTTP");
+  }
+  return carriesCredentials;
+}
+
 export async function resolveValidatedUserRedirect(
   currentUrl: URL,
   location: string,
@@ -172,13 +241,20 @@ export async function resolveValidatedUserRedirect(
   return nextUrl;
 }
 
+interface RedirectState {
+  redirectCount: number;
+  strict: boolean;
+  allowPrivateNetwork: boolean;
+  /** Set once a hop dropped credentials; they are never reattached, even if a later hop returns. */
+  credentialsWithheld: boolean;
+}
+
 async function fetchUserRemoteUrlInternal(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
-  redirectCount: number,
-  strict: boolean,
-  allowPrivateNetwork: boolean,
+  state: RedirectState,
 ): Promise<Response> {
+  const { redirectCount, strict, allowPrivateNetwork } = state;
   const { url, requestInit } = await normalizeRequestInput(input, init);
   const validation = await validateRemoteUrl(url.toString(), { strict, allowPrivateNetwork });
   if (!validation.valid) {
@@ -192,24 +268,49 @@ async function fetchUserRemoteUrlInternal(
   const redirectPolicy = requestInit.redirect ?? "follow";
   let fetchUrl = url;
   let fetchInit: BunFetchRequestInit = { ...requestInit, redirect: "manual" };
+  let response: Response | null = null;
 
   if (isIP(url.hostname) === 0) {
-    const pinnedAddress = validation.resolvedAddresses?.find((address) => isIP(address) !== 0);
-    if (!pinnedAddress) {
+    const pinnedAddresses = [...new Set(validation.resolvedAddresses?.filter((address) => isIP(address) !== 0) ?? [])];
+    if (pinnedAddresses.length === 0) {
       throw new RemoteUrlPolicyError(
         `Remote URL validation did not return a pinnable address for '${url.hostname}'.`,
         url.hostname,
         "ADDRESS_NOT_PINNABLE",
       );
     }
-    ({ url: fetchUrl, init: fetchInit } = createPinnedFetchRequest(url, requestInit, pinnedAddress));
+    const method = (requestInit.method ?? "GET").toUpperCase();
+    const canRetryAfterAnyTransportFailure = method === "GET" || method === "HEAD";
+    let lastTransportError: unknown;
+    for (const [index, pinnedAddress] of pinnedAddresses.entries()) {
+      ({ url: fetchUrl, init: fetchInit } = createPinnedFetchRequest(url, requestInit, pinnedAddress));
+      try {
+        response = await fetch(fetchUrl, fetchInit);
+        lastTransportError = undefined;
+        break;
+      } catch (error) {
+        lastTransportError = error;
+        const isFinalAddress = index === pinnedAddresses.length - 1;
+        const canRetry = canRetryAfterAnyTransportFailure || isConnectionRefusedTransportError(error);
+        if (!canRetry || requestInit.signal?.aborted || isFinalAddress) throw error;
+      }
+    }
+    if (lastTransportError !== undefined) throw lastTransportError;
+  } else {
+    response = await fetch(fetchUrl, fetchInit);
+  }
+  if (!response) {
+    throw new Error(`Remote request to '${url.hostname}' completed without a response.`);
   }
 
-  const response = await fetch(fetchUrl, fetchInit);
   // Do not expose the transport-level pinned IP to callers or redirect logic.
   Object.defineProperty(response, "url", { value: url.toString() });
 
   if (!isRedirectStatus(response.status)) {
+    if (state.credentialsWithheld && CREDENTIAL_CHALLENGE_STATUSES.has(response.status)) {
+      await response.body?.cancel();
+      throw credentialsWithheldError(url, `the redirect left the configured origin and '${url.origin}' requires them`);
+    }
     return response;
   }
 
@@ -245,18 +346,21 @@ async function fetchUserRemoteUrlInternal(
   }
 
   const nextUrl = await resolveValidatedUserRedirect(url, location, strict, allowPrivateNetwork);
+  const crossOrigin = url.origin !== nextUrl.origin;
+  const withholdsCredentials = crossOrigin && checkCrossOriginRedirect(url, nextUrl, requestInit);
   return await fetchUserRemoteUrlInternal(
     nextUrl,
-    buildRedirectRequestInit(requestInit, response.status),
-    redirectCount + 1,
-    strict,
-    allowPrivateNetwork,
+    buildRedirectRequestInit(requestInit, response.status, crossOrigin),
+    {
+      ...state,
+      redirectCount: redirectCount + 1,
+      credentialsWithheld: state.credentialsWithheld || withholdsCredentials,
+    },
   );
 }
 
 export interface FetchUserRemoteUrlOptions {
-  /** Enforce the private/link-local/loopback blocklist even outside production.
-   *  Pass true for personal (user-scoped) endpoint calls. */
+  /** Enforce the private/link-local/loopback blocklist even outside production. */
   strict?: boolean;
   /** Permit private/internal targets even in production, aligning with the
    *  `fetch_url` `FETCH_URL_ALLOW_PRIVATE_NETWORK` opt-in. The always-on
@@ -269,11 +373,10 @@ export async function fetchUserRemoteUrl(
   init?: RequestInit,
   options?: FetchUserRemoteUrlOptions,
 ): Promise<Response> {
-  return await fetchUserRemoteUrlInternal(
-    input,
-    init,
-    0,
-    options?.strict === true,
-    options?.allowPrivateNetwork === true,
-  );
+  return await fetchUserRemoteUrlInternal(input, init, {
+    redirectCount: 0,
+    strict: options?.strict === true,
+    allowPrivateNetwork: options?.allowPrivateNetwork === true,
+    credentialsWithheld: false,
+  });
 }

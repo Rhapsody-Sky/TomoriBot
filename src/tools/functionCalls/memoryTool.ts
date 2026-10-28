@@ -7,7 +7,9 @@ import { log } from "../../utils/misc/logger";
 import { BaseTool, type ToolContext, type ToolResult, type ToolParameterSchema } from "../../types/tool/interfaces";
 import { invalidateTomoriStateCache } from "../../utils/cache/tomoriStateCache";
 import { invalidateUserCache } from "../../utils/cache/userCache";
-import { resolveUserTarget } from "@/utils/discord/targetResolver";
+import { resolveTriggererDiscordId, resolveUserTarget } from "@/utils/discord/targetResolver";
+import { getMessageProxyHostProtection } from "@/utils/messageProxy/hostProtection";
+import { renderMemoryNoticeContent, memoryServerDiscId } from "./memoryNoticeContent";
 
 /**
  * Tool for remembering and learning new information during conversations
@@ -94,12 +96,8 @@ export class MemoryTool extends BaseTool {
     const requestedTargetUser =
       targetUserArg?.trim() || legacyTargetUserNicknameArg?.trim() || legacyTargetUserDiscordIdArg?.trim();
 
-    const { MEMORY_NOTICE_PREVIEW_LIMIT, sendMemoryEmbedWithExpand } = await import(
-      "../../utils/discord/expandableEmbedNotice"
-    );
+    const { sendMemoryEmbedWithExpand } = await import("../../utils/discord/expandableEmbedNotice");
     const { ColorCode } = await import("../../utils/misc/logger");
-    const { convertMentions } = await import("../../utils/text/contextBuilder");
-    const { buildTextPreview } = await import("@/utils/text/textPreview");
     const { sanitizeUnknownTemplatePlaceholders } = await import("@/utils/text/processors/mentionProcessor");
 
     const { validateMemoryContent } = await import("@/utils/misc/memoryLimits");
@@ -108,7 +106,7 @@ export class MemoryTool extends BaseTool {
     );
 
     const tomoriState = context.tomoriState;
-    const resolvedUserId = context.message?.author?.id || context.userId;
+    const resolvedUserId = resolveTriggererDiscordId(context);
     const userRow = resolvedUserId ? await userRepository.loadByDiscordId(resolvedUserId) : null;
 
     if (!tomoriState || !userRow?.user_id || !tomoriState.server_id || !tomoriState.persona_id || !resolvedUserId) {
@@ -227,7 +225,7 @@ export class MemoryTool extends BaseTool {
       }
     }
 
-    // Sanitize unknown {word} placeholders (e.g. {bredrumb}), so the LLM sometimes wraps
+    // Sanitize unknown {word} placeholders (e.g. {zallya}), so the LLM sometimes wraps
     // usernames in braces imitating {user}. Strip the braces so the name appears plainly.
     const memoryContent = sanitizeUnknownTemplatePlaceholders(memoryContentArg.trim());
 
@@ -281,7 +279,7 @@ export class MemoryTool extends BaseTool {
               scope: "server_wide",
               current_count: serverLimitCheck.currentCount,
               max_allowed: serverLimitCheck.maxAllowed,
-              reason: `Server memory limit of ${serverLimitCheck.maxAllowed} memories has been reached. Please inform the user that they need to use '/memory server remove' to remove some memories before I can learn new ones.`,
+              reason: `Server memory limit of ${serverLimitCheck.maxAllowed} memories has been reached. Please inform the user that they need to use '/memories' to remove some memories before I can learn new ones.`,
             },
           };
         }
@@ -295,29 +293,27 @@ export class MemoryTool extends BaseTool {
         );
 
         if (dbResult) {
-          log.success(`Tomori self-taught a server-wide memory (ID: ${dbResult.server_memory_id}): "${memoryContent}"`);
-
-          // Process memory content for display (convert {user} and {bot} tokens to actual names)
-          // Security: Ensure we have a valid server ID to prevent user data mixing
-          const serverId = "guild" in context.channel ? context.channel.guild.id : context.userId;
-          if (!serverId) {
-            throw new Error("Critical security error: No valid server or user ID available for memory processing");
-          }
-          const processedMemoryContent = await convertMentions(
-            memoryContent,
-            context.client,
-            serverId,
-            userRow.user_nickname, // Use triggerer's name for {user} replacement
-            tomoriState.persona_nickname, // Use bot's current nickname for {bot} replacement
-            tomoriState?.config.personal_memories_enabled,
+          log.success(
+            `Tomori self-taught a server memory for her own persona lineage (ID: ${dbResult.server_memory_id}): "${memoryContent}"`,
           );
-          const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
+
+          const singleServerId = memoryServerDiscId(
+            context,
+            "Critical security error: No valid server or user ID available for memory processing",
+          );
+          const { processedContent: processedMemoryContent, preview: memoryPreview } = await renderMemoryNoticeContent({
+            content: memoryContent,
+            client: context.client,
+            serverId: singleServerId,
+            userName: userRow.user_nickname ?? context.message?.author.displayName ?? userRow.user_disc_id,
+            botNickname: tomoriState.persona_nickname,
+            personalMemoriesEnabled: tomoriState?.config.personal_memories_enabled,
+          });
 
           // The expand helper uses the same preview limit, letting users read
           // the full memory ephemerally without channel clutter.
           await sendMemoryEmbedWithExpand(
-            context.channel,
-            context.locale,
+            context,
             {
               color: ColorCode.SUCCESS,
               titleKey: "genai.self_teach.server_memory_learned_title",
@@ -331,15 +327,13 @@ export class MemoryTool extends BaseTool {
               footerKey: "genai.self_teach.server_memory_footer",
             },
             processedMemoryContent,
-            {
-              webhook: context.webhook,
-              personaUsername: context.personaUsername,
-              personaAvatarUrl: context.personaAvatarUrl,
-            },
+            dbResult.server_memory_id === undefined
+              ? undefined
+              : { kind: "server_memory", id: dbResult.server_memory_id },
           );
 
           // Invalidate TomoriState cache so next message includes new memory
-          invalidateTomoriStateCache(serverId);
+          invalidateTomoriStateCache(singleServerId);
 
           return {
             success: true,
@@ -353,18 +347,18 @@ export class MemoryTool extends BaseTool {
           };
         }
 
-        log.error("Failed to save server-wide memory via self-teach (DB error)");
+        log.error("Failed to save server memory via self-teach (DB error)");
         return {
           success: false,
-          error: "Database operation failed to save server-wide memory",
+          error: "Database operation failed to save server memory",
           data: {
             status: "memory_save_failed_db_error",
             scope: "server_wide",
-            reason: "Database operation failed to save server-wide memory",
+            reason: "Database operation failed to save server memory",
           },
         };
       } catch (error) {
-        log.error("Database error during server-wide memory save", error as Error);
+        log.error("Database error during server memory save", error as Error);
         return {
           success: false,
           error: "Database error occurred while saving memory",
@@ -391,7 +385,32 @@ export class MemoryTool extends BaseTool {
             },
           };
         }
-        const targetUserDisplayName = resolvedTargetUserLabel || targetUserRow.user_nickname;
+        const targetUserDisplayName =
+          resolvedTargetUserLabel || targetUserRow.user_nickname || resolvedTargetUserId || "user";
+        const contextServerDiscId = "guild" in context.channel ? context.channel.guild.id : context.userId;
+        const messageProxyHostProtection = await getMessageProxyHostProtection(
+          resolvedTargetUserId as string,
+          contextServerDiscId,
+        );
+        if (messageProxyHostProtection.protected) {
+          log.info(
+            `Self-teach blocked: message-proxy identity ${resolvedTargetUserId} is shielded by host ${messageProxyHostProtection.hostUserDiscId} (${messageProxyHostProtection.reason})`,
+          );
+          return {
+            success: false,
+            error: `Cannot save personal memory: ${targetUserDisplayName} has privacy restrictions.`,
+            data: {
+              status: "memory_save_failed_privacy_restricted",
+              scope: "target_user",
+              reason:
+                messageProxyHostProtection.reason === "host_unresolved"
+                  ? `The host accounts for ${targetUserDisplayName} could not be resolved. I cannot save personal memories until their privacy restrictions can be checked.`
+                  : messageProxyHostProtection.reason === "host_blacklisted"
+                    ? `The host account for ${targetUserDisplayName} is blacklisted in this server. I cannot save personal memories for its message-proxy identities.`
+                    : `The host account for ${targetUserDisplayName} has full privacy enabled. I cannot save personal memories for its message-proxy identities.`,
+            },
+          };
+        }
 
         // Check if user has opted out of personalization (privacy setting)
         const { PrivacyLevel } = await import("../../types/db/schema");
@@ -408,7 +427,7 @@ export class MemoryTool extends BaseTool {
             data: {
               status: "memory_save_failed_privacy_restricted",
               scope: "target_user",
-              reason: `The user ${targetUserDisplayName} has chosen to restrict personal memory storage. I cannot save personal memories about them unless they change their privacy settings using '/personal privacy'.`,
+              reason: `The user ${targetUserDisplayName} has chosen to restrict personal memory storage. I cannot save personal memories about them unless they change their privacy settings using '/personal config'.`,
             },
           };
         }
@@ -429,7 +448,7 @@ export class MemoryTool extends BaseTool {
               target_user: targetUserDisplayName,
               current_count: personalLimitCheck.currentCount,
               max_allowed: personalLimitCheck.maxAllowed,
-              reason: `Personal memory limit of ${personalLimitCheck.maxAllowed} memories has been reached for this user. Please inform the user that they need to use '/memory personal remove' to remove some of their memories before I can learn new ones about them.`,
+              reason: `Personal memory limit of ${personalLimitCheck.maxAllowed} memories has been reached for this user. Please inform the user that they need to use '/personal memories' to remove some of their memories before I can learn new ones about them.`,
             },
           };
         }
@@ -446,31 +465,29 @@ export class MemoryTool extends BaseTool {
             `Tomori self-taught a personal memory for ${targetUserDisplayName} (Discord ID: ${resolvedTargetUserId}, Internal ID: ${targetUserRow.user_id}): "${memoryContent}"`,
           );
 
-          // Process memory content for display (convert {user} and {bot} tokens to actual names)
           // Security: Ensure we have a valid server ID to prevent user data mixing
-          const serverId = "guild" in context.channel ? context.channel.guild.id : context.userId;
-          if (!serverId) {
-            throw new Error("Critical security error: No valid server or user ID available for memory processing");
-          }
-          const processedMemoryContent = await convertMentions(
-            memoryContent,
-            context.client,
-            serverId,
-            targetUserDisplayName, // Use target user's name for {user} replacement
-            tomoriState.persona_nickname, // Use bot's current nickname for {bot} replacement
-            tomoriState?.config.personal_memories_enabled,
+          const serverId = memoryServerDiscId(
+            context,
+            "Critical security error: No valid server or user ID available for memory processing",
           );
-          const memoryPreview = buildTextPreview(processedMemoryContent, MEMORY_NOTICE_PREVIEW_LIMIT);
+          const { processedContent: processedMemoryContent, preview: memoryPreview } = await renderMemoryNoticeContent({
+            content: memoryContent,
+            client: context.client,
+            serverId,
+            userName: targetUserDisplayName,
+            botNickname: tomoriState.persona_nickname,
+            personalMemoriesEnabled: tomoriState?.config.personal_memories_enabled,
+          });
 
           // Determine footer key based on personalization settings
           const personalizationEnabled = tomoriState?.config.personal_memories_enabled ?? true;
-          // Security: Ensure we have a valid server ID to prevent user data mixing
-          const serverDiscId = "guild" in context.channel ? context.channel.guild.id : context.userId;
-          if (!serverDiscId) {
-            throw new Error("Critical security error: No valid server or user ID available for blacklist checking");
-          }
+          const serverDiscId = memoryServerDiscId(
+            context,
+            "Critical security error: No valid server or user ID available for blacklist checking",
+          );
           const targetUserIsBlacklisted =
-            (await userRepository.isBlacklisted(serverDiscId, resolvedTargetUserId as string)) ?? false;
+            ((await userRepository.isBlacklisted(serverDiscId, resolvedTargetUserId as string)) ?? false) ||
+            (await getMessageProxyHostProtection(resolvedTargetUserId as string, serverDiscId)).protected;
 
           let personalMemoryFooterKey: string;
           if (!personalizationEnabled) {
@@ -488,8 +505,7 @@ export class MemoryTool extends BaseTool {
           // Send notification notice (non-fatal: missing permissions won't block the memory save).
           try {
             await sendMemoryEmbedWithExpand(
-              context.channel,
-              context.locale,
+              context,
               {
                 color: ColorCode.SUCCESS,
                 titleKey: "genai.self_teach.personal_memory_learned_title",
@@ -505,11 +521,9 @@ export class MemoryTool extends BaseTool {
                 footerKey: personalMemoryFooterKey,
               },
               processedMemoryContent,
-              {
-                webhook: context.webhook,
-                personaUsername: context.personaUsername,
-                personaAvatarUrl: context.personaAvatarUrl,
-              },
+              dbResult.personal_memory_id === undefined
+                ? undefined
+                : { kind: "personal_memory", id: dbResult.personal_memory_id },
             );
           } catch (embedError) {
             log.warn("Failed to send personal memory notification notice (non-fatal)", embedError as Error);

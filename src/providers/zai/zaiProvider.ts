@@ -1,3 +1,4 @@
+import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type {
   AnyThreadChannel,
   BaseGuildTextChannel,
@@ -14,7 +15,7 @@ import { ZaiStreamAdapter, type ZaiStreamConfig } from "@/providers/zai/zaiStrea
 import { getZaiToolAdapter } from "@/providers/zai/zaiToolAdapter";
 import {
   createOpenAICompatibleHttpError,
-  normalizeOpenAICompatibleProviderError,
+  reportOpenAICompatibleKeyValidationFailure,
 } from "@/providers/openaiCompatible/openaiCompatibleErrorFormatter";
 import { callZaiStructuredJSON } from "@/providers/zai/zaiStructuredOutput";
 import { generateZaiNativeImage } from "@/providers/zai/zaiImageGeneration";
@@ -23,8 +24,6 @@ import type { TomoriState } from "@/types/db/schema";
 import type { StructuredContextItem } from "@/types/misc/context";
 import { generateConversationSummaryZai, generateRoleplaySummaryZai } from "@/providers/zai/compactGenerator";
 import { generatePresetFromPromptZai } from "@/providers/zai/presetGenerator";
-import { isBraveSearchAvailable } from "@/tools/restAPIs/brave/braveSearchService";
-import { getMCPManager } from "@/utils/mcp/mcpManager";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import type {
   CompactConversationResult,
@@ -60,6 +59,7 @@ import { applyStreamContextAvailability } from "@/tools/availability";
 import { log } from "@/utils/misc/logger";
 import { buildRuntimeLogitBiasMapForLlm } from "@/utils/provider/logitBiasResolver";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
 const DEFAULT_ZAI_MODEL = "zai/glm-4.7";
 
@@ -113,10 +113,9 @@ export class ZaiProvider
 
       return { valid: true };
     } catch (error) {
-      log.error("Z.ai API key validation failed", error as Error);
       return {
         valid: false,
-        error: normalizeOpenAICompatibleProviderError(error, {
+        error: await reportOpenAICompatibleKeyValidationFailure(error, "zai", "Z.ai API key validation failed", {
           errorMessagePrefix: "Z.ai API error",
         }),
       };
@@ -166,12 +165,17 @@ export class ZaiProvider
     tomoriState: TomoriState,
     streamingContext?: StreamingContext,
   ): Promise<Array<Record<string, unknown>>> {
-    if (!tomoriState.llm.has_tools) {
-      log.info("Z.ai provider: Model does not support tools (seeded capability)");
+    if (!resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
+      log.info(
+        `Z.ai provider: Tools unavailable (tool_use_enabled=${tomoriState.config.tool_use_enabled}, has_tools=${tomoriState.llm.has_tools})`,
+      );
       return [];
     }
 
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -180,7 +184,11 @@ export class ZaiProvider
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -193,6 +201,7 @@ export class ZaiProvider
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -201,13 +210,18 @@ export class ZaiProvider
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("zai", toolStateForContext);
 
@@ -224,6 +238,7 @@ export class ZaiProvider
         providerLabel: "Z.ai provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -259,7 +274,7 @@ export class ZaiProvider
       apiKey,
       temperature: tomoriState.config.llm_temperature,
       disabledParams: tomoriState.config.llm_disabled_params ?? [],
-      maxOutputTokens: tomoriState.config.llm_max_output_tokens ?? 4096,
+      maxOutputTokens: await resolveRequestMaxOutputTokens(tomoriState),
       endpointUrl: ZAI_GENERAL_CHAT_COMPLETIONS_URL,
       seesImages: tomoriState.llm.sees_images,
       seesVideos: tomoriState.llm.sees_videos,
@@ -271,7 +286,7 @@ export class ZaiProvider
       config.logitBias = runtimeLogitBias;
     }
 
-    if (tomoriState.llm.has_tools) {
+    if (resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
       config.tools = await this.getTools(tomoriState);
     }
 
@@ -335,7 +350,7 @@ export class ZaiProvider
       };
 
       // Z.ai uses a single endpoint, so no beta URL needed for prefill
-      if (streamingContext && tomoriState.llm.has_tools) {
+      if (streamingContext && resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("ZaiProvider: Reloading tools with streaming context for context-aware availability");
         streamConfig.tools = await this.getTools(tomoriState, streamingContext);
       }
@@ -391,15 +406,6 @@ export class ZaiProvider
       return undefined;
     }
 
-    const hasBraveApiKey = await isBraveSearchAvailable(request.tomoriState.server_id);
-
-    if (!hasBraveApiKey) {
-      const mcpManager = getMCPManager();
-      if (!mcpManager.isReady()) {
-        await mcpManager.initializeMCPServers();
-      }
-    }
-
     const toolStateForContext: ToolStateForContext = {
       server_id: request.tomoriState.server_id.toString(),
       activePersonaHasElevenlabsVoice: Boolean(
@@ -408,7 +414,10 @@ export class ZaiProvider
           request.tomoriState.speech_voice_id?.trim(),
       ),
       activePersonaVoiceDesignPrompt: request.tomoriState.speech_voice_design_prompt?.trim() || null,
-      activePersonaVoiceName: request.tomoriState.speech_voice_name,
+      activePersonaVoiceSampleId: request.tomoriState.speech_voice_sample_id,
+      activePersonaVoiceId: request.tomoriState.speech_voice_id,
+      activePersonaVoiceSourcePriority: request.tomoriState.voice_source_priority,
+
       diffusion_model_id: request.tomoriState.config.diffusion_model_id,
       nai_diffusion_model_id: request.tomoriState.config.nai_diffusion_model_id,
       video_model_id: request.tomoriState.config.video_model_id,
@@ -421,6 +430,7 @@ export class ZaiProvider
         supports_structoutput: request.tomoriState.llm.supports_structoutput,
       },
       config: {
+        emoji_usage_enabled: false,
         sticker_usage_enabled: false,
         web_search_enabled: true,
         self_teaching_enabled: false,
@@ -429,7 +439,11 @@ export class ZaiProvider
         videogen_enabled: false,
         voice_message_enabled: false,
         user_blocking_enabled: false,
+        user_info_updates_enabled: false,
         thread_creation_enabled: false,
+        conditioning_interactions_enabled: false,
+        dice_rolling_enabled: false,
+        danbooru_enabled: false,
       },
     };
 

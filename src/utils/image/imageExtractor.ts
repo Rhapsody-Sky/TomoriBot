@@ -122,8 +122,6 @@ function buildImageDownloadCandidates(info: ImageUrlInfo): string[] {
 }
 
 /**
- * Download one discovered image, falling back to its Discord proxy mirror.
- *
  * @param info - Discovered image, whose `proxyUrl` supplies the fallback source
  * @param options - Forwarded to {@link safeDownload} for every attempt
  * @returns The first successful download, else the last failure encountered
@@ -323,7 +321,10 @@ export async function resolveMessageImageUrls(
 
   let repliedToMessage: Message;
   try {
-    repliedToMessage = await context.channel.messages.fetch(repliedToMessageId);
+    repliedToMessage =
+      message.reference?.channelId && message.reference.channelId !== context.channel.id
+        ? await message.fetchReference()
+        : await context.channel.messages.fetch(repliedToMessageId);
   } catch (error) {
     log.warn(
       `Failed to fetch replied-to message ${repliedToMessageId} while resolving images for ${messageId}:`,

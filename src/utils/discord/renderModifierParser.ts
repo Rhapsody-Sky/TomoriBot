@@ -5,6 +5,16 @@ import { escapeRegExp } from "@/utils/text/processors/regexUtils";
 const WEBHOOK_USERNAME_LIMIT = 80;
 const RENDER_MODIFIER_LIMIT = 64;
 const TRUNCATION_SUFFIX = "...";
+const MODIFIER_SEGMENT = `[^()（）\\n\\r:：]{1,${RENDER_MODIFIER_LIMIT}}`;
+// One nested level carries a copied persona's sprite: "Locke (Tomori (shocked)):".
+const LABEL_MODIFIER_PATTERN = `${MODIFIER_SEGMENT}(?:[（(]${MODIFIER_SEGMENT}[）)])?`;
+
+/**
+ * Modifier in the decorated "Persona (neutral)" webhook name an alter uses when it reverts from a
+ * sprite to its base appearance and would otherwise share the sprite's clean username, which makes
+ * Discord group the reverted message under the sprite's avatar.
+ */
+export const NEUTRAL_APPEARANCE_MODIFIER = "neutral";
 
 export type RenderModifierName = {
   sourceName: string;
@@ -38,6 +48,14 @@ export function parseRenderModifierWebhookName(value?: string | null): RenderMod
   if (!sourceName || !modifier) return null;
 
   return { sourceName, modifier };
+}
+
+export function parseNestedRenderModifier(modifier: string): { targetName: string; spriteLabel: string } | null {
+  const match = new RegExp(`^(${MODIFIER_SEGMENT}?)\\s*[（(](${MODIFIER_SEGMENT})[）)]$`, "u").exec(modifier.trim());
+  const targetName = match?.[1]?.trim();
+  const spriteLabel = match?.[2]?.trim();
+  if (!targetName || !spriteLabel) return null;
+  return { targetName, spriteLabel };
 }
 
 export function formatRenderModifierWebhookName(sourceName: string, modifier: string): string {
@@ -87,6 +105,13 @@ export function parseLeadingRenderModifier(
 ): LeadingRenderModifierMatch | null {
   if (!text.trim() || text.trimStart().startsWith("```")) return null;
 
+  // Models sometimes copy the prompt's code-span example or emphasize the label. Consume only a
+  // balanced wrapper around the label, so ordinary Markdown at the start stays in the message.
+  const opening = /^(\s*)(`|\*\*|\*|__|_)/u.exec(text);
+  const wrapper = opening?.[2] ?? "";
+  const prefixLength = wrapper ? (opening?.[0].length ?? 0) : 0;
+  const labelText = text.slice(prefixLength);
+
   const collectedSourceNames = collectRenderModifierSourceNames("", sourceNames);
   const collectedChainSourceNames = collectRenderModifierSourceNames("", chainSourceNames);
   const labelChainAlternation = buildSourceLabelAlternation(collectedChainSourceNames);
@@ -94,23 +119,78 @@ export function parseLeadingRenderModifier(
 
   for (const sourceName of collectedSourceNames) {
     const pattern = new RegExp(
-      `^\\s*${labelChainPrefix}(${escapeRegExp(sourceName)})\\s*\\(([^()\\n\\r:：]{1,${RENDER_MODIFIER_LIMIT}})\\)\\s*[:：][ \\t]*`,
+      `^\\s*${labelChainPrefix}(${escapeRegExp(sourceName)})\\s*[（(](${LABEL_MODIFIER_PATTERN})[）)]\\s*[:：]`,
       "iu",
     );
-    const match = pattern.exec(text);
+    const match = pattern.exec(labelText);
     const matchedSourceName = match?.[1]?.trim();
     const modifier = match?.[2]?.trim();
     if (!match || !matchedSourceName || !modifier) continue;
 
+    const remainder = labelText.slice(match[0].length);
+    const closing = wrapper
+      ? new RegExp(`^[ \\t]*${escapeRegExp(wrapper)}[ \\t]*`, "u").exec(remainder)?.[0]
+      : /^[ \t]*/u.exec(remainder)?.[0];
+    if (closing === undefined) continue;
+    const consumed = prefixLength + match[0].length + closing.length;
     return {
       sourceName: matchedSourceName,
       modifier,
-      body: text.slice(match[0].length),
-      matchedPrefix: match[0],
+      body: text.slice(consumed),
+      matchedPrefix: text.slice(0, consumed),
     };
   }
 
   return null;
+}
+
+/**
+ * Reports whether `text` opens with a plain, undecorated label naming one of `sourceNames`, in the
+ * same forms stripLeakedOwnNameLabels removes ("Locke:", "**Locke:**", "**Locke**:"). The stream
+ * treats it as the model returning to its base appearance after a sprite.
+ *
+ * Accepts only the ASCII colon: a label this reports must also be one the output cleaner strips,
+ * or the reset would ship with its label still visible.
+ */
+export function hasLeadingPlainOwnNameLabel(text: string, sourceNames: readonly string[]): boolean {
+  if (!text.trim() || text.trimStart().startsWith("```")) return false;
+
+  const labelForms = collectRenderModifierSourceNames("", sourceNames).flatMap((sourceName) => {
+    const escaped = escapeRegExp(sourceName);
+    return [`\\*\\*${escaped}:\\*\\*`, `\\*\\*${escaped}\\*\\*:`, `${escaped}:`];
+  });
+  if (labelForms.length === 0) return false;
+
+  return new RegExp(`^\\s*(?:${labelForms.join("|")})`, "iu").test(text);
+}
+
+/**
+ * Parses a leading sprite modifier for `/impersonate persona`, where the persona is already
+ * fixed by the command's autocomplete option: unlike {@link parseLeadingRenderModifier}, the source
+ * name is optional. Accepts both "PersonaName (modifier): body" (delegated to the named parser)
+ * and the bare "(modifier): body" shape, since repeating the already-selected persona's name is
+ * redundant in this context. Callers still gate on an actual sprite match before treating the
+ * text as decorated; text that fails that lookup falls through to plain, unmodified content.
+ */
+export function parseLeadingImpersonationSpriteModifier(
+  text: string,
+  personaName: string,
+): LeadingRenderModifierMatch | null {
+  const named = parseLeadingRenderModifier(text, [personaName]);
+  if (named) return named;
+
+  if (!text.trim() || text.trimStart().startsWith("```")) return null;
+
+  const bare = new RegExp(`^\\s*\\(([^()\\n\\r:：]{1,${RENDER_MODIFIER_LIMIT}})\\)\\s*[:：][ \\t]*`, "u").exec(text);
+  const modifier = bare?.[1]?.trim();
+  if (!bare || !modifier) return null;
+
+  return {
+    sourceName: personaName,
+    modifier,
+    body: text.slice(bare[0].length),
+    matchedPrefix: bare[0],
+  };
 }
 
 // Rejects label candidates that are really markdown structure: list items ("- Name", "1. Name"),
@@ -204,11 +284,16 @@ export function isAllowedRenderModifierSpeakerLabel(label: string, sourceNames: 
  * flipped interpretation wins, since all newly sent messages use it; legacy
  * persona-on-persona messages in the transition window are misattributed until
  * they age out of the history fetch window.
+ *
+ * A legacy-shaped "Persona (neutral)" name resolves to the plain persona name with
+ * `isNeutralAppearance` set: it is usually an alter's group-break revert to its base
+ * appearance, but a real sprite named "neutral" produces the same name, so callers
+ * check the sprite message mapping before settling on the plain name.
  */
 export function resolveRenderModifierSourcePersona(
   webhookName: string,
   personaByNickname: Map<string, TomoriState>,
-): { persona: TomoriState; displayName: string } | null {
+): { persona: TomoriState; displayName: string; isNeutralAppearance?: boolean } | null {
   const parsed = parseRenderModifierWebhookName(webhookName);
   if (!parsed) return null;
 
@@ -222,6 +307,10 @@ export function resolveRenderModifierSourcePersona(
 
   const legacyPersona = personaByNickname.get(normalizeRenderModifierName(parsed.sourceName));
   if (!legacyPersona) return null;
+
+  if (normalizeRenderModifierName(parsed.modifier) === normalizeRenderModifierName(NEUTRAL_APPEARANCE_MODIFIER)) {
+    return { persona: legacyPersona, displayName: legacyPersona.persona_nickname, isNeutralAppearance: true };
+  }
 
   return {
     persona: legacyPersona,

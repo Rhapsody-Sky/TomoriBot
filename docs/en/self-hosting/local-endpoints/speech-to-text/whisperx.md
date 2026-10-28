@@ -2,13 +2,14 @@
 title: "WhisperX Transcription"
 sidebar:
   order: 1
+aiGenerated: true
 ---
 
-WhisperX is the recommended beginner-friendly local transcription path.
+Set up local, accurate speech-to-text for TomoriBot using the bundled [WhisperX](https://github.com/m-bain/whisperX) server. WhisperX provides fast audio transcription with word-level alignment.
 
 ## Setup
 
-Run these commands from the TomoriBot repo root, the folder where you cloned TomoriBot. The first command moves into the STT server folder:
+Run these commands from the TomoriBot repository root:
 
 ### Windows PowerShell
 
@@ -36,19 +37,15 @@ Keep that terminal open while TomoriBot is using WhisperX. The default endpoint 
 
 ## Register in TomoriBot
 
-Run `/provider custom-endpoint add`:
+Run `/providers`, choose `Add New Custom Endpoint`, and use the transcription API compatibility:
 
-- `capability`: `transcription`
-- `api_style`: `openai-compatible-transcription`
+- API Compatibility: `openai-compatible-transcription`
 - `endpoint_url`: `http://127.0.0.1:8021`
 
-In the modal:
+After saving the connection, select it and use its model dropdown to add `large-v3`, or whatever `WHISPERX_MODEL` is set to, as a Transcription model.
 
-- `Transcription Model`: `large-v3`, or whatever `WHISPERX_MODEL` is set to
-- `Transcription Language`: optional language hint, such as `en` or `ja`
+Use `/providers` for endpoint registration and model setup. Then open `/config` > Models > Switch Models to select and activate the registered endpoint.
 
-Registration makes the endpoint active immediately. Use `/model transcription` later only when switching endpoints.
+## Use transcripts
 
-## Use Transcripts
-
-After registration, TomoriBot transcribes audio attachments in the background and adds the text to chat context. Use `/speech transcripts` only if you also want transcripts posted visibly in chat.
+After registration, TomoriBot transcribes audio attachments in the background and adds the text to chat context. Use `/config` > Engine > Notices only if you also want transcripts posted visibly in chat.

@@ -1,12 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import {
+  areDegradationBodiesEqual,
   buildDegradationAttempts,
   buildImageStripAttempt,
   buildTargetedAttempt,
   classifyDegradableError,
+  createDegradationQueue,
+  errorMessageNamesRejectableParam,
   extractRejectedParams,
   isMultimodalRejectionError,
   messagesContainImageBlocks,
+  planDegradationRetry,
   stripImageBlocksWithNotice,
 } from "@/providers/utils/paramDegradation";
 
@@ -33,6 +37,42 @@ describe("extractRejectedParams", () => {
     expect(extractRejectedParams("Unsupported parameter: temperature", body)).toEqual(["temperature"]);
   });
 
+  it("drops a rejected custom context field while retaining Ollama's option", () => {
+    const requestBody = {
+      model: "local-model",
+      messages: [],
+      stream: true,
+      options: { num_ctx: 8192 },
+      max_context_length: 8192,
+    };
+    const message = "property 'max_context_length' is unsupported";
+
+    expect(classifyDegradableError({ statusCode: 400, message })).toBe("parameter_rejection_400");
+    const rejected = extractRejectedParams(message, requestBody);
+    expect(rejected).toEqual(["max_context_length"]);
+    const retry = buildTargetedAttempt(requestBody, rejected);
+    expect(retry.body).not.toHaveProperty("max_context_length");
+    expect(retry.body.options).toEqual({ num_ctx: 8192 });
+    expect(
+      buildDegradationAttempts(requestBody, { mandatoryKeys: new Set(["model", "messages", "stream"]) })[0]?.body,
+    ).toEqual(requestBody);
+  });
+
+  it("can drop the Ollama options object when a strict endpoint names it", () => {
+    expect(extractRejectedParams("property 'options' is unsupported", { options: { num_ctx: 8192 } })).toEqual([
+      "options",
+    ]);
+  });
+
+  it("keeps Ollama's options when an error only uses the word in prose", () => {
+    const requestBody = { options: { num_ctx: 8192 }, top_k: 40 };
+    const message = "Unsupported parameter: top_k. Supported options are temperature and top_p.";
+
+    expect(extractRejectedParams(message, requestBody)).toEqual(["top_k"]);
+    expect(errorMessageNamesRejectableParam("Upstream failed; check your request options")).toBe(false);
+    expect(errorMessageNamesRejectableParam('property "options" is unsupported')).toBe(true);
+  });
+
   it("excludes a named parameter that is absent from the request", () => {
     expect(extractRejectedParams("Unsupported parameter: top_p", body)).toEqual([]);
   });
@@ -47,6 +87,33 @@ describe("extractRejectedParams", () => {
 });
 
 describe("buildDegradationAttempts", () => {
+  it("does not serialize inline media while preparing retries", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: `data:image/jpeg;base64,${"A".repeat(1048576)}` } }],
+      },
+    ];
+    const stringify = spyOn(JSON, "stringify");
+    let serializationCount: number;
+    let attempts: ReturnType<typeof buildDegradationAttempts>;
+    try {
+      attempts = buildDegradationAttempts(
+        { model: "example/model", messages, stream: true, temperature: 0.8, top_p: 0.9 },
+        {
+          mandatoryKeys: new Set(["model", "messages", "stream"]),
+          stripImages: (value) => stripImageBlocksWithNotice(value as Array<Record<string, unknown>>),
+        },
+      );
+      serializationCount = stringify.mock.calls.length;
+    } finally {
+      stringify.mockRestore();
+    }
+    expect(serializationCount).toBe(0);
+    expect(attempts[0].body.messages).toBe(messages);
+    expect(attempts.some((attempt) => attempt.label === "strip_images")).toBe(true);
+  });
+
   it("builds the degradation ladder in priority order and preserves mandatory keys", () => {
     const attempts = buildDegradationAttempts(
       {
@@ -105,6 +172,53 @@ describe("buildDegradationAttempts", () => {
     }
   });
 
+  it("probes declared injected keys before the user's samplers", () => {
+    // Without the declaration, reasoning_budget and custom_option are indistinguishable, so the
+    // key the backend actually rejected sorts into the tail behind unrelated junk. Ordering is
+    // pure latency (the ladder stops at the first success, so the winning rung ships the same
+    // payload either way), and a key the user never asked for is the better first hypothesis.
+    const attempts = buildDegradationAttempts(
+      {
+        model: "nvidia/example",
+        messages: [],
+        stream: true,
+        temperature: 0.8,
+        min_p: 0.1,
+        custom_option: true,
+        chat_template_kwargs: { enable_thinking: true },
+        reasoning_budget: 16384,
+      },
+      {
+        mandatoryKeys: new Set(["model", "messages", "stream"]),
+        priorityKeys: ["reasoning_budget", "chat_template_kwargs"],
+      },
+    );
+
+    expect(attempts.map((attempt) => attempt.label)).toEqual([
+      "default",
+      "probe_drop_reasoning_budget",
+      "probe_drop_chat_template_kwargs",
+      "probe_drop_min_p",
+      "probe_drop_temperature",
+      "probe_drop_custom_option",
+      "minimal_payload",
+    ]);
+  });
+
+  it("leaves undeclared keys in the unknown tail", () => {
+    const attempts = buildDegradationAttempts(
+      { model: "nvidia/example", messages: [], stream: true, temperature: 0.8, reasoning_budget: 16384 },
+      { mandatoryKeys: new Set(["model", "messages", "stream"]) },
+    );
+
+    expect(attempts.map((attempt) => attempt.label)).toEqual([
+      "default",
+      "probe_drop_temperature",
+      "probe_drop_reasoning_budget",
+      "minimal_payload",
+    ]);
+  });
+
   it("deduplicates identical serialized bodies", () => {
     const attempts = buildDegradationAttempts(
       { model: "example/model", messages: [], stream: true },
@@ -113,6 +227,74 @@ describe("buildDegradationAttempts", () => {
 
     expect(attempts).toHaveLength(1);
     expect(attempts[0]?.label).toBe("default");
+  });
+});
+
+describe("degradation body equality", () => {
+  it("omits undefined options and distinguishes null and changed values", () => {
+    const body = { model: "example/model", messages: [], stream: true };
+    expect(areDegradationBodiesEqual(body, { ...body, temperature: undefined })).toBe(true);
+    expect(areDegradationBodiesEqual(body, { ...body, temperature: null })).toBe(false);
+    expect(areDegradationBodiesEqual({ ...body, temperature: 0.8 }, { ...body, temperature: 0.9 })).toBe(false);
+  });
+
+  it("deduplicates separately created image-strip bodies", () => {
+    const body = {
+      model: "example/model",
+      messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }],
+    };
+    const first = buildImageStripAttempt(body);
+    const second = buildImageStripAttempt(body);
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    if (!first || !second) throw new Error("Missing image-strip attempt");
+    expect(areDegradationBodiesEqual(first.body, second.body)).toBe(true);
+    expect(areDegradationBodiesEqual(body, first.body)).toBe(false);
+  });
+});
+
+describe("lazy degradation queue", () => {
+  it("skips retry preparation for a size rejection and prepares once for a recoverable failure", () => {
+    const body = { model: "example/model", messages: [], stream: true, temperature: 0.8 };
+    let stripCalls = 0;
+    const queue = createDegradationQueue(body, {
+      mandatoryKeys: new Set(["model", "messages", "stream"]),
+      stripImages: (messages) => {
+        stripCalls++;
+        return messages;
+      },
+    });
+    const input = {
+      ...queue,
+      attemptIndex: 0,
+      body,
+      statusCode: 400,
+      queueTargetedAttempt: () => false,
+      queueImageStripAttempt: () => false,
+    };
+    expect(stripCalls).toBe(0);
+    expect(
+      planDegradationRetry({
+        ...input,
+        message: "Please make sure your payload is below 26214400 bytes in size.",
+      }),
+    ).toBeNull();
+    expect(stripCalls).toBe(0);
+    expect(planDegradationRetry({ ...input, message: "Bad request" })).not.toBeNull();
+    queue.prepareAttempts();
+    expect(stripCalls).toBe(1);
+    expect(queue.attempts.some((attempt) => attempt.label === "probe_drop_temperature")).toBe(true);
+  });
+
+  it("keeps a targeted retry ahead of static candidates without duplicating its body", () => {
+    const body = { model: "example/model", messages: [], stream: true, temperature: 0.8, top_p: 0.9 };
+    const queue = createDegradationQueue(body, { mandatoryKeys: new Set(["model", "messages", "stream"]) });
+    const targeted = buildTargetedAttempt(body, ["temperature"]);
+    queue.attempts.push(targeted);
+    queue.prepareAttempts();
+    expect(queue.attempts[1]).toBe(targeted);
+    expect(queue.attempts.filter((attempt) => areDegradationBodiesEqual(attempt.body, targeted.body))).toHaveLength(1);
+    expect(queue.attempts.some((attempt) => attempt.label === "probe_drop_top_p")).toBe(true);
   });
 });
 
@@ -245,6 +427,7 @@ describe("buildImageStripAttempt", () => {
 describe("classifyDegradableError", () => {
   it.each([
     [400, "Bad request", "generic_400"],
+    [400, "Invalid request. Please check your input and try again.", "generic_400"],
     [400, "Unsupported parameter: min_p", "parameter_rejection_400"],
     [404, "No endpoints found that support these parameters", "no_endpoints_404"],
     [502, "Bad gateway", null],
@@ -260,6 +443,35 @@ describe("classifyDegradableError", () => {
       "backend_incompatible_502",
     );
     expect(classifyDegradableError({ statusCode: 502, message: "Bad gateway" })).toBeNull();
+  });
+
+  it("degrades an opaque 5xx only when the provider opts in", () => {
+    // NVIDIA NIM reports an unsupported request key as a bare "Internal server error", and when
+    // streaming it does so mid-SSE after a 200, so nothing else in the ladder can see it.
+    expect(classifyDegradableError({ statusCode: 500, message: "Internal server error" })).toBeNull();
+    expect(
+      classifyDegradableError({ statusCode: 500, message: "Internal server error", degradeOnOpaque5xx: true }),
+    ).toBe("opaque_5xx");
+    expect(classifyDegradableError({ statusCode: 503, message: "", degradeOnOpaque5xx: true })).toBe("opaque_5xx");
+  });
+
+  it("fails a descriptive 5xx fast instead of walking the ladder", () => {
+    // A genuine outage says so. Degrading against a dead endpoint burns every rung and delays
+    // the key-rotation and model-fallback paths that can actually recover the turn.
+    expect(
+      classifyDegradableError({
+        statusCode: 503,
+        message: "Service temporarily overloaded, please try again later",
+        degradeOnOpaque5xx: true,
+      }),
+    ).toBeNull();
+    expect(
+      classifyDegradableError({
+        statusCode: 500,
+        message: "thinking_token_budget is not yet supported by the V2 model runner",
+        degradeOnOpaque5xx: true,
+      }),
+    ).toBeNull();
   });
 
   it("supports provider-specific classifiers", () => {

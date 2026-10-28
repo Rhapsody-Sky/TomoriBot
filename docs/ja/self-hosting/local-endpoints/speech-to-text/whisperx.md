@@ -2,13 +2,14 @@
 title: "WhisperXの文字起こし"
 sidebar:
   order: 1
+aiGenerated: true
 ---
 
-WhisperXは、初心者向けに推奨されるローカル文字起こしの方法です。
+バンドルされている [WhisperX](https://github.com/m-bain/whisperX) サーバーを使用して、TomoriBotのローカルで正確な音声認識をセットアップします。WhisperXは、単語レベルのアライメントによる高速音声転写を提供します。
 
 ## セットアップ
 
-TomoriBotのリポジトリのルート（TomoriBotをクローンしたフォルダー）から以下のコマンドを実行します。最初のコマンドでSTTサーバーのフォルダーに移動します。
+TomoriBotリポジトリルートから次のコマンドを実行します。
 
 ### Windows PowerShell
 
@@ -36,19 +37,15 @@ TomoriBotがWhisperXを使用している間は、そのターミナルを開い
 
 ## TomoriBotへの登録
 
-`/provider custom-endpoint add`を実行します。
+`/providers`を実行し、`新しいカスタムエンドポイントを追加`を選んで、文字起こしのAPI互換性を使用します。
 
-- `capability`: `transcription`
-- `api_style`: `openai-compatible-transcription`
-- `endpoint_url`: `http://127.0.0.1:8021`
+- API互換性：`openai-compatible-transcription`
+- `endpoint_url`：`http://127.0.0.1:8021`
 
-モーダルで以下を設定します。
+接続を保存したら、それを選択し、モデルのドロップダウンから`large-v3`（または`WHISPERX_MODEL`に設定されている値）を文字起こしモデルとして追加します。
 
-- `Transcription Model`: `large-v3`、または`WHISPERX_MODEL`に設定されている値
-- `Transcription Language`: 任意の言語ヒント（例: `en`や`ja`）
+エンドポイントの登録とモデルのセットアップには`/providers`を使用してください。その後、`/config` > モデル > モデルの切り替えを開き、登録したエンドポイントを選択して有効化します。
 
-登録すると、エンドポイントはすぐに有効になります。今後、エンドポイントを切り替える場合にのみ`/model transcription`を使用します。
+## トランスクリプトを使用する
 
-## 文字起こしの使用
-
-登録後、TomoriBotは音声添付ファイルをバックグラウンドで文字起こしし、チャットコンテキストにテキストを追加します。文字起こしをチャットに表示して投稿したい場合にのみ、`/speech transcripts`を使用してください。
+登録後、TomoriBotはバックグラウンドで音声添付ファイルを文字起こしし、テキストをチャットコンテキストに追加します。トランスクリプトをチャットに視覚的に投稿したい場合にのみ、「`/config`」>「エンジン」>「通知」を使用します。

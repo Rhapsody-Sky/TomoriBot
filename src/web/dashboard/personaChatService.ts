@@ -7,6 +7,8 @@ import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/p
 import { getProviderForTomori } from "@/utils/provider/providerFactory";
 import { selectApiKey } from "@/utils/security/keyRotation";
 import { decryptApiKey } from "@/utils/security/crypto";
+import { resolveEffectiveUserNaming } from "@/utils/text/userNaming";
+import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
 import type { TomoriState } from "@/types/db/schema";
 import type { StreamingContext } from "@/types/tool/interfaces";
 import { DashboardServiceError } from "./errors";
@@ -40,6 +42,7 @@ function safeTestState(state: TomoriState): TomoriState {
     llm: {
       ...state.llm,
       has_tools: false,
+      verbatim_tool_calling: false,
     },
     config: {
       ...state.config,
@@ -54,7 +57,11 @@ function safeTestState(state: TomoriState): TomoriState {
       voice_message_enabled: false,
       user_blocking_enabled: false,
       self_teaching_enabled: false,
-      verbatim_tool_calling_enabled: false,
+      response_drafting_enabled: false,
+      conditioning_interactions_enabled: false,
+      dice_rolling_enabled: false,
+      danbooru_enabled: false,
+      user_info_updates_enabled: false,
     },
   };
 }
@@ -68,7 +75,7 @@ function buildHistory(
   return messages.map((message, index) => ({
     id: `dashboard-test-${index + 1}`,
     authorId: message.role === "user" ? actor.discordId : `persona-${persona.persona_id ?? 0}`,
-    authorName: message.role === "user" ? actor.user.user_nickname : persona.persona_nickname,
+    authorName: message.role === "user" ? (actor.user.user_nickname ?? actor.discordId) : persona.persona_nickname,
     authorType: message.role === "user" ? "user" : "persona",
     personaName: message.role === "assistant" ? persona.persona_nickname : null,
     content: message.content,
@@ -130,6 +137,23 @@ export class DashboardPersonaChatService {
     try {
       const personalOverlay = await applyPersonalProviderSelectionsToTomoriState(basePersona, actor.user.user_id);
       const persona = safeTestState(personalOverlay.tomoriState);
+      const personalized = persona.config.personal_memories_enabled !== false;
+      const preferences = personalized
+        ? await userNamingRepository.loadPreferences([
+            { userId: actor.user.user_id, personaLineageId: persona.persona_lineage_id },
+          ])
+        : new Map();
+      const naming = resolveEffectiveUserNaming({
+        global: {
+          userNickname: personalized ? actor.user.user_nickname : null,
+          prefixOverride: personalized ? (actor.user.prefix_override ?? null) : null,
+          suffixOverride: personalized ? (actor.user.suffix_override ?? null) : null,
+          addressingStyle: personalized ? (actor.user.addressing_style ?? null) : null,
+        },
+        liveDisplayName: guild.members.cache.get(actor.discordId)?.displayName ?? actor.discordId,
+        persona: personalized ? persona.naming_config : undefined,
+        preference: preferences.get(userPersonaNamingPairKey(actor.user.user_id, persona.persona_lineage_id)),
+      });
       const history = buildHistory(parsed.data.messages, actor, persona);
       const channelId = `dashboard-test-${snapshot.serverDiscordId}-${actor.discordId}`;
       const preparedParticipantContext = await prepareParticipantContext({
@@ -153,7 +177,9 @@ export class DashboardPersonaChatService {
         channelName: "Dashboard test chat",
         channelId,
         client: this.client,
-        triggererName: actor.user.user_nickname,
+        triggererName: naming.nickname,
+        triggererFormattedName: naming.formattedName,
+        triggererAddressTerm: naming.addressTerm,
         triggererUserId: actor.user.user_id,
         tomoriNickname: persona.persona_nickname,
         tomoriAttributes: persona.attribute_list ?? [],

@@ -1,3 +1,4 @@
+import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
 /**
  * NovelAI Image Generation Tool
  * Generates images using NovelAI's diffusion models with imageboard-style tag prompts.
@@ -12,11 +13,12 @@
  */
 
 import { AttachmentBuilder } from "discord.js";
-import JSZip from "jszip";
+import { prepareGeneratedImage } from "@/utils/image/generatedImageMetadata";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
 import { buildGeneratedImageComponentsV2Payload } from "@/utils/discord/generatedImageMessage";
-import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/personaDispatch";
+import { mediaDeliveryFailure, sendToolMediaPost } from "@/utils/discord/webhook/toolMediaDelivery";
+import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
 import {
   buildImageToolNoticeDescription,
   buildReferencedMessageUrl,
@@ -37,16 +39,18 @@ import {
   NAI_CHAR_REF_STRENGTH,
   NAI_DEFAULT_NEGATIVE_PROMPT,
   classifyNaiImageError,
+  extractPngFromZipResponse,
   generateNovelAiImage,
-  isNaiV4Model,
+  naiImageRequestSignal,
+  readNaiErrorSnippet,
+  usesNaiStructuredPromptFormat,
   type NaiGenerationCharacterPayload,
 } from "@/utils/image/naiImageGeneration";
 import { loadCharRefAsBase64 } from "@/utils/storage/charrefStorage";
-import {
-  CredentialUnavailableError,
-  getResolvedCapabilityModelId,
-  resolveCapabilityCredentials,
-} from "@/utils/provider/credentialResolver";
+import { reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { classifySendFailure } from "@/utils/discord/stream/sendFailureCache";
+import { CredentialUnavailableError, getResolvedCapabilityModelId } from "@/utils/provider/credentialResolver";
+import { resolveCredentialsWithMediaQuota } from "@/utils/quota/mediaQuotaGate";
 
 // Disabled by default because the suggest-tags endpoint is currently unstable and
 // can hurt generation reliability; enable again once the API is consistently healthy.
@@ -56,7 +60,7 @@ const NAI_IMAGE_ENABLE_TAG_RESOLUTION =
 // 1.0 fully redraws the masked area from the prompt with no original pixel bleed-through.
 // Lower values preserve more of the original structure but cause color blending artifacts
 // when the edit changes colors (e.g. white hair → red hair at 0.7 produces grey).
-const NAI_INPAINT_STRENGTH = Number.parseFloat(process.env.NAI_INPAINT_STRENGTH || "1.0");
+const NAI_INPAINT_STRENGTH = 1.0;
 const NAI_ENABLE_CHAR_REFERENCES = (process.env.NAI_ENABLE_CHAR_REFERENCES || "true").toLowerCase() === "true";
 // Intentionally disabled: profile-driven autofill can conflict with inline tags the
 // LLM picks from context. The LLM reads Physical Appearance tags from context and writes them
@@ -158,6 +162,10 @@ export class GenerateImageNaiTool extends BaseTool {
   parameters: ToolParameterSchema = {
     type: "object",
     properties: {
+      nsfw: {
+        type: "boolean",
+        description: "Set true when the image requires a Discord spoiler, useful for NSFW images.",
+      },
       prompt: {
         type: "string",
         description:
@@ -250,74 +258,34 @@ export class GenerateImageNaiTool extends BaseTool {
     return context.tomoriState.config.imagegen_enabled;
   }
 
-  /**
-   * Sends a generated image to the Discord channel via webhook (for persona avatar) or direct message.
-   * Prefers webhook for consistent persona appearance, falls back to bot message.
-   */
   private async sendGeneratedImage(
     context: ToolContext,
     attachment: AttachmentBuilder,
     attachmentFilename: string,
     elapsedMs: number,
+    promptAttachment?: AttachmentBuilder,
   ): Promise<import("discord.js").Message> {
-    const threadId =
-      "isThread" in context.channel && typeof context.channel.isThread === "function" && context.channel.isThread()
-        ? context.channel.id
-        : undefined;
-    const componentsPayload = buildGeneratedImageComponentsV2Payload(attachmentFilename, elapsedMs, context.locale);
-
-    if (context.webhook && context.personaUsername) {
-      try {
-        return await sendWebhookMessageWithIdentity(
-          context.webhook,
-          {
-            files: [attachment],
-            ...componentsPayload,
-            withComponents: true,
-            ...(threadId ? { threadId } : {}),
-          },
-          {
-            username: context.personaUsername,
-            avatarUrl: context.personaAvatarUrl,
-            avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/") ? context.personaAvatarUrl : undefined,
-          },
-        );
-      } catch (error) {
-        log.warn(
-          "Failed to send NAI generated image via webhook with Components V2, retrying without components",
-          error,
-        );
-        try {
-          return await sendWebhookMessageWithIdentity(
-            context.webhook,
-            {
-              files: [attachment],
-              ...(threadId ? { threadId } : {}),
-            },
-            {
-              username: context.personaUsername,
-              avatarUrl: context.personaAvatarUrl,
-              avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/") ? context.personaAvatarUrl : undefined,
-            },
-          );
-        } catch (fallbackError) {
-          log.warn(
-            "Failed to send NAI generated image via webhook, falling back to bot message",
-            fallbackError as Error,
-          );
-        }
-      }
-    }
-
-    try {
-      return await context.channel.send({
-        files: [attachment],
-        ...componentsPayload,
-      });
-    } catch (error) {
-      log.warn("Failed to send NAI generated image with Components V2, falling back to attachment-only message", error);
-      return await context.channel.send({ files: [attachment] });
-    }
+    const componentsPayload = buildGeneratedImageComponentsV2Payload(
+      attachmentFilename,
+      elapsedMs,
+      context.locale,
+      [],
+      Boolean(promptAttachment),
+      attachment.spoiler,
+    );
+    const files = () =>
+      [attachment, ...(promptAttachment ? [promptAttachment] : [])].map(
+        (file) =>
+          new AttachmentBuilder(file.attachment, {
+            name: file.name ?? undefined,
+            description: file.description ?? undefined,
+          }),
+      );
+    return sendToolMediaPost(
+      context,
+      () => ({ files: files(), ...componentsPayload, withComponents: true }),
+      () => ({ files: files() }),
+    );
   }
 
   /**
@@ -523,7 +491,7 @@ export class GenerateImageNaiTool extends BaseTool {
           resolvedTags = personaProfile?.tags ?? [];
 
           if (personaProfile?.refUrl && allowCharacterReferences) {
-            refImageBase64 = await loadCharRefAsBase64(personaProfile.refUrl);
+            refImageBase64 = await loadCharRefAsBase64(personaProfile.refUrl, "personas", personaId);
           } else if (personaProfile?.refUrl) {
             if (NAI_ENABLE_CHAR_REFERENCES) {
               skippedReferenceBecauseMultiCharacter = true;
@@ -537,7 +505,7 @@ export class GenerateImageNaiTool extends BaseTool {
           resolvedTags = userProfile?.tags ?? [];
 
           if (userProfile?.refUrl && allowCharacterReferences) {
-            refImageBase64 = await loadCharRefAsBase64(userProfile.refUrl);
+            refImageBase64 = await loadCharRefAsBase64(userProfile.refUrl, "users", normalizedId);
           } else if (userProfile?.refUrl) {
             if (NAI_ENABLE_CHAR_REFERENCES) {
               skippedReferenceBecauseMultiCharacter = true;
@@ -723,12 +691,13 @@ export class GenerateImageNaiTool extends BaseTool {
     width: number,
     height: number,
     imageParams: EffectiveNaiImageParams,
+    abortSignal: AbortSignal | undefined,
   ): Promise<Buffer> {
     const seed = Math.floor(Math.random() * 2147483647);
 
     let requestPayload: Record<string, unknown>;
 
-    if (isNaiV4Model(model)) {
+    if (usesNaiStructuredPromptFormat(model)) {
       requestPayload = {
         action: "infill",
         input: prompt,
@@ -826,28 +795,18 @@ export class GenerateImageNaiTool extends BaseTool {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(requestPayload),
+      signal: naiImageRequestSignal(abortSignal),
     });
 
     if (!response.ok) {
       const correlationId = response.headers.get("x-correlation-id");
-      const errorText = await response.text().catch(() => "");
-      const snippet = errorText.slice(0, 500);
+      const snippet = await readNaiErrorSnippet(response);
       throw new Error(
         `NovelAI inpainting failed (${response.status} ${response.statusText})${correlationId ? ` [correlation-id: ${correlationId}]` : ""}: ${snippet}`,
       );
     }
 
-    const zipBuffer = Buffer.from(await response.arrayBuffer());
-    const zip = await JSZip.loadAsync(zipBuffer);
-
-    const pngFileName = Object.keys(zip.files).find((name) => name.toLowerCase().endsWith(".png"));
-
-    if (!pngFileName) {
-      throw new Error("NovelAI inpainting response ZIP did not contain a PNG file");
-    }
-
-    const pngData = await zip.files[pngFileName].async("nodebuffer");
-    return Buffer.from(pngData);
+    return await extractPngFromZipResponse(response);
   }
 
   /**
@@ -913,17 +872,21 @@ export class GenerateImageNaiTool extends BaseTool {
 
     // Default to allowed; overwritten below for server-credential users
     let quotaCheck: QuotaCheckResult = { allowed: true };
+    let failureScope: "server" | "personal" | undefined;
 
     try {
-      // Resolve credentials first so we can skip server quota for personal BYOK users
-      const creds = await resolveCapabilityCredentials(context.tomoriState.server_id, "image-nai", {
-        userId: context.internalUserId ?? null,
-      });
-
-      // Personal BYOK users bring their own API quota, so bypass server quota entirely
-      if (creds.source === "server") {
-        quotaCheck = await checkImageQuota(context.tomoriState.server_id, userDiscId);
-      }
+      const { credentials: creds, quotaCheck: serverQuotaCheck } = await resolveCredentialsWithMediaQuota(
+        context.tomoriState.server_id,
+        "image-nai",
+        context.internalUserId ?? null,
+        checkImageQuota,
+        userDiscId,
+        quotaCheck,
+        undefined,
+        context.streamContext?.imageModelSelection,
+      );
+      quotaCheck = serverQuotaCheck;
+      failureScope = creds.source;
 
       if (!quotaCheck.allowed) {
         let errorMessage = "";
@@ -985,7 +948,7 @@ export class GenerateImageNaiTool extends BaseTool {
         `Using NAI diffusion model: ${baseModelCodename} (source: ${resolvedModel.source}) for ${isInpaintMode ? "inpainting" : "image generation"}`,
       );
 
-      if (characters.length > 0 && !isNaiV4Model(baseModelCodename)) {
+      if (characters.length > 0 && !usesNaiStructuredPromptFormat(baseModelCodename)) {
         return {
           success: false,
           error: localizer(context.locale, "tools.generate_image_nai.characters_require_v4"),
@@ -1167,7 +1130,7 @@ export class GenerateImageNaiTool extends BaseTool {
           sourceImage.mimeType,
           editTarget,
           googleApiKey,
-          isNaiV4Model(baseModelCodename),
+          usesNaiStructuredPromptFormat(baseModelCodename),
         );
 
         log.info(
@@ -1219,6 +1182,7 @@ export class GenerateImageNaiTool extends BaseTool {
           segResult.imageWidth,
           segResult.imageHeight,
           effectiveImageParams,
+          context.abortSignal,
         );
 
         log.success(`[NAI] Inpainting complete with model "${inpaintModel}"`);
@@ -1235,9 +1199,21 @@ export class GenerateImageNaiTool extends BaseTool {
         });
       }
 
+      // /kill stops awaiting this tool but cannot stop it (the inpaint path takes no signal), so
+      // posting now would deliver and charge for a reply the user killed.
+      if (context.abortSignal?.aborted) {
+        return { success: false, error: "NAI image generation was cancelled." };
+      }
+
       const filePrefix = isInpaintMode ? "nai_inpainted" : "nai_generated";
-      const attachmentFilename = `${filePrefix}_${Date.now()}.png`;
-      const attachment = new AttachmentBuilder(imageBuffer, {
+      const preparedImage = await prepareGeneratedImage(
+        imageBuffer,
+        normalizedPrompt,
+        context.locale,
+        effectiveNegativePrompt,
+      );
+      const attachmentFilename = `${args.nsfw === true ? "SPOILER_" : ""}${filePrefix}_${Date.now()}.${preparedImage.extension}`;
+      const attachment = new AttachmentBuilder(preparedImage.buffer, {
         name: attachmentFilename,
       });
 
@@ -1246,6 +1222,7 @@ export class GenerateImageNaiTool extends BaseTool {
         attachment,
         attachmentFilename,
         Date.now() - startedAtMs,
+        preparedImage.promptAttachment,
       );
 
       log.success(`Successfully ${isInpaintMode ? "inpainted" : "generated"} and sent NAI image to Discord`);
@@ -1290,17 +1267,21 @@ export class GenerateImageNaiTool extends BaseTool {
         endTurn: context.streamContext?.endTurnAfterTools?.includes(this.name) ?? false,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (error instanceof DiscordDeliveryError) return mediaDeliveryFailure(context, error.outcome);
+      if (context.abortSignal?.aborted) {
+        return { success: false, error: "NAI image generation was cancelled." };
+      }
       const errorKind = classifyNaiImageError(error);
 
-      log.error(`NAI ${isInpaintMode ? "inpainting" : "image generation"} failed:`, error as Error);
-
-      if (errorKind === "quota") {
-        return {
-          success: false,
-          error: localizer(context.locale, "tools.generate_image_nai.provider_quota_exceeded"),
-        };
-      }
+      await reportProviderFailure({
+        summary: `NAI ${isInpaintMode ? "inpainting" : "image generation"} failed`,
+        errorType: "NaiImageGenerationFailed",
+        error,
+        expected: errorKind !== "other" || classifySendFailure(error) !== null,
+        serverId: context.tomoriState.server_id,
+        userId: context.internalUserId ?? null,
+        dimensions: { operation: isInpaintMode ? "image-inpaint" : "image-generation", provider: "novelai", errorKind },
+      });
 
       if (error instanceof CredentialUnavailableError && error.reason === "missing_model_id") {
         return {
@@ -1308,32 +1289,19 @@ export class GenerateImageNaiTool extends BaseTool {
           error: localizer(context.locale, "tools.generate_image_nai.model_not_configured"),
         };
       }
-
-      if (errorKind === "auth") {
-        return {
-          success: false,
-          error: "NovelAI API authentication failed. Please check your API key and subscription status.",
-        };
-      }
-
-      if (errorKind === "rate_limit") {
-        return {
-          success: false,
-          error: "NovelAI API rate limit reached. Please try again in a moment.",
-        };
-      }
-
-      if (errorMessage.includes("segmentation") || errorMessage.includes("segment")) {
-        return {
-          success: false,
-          error: `Segmentation failed: ${errorMessage}`,
-        };
-      }
-
-      return {
-        success: false,
-        error: `Failed to ${isInpaintMode ? "inpaint" : "generate"} NAI image: ${errorMessage}`,
-      };
+      return createProviderToolFailure(error, {
+        locale: context.locale,
+        provider: "novelai",
+        credentialScope: failureScope,
+        kind:
+          errorKind === "auth"
+            ? "authentication"
+            : errorKind === "quota"
+              ? "quota"
+              : errorKind === "rate_limit"
+                ? "rate_limit"
+                : undefined,
+      });
     }
   }
 }

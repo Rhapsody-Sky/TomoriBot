@@ -4,7 +4,6 @@ import type {
   ButtonInteraction,
   ChatInputCommandInteraction,
   InteractionEditReplyOptions,
-  InteractionReplyOptions,
   Message,
   ModalMessageModalSubmitInteraction,
   ModalSubmitInteraction,
@@ -12,7 +11,6 @@ import type {
 import type { TomoriState } from "@/types/db/schema";
 import type { ModalOptions } from "@/types/discord/modal";
 import { ColorCode, log } from "@/utils/misc/logger";
-import { localizer } from "@/utils/text/localizer";
 import {
   buildNoticeContainer,
   buildRangeSelectorPayload,
@@ -28,57 +26,12 @@ import {
 } from "./interactionCore";
 import type { AvatarSessionCache } from "./interactionCore";
 import type { NoticeContainerOptions } from "./interactionCore";
+import { validateComponentsV2MessageLimits, type ComponentsV2MessagePayload } from "./componentsV2Limits";
 
-// Re-exported so anchor-workflow callers (e.g. commands/model/text.ts) can detect a
-// collector timeout without importing the heavy interactionCore module directly, keeping
-// their unit-test module graph small.
-export { isCollectorTimeoutError } from "./interactionCore";
-
-const DEFAULT_WORKFLOW_COMPONENT_TIMEOUT_MS = 120000;
-const configuredWorkflowTimeout = Number.parseInt(process.env.PERSONA_WORKFLOW_COMPONENT_TIMEOUT_MS || "", 10);
-export const PERSONA_WORKFLOW_COMPONENT_TIMEOUT_MS =
-  Number.isFinite(configuredWorkflowTimeout) && configuredWorkflowTimeout > 0
-    ? configuredWorkflowTimeout
-    : DEFAULT_WORKFLOW_COMPONENT_TIMEOUT_MS;
-
-/**
- * Command files built on the anchor one-message workflow. The lock-down audit
- * (`tests/unit/commands/anchorMigrationLockdown.test.ts`) forbids every file listed here
- * from calling the pre-anchor picker/modal primitives (`promptForSavedProvider`,
- * `promptWithPaginatedModal`, `replaceProviderPickerWithInfo`, `promptWithRawModal`). Their
- * absence transitively guarantees the only modal path is the anchor controller, so no
- * post-modal terminal can escape it via `replyInfoEmbed`/`followUp`.
- *
- * Add a file here only once every one of its terminals renders on the anchor message.
- */
-export const MIGRATED_ANCHOR_CALLERS: readonly string[] = [
-  "src/commands/model/text.ts",
-  "src/commands/model/vision.ts",
-  "src/commands/model/video.ts",
-  "src/commands/model/image.ts",
-  "src/commands/model/embedding.ts",
-  "src/commands/personal/provider/model-text.ts",
-  "src/commands/personal/provider/model-vision.ts",
-  "src/commands/personal/provider/model-video.ts",
-  "src/commands/personal/provider/model-image.ts",
-  "src/commands/personal/provider/model-embedding.ts",
-  "src/commands/model/fallback.ts",
-  "src/commands/personal/model/fallback.ts",
-];
-
-/** Primitives a migrated caller must not reach for; see {@link MIGRATED_ANCHOR_CALLERS}. */
-export const PRE_ANCHOR_PRIMITIVES: readonly string[] = [
-  "promptForSavedProvider",
-  "promptWithPaginatedModal",
-  "replaceProviderPickerWithInfo",
-  "promptWithRawModal",
-];
+const PERSONA_WORKFLOW_COMPONENT_TIMEOUT_MS = 2 * 60_000;
 
 type PersonaWorkflowRootInteraction = ChatInputCommandInteraction | ButtonInteraction;
 type PersonaWorkflowMessageInteraction = ButtonInteraction | ModalMessageModalSubmitInteraction;
-
-/** The only supported delivery policies for a persona-picker workflow. */
-export type PersonaWorkflowDeliveryPolicy = "replace-picker" | "separate-public";
 
 /**
  * A Components V2 edit payload. Legacy content and embeds are impossible to
@@ -92,16 +45,6 @@ export interface PersonaWorkflowComponentsV2Payload
   embeds?: never;
 }
 
-/** A public response payload used only by the explicit visibility-change phase. */
-export type PersonaWorkflowPublicPayload = Omit<
-  InteractionReplyOptions,
-  "ephemeral" | "fetchReply" | "withResponse"
-> & {
-  ephemeral?: never;
-  fetchReply?: never;
-  withResponse?: never;
-};
-
 export type PersonaWorkflowUpdateErrorCode =
   | "already-acknowledged"
   | "anchor-message-unavailable"
@@ -109,8 +52,6 @@ export type PersonaWorkflowUpdateErrorCode =
   | "discord-update-failed"
   | "message-mismatch"
   | "non-message-backed-interaction"
-  | "public-reply-already-sent"
-  | "public-reply-must-not-be-ephemeral"
   | "unsupported-replacement";
 
 /** Typed failure raised by anchor-message and acknowledgment operations. */
@@ -126,7 +67,7 @@ export class PersonaWorkflowUpdateError extends Error {
   }
 }
 
-export interface PersonaWorkflowMessageController {
+interface PersonaWorkflowMessageController {
   readonly anchorMessageId: string;
   readonly deliveryPolicy: "replace-picker";
   replace(payload: PersonaWorkflowComponentsV2Payload): Promise<Message>;
@@ -136,15 +77,9 @@ export interface PersonaWorkflowMessageController {
   delete(): Promise<void>;
 }
 
-export interface PersonaWorkflowInPlacePhase {
+interface PersonaWorkflowInPlacePhase {
   readonly deliveryPolicy: "replace-picker";
   readonly message: PersonaWorkflowMessageController;
-}
-
-export interface PersonaWorkflowPublicReplyPhase {
-  readonly deliveryPolicy: "separate-public";
-  readonly privateMessage: PersonaWorkflowMessageController;
-  reply(payload: PersonaWorkflowPublicPayload): Promise<Message>;
 }
 
 export type PersonaWorkflowModalResult =
@@ -154,7 +89,7 @@ export type PersonaWorkflowModalResult =
   | { outcome: "error"; error: PersonaWorkflowUpdateError }
   | { outcome: "fatal"; error: PersonaWorkflowUpdateError };
 
-export interface PersonaWorkflowModalPhase {
+interface PersonaWorkflowModalPhase {
   readonly values: Readonly<Record<string, string>>;
   readonly multiValues: Readonly<Record<string, string[]>>;
   readonly attachments: Readonly<Record<string, APIAttachment>>;
@@ -167,7 +102,7 @@ export interface PersonaWorkflowModalPhase {
   unsafeInteraction(): ModalSubmitInteraction;
 }
 
-export interface PersonaWorkflowNestedButtonPhase {
+interface PersonaWorkflowNestedButtonPhase {
   readonly message: PersonaWorkflowMessageController;
   replace(payload: PersonaWorkflowComponentsV2Payload): Promise<Message>;
   beginInPlaceWork(): Promise<PersonaWorkflowInPlacePhase>;
@@ -175,19 +110,9 @@ export interface PersonaWorkflowNestedButtonPhase {
   delete(): Promise<void>;
 }
 
-/**
- * Anchor private-message phase for a non-persona sibling scope. Persona
- * branches must still enter through `runPersonaPickerWorkflow`.
- */
-export interface AnchorPrivateWorkflowPhase {
-  readonly phaseId: string;
-  readonly message: PersonaWorkflowMessageController;
-  useButton(button: ButtonInteraction): PersonaWorkflowNestedButtonPhase;
-}
+type PersonaWorkflowModalSource = ModalOptions | (() => Promise<ModalOptions>);
 
-export type PersonaWorkflowModalSource = ModalOptions | (() => Promise<ModalOptions>);
-
-export interface PersonaWorkflowSelectionPhase<TPersona extends TomoriState> {
+interface PersonaWorkflowSelectionPhase<TPersona extends TomoriState> {
   readonly persona: TPersona;
   readonly absoluteIndex: number;
   /** Stable id used to scope nested component custom ids. */
@@ -196,9 +121,6 @@ export interface PersonaWorkflowSelectionPhase<TPersona extends TomoriState> {
   readonly deliveryPolicy: "replace-picker";
   beginInPlaceWork(): Promise<PersonaWorkflowInPlacePhase>;
   openModal(options: PersonaWorkflowModalSource): Promise<PersonaWorkflowModalResult>;
-  beginSeparatePublicReply(
-    compactPrivatePicker: PersonaWorkflowComponentsV2Payload,
-  ): Promise<PersonaWorkflowPublicReplyPhase>;
   /** Binds a collector button to safe same-message operations. */
   useButton(button: ButtonInteraction): PersonaWorkflowNestedButtonPhase;
   /** Explicit escape hatch for Discord APIs not modeled by the workflow. */
@@ -238,36 +160,8 @@ export type PersonaPickerWorkflowResult<TPersona extends TomoriState, TValue = v
     }
   | { outcome: "cancelled" }
   | { outcome: "timeout" }
-  | { outcome: "empty" }
   | { outcome: "error"; error?: unknown }
   | { outcome: "fatal"; error?: unknown };
-
-/**
- * Declares which personas an item-scoped command can actually act on. Supplied
- * to {@link runPersonaPickerWorkflow} so the picker filter and the terminal
- * empty state are both driven by one predicate. The identical `isEligible`
- * function must also back the caller's pre-picker guard and its post-selection
- * concurrency backstop; divergence between the three reintroduces the wasted
- * round trip this option exists to remove.
- */
-export interface PersonaWorkflowEligibility<TPersona extends TomoriState> {
-  /**
-   * Synchronous predicate deciding whether a persona qualifies. Class B callers
-   * close over a precomputed `Set` of eligible keys so no per-persona query runs
-   * between the persona click and its acknowledgment.
-   */
-  isEligible: (persona: TPersona) => boolean;
-  /** Title locale key for the terminal state rendered when no persona qualifies. */
-  emptyTitleKey: string;
-  /** Description locale key for that terminal state. */
-  emptyDescriptionKey: string;
-  /**
-   * Locale key for the bare item noun ("attributes", "documents"). Interpolated
-   * into the single shared filtered-notice sentence shown when the picker was
-   * narrowed.
-   */
-  itemsLabelKey: string;
-}
 
 export interface PersonaPickerWorkflowOptions<TPersona extends TomoriState, TValue = void> {
   personas: readonly TPersona[];
@@ -275,13 +169,6 @@ export interface PersonaPickerWorkflowOptions<TPersona extends TomoriState, TVal
   descriptionKey?: string;
   color?: string | number;
   requiredPersonaId?: number;
-  /**
-   * Optional eligibility filter. When supplied, only personas satisfying
-   * `isEligible` are shown, a filtered notice is appended when any persona was
-   * excluded, and the workflow reaches a terminal `empty` outcome instead of
-   * ever rendering a zero-persona picker.
-   */
-  eligibility?: PersonaWorkflowEligibility<TPersona>;
   onCancel?: () => Promise<void>;
   onSelected: (
     selection: PersonaWorkflowSelectionPhase<TPersona>,
@@ -318,6 +205,17 @@ function assertComponentsV2Payload(payload: PersonaWorkflowComponentsV2Payload):
     throw new PersonaWorkflowUpdateError(
       "unsupported-replacement",
       "Anchor persona workflow updates cannot contain legacy content or embeds.",
+    );
+  }
+
+  const validation = validateComponentsV2MessageLimits(payload as unknown as ComponentsV2MessagePayload);
+  if (!validation.valid) {
+    const summary = validation.violations
+      .map((v) => `${v.path}: [${v.code}] observed ${v.observed} (limit ${v.limit})`)
+      .join("; ");
+    throw new PersonaWorkflowUpdateError(
+      "unsupported-replacement",
+      `Anchor persona workflow payload exceeded Discord limits: ${summary}`,
     );
   }
 }
@@ -385,21 +283,6 @@ function logWorkflowTimeout(
       ...metadata,
     },
   });
-}
-
-function logWorkflowEmpty(
-  stage: string,
-  anchorMessageId: string | null,
-  counts: { totalPersonas: number; eligiblePersonas: number; interactionId?: string },
-): void {
-  // Empty is a normal terminal state, not a warning, so it uses info-level
-  // logging. The total-vs-eligible counts are folded into the message because
-  // the info channel does not carry structured metadata.
-  log.info(
-    `Persona workflow ${stage} reached an empty eligible set (message=${anchorMessageId ?? "none"}, ` +
-      `total=${counts.totalPersonas}, eligible=${counts.eligiblePersonas}` +
-      `${counts.interactionId ? `, interaction=${counts.interactionId}` : ""})`,
-  );
 }
 
 function logWorkflowFatal(
@@ -741,65 +624,6 @@ export function buildPersonaWorkflowNotice(options: NoticeContainerOptions): Per
   };
 }
 
-/**
- * Starts one ephemeral Components V2 message for a non-persona sibling scope.
- * This is intentionally a narrow adapter: it exposes the same typed controller
- * and nested-button phase used by persona workflows without adding a competing
- * persona-selection abstraction.
- */
-export async function beginAnchorPrivateWorkflow(
-  interaction: ChatInputCommandInteraction,
-  locale: string,
-  initialPayload: PersonaWorkflowComponentsV2Payload,
-): Promise<AnchorPrivateWorkflowPhase> {
-  assertComponentsV2Payload(initialPayload);
-  if (interaction.replied || interaction.deferred) {
-    throw new PersonaWorkflowUpdateError(
-      "already-acknowledged",
-      "The anchor private workflow must perform the command's first acknowledgment.",
-    );
-  }
-
-  let message: Message;
-  try {
-    const response = await interaction.reply({
-      ...initialPayload,
-      flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
-      withResponse: true,
-    });
-    message = response.resource?.message ?? (await interaction.fetchReply());
-  } catch (error) {
-    const failure = classifyUpdateFailure("Failed to create the anchor private workflow message.", error);
-    if (failure.code === "anchor-message-unavailable") {
-      logWorkflowFatal("anchor-private-start", null, failure, { interactionId: interaction.id });
-    }
-    throw failure;
-  }
-
-  const ledger = new AcknowledgementLedger();
-  const controller = new AnchorMessageController(interaction, message.id, ledger);
-  const phaseId = interaction.id;
-  return {
-    phaseId,
-    message: controller,
-    useButton(button) {
-      return {
-        message: controller,
-        replace: (payload) => controller.replaceFrom(button, payload),
-        async beginInPlaceWork() {
-          await controller.acknowledgeInPlace(button);
-          return { deliveryPolicy: "replace-picker", message: controller };
-        },
-        openModal: (options) => openModalWithBridge(button, locale, options, controller),
-        async delete() {
-          await controller.acknowledgeInPlace(button);
-          await controller.delete();
-        },
-      };
-    },
-  };
-}
-
 function buildModalReadyPayload(locale: string, customId: string): PersonaWorkflowComponentsV2Payload {
   return {
     components: buildNoticeContainer({
@@ -810,22 +634,11 @@ function buildModalReadyPayload(locale: string, customId: string): PersonaWorkfl
       button: {
         customId,
         labelKey: "general.persona_workflow.open_modal_button",
-        style: ButtonStyle.Primary,
+        style: ButtonStyle.Secondary,
       },
     }),
     flags: MessageFlags.IsComponentsV2,
   };
-}
-
-function publicPayloadIsEphemeral(flags: unknown): boolean {
-  if (typeof flags === "number") return (flags & MessageFlags.Ephemeral) !== 0;
-  if (typeof flags === "bigint") return (flags & BigInt(MessageFlags.Ephemeral)) !== 0n;
-  if (typeof flags === "string") return flags === "Ephemeral";
-  if (Array.isArray(flags)) return flags.some(publicPayloadIsEphemeral);
-  if (flags && typeof flags === "object" && "bitfield" in flags) {
-    return publicPayloadIsEphemeral((flags as { bitfield: unknown }).bitfield);
-  }
-  return false;
 }
 
 async function awaitWorkflowButton(
@@ -1073,10 +886,20 @@ async function openModalWithBridge(
 
   const prefix = `persona_workflow_${initialButton.id}_${Date.now().toString(36)}`;
   let rangePage = 0;
+  const renderSelector = () =>
+    buildRangeSelectorPayload(
+      locale,
+      prefix,
+      optionCount,
+      rangePage,
+      MODAL_OPTIONS_PER_PAGE,
+      "general.pagination.select_persona_title",
+      "general.pagination.select_persona_page_description",
+    );
   if (modalButton === initialButton && !controller.hasAcknowledged(initialButton)) {
-    await controller.replaceFrom(initialButton, buildRangeSelectorPayload(locale, prefix, optionCount, rangePage));
+    await controller.replaceFrom(initialButton, renderSelector());
   } else {
-    await controller.replace(buildRangeSelectorPayload(locale, prefix, optionCount, rangePage));
+    await controller.replace(renderSelector());
   }
 
   while (true) {
@@ -1112,13 +935,13 @@ async function openModalWithBridge(
     }
     if (rangeButton.customId === `${prefix}_previous`) {
       rangePage = Math.max(0, rangePage - 1);
-      await controller.replaceFrom(rangeButton, buildRangeSelectorPayload(locale, prefix, optionCount, rangePage));
+      await controller.replaceFrom(rangeButton, renderSelector());
       continue;
     }
     if (rangeButton.customId === `${prefix}_next`) {
       const totalRangePages = Math.ceil(Math.ceil(optionCount / MODAL_OPTIONS_PER_PAGE) / RANGES_PER_SELECTOR_PAGE);
       rangePage = Math.min(totalRangePages - 1, rangePage + 1);
-      await controller.replaceFrom(rangeButton, buildRangeSelectorPayload(locale, prefix, optionCount, rangePage));
+      await controller.replaceFrom(rangeButton, renderSelector());
       continue;
     }
 
@@ -1196,44 +1019,6 @@ function createSelectionPhase<TPersona extends TomoriState>(
         },
       };
     },
-    async beginSeparatePublicReply(compactPrivatePicker) {
-      await controller.replaceFrom(selectedButton, compactPrivatePicker);
-      let publicReplySent = false;
-      return {
-        deliveryPolicy: "separate-public",
-        privateMessage: controller,
-        async reply(payload) {
-          if (publicReplySent) {
-            throw new PersonaWorkflowUpdateError(
-              "public-reply-already-sent",
-              "The separate-public workflow phase already created its public response.",
-            );
-          }
-          if (publicPayloadIsEphemeral(payload.flags)) {
-            throw new PersonaWorkflowUpdateError(
-              "public-reply-must-not-be-ephemeral",
-              "The separate-public workflow phase cannot create an ephemeral response.",
-            );
-          }
-          publicReplySent = true;
-          try {
-            return await selectedButton.followUp(payload);
-          } catch (error) {
-            logWorkflowFailure("separate-public", controller.anchorMessageId, error, {
-              interactionId: selectedButton.id,
-            });
-            throw controller.classifyFailure(
-              "Failed to create the workflow's public response.",
-              error,
-              "separate-public",
-              {
-                interactionId: selectedButton.id,
-              },
-            );
-          }
-        },
-      };
-    },
     unsafeInteractions: () => ({ root, selectedButton }),
   };
   return { phase, state };
@@ -1264,43 +1049,9 @@ export async function runPersonaPickerWorkflow<TPersona extends TomoriState, TVa
 ): Promise<PersonaPickerWorkflowResult<TPersona, TValue>> {
   const avatarSessionCache: AvatarSessionCache = new Map();
   const ledger = new AcknowledgementLedger();
-  const { eligibility } = options;
-
-  // Resolve eligibility once. `filterPersonas` is the single filtering point;
-  //    both the initial entry and every persona-supplying retry pass through it,
-  //    so the picker can never render a persona the command cannot act on.
-  const filterPersonas = (list: readonly TPersona[]): { filtered: readonly TPersona[]; excluded: number } => {
-    if (!eligibility) return { filtered: list, excluded: 0 };
-    const filtered = list.filter((persona) => eligibility.isEligible(persona));
-    return { filtered, excluded: list.length - filtered.length };
-  };
-
-  const initialFilter = filterPersonas(options.personas);
-  let currentPersonas = initialFilter.filtered;
-  let currentExcluded = initialFilter.excluded;
-
-  // Pre-picker empty case. The caller owns rendering its own notice on its
-  //     deferred reply (it computes the same eligible set for its own guard), so
-  //     the workflow returns `empty` here without ever rendering a picker.
-  if (eligibility && currentPersonas.length === 0) {
-    logWorkflowEmpty("initial", null, {
-      totalPersonas: options.personas.length,
-      eligiblePersonas: 0,
-      interactionId: interaction.id,
-    });
-    return { outcome: "empty" };
-  }
+  let currentPersonas = options.personas;
 
   while (true) {
-    // The filtered notice is verb-agnostic: one shared sentence with the family's
-    // bare item noun interpolated in. It is only shown when the current picker
-    // actually hides at least one persona.
-    const filteredNotice =
-      eligibility && currentExcluded > 0
-        ? localizer(locale, "general.persona_workflow.filtered_notice", {
-            items: localizer(locale, eligibility.itemsLabelKey),
-          })
-        : undefined;
     const pickerResult = await replyPaginatedPersonaChoicesV2(interaction, locale, {
       personas: [...currentPersonas],
       titleKey: options.titleKey,
@@ -1308,7 +1059,6 @@ export async function runPersonaPickerWorkflow<TPersona extends TomoriState, TVa
       color: options.color,
       preserveSelectedInteraction: true,
       avatarSessionCache,
-      filteredNotice,
     });
 
     if (!pickerResult.success) {
@@ -1455,44 +1205,12 @@ export async function runPersonaPickerWorkflow<TPersona extends TomoriState, TVa
         `Persona workflow retrying picker ${controller.anchorMessageId} in place for persona ${normalized.persona.persona_id}`,
       );
       if (directive.personas) {
-        const { filtered, excluded } = filterPersonas(directive.personas);
-
-        // Mid-loop empty case: the user just removed the last item from the last
-        // eligible persona. Replace the anchor message in place with the
-        // terminal empty state and return `empty`; never render an empty picker
-        // and never emit a second ephemeral message.
-        if (eligibility && filtered.length === 0) {
-          try {
-            await controller.replace(
-              noticePayload(locale, eligibility.emptyTitleKey, eligibility.emptyDescriptionKey, ColorCode.INFO),
-            );
-          } catch (error) {
-            if (isFatalInteractionFailure(error)) {
-              controller.logLatchedFatal("retry-empty-state", {
-                interactionId: selectedButton.id,
-              });
-              return { outcome: "fatal", error };
-            }
-            return { outcome: "error", error };
-          }
-          logWorkflowEmpty("retry", controller.anchorMessageId, {
-            totalPersonas: directive.personas.length,
-            eligiblePersonas: 0,
-            interactionId: selectedButton.id,
-          });
-          return { outcome: "empty" };
-        }
-
-        // Avatar-cache identity comparison stays sound because both sides are the
-        // post-filter arrays: filtering changes indices, so comparing the raw
-        // retry array against the already-filtered current array would spuriously
-        // clear the cache. Comparing filtered-to-filtered keeps it accurate.
+        const retryPersonas = directive.personas;
         const identityChanged =
-          filtered.length !== currentPersonas.length ||
-          filtered.some((persona, index) => persona.persona_id !== currentPersonas[index]?.persona_id);
+          retryPersonas.length !== currentPersonas.length ||
+          retryPersonas.some((persona, index) => persona.persona_id !== currentPersonas[index]?.persona_id);
         if (identityChanged) avatarSessionCache.clear();
-        currentPersonas = filtered;
-        currentExcluded = excluded;
+        currentPersonas = retryPersonas;
       }
       continue;
     }

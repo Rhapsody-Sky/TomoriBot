@@ -4,6 +4,19 @@
  */
 
 import { z } from "zod";
+import { MAX_VOICE_DESIGN_PROMPT_LENGTH } from "@/constants/speech";
+import {
+  naturalNudgeInterestsSchema,
+  naturalNudgeTalkativenessSchema,
+  personaAuthoredIdleNudgesSchema,
+  type NaturalNudgeInterest,
+  type PersonaAuthoredIdleNudge,
+} from "@/modules/natural-nudges/db/types";
+import {
+  EMPTY_PERSONA_NAMING_CONFIG,
+  personaNamingConfigSchema,
+  type PersonaNamingConfig,
+} from "@/types/personaNaming";
 
 /**
  * Current version of the preset export format
@@ -17,21 +30,16 @@ export const PRESET_EXPORT_VERSION = "1.0.0";
  */
 export const UNPAIRED_SAMPLE_DIALOGUE_SENTINEL = "__UNPAIRED_SAMPLE_DIALOGUE__";
 
-function parsePositiveIntegerEnv(name: string, defaultValue: number): number {
-  const parsedValue = Number.parseInt(process.env[name] ?? "", 10);
-  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : defaultValue;
-}
-
 /**
  * Preset import/export schema limits.
- * Admins can raise these with env vars, but doing so affects untrusted import files
- * and cross-instance preset portability.
  */
-export const PRESET_MAX_STRING_LENGTH = parsePositiveIntegerEnv("PRESET_MAX_STRING_LENGTH", 5000);
-export const PRESET_MAX_ATTRIBUTES = parsePositiveIntegerEnv("PRESET_MAX_ATTRIBUTES", 200);
-const PRESET_MAX_SAMPLE_DIALOGUES = parsePositiveIntegerEnv("PRESET_MAX_SAMPLE_DIALOGUES", 100);
-const PRESET_MAX_TRIGGER_WORDS = parsePositiveIntegerEnv("PRESET_MAX_TRIGGER_WORDS", 100);
-const PRESET_MAX_IMAGE_TAGS = parsePositiveIntegerEnv("PRESET_MAX_IMAGE_TAGS", 200);
+export const PRESET_MAX_STRING_LENGTH = 5000;
+// Four 4000-character persona prompt fields can add three two-character separators.
+export const PRESET_MAX_PERSONA_PROMPT_LENGTH = 16_003;
+export const PRESET_MAX_ATTRIBUTES = 200;
+const PRESET_MAX_SAMPLE_DIALOGUES = 100;
+const PRESET_MAX_TRIGGER_WORDS = 100;
+const PRESET_MAX_IMAGE_TAGS = 200;
 
 /**
  * Generated presets use the canonical 6-attribute layout from presetCommon.ts:
@@ -60,6 +68,9 @@ export interface PresetExportData {
   sample_dialogues_out: string[];
   trigger_words: string[];
   persona_prompt?: string | null;
+  speech_voice_design_prompt?: string | null;
+  voice_source_priority?: "design" | "clone";
+  naming_config?: PersonaNamingConfig;
   persona_lineage_id?: number;
   /** Official preset lineage, when this export was materialized from a preset pointer */
   preset_lineage_id?: number;
@@ -77,6 +88,13 @@ export interface PresetExportData {
   nai_attg_genre?: string | null;
   /** ATTG: Quality stars (Erato only, 1-5) */
   nai_attg_stars?: number | null;
+  /** Absent in exports that predate the flag, which were all SFW. */
+  is_nsfw?: boolean;
+  /** Natural Nudges topics; absent in exports that predate Natural Nudges. */
+  natural_nudge_interests?: NaturalNudgeInterest[];
+  natural_nudge_talkativeness?: number;
+  /** Persona-authored idle nudge definitions; absent in exports that predate them. */
+  natural_nudge_idle_nudges?: PersonaAuthoredIdleNudge[];
 }
 
 /**
@@ -90,9 +108,6 @@ export interface PresetExport {
   data: PresetExportData;
 }
 
-/**
- * Result type for export operations
- */
 export type ExportResult =
   | {
       success: true;
@@ -103,9 +118,6 @@ export type ExportResult =
       error: string; // Locale key for error message
     };
 
-/**
- * Result type for import operations
- */
 export type ImportResult =
   | {
       success: true;
@@ -115,6 +127,8 @@ export type ImportResult =
         dialogueCount: number;
         triggerWordCount: number;
       };
+      /** Whether the imported main persona now resolves sprites from an official preset. */
+      mainPersonaIsPointer: boolean;
     }
   | {
       success: false;
@@ -130,9 +144,6 @@ export interface ValidationResult {
   error?: string; // Locale key or pipe-separated error
 }
 
-/**
- * Zod schema for preset export data validation
- */
 export const presetExportDataSchema = z.object({
   tomori_nickname: z.string().min(1, "Nickname cannot be empty").max(100, "Nickname too long"),
   attribute_list: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_ATTRIBUTES),
@@ -140,7 +151,10 @@ export const presetExportDataSchema = z.object({
   sample_dialogues_in: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_SAMPLE_DIALOGUES),
   sample_dialogues_out: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_SAMPLE_DIALOGUES),
   trigger_words: z.array(z.string().max(PRESET_MAX_STRING_LENGTH)).max(PRESET_MAX_TRIGGER_WORDS),
-  persona_prompt: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
+  persona_prompt: z.string().max(PRESET_MAX_PERSONA_PROMPT_LENGTH).nullable().optional(),
+  speech_voice_design_prompt: z.string().max(MAX_VOICE_DESIGN_PROMPT_LENGTH).nullable().optional(),
+  voice_source_priority: z.enum(["design", "clone"]).default("design"),
+  naming_config: personaNamingConfigSchema.default(EMPTY_PERSONA_NAMING_CONFIG),
   persona_lineage_id: z
     .preprocess((value) => {
       if (typeof value === "bigint") {
@@ -170,6 +184,10 @@ export const presetExportDataSchema = z.object({
   nai_attg_tags: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
   nai_attg_genre: z.string().max(PRESET_MAX_STRING_LENGTH).nullable().optional(),
   nai_attg_stars: z.number().int().min(1).max(5).nullable().optional(),
+  is_nsfw: z.boolean().optional(),
+  natural_nudge_interests: naturalNudgeInterestsSchema.optional(),
+  natural_nudge_talkativeness: naturalNudgeTalkativenessSchema.optional(),
+  natural_nudge_idle_nudges: personaAuthoredIdleNudgesSchema.optional(),
 });
 
 /**

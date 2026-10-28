@@ -31,6 +31,14 @@ import type { MentionConverter } from "./templates";
 import type { SimplifiedMessageForContext } from "./types";
 import { buildDateSpacer, TIME_AWARENESS_NOTE_DEPTH } from "./timeAwareness";
 
+/**
+ * Expanded by the caller's tool macro resolver before use, so the `read_file` instruction appears only
+ * when the turn actually exposes `read_file`. `{filename}` and `{media_id}` are filled afterwards
+ * because a filename is user-controlled and must never be parsed as a conditional or macro.
+ */
+export const DOCUMENT_HINT_TEMPLATE =
+  "[System: A file named `{filename}` is attached (message ID: {media_id}).{{if tool:read_file}} Use {document_tool} with this message ID to read its contents, only if needed.{{else}} Its contents are not available to you right now, so do not guess them.{{/if}}]";
+
 export async function appendDialogueHistoryContext(params: {
   contextItems: StructuredContextItem[];
   client: Client;
@@ -42,9 +50,15 @@ export async function appendDialogueHistoryContext(params: {
   channelContextNote?: { note: string; depth: number } | null;
   reunionNote?: string | null;
   dateSpacerTemplate?: string | null;
+  /** `DOCUMENT_HINT_TEMPLATE` after tool macro expansion. */
+  documentHintTemplate: string;
   includeTimestamps: boolean;
   isUserImpersonation: boolean;
   impersonatedUserId?: string;
+  triggererDiscordId?: string;
+  triggererFormattedName: string;
+  historyUserLabels?: Map<string, string>;
+  historyPersonaMentionLabels?: Map<string, string>;
   messageIdMap?: MessageIdMap;
   uncensorInputOptions: { unicodeSpacesEnabled: boolean; sanitizeEnabled: boolean };
   convertMentions: MentionConverter;
@@ -85,7 +99,7 @@ export async function appendDialogueHistoryContext(params: {
       activeNotes.push({ text: globalNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
     }
   }
-  if (shouldInjectVerbatimToolCallingNudge(params.tomoriConfig, params.tomoriState)) {
+  if (shouldInjectVerbatimToolCallingNudge(params.tomoriState)) {
     activeNotes.push({
       text: VERBATIM_TOOL_CALLING_NUDGE,
       targetIndex: Math.max(0, totalMessages - VERBATIM_TOOL_CALLING_CONTEXT_DEPTH),
@@ -187,6 +201,7 @@ export async function appendDialogueHistoryContext(params: {
       hasMediaDescriptors: mediaDescriptors.length > 0,
       mediaAttributionHint,
     });
+    appendDocumentHintParts({ ...params, msg, parts });
 
     if (role === "user" && (parts.length > 0 || detachedSystemParts.length > 0 || mediaDescriptors.length > 0)) {
       pushDialogueHistoryContextItem(
@@ -197,10 +212,29 @@ export async function appendDialogueHistoryContext(params: {
         undefined,
         sender,
         mediaDescriptors,
+        msg.combinedMessageIds,
       );
     } else {
-      pushDialogueHistoryContextItem(params.contextItems, "user", detachedSystemParts, msg.id, undefined, sender);
-      pushDialogueHistoryContextItem(params.contextItems, role, parts, msg.id, undefined, sender, mediaDescriptors);
+      pushDialogueHistoryContextItem(
+        params.contextItems,
+        "user",
+        detachedSystemParts,
+        msg.id,
+        undefined,
+        sender,
+        undefined,
+        msg.combinedMessageIds,
+      );
+      pushDialogueHistoryContextItem(
+        params.contextItems,
+        role,
+        parts,
+        msg.id,
+        undefined,
+        sender,
+        mediaDescriptors,
+        msg.combinedMessageIds,
+      );
     }
   }
 
@@ -214,6 +248,24 @@ export async function appendDialogueHistoryContext(params: {
         ContextItemTag.CONTEXT_NOTE_INJECTION,
       );
     }
+  }
+}
+
+function appendDocumentHintParts(params: {
+  msg: SimplifiedMessageForContext;
+  parts: ContextPart[];
+  documentHintTemplate: string;
+  messageIdMap?: MessageIdMap;
+}): void {
+  for (const document of params.msg.documentAttachments ?? []) {
+    const sourceMessageId = document.sourceMessageId ?? params.msg.id;
+    const mediaId = params.messageIdMap?.register(sourceMessageId, "media") ?? sourceMessageId;
+    params.parts.push({
+      type: "text",
+      text: params.documentHintTemplate
+        .replace("{media_id}", () => mediaId)
+        .replace("{filename}", () => document.filename),
+    });
   }
 }
 
@@ -413,17 +465,30 @@ async function appendTextParts(
     mediaAttributionHint: string | null;
   },
 ): Promise<void> {
+  const authorLabel =
+    params.msg.authorType === "user"
+      ? (params.historyUserLabels?.get(params.msg.authorId) ??
+        (params.triggererDiscordId === params.msg.authorId && params.triggererFormattedName
+          ? params.triggererFormattedName
+          : params.msg.authorName))
+      : params.msg.authorName;
+
   if (params.msg.content) {
-    const normalizedContent = normalizeCustomEmojisForLlm(params.msg.content);
+    let normalizedContent = normalizeCustomEmojisForLlm(params.msg.content);
+    if (params.msg.authorPersonaLineageId != null && params.historyPersonaMentionLabels) {
+      normalizedContent = normalizedContent.replace(/<@!?(\d+)>/gu, (mention, targetId: string) => {
+        return params.historyPersonaMentionLabels?.get(`${params.msg.authorPersonaLineageId}:${targetId}`) ?? mention;
+      });
+    }
 
     // The author label is text WE author, so identity macros in it must still resolve: it is
     //    what tells the model which name owns the turn. Resolved BEFORE the join so the body,
     //    which is raw prose, can opt out of macro expansion in step 3.
     const resolvedAuthorLabel = await params.convertMentions(
-      params.msg.authorName,
+      authorLabel,
       params.client,
       params.guildId,
-      params.msg.authorName,
+      authorLabel,
       params.botName,
       params.tomoriConfig.personal_memories_enabled,
       undefined,
@@ -442,12 +507,17 @@ async function appendTextParts(
     }
 
     if (params.tomoriConfig.humanizer_degree >= HumanizerDegree.HEAVY && params.role === "model") {
-      processedContent = humanizeString(processedContent);
+      // content is already real, previously-delivered text, so re-rolling the same randomized
+      // comma/emphasis noise on every context build would just re-randomize already-final output
+      // and, since it never lands on the same result twice, defeat provider prompt-prefix caching
+      // for every turn after this one. suppressPunctuationNoise keeps only the deterministic
+      // casing/semicolon normalization, so a rebuilt prompt's history prefix stays byte-stable.
+      [processedContent] = humanizeString(processedContent, { suppressPunctuationNoise: true });
     }
-    // Mentions, channel links, and roles still resolve here. Only the identity macros are left
+    // Mentions, channel links, and roles still resolve here. Only the identity macros stay
     //    literal: this string carries a real Discord message body, so rewriting "{bot}"/"{char}"
-    //    would corrupt legitimate content (e.g. a persona preset Tomori drafted for a user) and,
-    //    on a model-role line, would collapse both macros onto the persona's own name.
+    //    would corrupt legitimate content (e.g. a persona preset Tomori drafted for a user).
+    //    On a model-role line it would also collapse both macros onto the persona's own name.
     processedContent = await params.convertMentions(
       processedContent,
       params.client,
@@ -475,10 +545,10 @@ async function appendTextParts(
     params.parts.push({
       type: "text",
       text: await params.convertMentions(
-        buildMediaAttributionText(params.msg, params.msg.authorName),
+        buildMediaAttributionText(params.msg, authorLabel),
         params.client,
         params.guildId,
-        params.msg.authorName,
+        authorLabel,
         params.botName,
         params.tomoriConfig.personal_memories_enabled,
       ),

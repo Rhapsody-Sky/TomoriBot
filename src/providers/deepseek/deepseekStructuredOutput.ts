@@ -1,58 +1,24 @@
+import { buildExampleJsonFromSchema } from "@/providers/utils/structuredOutput";
+import {
+  parsePrivateStructuredOutput,
+  privateStructuredFailure,
+  readStructuredResponse,
+} from "@/providers/utils/structuredReview";
 import type { z } from "zod";
+import { toDeepseekApiModelName } from "@/providers/deepseek/deepseekShared";
 import type { ProviderStructuredJsonRequest, StructuredOutputResult } from "@/types/provider/featureInterfaces";
 import { log } from "@/utils/misc/logger";
+import { readProviderErrorBody } from "@/utils/provider/providerErrorMetrics";
+import { buildDeepSeekThinkingRequest } from "@/utils/provider/thinkingControl";
+import { fetchAndOptimizeImage } from "@/utils/image/imageProcessor";
 
 type DeepseekStructuredOutputRequest = ProviderStructuredJsonRequest;
 
-function buildExampleJsonFromSchema(schema: unknown): unknown {
-  if (!schema || typeof schema !== "object") {
-    return {};
-  }
+type DeepseekContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
-  const record = schema as Record<string, unknown>;
-
-  if ("const" in record) {
-    return record.const;
-  }
-
-  if (Array.isArray(record.enum) && record.enum.length > 0) {
-    return record.enum[0];
-  }
-
-  if (Array.isArray(record.anyOf) && record.anyOf.length > 0) {
-    return buildExampleJsonFromSchema(record.anyOf[0]);
-  }
-
-  const schemaType = record.type;
-  if (schemaType === "object") {
-    const properties =
-      record.properties && typeof record.properties === "object" ? (record.properties as Record<string, unknown>) : {};
-    const example: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(properties)) {
-      example[key] = buildExampleJsonFromSchema(value);
-    }
-    return example;
-  }
-
-  if (schemaType === "array") {
-    return [buildExampleJsonFromSchema(record.items)];
-  }
-
-  if (schemaType === "integer" || schemaType === "number") {
-    const minimum = typeof record.minimum === "number" && Number.isFinite(record.minimum) ? record.minimum : 0;
-    return minimum;
-  }
-
-  if (schemaType === "boolean") {
-    return false;
-  }
-
-  if (schemaType === "string") {
-    return "<string>";
-  }
-
-  return {};
-}
+type DeepseekStructuredMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | DeepseekContentPart[] };
 
 function buildDeepseekStructuredSystemPrompt(
   systemPrompt: string,
@@ -76,6 +42,55 @@ function buildDeepseekStructuredSystemPrompt(
     .join("\n\n");
 }
 
+function parseDeepseekJsonResponse(text: string): unknown {
+  const cleanedText = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?think>/gi, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleanedText);
+  } catch {
+    // Continue to fallback extraction attempts below.
+  }
+
+  const fencedMatch = cleanedText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fencedMatch?.[1]) {
+    try {
+      return JSON.parse(fencedMatch[1]);
+    } catch {}
+  }
+
+  const firstBrace = cleanedText.indexOf("{");
+  const lastBrace = cleanedText.lastIndexOf("}");
+  const firstBracket = cleanedText.indexOf("[");
+  const lastBracket = cleanedText.lastIndexOf("]");
+
+  const hasBrackets = firstBracket !== -1 && lastBracket > firstBracket;
+  const hasBraces = firstBrace !== -1 && lastBrace > firstBrace;
+
+  // Inspect whichever delimiter appears first so array roots enclosing objects are not stripped
+  if (hasBrackets && (!hasBraces || firstBracket < firstBrace)) {
+    try {
+      return JSON.parse(cleanedText.slice(firstBracket, lastBracket + 1));
+    } catch {}
+  }
+
+  if (hasBraces) {
+    try {
+      return JSON.parse(cleanedText.slice(firstBrace, lastBrace + 1));
+    } catch {}
+  }
+
+  if (hasBrackets) {
+    try {
+      return JSON.parse(cleanedText.slice(firstBracket, lastBracket + 1));
+    } catch {}
+  }
+
+  return JSON.parse(cleanedText);
+}
+
 /**
  * Call DeepSeek with JSON Output (`response_format: json_object`).
  * DeepSeek does not currently expose a schema-enforced JSON mode in the stable API,
@@ -87,27 +102,49 @@ export async function callDeepseekStructuredJSON<T>(
   responseSchema: Record<string, unknown>,
   zodSchema: z.ZodType<T>,
 ): Promise<StructuredOutputResult<T>> {
-  const images = request.images ?? [];
-  if (images.length > 0) {
-    return {
-      success: false,
-      error: "DeepSeek structured output does not support image inputs.",
-    };
-  }
-
   try {
+    const contentParts: DeepseekContentPart[] = [{ type: "text", text: request.userPrompt }];
+
+    if (request.images && request.images.length > 0) {
+      for (const image of request.images) {
+        try {
+          const optimized = await fetchAndOptimizeImage(image.url, image.mimeType);
+          contentParts.push({
+            type: "image_url",
+            image_url: {
+              url: `data:${optimized.mimeType};base64,${optimized.data}`,
+            },
+          });
+        } catch (fetchError) {
+          log.error(`Error fetching DeepSeek image ${image.name ?? image.url}`, fetchError as Error, {
+            errorType: "DeepseekImageFetchError",
+            metadata: {
+              imageName: image.name ?? null,
+              imageUrl: image.url,
+            },
+          });
+        }
+      }
+    }
+
+    const userContent =
+      contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text : contentParts;
+
+    const messages: DeepseekStructuredMessage[] = [
+      {
+        role: "system",
+        content: buildDeepseekStructuredSystemPrompt(request.systemPrompt, responseSchema, request.schemaName),
+      },
+      {
+        role: "user",
+        content: userContent,
+      },
+    ];
+
+    const apiModel = toDeepseekApiModelName(request.model);
     const body: Record<string, unknown> = {
-      model: request.model,
-      messages: [
-        {
-          role: "system",
-          content: buildDeepseekStructuredSystemPrompt(request.systemPrompt, responseSchema, request.schemaName),
-        },
-        {
-          role: "user",
-          content: request.userPrompt,
-        },
-      ],
+      model: apiModel,
+      messages,
       response_format: {
         type: "json_object",
       },
@@ -115,20 +152,36 @@ export async function callDeepseekStructuredJSON<T>(
       stream: false,
     };
 
-    if (request.model !== "deepseek-reasoner") {
+    const thinking =
+      request.thinkingLevel === undefined ? undefined : buildDeepSeekThinkingRequest(apiModel, request.thinkingLevel);
+    if (thinking?.thinking) body.thinking = thinking.thinking;
+    if (thinking?.reasoning_effort) body.reasoning_effort = thinking.reasoning_effort;
+    if (!thinking?.omitSampling) {
       body.temperature = request.temperature ?? 1.0;
     }
 
-    const response = await fetch("https://api.deepseek.com/chat/completions", {
+    const endpointUrl = request.endpointUrl || "https://api.deepseek.com/chat/completions";
+    const response = await fetch(endpointUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${request.apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: request.abortSignal,
     });
 
     if (!response.ok) {
+      if (request.privateOutput) {
+        return privateStructuredFailure(
+          request,
+          "transport",
+          response.status,
+          undefined,
+          undefined,
+          await readProviderErrorBody(response, request.apiKey),
+        );
+      }
       const errorBody = await response.text();
       log.error("DeepSeek structured JSON request failed", new Error(errorBody), {
         errorType: "DeepseekStructuredJSONHttpError",
@@ -143,8 +196,9 @@ export async function callDeepseekStructuredJSON<T>(
       };
     }
 
-    const result = (await response.json()) as {
-      choices?: Array<{ message?: { content?: unknown } }>;
+    const result = (await readStructuredResponse(request, response)) as {
+      usage?: unknown;
+      choices?: Array<{ message?: { content?: unknown; refusal?: unknown } }>;
     };
     const messageContent = result.choices?.[0]?.message?.content;
     const responseText =
@@ -166,6 +220,14 @@ export async function callDeepseekStructuredJSON<T>(
               .trim()
           : "";
 
+    if (request.privateOutput)
+      return parsePrivateStructuredOutput(
+        request,
+        responseText,
+        zodSchema,
+        result.usage,
+        Boolean(result.choices?.[0]?.message?.refusal),
+      );
     if (!responseText) {
       log.warn("DeepSeek structured JSON returned empty response", {
         model: request.model,
@@ -178,7 +240,7 @@ export async function callDeepseekStructuredJSON<T>(
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(responseText);
+      parsed = parseDeepseekJsonResponse(responseText);
     } catch (parseError) {
       log.error("DeepSeek structured JSON parse failed", parseError as Error, {
         errorType: "DeepseekStructuredJSONParseError",
@@ -208,6 +270,7 @@ export async function callDeepseekStructuredJSON<T>(
       data: validationResult.data,
     };
   } catch (error) {
+    if (request.privateOutput) return privateStructuredFailure(request);
     log.error("Error calling DeepSeek structured JSON", error as Error, {
       errorType: "DeepseekStructuredJSONError",
       metadata: {

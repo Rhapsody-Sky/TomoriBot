@@ -7,19 +7,32 @@
  * Export contract: toExportShape / fromExportShape are required by IRepository
  * and consumed by the Phase 6 (#16.7) export pipeline composition.
  */
-import type { GuildMcpServerRow } from "@/types/db/schema";
+import type { GuildMcpFailureReason, GuildMcpServerRow } from "@/types/db/schema";
 import { sql } from "@/utils/db/client";
 import { log } from "@/utils/misc/logger";
+import { lazyRotateEncryptedRow } from "@/utils/security/encryptedColumns";
 import { keyManager } from "@/utils/security/keyManager";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCacheStore";
 import { invalidateGuildMcpConfigCache } from "@/utils/cache/guildMcpConfigCache";
 import type { IRepository } from "./IRepository";
+import { normalizeMcpToolNameSnapshot } from "@/utils/mcp/mcpToolSnapshot";
 
 /** Portable tool config export shape (expanded in Phase 6 #16.7). */
 type ToolExportShape = {
   server_disc_id: string;
   mcp_servers: Array<{ name: string; url: string; server_type: string }>;
 };
+
+type McpToolSnapshotUpdateResult = "updated" | "unchanged" | "not-found" | "failed";
+/** `not-found` also covers a registration that was disabled or removed while the connect was in flight. */
+type McpConnectFailureRecordResult =
+  | { status: "failing"; failingSince: Date }
+  | { status: "auto-disabled"; failingSince: Date; serverDiscId: string }
+  | { status: "not-found" }
+  | { status: "failed" };
+export type BraveApiKeyStatusReadResult =
+  | { status: "fresh"; configured: boolean }
+  | { status: "unavailable"; configured: false };
 
 class ToolRepository implements IRepository<ToolExportShape> {
   async loadMcpServers(serverId: number): Promise<GuildMcpServerRow[]> {
@@ -35,29 +48,40 @@ class ToolRepository implements IRepository<ToolExportShape> {
   }
 
   /**
-   * Returns the count of registered MCP servers for a guild.
-   *
-   */
-  async countMcpServers(serverId: number): Promise<number> {
-    return this.sqlCountGuildMcpServers(serverId);
-  }
-
-  /**
    * Returns true if a Brave Search API key is configured for the server.
    *
    */
   async getBraveApiKeyStatus(serverId: number): Promise<boolean> {
-    return this.sqlGetBraveApiKeyStatus(serverId);
+    return (await this.getBraveApiKeyStatusResult(serverId)).configured;
+  }
+
+  /**
+   * Reads Brave configuration without collapsing a database failure into an unconfigured state.
+   */
+  async getBraveApiKeyStatusResult(serverId: number): Promise<BraveApiKeyStatusReadResult> {
+    try {
+      const rows = await sql`
+        SELECT api_key FROM opt_api_keys
+        WHERE server_id = ${serverId}
+          AND service_name = 'brave-search'
+        LIMIT 1
+      `;
+      return { status: "fresh", configured: rows.length > 0 && rows[0]?.api_key != null };
+    } catch (error) {
+      log.error(`Error checking Brave API key status for server ${serverId}:`, error);
+      return { status: "unavailable", configured: false };
+    }
   }
 
   /**
    * Decrypts the auth token for a guild MCP server row.
    *
    * @param row - GuildMcpServerRow with an encrypted auth token
-   * @returns Decrypted token string or null if absent / decryption failed
+   * Internal private callers report a normalized failure at their orchestration owner.
+   * @returns Decrypted token or null when absent; private failures throw without SDK details.
    */
-  async decryptMcpAuthToken(row: GuildMcpServerRow): Promise<string | null> {
-    return this.sqlDecryptGuildMcpAuthToken(row);
+  async decryptMcpAuthToken(row: GuildMcpServerRow, privateFailure = false): Promise<string | null> {
+    return this.sqlDecryptGuildMcpAuthToken(row, privateFailure);
   }
 
   /**
@@ -75,9 +99,17 @@ class ToolRepository implements IRepository<ToolExportShape> {
     url: string,
     authToken: string | undefined,
     serverType: string | null | undefined,
+    lastDiscoveredToolNames: readonly string[],
     serverDiscId: string,
   ): Promise<GuildMcpServerRow | null> {
-    const row = await this.sqlInsertGuildMcpServer(serverId, name, url, authToken, serverType);
+    const row = await this.sqlInsertGuildMcpServer(
+      serverId,
+      name,
+      url,
+      authToken,
+      serverType,
+      normalizeMcpToolNameSnapshot(lastDiscoveredToolNames),
+    );
     if (row) {
       invalidateGuildMcpConfigCache(serverId);
       invalidateTomoriStateCache(serverDiscId);
@@ -85,14 +117,39 @@ class ToolRepository implements IRepository<ToolExportShape> {
     return row;
   }
 
-  /**
-   * Deletes an MCP server from a guild by name.
-   * Invalidates caches after write.
-   *
-   * @param serverDiscId - Discord server snowflake (required for tomori state cache invalidation)
-   */
-  async deleteMcpServer(serverId: number, name: string, serverDiscId: string): Promise<boolean> {
-    const ok = await this.sqlDeleteGuildMcpServer(serverId, name);
+  /** Refreshes display-only discovery metadata without invalidating assembled Tomori state. */
+  async updateMcpToolNameSnapshot(
+    serverId: number,
+    guildMcpId: number,
+    functionNames: readonly string[],
+  ): Promise<McpToolSnapshotUpdateResult> {
+    const result = await this.sqlUpdateGuildMcpToolNameSnapshot(
+      serverId,
+      guildMcpId,
+      normalizeMcpToolNameSnapshot(functionNames),
+    );
+    if (result === "updated") invalidateGuildMcpConfigCache(serverId);
+    return result;
+  }
+
+  /** Deletes one MCP registration by its stable ID inside the current scope. */
+  async deleteMcpServerById(serverId: number, guildMcpId: number, serverDiscId: string): Promise<boolean> {
+    const ok = await this.sqlDeleteGuildMcpServerById(serverId, guildMcpId);
+    if (ok) {
+      invalidateGuildMcpConfigCache(serverId);
+      invalidateTomoriStateCache(serverDiscId);
+    }
+    return ok;
+  }
+
+  /** Updates one MCP registration by its stable ID inside the current scope. */
+  async updateMcpServerEnabledById(
+    serverId: number,
+    guildMcpId: number,
+    enabled: boolean,
+    serverDiscId: string,
+  ): Promise<boolean> {
+    const ok = await this.sqlUpdateGuildMcpServerEnabledById(serverId, guildMcpId, enabled);
     if (ok) {
       invalidateGuildMcpConfigCache(serverId);
       invalidateTomoriStateCache(serverDiscId);
@@ -101,30 +158,90 @@ class ToolRepository implements IRepository<ToolExportShape> {
   }
 
   /**
-   * Enables or disables an MCP server for a guild.
-   * Invalidates caches after write.
-   *
-   * @param serverDiscId - Discord server snowflake (required for tomori state cache invalidation)
+   * Extends the registration's failure streak and disables it once the streak is at least
+   * `autoDisableAfterMs` old. The age check runs on the database clock so restarts and host clock
+   * drift cannot shorten or reset the window.
    */
-  async updateMcpServerEnabled(
+  async recordMcpConnectFailure(
     serverId: number,
-    name: string,
-    enabled: boolean,
-    serverDiscId: string,
-  ): Promise<boolean> {
-    const ok = await this.sqlUpdateGuildMcpServerEnabled(serverId, name, enabled);
-    if (ok) {
-      invalidateGuildMcpConfigCache(serverId);
-      invalidateTomoriStateCache(serverDiscId);
+    guildMcpId: number,
+    reason: GuildMcpFailureReason,
+    autoDisableAfterMs: number,
+  ): Promise<McpConnectFailureRecordResult> {
+    const result = await this.sqlRecordGuildMcpConnectFailure(serverId, guildMcpId, reason, autoDisableAfterMs);
+    if (result.status === "failing" || result.status === "auto-disabled") invalidateGuildMcpConfigCache(serverId);
+    if (result.status === "auto-disabled") invalidateTomoriStateCache(result.serverDiscId);
+    return result;
+  }
+
+  /** Ends a failure streak after a successful connect. */
+  async clearMcpConnectFailure(serverId: number, guildMcpId: number): Promise<void> {
+    if (await this.sqlClearGuildMcpConnectFailure(serverId, guildMcpId)) invalidateGuildMcpConfigCache(serverId);
+  }
+
+  private async sqlRecordGuildMcpConnectFailure(
+    serverId: number,
+    guildMcpId: number,
+    reason: GuildMcpFailureReason,
+    autoDisableAfterMs: number,
+  ): Promise<McpConnectFailureRecordResult> {
+    const thresholdSeconds = autoDisableAfterMs / 1000;
+    try {
+      const [row] = await sql`
+        UPDATE guild_mcp_servers AS g
+        SET failing_since = COALESCE(g.failing_since, now()),
+            failure_reason = ${reason},
+            is_enabled = NOT COALESCE(g.failing_since <= now() - make_interval(secs => ${thresholdSeconds}), false)
+        FROM servers AS s
+        WHERE g.server_id = ${serverId}
+          AND g.guild_mcp_id = ${guildMcpId}
+          AND g.is_enabled = true
+          AND s.server_id = g.server_id
+        RETURNING g.is_enabled, g.failing_since, s.server_disc_id
+      `;
+      if (!row) return { status: "not-found" };
+      if (row.is_enabled) return { status: "failing", failingSince: row.failing_since as Date };
+      log.warn(`[GuildMcpDb] Auto-disabled MCP server ID ${guildMcpId} for server ${serverId} (${reason})`);
+      return {
+        status: "auto-disabled",
+        failingSince: row.failing_since as Date,
+        serverDiscId: row.server_disc_id as string,
+      };
+    } catch (error) {
+      log.error(
+        `[GuildMcpDb] Failed to record connect failure for MCP server ID ${guildMcpId} on server ${serverId}`,
+        error,
+      );
+      return { status: "failed" };
     }
-    return ok;
+  }
+
+  private async sqlClearGuildMcpConnectFailure(serverId: number, guildMcpId: number): Promise<boolean> {
+    try {
+      const cleared = await sql`
+        UPDATE guild_mcp_servers
+        SET failing_since = NULL, failure_reason = NULL
+        WHERE server_id = ${serverId}
+          AND guild_mcp_id = ${guildMcpId}
+          AND (failing_since IS NOT NULL OR failure_reason IS NOT NULL)
+        RETURNING guild_mcp_id
+      `;
+      return cleared.length > 0;
+    } catch (error) {
+      log.error(
+        `[GuildMcpDb] Failed to clear connect failure for MCP server ID ${guildMcpId} on server ${serverId}`,
+        error,
+      );
+      return false;
+    }
   }
 
   private async sqlLoadGuildMcpServers(serverId: number): Promise<GuildMcpServerRow[]> {
     try {
       const rows = await sql`
         SELECT guild_mcp_id, server_id, name, url, auth_token, key_version,
-               is_enabled, server_type, created_at, updated_at
+               is_enabled, server_type, last_discovered_tool_names, failing_since, failure_reason,
+               created_at, updated_at
         FROM guild_mcp_servers
         WHERE server_id = ${serverId}
         ORDER BY created_at ASC
@@ -143,6 +260,7 @@ class ToolRepository implements IRepository<ToolExportShape> {
     url: string,
     rawAuthToken?: string,
     serverType?: string | null,
+    lastDiscoveredToolNames: readonly string[] = [],
   ): Promise<GuildMcpServerRow | null> {
     try {
       const currentKey = keyManager.getCurrentKey();
@@ -152,19 +270,23 @@ class ToolRepository implements IRepository<ToolExportShape> {
 
       if (rawAuthToken) {
         const [result] = await sql`
-          INSERT INTO guild_mcp_servers (server_id, name, url, auth_token, key_version, server_type)
+          INSERT INTO guild_mcp_servers (
+            server_id, name, url, auth_token, key_version, server_type, last_discovered_tool_names
+          )
           VALUES (
             ${serverId}, ${name}, ${url},
             pgp_sym_encrypt(${rawAuthToken.trim()}, ${currentKey}, 'compress-algo=1, cipher-algo=aes256'),
-            ${currentVersion}, ${serverType ?? null}
+            ${currentVersion}, ${serverType ?? null}, ${sql.array([...lastDiscoveredToolNames], "TEXT")}
           )
           RETURNING *
         `;
         row = result as GuildMcpServerRow;
       } else {
         const [result] = await sql`
-          INSERT INTO guild_mcp_servers (server_id, name, url, server_type)
-          VALUES (${serverId}, ${name}, ${url}, ${serverType ?? null})
+          INSERT INTO guild_mcp_servers (server_id, name, url, server_type, last_discovered_tool_names)
+          VALUES (
+            ${serverId}, ${name}, ${url}, ${serverType ?? null}, ${sql.array([...lastDiscoveredToolNames], "TEXT")}
+          )
           RETURNING *
         `;
         row = result as GuildMcpServerRow;
@@ -183,58 +305,82 @@ class ToolRepository implements IRepository<ToolExportShape> {
     }
   }
 
-  private async sqlDeleteGuildMcpServer(serverId: number, name: string): Promise<boolean> {
+  private async sqlDeleteGuildMcpServerById(serverId: number, guildMcpId: number): Promise<boolean> {
     try {
       const result = await sql`
         DELETE FROM guild_mcp_servers
-        WHERE server_id = ${serverId} AND name = ${name}
+        WHERE server_id = ${serverId} AND guild_mcp_id = ${guildMcpId}
       `;
-
       const deleted = result.count > 0;
       if (deleted) {
-        log.success(`[GuildMcpDb] Deleted MCP server "${name}" for server ${serverId}`);
+        log.success(`[GuildMcpDb] Deleted MCP server ID ${guildMcpId} for server ${serverId}`);
       }
       return deleted;
     } catch (error) {
-      log.error(`[GuildMcpDb] Failed to delete MCP server "${name}" for server ${serverId}`, error);
+      log.error(`[GuildMcpDb] Failed to delete MCP server ID ${guildMcpId} for server ${serverId}`, error);
       return false;
     }
   }
 
-  private async sqlCountGuildMcpServers(serverId: number): Promise<number> {
+  private async sqlUpdateGuildMcpServerEnabledById(
+    serverId: number,
+    guildMcpId: number,
+    enabled: boolean,
+  ): Promise<boolean> {
     try {
-      const [row] = await sql`
-        SELECT COUNT(*) AS count FROM guild_mcp_servers
-        WHERE server_id = ${serverId}
-      `;
-
-      return Number.parseInt(row?.count as string, 10) || 0;
-    } catch (error) {
-      log.error(`[GuildMcpDb] Failed to count MCP servers for server ${serverId}`, error);
-      return 0;
-    }
-  }
-
-  private async sqlUpdateGuildMcpServerEnabled(serverId: number, name: string, enabled: boolean): Promise<boolean> {
-    try {
+      // An administrator's choice ends any failure streak, so a re-enabled server gets a full
+      // auto-disable window instead of being switched off again on its first failure.
       const result = await sql`
         UPDATE guild_mcp_servers
-        SET is_enabled = ${enabled}
-        WHERE server_id = ${serverId} AND name = ${name}
+        SET is_enabled = ${enabled}, failing_since = NULL, failure_reason = NULL
+        WHERE server_id = ${serverId} AND guild_mcp_id = ${guildMcpId}
       `;
-
       const updated = result.count > 0;
       if (updated) {
-        log.success(`[GuildMcpDb] ${enabled ? "Enabled" : "Disabled"} MCP server "${name}" for server ${serverId}`);
+        log.success(
+          `[GuildMcpDb] ${enabled ? "Enabled" : "Disabled"} MCP server ID ${guildMcpId} for server ${serverId}`,
+        );
       }
       return updated;
     } catch (error) {
-      log.error(`[GuildMcpDb] Failed to update MCP server enabled state for "${name}" on server ${serverId}`, error);
+      log.error(`[GuildMcpDb] Failed to update MCP server ID ${guildMcpId} for server ${serverId}`, error);
       return false;
     }
   }
 
-  private async sqlDecryptGuildMcpAuthToken(row: GuildMcpServerRow): Promise<string | null> {
+  private async sqlUpdateGuildMcpToolNameSnapshot(
+    serverId: number,
+    guildMcpId: number,
+    functionNames: readonly string[],
+  ): Promise<McpToolSnapshotUpdateResult> {
+    try {
+      const updated = await sql`
+        UPDATE guild_mcp_servers
+        SET last_discovered_tool_names = ${sql.array([...functionNames], "TEXT")}
+        WHERE server_id = ${serverId}
+          AND guild_mcp_id = ${guildMcpId}
+          AND last_discovered_tool_names IS DISTINCT FROM ${sql.array([...functionNames], "TEXT")}
+        RETURNING guild_mcp_id
+      `;
+      if (updated.length > 0) return "updated";
+
+      const existing = await sql`
+        SELECT guild_mcp_id
+        FROM guild_mcp_servers
+        WHERE server_id = ${serverId} AND guild_mcp_id = ${guildMcpId}
+        LIMIT 1
+      `;
+      return existing.length > 0 ? "unchanged" : "not-found";
+    } catch (error) {
+      log.error(
+        `[GuildMcpDb] Failed to refresh tool-name snapshot for MCP server ID ${guildMcpId} on server ${serverId}`,
+        error,
+      );
+      return "failed";
+    }
+  }
+
+  private async sqlDecryptGuildMcpAuthToken(row: GuildMcpServerRow, privateFailure = false): Promise<string | null> {
     if (!row.auth_token) return null;
 
     try {
@@ -246,44 +392,25 @@ class ToolRepository implements IRepository<ToolExportShape> {
       `;
 
       if (!result?.decrypted_token) {
+        if (privateFailure) throw new Error("MCP credential resolution failed");
         log.warn(`[GuildMcpDb] Decryption returned empty for MCP server "${row.name}"`);
         return null;
       }
 
       const decryptedToken = result.decrypted_token.toString();
-
-      const currentVersion = keyManager.getCurrentVersion();
-      if (keyVersion !== currentVersion) {
-        log.info(`[GuildMcpDb] Rotating auth token for "${row.name}" from key v${keyVersion} to v${currentVersion}`);
-        const currentKey = keyManager.getCurrentKey();
-        await sql`
-          UPDATE guild_mcp_servers
-          SET auth_token = pgp_sym_encrypt(${decryptedToken}, ${currentKey}, 'compress-algo=1, cipher-algo=aes256'),
-              key_version = ${currentVersion}
-          WHERE guild_mcp_id = ${row.guild_mcp_id}
-        `;
-        log.success(`[GuildMcpDb] Key rotation completed for MCP server "${row.name}"`);
+      if (row.guild_mcp_id !== undefined) {
+        await lazyRotateEncryptedRow(sql, "guild_mcp_servers", {
+          id: row.guild_mcp_id,
+          ciphertext: row.auth_token,
+          key_version: row.key_version,
+        });
       }
 
       return decryptedToken;
     } catch (error) {
+      if (privateFailure) throw new Error("MCP credential resolution failed");
       log.error(`[GuildMcpDb] Failed to decrypt auth token for MCP server "${row.name}"`, error);
       return null;
-    }
-  }
-
-  private async sqlGetBraveApiKeyStatus(serverId: number): Promise<boolean> {
-    try {
-      const result = await sql`
-        SELECT api_key FROM opt_api_keys
-        WHERE server_id = ${serverId}
-        AND service_name = 'brave-search'
-        LIMIT 1
-      `;
-      return result && result.length > 0;
-    } catch (error) {
-      log.error(`Error checking Brave API key status for server ${serverId}:`, error);
-      return false;
     }
   }
 
@@ -291,7 +418,8 @@ class ToolRepository implements IRepository<ToolExportShape> {
     try {
       const rows = await sql`
         SELECT guild_mcp_id, server_id, name, url, auth_token, key_version,
-               is_enabled, server_type, created_at, updated_at
+               is_enabled, server_type, last_discovered_tool_names, failing_since, failure_reason,
+               created_at, updated_at
         FROM guild_mcp_servers
         WHERE is_enabled = true
         ORDER BY server_id ASC, created_at ASC

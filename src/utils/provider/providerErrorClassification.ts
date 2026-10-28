@@ -1,4 +1,40 @@
+import { z } from "zod";
 import type { ProviderError } from "@/types/stream/interfaces";
+
+export const providerContentRejectionSchema = z.enum([
+  "SAFETY",
+  "PROHIBITED_CONTENT",
+  "RECITATION",
+  "BLOCKLIST",
+  "SPII",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "content_filter",
+  "content_policy_violation",
+]);
+
+const contentRejectionFields = z.object({
+  promptFeedback: z.object({ blockReason: z.string().optional() }).optional(),
+  candidates: z.array(z.object({ finishReason: z.string().optional() })).optional(),
+  choices: z.array(z.object({ finish_reason: z.string().nullish() })).optional(),
+  error: z.object({ code: z.union([z.string(), z.number()]).optional() }).optional(),
+});
+
+export function getProviderContentRejectionCode(value: unknown): string | undefined {
+  const response = contentRejectionFields.safeParse(value);
+  if (!response.success) return undefined;
+  const codes = [
+    response.data.promptFeedback?.blockReason,
+    response.data.error?.code,
+    ...(response.data.candidates?.map((candidate) => candidate.finishReason) ?? []),
+    ...(response.data.choices?.map((choice) => choice.finish_reason) ?? []),
+  ];
+  for (const value of codes) {
+    const code = providerContentRejectionSchema.safeParse(value);
+    if (code.success) return code.data;
+  }
+  return undefined;
+}
 
 const MODEL_ERROR_PATTERNS: RegExp[] = [
   /\bunsupported\s+model\b/i,
@@ -11,6 +47,11 @@ const MODEL_ERROR_PATTERNS: RegExp[] = [
   // "Grok 4.1 Fast is deprecated"), so present it as a model error and steer the user to
   // pick a different model rather than showing the generic API-error copy.
   /\bdeprecated\b/i,
+  // NVIDIA NIM answers a retired model with 410 "has reached its end of life" and a model the
+  // account cannot reach with 404 "Function '<uuid>': Not found for account"; neither names the
+  // model in a shape the patterns above match, so both fell through to API-key advice.
+  /\breached\s+its\s+end\s+of\s+life\b/i,
+  /\bnot\s+found\s+for\s+account\b/i,
 ];
 
 export function isProviderModelError(error: ProviderError): boolean {
@@ -30,6 +71,7 @@ const CONTEXT_LENGTH_ERROR_PATTERNS: RegExp[] = [
   /\bcontext_length_exceeded\b/i,
   /\bcontext\s+window\s+(?:is\s+)?exceeded\b/i,
   /\breduce\s+the\s+length\s+of\b/i,
+  /\btoo\s+much\s+context\b/i,
 ];
 
 // The account cannot afford the request at the requested max_tokens: a credit
@@ -44,10 +86,9 @@ const CREDIT_AFFORDABILITY_ERROR_PATTERNS: RegExp[] = [
 ];
 
 // The account has no spendable balance at all, so no request of any size can succeed.
-// Distinct from the affordability ceiling above: there, a smaller max_tokens still fits
-// the remaining credit. Example (DeepSeek 402): "Insufficient Balance". Matching these
-// against the affordability patterns would hand the user a `reduce_output_tokens` tip
-// that cannot possibly work.
+// Separate from the affordability ceiling above, where a smaller max_tokens still fits the
+// remaining credit. Matching these against the affordability patterns would hand the user a
+// `reduce_output_tokens` tip that cannot possibly work.
 const ACCOUNT_BALANCE_EXHAUSTED_PATTERNS: RegExp[] = [
   /\binsufficient\s+balance\b/i,
   /\bbalance\s+is\s+insufficient\b/i,
@@ -69,6 +110,17 @@ export function isAccountBalanceExhaustedError(error: ProviderError): boolean {
   return collectProviderErrorMessages(error).some((message) =>
     matchesAnyPattern(message, ACCOUNT_BALANCE_EXHAUSTED_PATTERNS),
   );
+}
+
+/**
+ * Detects NVIDIA NIM refusing the credential itself.
+ *
+ * NIM answers a mistyped key, an expired key, and a key without inference access with the same
+ * `403 {"detail":"Authorization failed"}`, so expiry can only be offered as a possibility. Scoped
+ * to NVIDIA because expiry is not a known cause of the same status on other providers.
+ */
+export function isNvidiaCredentialRejected(providerName: string, error: ProviderError): boolean {
+  return providerName === "nvidia" && error.type === "api_error" && error.code === "403";
 }
 
 /**
@@ -98,6 +150,110 @@ export function isCreditAffordabilityError(error: ProviderError): boolean {
   );
 }
 
+// Adapters write `code` in their own vocabulary: HTTP statuses, Google status names, Anthropic error
+// types, Vertex's own config codes, and the OpenAI-compatible composites.
+const CREDENTIAL_REJECTION_CODES = new Set([
+  "401",
+  "403",
+  "PERMISSION_DENIED",
+  "UNAUTHENTICATED",
+  "authentication_error",
+  "permission_error",
+  "vertex_auth_error",
+]);
+
+// Each entry names a failure the server's own key, account, or endpoint causes, or one that clears
+// on its own.
+const NON_INCIDENT_PROVIDER_CODES = new Set([
+  ...CREDENTIAL_REJECTION_CODES,
+  "402",
+  "404",
+  "429_balance",
+  "429_plan_access",
+  "ECONNREFUSED",
+  "billing_error",
+  "not_found_error",
+  // Anthropic's mid-stream SSE error event arrives as a non-retryable api_error whatever its cause.
+  "rate_limit_error",
+  // NovelAI's adapter already records this at error level with the raw tool-call block, which
+  // cannot ride on the ProviderError because the embed would show it to the user as "Details".
+  "tool_call_parse_error",
+  "vertex_config_error",
+]);
+
+// Google answers a bad key and a billing problem with a plain 400, and some providers report a
+// moderation refusal the same way, so these are only distinguishable by message. Bun's fetch words
+// its connection failures without the errno text the adapters look for ("Unable to connect", "The
+// socket connection was closed unexpectedly"), so those arrive as `unknown` and would file every
+// message to a server's dead custom endpoint as an incident.
+const NON_INCIDENT_MESSAGE_PATTERNS: RegExp[] = [
+  /\bunable\s+to\s+connect\b/i,
+  /\bconnection\s+refused\b/i,
+  /\bsocket\s+connection\s+was\s+closed\s+unexpectedly\b/i,
+  /\b(?:ENOTFOUND|ECONNRESET|EHOSTUNREACH|ENETUNREACH)\b/,
+  /\bapi[\s_-]?key\s+(?:is\s+)?(?:not\s+valid|invalid|expired|revoked)\b/i,
+  /\b(?:invalid|incorrect|expired)\s+api[\s_-]?key\b/i,
+  /\bPERMISSION_DENIED\b/,
+  /\bUNAUTHENTICATED\b/,
+  /\bbilling\b/i,
+  /\bfree\s+tier\b/i,
+  /\brecaptcha\b/i,
+  /\btrial\s+generations?\b/i,
+  /\bcontent[\s_-]?(?:filter|policy|management)\b/i,
+  /\bmoderation\b/i,
+  /\bflagged\b/i,
+];
+
+/**
+ * Decides whether a provider failure belongs in `error_logs`, which production reads as the
+ * operator's incident feed.
+ *
+ * Transient failures and anything the server can repair itself (its key, balance, model choice,
+ * conversation length, or content) stay at warn level: on a public instance they arrive constantly
+ * and only that server can act on them. What remains is mostly a request TomoriBot built wrong or a
+ * failure no classifier recognized, and those need the raw provider text to diagnose.
+ */
+export function isOperatorActionableProviderError(error: ProviderError): boolean {
+  if (error.retryable || (error.type !== "api_error" && error.type !== "unknown")) {
+    return false;
+  }
+  if (error.code !== undefined && NON_INCIDENT_PROVIDER_CODES.has(String(error.code))) {
+    return false;
+  }
+  if (
+    isProviderModelError(error) ||
+    isContextLengthError(error) ||
+    isCreditAffordabilityError(error) ||
+    isAccountBalanceExhaustedError(error)
+  ) {
+    return false;
+  }
+  return !collectProviderErrorMessages(error).some((message) =>
+    matchesAnyPattern(message, NON_INCIDENT_MESSAGE_PATTERNS),
+  );
+}
+
+/**
+ * Detects a provider refusing the key itself, which no retry fixes until the key's owner acts.
+ * Accepts `unknown` because a stream result carries its failure untyped.
+ */
+export function isCredentialRejection(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  if ("retryable" in error && error.retryable === true) return false;
+  return CREDENTIAL_REJECTION_CODES.has(String(error.code));
+}
+
+/**
+ * Detects a timeout from error text, for classifiers that have no status code to go on.
+ *
+ * Bun's fetch abandons a server that has sent nothing for 300 seconds with "The operation timed
+ * out.", which has no "timeout" substring. A slow local backend processing a long prompt hits that
+ * ceiling, and matching only "timeout" told the user to check their API key.
+ */
+export function isProviderTimeoutMessage(message: string): boolean {
+  return /timeout|timed\s+out/i.test(message);
+}
+
 /**
  * Tests a message against a set of patterns after collapsing whitespace.
  * @param message - Candidate message (nullable).
@@ -120,16 +276,32 @@ export function isProviderModelErrorMessage(message: string | null | undefined):
   return MODEL_ERROR_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+const DISPLAYABLE_ERROR_CODE_PATTERNS = [/^\d{3}(?:_[a-z]+)*$/, /^[A-Z]+(?:_[A-Z]+)*$/, /^[a-z]+(?:_[a-z]+)*$/];
+
+/**
+ * Error codes can come from a response body, so a hostile endpoint can return its received bearer
+ * value as the code. Only HTTP statuses (including re-coded ones such as `429_balance`) and
+ * single-case enum words are shown, which excludes the digits and mixed case keys carry.
+ */
+export function formatProviderErrorCodeForDisplay(code: string | number | null | undefined): string {
+  const value = code === null || code === undefined ? "" : String(code);
+  return value.length <= 40 && DISPLAYABLE_ERROR_CODE_PATTERNS.some((pattern) => pattern.test(value))
+    ? value
+    : "unknown";
+}
+
+/**
+ * Raw upstream text for restricted operator logs. Endpoints can echo request headers here, so it
+ * never belongs in a channel, an interaction reply, or model context.
+ */
 export function getProviderErrorDetail(error: ProviderError): string | null {
   const messages = collectProviderErrorMessages(error);
   return messages.find((message) => message.trim().length > 0) ?? null;
 }
 
 function collectProviderErrorMessages(error: ProviderError): string[] {
-  // Order matters: prefer the raw provider message and original error payload over the
-  // friendly `userMessage`. Callers append this as a "Details" section beneath a localized
-  // headline, so surfacing the raw provider text (e.g. "Unsupported model X. Supported IDs: ...")
-  // is more actionable than echoing the headline, and keeps the de-dupe check meaningful.
+  // The raw provider message and original payload come first because they name the actual cause
+  // (e.g. "Unsupported model X. Supported IDs: ...") for the operator reading the log.
   const messages: string[] = [];
   appendMessage(messages, error.message);
   appendMessage(messages, extractUnknownErrorMessage(error.originalError));

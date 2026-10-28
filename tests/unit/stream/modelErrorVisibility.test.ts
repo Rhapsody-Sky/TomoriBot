@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it, mock } from "bun:test";
+import { REST } from "discord.js";
+import { beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import type { Client, TextChannel } from "discord.js";
 import { HumanizerDegree, type TomoriState } from "@/types/db/schema";
 import type { StreamConfig, StreamContext, StreamProvider } from "@/types/stream/interfaces";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
+import { log } from "@/utils/misc/logger";
 import { initializeLocalizer } from "@/utils/text/localizer";
+import { localizedCopy } from "../../helpers/localeCases";
 
 function makeConfig(): StreamConfig {
   return {
@@ -26,11 +29,13 @@ function makeContext(send: ReturnType<typeof mock>, suppressUserErrors: boolean)
   return {
     channel: {
       id: "channel_1",
+      client: { rest: new REST() },
       send,
     } as unknown as TextChannel,
     client: {} as Client,
     tomoriState: {
       server_id: 1,
+      llm: { llm_provider: "fake" },
       persona_nickname: "Tomori",
       trigger_words: [],
       config: {},
@@ -90,7 +95,13 @@ describe("StreamOrchestrator model-error visibility", () => {
   });
 
   it("renders a dedicated model configuration error embed for terminal model errors", async () => {
-    const send = mock(async () => undefined);
+    const send = mock(async (_payload: unknown) => ({
+      id: "sent",
+      channelId: "channel_1",
+      webhookId: null,
+      author: { username: "Bot" },
+      createMessageComponentCollector: () => ({ on: () => undefined }),
+    }));
     const result = await new StreamOrchestrator().streamToDiscord(
       makeProvider(),
       makeConfig(),
@@ -100,12 +111,18 @@ describe("StreamOrchestrator model-error visibility", () => {
     expect(result.status).toBe("error");
     expect(send).toHaveBeenCalledTimes(1);
     const payload = send.mock.calls[0]?.[0] as { embeds?: Array<{ data?: { title?: string; description?: string } }> };
-    expect(payload.embeds?.[0]?.data?.title).toContain("Model Configuration Error");
-    expect(payload.embeds?.[0]?.data?.description).toContain("Unsupported model `Deepseek`");
+    expect(payload.embeds?.[0]?.data?.title).toContain(localizedCopy("en-US", "genai.stream.model_error_title"));
+    expect(payload.embeds?.[0]?.data?.description).toBe("Error Code 400_model: Invalid request sent to provider");
   });
 
   it("suppresses model errors during retry/fallback suppression", async () => {
-    const send = mock(async () => undefined);
+    const send = mock(async () => ({
+      id: "sent",
+      channelId: "channel_1",
+      webhookId: null,
+      author: { username: "Bot" },
+      createMessageComponentCollector: () => ({ on: () => undefined }),
+    }));
     const result = await new StreamOrchestrator().streamToDiscord(
       makeProvider(),
       makeConfig(),
@@ -116,35 +133,45 @@ describe("StreamOrchestrator model-error visibility", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("appends the raw provider detail beneath the headline for non-model errors", async () => {
-    // A provider whose localized headline hides the real cause (mirrors OpenRouter mapping a known
-    // code to a hardcoded locale string). The central detail-append must still surface the raw text.
-    const provider: StreamProvider = {
-      ...makeProvider(),
-      processChunk() {
-        return {
-          type: "error",
-          error: {
-            type: "api_error",
-            message: "HTTP 502: upstream model provider returned an unexpected gateway response",
-            code: "502",
-            retryable: false,
-          },
-        };
-      },
-      createErrorDescription() {
-        return "Error Code 502: The provider is temporarily unavailable.";
-      },
-    };
+  it("keeps echoed credentials and injected mentions in the operator log, out of the embed", async () => {
+    const canary = "sk-live-CANARY0001";
+    const echoes = [canary, Buffer.from(canary).toString("base64"), encodeURIComponent(`Bearer ${canary}`)];
+    for (const echo of echoes) {
+      const upstream = `HTTP 502: rejected Authorization ${echo} @everyone <@123456789012345678>`;
+      const provider: StreamProvider = {
+        ...makeProvider(),
+        processChunk() {
+          return {
+            type: "error",
+            error: { type: "api_error", message: upstream, userMessage: upstream, code: "502", retryable: false },
+          };
+        },
+        createErrorDescription() {
+          return "Error Code 502: The provider is temporarily unavailable.";
+        },
+      };
+      const warn = spyOn(log, "warn").mockImplementation(() => undefined);
+      const error = spyOn(log, "error").mockImplementation(async () => undefined);
+      try {
+        const send = mock(async (_payload: unknown) => ({
+          id: "sent",
+          channelId: "channel_1",
+          webhookId: null,
+          author: { username: "Bot" },
+          createMessageComponentCollector: () => ({ on: () => undefined }),
+        }));
+        const result = await new StreamOrchestrator().streamToDiscord(provider, makeConfig(), makeContext(send, false));
 
-    const send = mock(async () => undefined);
-    const result = await new StreamOrchestrator().streamToDiscord(provider, makeConfig(), makeContext(send, false));
-
-    expect(result.status).toBe("error");
-    expect(send).toHaveBeenCalledTimes(1);
-    const payload = send.mock.calls[0]?.[0] as { embeds?: Array<{ data?: { title?: string; description?: string } }> };
-    expect(payload.embeds?.[0]?.data?.description).toContain("The provider is temporarily unavailable");
-    expect(payload.embeds?.[0]?.data?.description).toContain("**Details:**");
-    expect(payload.embeds?.[0]?.data?.description).toContain("unexpected gateway response");
+        expect(result.status).toBe("error");
+        const payload = send.mock.calls[0]?.[0] as { embeds?: Array<{ data?: { description?: string } }> };
+        const description = payload.embeds?.[0]?.data?.description ?? "";
+        expect(description).toBe("Error Code 502: The provider is temporarily unavailable.");
+        const operatorLog = [...warn.mock.calls, ...error.mock.calls].map(([message]) => String(message));
+        expect(operatorLog.some((message) => message.includes("rejected Authorization"))).toBe(true);
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+    }
   });
 });

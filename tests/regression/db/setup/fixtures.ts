@@ -8,6 +8,7 @@
  * with real data and so cleanup can target them precisely.
  */
 import type { SQL } from "bun";
+import { clearUserCache } from "@/utils/cache/userCache";
 
 /** Stable Discord-scoped identifiers for all fixture rows. */
 export const FIXTURE_IDS = {
@@ -113,12 +114,10 @@ export async function insertFixtures(db: SQL): Promise<FixtureRefs> {
   await db`DELETE FROM persona_textgen_configs WHERE persona_id = ${personaId}`;
 
   const [userRow] = await db`
-    INSERT INTO users (user_disc_id, user_nickname)
-    VALUES (${FIXTURE_IDS.userDiscId}, '_rt_user')
+    INSERT INTO users (user_disc_id)
+    VALUES (${FIXTURE_IDS.userDiscId})
     ON CONFLICT (user_disc_id) DO UPDATE
-    SET
-      user_nickname = EXCLUDED.user_nickname,
-      privacy_level = 0
+    SET privacy_level = 0
     RETURNING user_id
   `;
   const userId: number = userRow.user_id;
@@ -126,26 +125,32 @@ export async function insertFixtures(db: SQL): Promise<FixtureRefs> {
   await db`
     INSERT INTO user_personalization_configs (
       user_id,
+      user_nickname,
       shortterm_cache_crossserver_opt_in,
       physical_appearance_tags,
       nai_char_ref_url,
       impersonation_prompt,
-      personal_dtm
+      personal_dtm,
+      natural_nudge_opt_out
     ) VALUES (
       ${userId},
+      '_rt_user',
       false,
       ARRAY[]::TEXT[],
       NULL,
       NULL,
-      'follow'
+      'follow',
+      false
     )
     ON CONFLICT (user_id) DO UPDATE
     SET
+      user_nickname = EXCLUDED.user_nickname,
       shortterm_cache_crossserver_opt_in = EXCLUDED.shortterm_cache_crossserver_opt_in,
       physical_appearance_tags = EXCLUDED.physical_appearance_tags,
       nai_char_ref_url = EXCLUDED.nai_char_ref_url,
       impersonation_prompt = EXCLUDED.impersonation_prompt,
       personal_dtm = EXCLUDED.personal_dtm,
+      natural_nudge_opt_out = EXCLUDED.natural_nudge_opt_out,
       updated_at = NOW()
   `;
 
@@ -164,4 +169,6 @@ export async function cleanupFixtures(db: SQL): Promise<void> {
 
   // Users have no cascade from servers, so clean up separately
   await db`DELETE FROM users WHERE user_disc_id LIKE '_rt_%'`;
+  // The DB lane shares one process, so a cached row would hand the next suite a deleted user_id.
+  clearUserCache();
 }

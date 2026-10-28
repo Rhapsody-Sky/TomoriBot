@@ -12,27 +12,20 @@ import type {
   ChatReminderData,
   LockedChatTurn,
   ManualTriggerInvoker,
+  NaturalNudgeTurn,
   QueuedMessageDiscardHandler,
   QueuedMessageDiscardReason,
   RunnableChatAdmission,
   SceneTurnMetadata,
   SystemTriggerIdentity,
   TextQuotaSource,
+  TomoriChatInput,
 } from "@/utils/chat/types";
-
-function parseIntegerEnvFlag(value: string | undefined, defaultValue: number, minimum: number): number {
-  if (typeof value !== "string") return defaultValue;
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) return defaultValue;
-  return Math.max(minimum, parsed);
-}
+import { parseIntegerEnvFlag } from "@/utils/misc/envFlags";
+import { getMessageProxyMessageRecord } from "@/utils/messageProxy/proxyExpectation";
 
 export const CHANNEL_LOCK_TIMEOUT_MS = parseIntegerEnvFlag(process.env.CHANNEL_LOCK_TIMEOUT_MS, 180000, 10000);
-const DISCORD_TYPING_KEEPALIVE_INTERVAL_MS = parseIntegerEnvFlag(
-  process.env.DISCORD_TYPING_KEEPALIVE_INTERVAL_MS,
-  8000,
-  1000,
-);
+const DISCORD_TYPING_KEEPALIVE_INTERVAL_MS = 8000;
 export const MAX_FOLLOW_UP_INTERRUPTS = Number.parseInt(process.env.MAX_FOLLOW_UP_INTERRUPTS || "3", 10);
 const SELF_REPLY_SUPPRESSION_TTL_MS = 5000;
 
@@ -43,7 +36,11 @@ export type QueuedMessage = {
   reasoningQuery?: string;
   llmOverrideCodename?: string;
   isStopResponse?: boolean;
-  isFollowUp?: boolean;
+  /**
+   * Set only on a follow-up: the account whose newer follow-up supersedes this one. A verified
+   * proxy repost is authored by the service's webhook, so its author ID cannot key this.
+   */
+  followUpUserDiscId?: string;
   selectedPersonaId?: number;
   triggeredPersonaIds?: number[];
   isPersonaJob?: boolean;
@@ -59,11 +56,15 @@ export type QueuedMessage = {
   forcedMentions?: ForcedMention[];
   manualTriggerInvoker?: ManualTriggerInvoker;
   systemTriggerIdentity?: SystemTriggerIdentity;
+  borrowsTriggerMessage?: boolean;
   manualStreamingContextOverrides?: Pick<
     StreamingContext,
     "disableCrossChannelMessage" | "disableRecentMessageReplyTool" | "disableReminderTool"
   >;
   sceneTurn?: SceneTurnMetadata;
+  naturalNudge?: NaturalNudgeTurn;
+  conditioningInteraction?: TomoriChatInput["conditioningInteraction"];
+  nudgeSceneCatcherPersonaId?: number;
   reminderRecipientID?: string;
   reminderData?: ChatReminderData;
   onGenerationResult?: ChatGenerationResultHandler;
@@ -76,25 +77,38 @@ export interface ChannelLockEntry {
   currentMessageId?: string;
   serverDiscId: string;
   userDiscId?: string;
+  activeProxyIdentityUserDiscId?: string | null;
+  activeMessageWasProxy?: boolean;
   currentIsPersonaJob?: boolean;
   activePersonaId?: number;
   activeTriggeredPersonaIds?: number[];
+  /** Set during a Natural Nudges turn so gateway echoes cannot schedule duplicate persona replies. */
+  activeNaturalNudge?: "single" | "scene";
+  nudgeInterrupted?: boolean;
   activeIsUserImpersonation?: boolean;
   activeImpersonatedUserId?: string;
   followUpEligible?: boolean;
   isInToolCallChain?: boolean;
+  /** Tool currently executing for this turn, read by /kill to warn when a paid media job was in flight. */
+  activeToolName?: string;
   isCommandTriggered?: boolean;
   typingKeepaliveTimer: NodeJS.Timeout | null;
   followUpCount: number;
   messageQueue: QueuedMessage[];
   /** Callback that aborts the active HTTP request and rejects the stream Promise.race. Set by toolLoop, cleared on release. */
   activeStreamKill?: ((reason: Error) => void) | null;
-  /** AbortController for the entire turn (streaming + tools). Aborted by /bot kill; signal forwarded to tools via ToolContext. */
+  /** Last sign of life from the turn holding the lock; `lockedAt` stays the turn's start time. */
+  lastProgressAt?: number;
+  /** One token per in-flight phase that carries its own timeout; see {@link runUnderWatchdog}. */
+  activeWatchdogs?: Set<symbol>;
+  /** AbortController for the entire turn (streaming + tools). Aborted by /kill; signal forwarded to tools via ToolContext. */
   activeTurnAbortController: AbortController | null;
 }
 
 export const channelLocks = new Map<string, ChannelLockEntry>();
 export const selfReplySuppressionUntil = new Map<string, number>();
+/** A nudge turn's last message can reach the gateway after its lock releases, so its output stays ignored briefly. */
+const nudgeOutputQuietUntil = new Map<string, number>();
 
 export async function runWithChannelLock<T>(
   admission: RunnableChatAdmission,
@@ -134,7 +148,10 @@ export async function runWithChannelLock<T>(
     selectedPersonaId: admission.incoming.selectedPersonaId,
     triggeredPersonaIds: admission.incoming.triggeredPersonaIds,
     isCommandTriggered: admission.incoming.isManuallyTriggered ?? false,
+    naturalNudge: admission.incoming.naturalNudge ? (admission.incoming.sceneTurn ? "scene" : "single") : undefined,
   });
+  // The quiet window only bridges to the next nudge turn; any other turn's persona output is real.
+  if (!admission.incoming.naturalNudge) nudgeOutputQuietUntil.delete(channelId);
 
   try {
     return await callback(
@@ -160,11 +177,7 @@ export async function runWithChannelLock<T>(
 
 export function isActiveNaturalStopTurn(channelId: string, userDiscId: string): boolean {
   const lockEntry = channelLocks.get(channelId);
-  return Boolean(
-    lockEntry?.isLocked &&
-      Date.now() - lockEntry.lockedAt <= CHANNEL_LOCK_TIMEOUT_MS &&
-      lockEntry.userDiscId === userDiscId,
-  );
+  return Boolean(lockEntry?.isLocked && !isChannelLockExpired(lockEntry) && lockEntry.userDiscId === userDiscId);
 }
 
 export function getOrCreateChannelLockEntry(channelId: string, serverDiscId: string): ChannelLockEntry {
@@ -189,13 +202,65 @@ export function getOrCreateChannelLockEntry(channelId: string, serverDiscId: str
   return fresh;
 }
 
+/**
+ * Whether a held lock has outlived its turn and may be treated as abandoned.
+ *
+ * A lock is never expired while a {@link runUnderWatchdog} phase is in flight: that phase already
+ * carries its own timeout, and the stream's first-token budget and the tool budget both exceed
+ * {@link CHANNEL_LOCK_TIMEOUT_MS} on purpose. Expiring on turn age let any message sent in a busy
+ * channel kill a slow but healthy reply or tool call. Work outside those phases has no other bound,
+ * so it keeps this recovery.
+ */
+function isChannelLockExpired(lockEntry: ChannelLockEntry): boolean {
+  if (!lockEntry.isLocked || (lockEntry.activeWatchdogs?.size ?? 0) > 0) {
+    return false;
+  }
+  return Date.now() - (lockEntry.lastProgressAt ?? lockEntry.lockedAt) > CHANNEL_LOCK_TIMEOUT_MS;
+}
+
+/**
+ * Records that the turn holding this channel's lock is still making progress, so the stale-lock
+ * window measures time since the last sign of life rather than time since the turn began.
+ */
+export function touchChannelLock(channelId: string): void {
+  const lockEntry = channelLocks.get(channelId);
+  if (lockEntry?.isLocked) {
+    lockEntry.lastProgressAt = Date.now();
+  }
+}
+
+/**
+ * Runs a phase that enforces its own timeout, exempting the channel lock from stale release until it
+ * settles. Only wrap work whose every path ends within a bounded time (a `Promise.race` against a
+ * timer), because the exemption removes the lock's last recovery for that phase.
+ *
+ * Each phase holds its own token rather than a shared counter: `/kill` can release the lock and a
+ * new turn can acquire it while the old phase is still settling, and that phase's cleanup must not
+ * lift the new turn's exemption.
+ */
+export async function runUnderWatchdog<T>(channelId: string, work: () => Promise<T>): Promise<T> {
+  const lockEntry = channelLocks.get(channelId);
+  const token = Symbol("watchdog");
+  if (lockEntry) {
+    lockEntry.activeWatchdogs ??= new Set();
+    lockEntry.activeWatchdogs.add(token);
+  }
+  touchChannelLock(channelId);
+  try {
+    return await work();
+  } finally {
+    lockEntry?.activeWatchdogs?.delete(token);
+    touchChannelLock(channelId);
+  }
+}
+
 export function releaseStaleChannelLockIfExpired(channelId: string, lockEntry: ChannelLockEntry): boolean {
-  if (!lockEntry.isLocked || Date.now() - lockEntry.lockedAt <= CHANNEL_LOCK_TIMEOUT_MS) {
+  if (!isChannelLockExpired(lockEntry)) {
     return false;
   }
 
   log.warn(
-    `Channel ${channelId} lock is stale (locked since ${new Date(lockEntry.lockedAt).toISOString()} for message ${lockEntry.currentMessageId}). Forcibly releasing. Previous queue length: ${lockEntry.messageQueue.length}`,
+    `Channel ${channelId} lock is stale (locked since ${new Date(lockEntry.lockedAt).toISOString()}, last progress ${new Date(lockEntry.lastProgressAt ?? lockEntry.lockedAt).toISOString()}, for message ${lockEntry.currentMessageId}). Forcibly releasing. Previous queue length: ${lockEntry.messageQueue.length}`,
   );
   lockEntry.activeTurnAbortController?.abort();
   lockEntry.activeTurnAbortController = null;
@@ -204,13 +269,17 @@ export function releaseStaleChannelLockIfExpired(channelId: string, lockEntry: C
   stopDiscordTypingKeepalive(channelId, lockEntry, "stale_lock_release");
   lockEntry.isLocked = false;
   lockEntry.userDiscId = undefined;
+  lockEntry.activeProxyIdentityUserDiscId = undefined;
+  lockEntry.activeMessageWasProxy = false;
   lockEntry.currentIsPersonaJob = false;
   lockEntry.activePersonaId = undefined;
   lockEntry.activeTriggeredPersonaIds = undefined;
+  lockEntry.activeNaturalNudge = undefined;
   lockEntry.activeIsUserImpersonation = undefined;
   lockEntry.activeImpersonatedUserId = undefined;
   lockEntry.followUpEligible = false;
   lockEntry.isInToolCallChain = false;
+  lockEntry.activeToolName = undefined;
   lockEntry.isCommandTriggered = false;
   discardQueuedMessages(lockEntry.messageQueue, "stale_lock_release");
   lockEntry.messageQueue = [];
@@ -226,19 +295,28 @@ export function acquireChannelLockForTurn(
     selectedPersonaId?: number;
     triggeredPersonaIds?: number[];
     isCommandTriggered: boolean;
+    naturalNudge?: "single" | "scene";
   },
 ): void {
   lockEntry.isLocked = true;
   lockEntry.lockedAt = Date.now();
+  lockEntry.lastProgressAt = lockEntry.lockedAt;
+  lockEntry.activeWatchdogs?.clear();
   lockEntry.currentMessageId = args.messageId;
   lockEntry.userDiscId = args.userDiscId;
+  const activeProxyRecord = getMessageProxyMessageRecord(args.messageId);
+  lockEntry.activeMessageWasProxy = Boolean(activeProxyRecord);
+  lockEntry.activeProxyIdentityUserDiscId = activeProxyRecord?.identityUserDiscId ?? null;
   lockEntry.currentIsPersonaJob = args.isPersonaJob;
   lockEntry.activePersonaId = args.selectedPersonaId;
   lockEntry.activeTriggeredPersonaIds = args.triggeredPersonaIds;
+  lockEntry.activeNaturalNudge = args.naturalNudge;
+  lockEntry.nudgeInterrupted = false;
   lockEntry.activeIsUserImpersonation = undefined;
   lockEntry.activeImpersonatedUserId = undefined;
   lockEntry.followUpEligible = false;
   lockEntry.isInToolCallChain = false;
+  lockEntry.activeToolName = undefined;
   lockEntry.isCommandTriggered = args.isCommandTriggered;
   lockEntry.activeTurnAbortController?.abort();
   lockEntry.activeTurnAbortController = new AbortController();
@@ -281,6 +359,17 @@ export function setChannelToolCallChainActive(lockEntry: ChannelLockEntry | unde
   }
 }
 
+export function setChannelActiveToolName(channelId: string, toolName: string | undefined): void {
+  const lockEntry = channelLocks.get(channelId);
+  if (lockEntry) {
+    lockEntry.activeToolName = toolName;
+  }
+}
+
+export function getChannelActiveToolName(channelId: string): string | undefined {
+  return channelLocks.get(channelId)?.activeToolName;
+}
+
 export function queuePersonaJobsAtFront(args: {
   lockEntry: ChannelLockEntry;
   message: Message;
@@ -295,6 +384,9 @@ export function queuePersonaJobsAtFront(args: {
   shouldSurfaceUserErrors?: boolean;
   injectedContextItems?: StructuredContextItem[];
   forcedMentions?: ForcedMention[];
+  naturalNudge?: NaturalNudgeTurn;
+  borrowsTriggerMessage?: boolean;
+  manualSystemPrompt?: string;
 }): void {
   for (let i = args.personaJobs.length - 1; i >= 0; i--) {
     const queuedPersona = args.personaJobs[i];
@@ -313,6 +405,9 @@ export function queuePersonaJobsAtFront(args: {
       shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
       injectedContextItems: args.injectedContextItems,
       forcedMentions: args.forcedMentions,
+      naturalNudge: args.naturalNudge,
+      borrowsTriggerMessage: args.borrowsTriggerMessage,
+      manualSystemPrompt: args.manualSystemPrompt,
     });
   }
 
@@ -332,6 +427,7 @@ export function queueScenePersonaJobsAtFront(args: {
     sceneTurn: SceneTurnMetadata;
     manualSystemPrompt: string;
     textQuotaTriggerKey: string;
+    injectedContextItems?: StructuredContextItem[];
   }>;
   triggeredPersonaIds: number[];
   forceReason?: boolean;
@@ -340,10 +436,11 @@ export function queueScenePersonaJobsAtFront(args: {
   textQuotaSource: TextQuotaSource;
   textQuotaUserDiscId: string;
   shouldSurfaceUserErrors?: boolean;
-  injectedContextItems?: StructuredContextItem[];
   forcedMentions?: ForcedMention[];
   manualTriggerInvoker?: ManualTriggerInvoker;
   manualStreamingContextOverrides?: QueuedMessage["manualStreamingContextOverrides"];
+  naturalNudge?: NaturalNudgeTurn;
+  borrowsTriggerMessage?: boolean;
 }): void {
   for (let i = args.sceneJobs.length - 1; i >= 0; i--) {
     const queuedSceneJob = args.sceneJobs[i];
@@ -361,11 +458,13 @@ export function queueScenePersonaJobsAtFront(args: {
       textQuotaUserDiscId: args.textQuotaUserDiscId,
       manualSystemPrompt: queuedSceneJob.manualSystemPrompt,
       shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
-      injectedContextItems: args.injectedContextItems,
+      injectedContextItems: queuedSceneJob.injectedContextItems,
       forcedMentions: args.forcedMentions,
       manualTriggerInvoker: args.manualTriggerInvoker,
       manualStreamingContextOverrides: args.manualStreamingContextOverrides,
       sceneTurn: queuedSceneJob.sceneTurn,
+      naturalNudge: args.naturalNudge,
+      borrowsTriggerMessage: args.borrowsTriggerMessage,
     });
   }
 
@@ -437,24 +536,46 @@ export async function requestNaturalStopForLockedTurn(args: {
   log.info(`Stop signal sent for channel ${args.channelId}. Stop response will be generated after stream completes.`);
 }
 
+/**
+ * Queues a message from the active turn's user as a follow-up, interrupting the stream unless a
+ * tool chain is running.
+ * @param args.verifiedProxySenderDiscId - Attested host of a confirmed message-proxy repost whose
+ *   original never ran. Only this admits a bot-authored webhook message, so an unrelated webhook
+ *   can neither interrupt the turn nor speak as its user.
+ * @returns Whether the message was queued as a follow-up
+ */
 export function queueFollowUpForLockedTurn(args: {
   lockEntry: ChannelLockEntry;
   channelId: string;
   userDiscId: string;
   message: Message;
+  verifiedProxySenderDiscId?: string;
   textQuotaSource: TextQuotaSource;
   textQuotaTriggerKey: string;
   textQuotaUserDiscId: string;
   manualStreamingContextOverrides: QueuedMessage["manualStreamingContextOverrides"];
   isNaturalStopMessage: boolean;
   shouldSurfaceUserErrors?: boolean;
+  isUserImpersonation?: boolean;
+  impersonatedUserId?: string;
   onGenerationResult?: ChatGenerationResultHandler;
   onQueueDiscard?: QueuedMessageDiscardHandler;
 }): boolean {
+  const isVerifiedProxyRepost = args.verifiedProxySenderDiscId === args.userDiscId;
+  const incomingProxyIdentityUserDiscId = isVerifiedProxyRepost
+    ? getMessageProxyMessageRecord(args.message.id)?.identityUserDiscId
+    : null;
+  const sameSpeaker =
+    args.lockEntry.activeMessageWasProxy || isVerifiedProxyRepost
+      ? Boolean(
+          args.lockEntry.activeProxyIdentityUserDiscId &&
+            incomingProxyIdentityUserDiscId === args.lockEntry.activeProxyIdentityUserDiscId,
+        )
+      : true;
   if (
     !args.lockEntry.isLocked ||
-    args.message.author.bot ||
-    args.message.webhookId ||
+    !sameSpeaker ||
+    (!isVerifiedProxyRepost && (args.message.author.bot || args.message.webhookId)) ||
     args.lockEntry.followUpEligible !== true ||
     args.lockEntry.isCommandTriggered ||
     args.lockEntry.userDiscId !== args.userDiscId ||
@@ -464,24 +585,26 @@ export function queueFollowUpForLockedTurn(args: {
     return false;
   }
 
+  const followUp: QueuedMessage = {
+    message: args.message,
+    isManuallyTriggered: true,
+    forceReason: false,
+    followUpUserDiscId: args.userDiscId,
+    selectedPersonaId: args.lockEntry.activePersonaId,
+    triggeredPersonaIds: args.lockEntry.activeTriggeredPersonaIds,
+    isUserImpersonation: args.isUserImpersonation,
+    impersonatedUserId: args.impersonatedUserId,
+    textQuotaSource: args.textQuotaSource,
+    textQuotaTriggerKey: args.textQuotaTriggerKey,
+    textQuotaUserDiscId: args.textQuotaUserDiscId,
+    shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
+    manualStreamingContextOverrides: args.manualStreamingContextOverrides,
+    onGenerationResult: args.onGenerationResult,
+    onQueueDiscard: args.onQueueDiscard,
+  };
+
   if (args.lockEntry.isInToolCallChain) {
-    const removedSupersededFollowUps = enqueueLatestFollowUp(args.lockEntry, args.userDiscId, {
-      message: args.message,
-      isManuallyTriggered: true,
-      forceReason: false,
-      isFollowUp: true,
-      selectedPersonaId: args.lockEntry.activePersonaId,
-      triggeredPersonaIds: args.lockEntry.activeTriggeredPersonaIds,
-      isUserImpersonation: args.lockEntry.activeIsUserImpersonation,
-      impersonatedUserId: args.lockEntry.activeImpersonatedUserId,
-      textQuotaSource: args.textQuotaSource,
-      textQuotaTriggerKey: args.textQuotaTriggerKey,
-      textQuotaUserDiscId: args.textQuotaUserDiscId,
-      shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
-      manualStreamingContextOverrides: args.manualStreamingContextOverrides,
-      onGenerationResult: args.onGenerationResult,
-      onQueueDiscard: args.onQueueDiscard,
-    });
+    const removedSupersededFollowUps = enqueueLatestFollowUp(args.lockEntry, args.userDiscId, followUp);
 
     log.info(
       `Follow-up message during tool-call chain in channel ${args.channelId} from user ${args.userDiscId}. ` +
@@ -492,23 +615,7 @@ export function queueFollowUpForLockedTurn(args: {
   }
 
   StreamOrchestrator.requestFollowUp(args.channelId, args.userDiscId);
-  const removedSupersededFollowUps = enqueueLatestFollowUp(args.lockEntry, args.userDiscId, {
-    message: args.message,
-    isManuallyTriggered: true,
-    forceReason: false,
-    isFollowUp: true,
-    selectedPersonaId: args.lockEntry.activePersonaId,
-    triggeredPersonaIds: args.lockEntry.activeTriggeredPersonaIds,
-    isUserImpersonation: args.lockEntry.activeIsUserImpersonation,
-    impersonatedUserId: args.lockEntry.activeImpersonatedUserId,
-    textQuotaSource: args.textQuotaSource,
-    textQuotaTriggerKey: args.textQuotaTriggerKey,
-    textQuotaUserDiscId: args.textQuotaUserDiscId,
-    shouldSurfaceUserErrors: args.shouldSurfaceUserErrors,
-    manualStreamingContextOverrides: args.manualStreamingContextOverrides,
-    onGenerationResult: args.onGenerationResult,
-    onQueueDiscard: args.onQueueDiscard,
-  });
+  const removedSupersededFollowUps = enqueueLatestFollowUp(args.lockEntry, args.userDiscId, followUp);
 
   log.info(
     `Follow-up message detected in channel ${args.channelId} from user ${args.userDiscId}. ` +
@@ -541,14 +648,23 @@ export function releaseChannelLockAndReplayQueue(args: {
 }): void {
   args.lockEntry.isLocked = false;
   args.lockEntry.lockedAt = 0;
+  args.lockEntry.lastProgressAt = undefined;
+  args.lockEntry.activeWatchdogs?.clear();
   args.lockEntry.currentMessageId = undefined;
   args.lockEntry.userDiscId = undefined;
+  args.lockEntry.activeProxyIdentityUserDiscId = undefined;
+  args.lockEntry.activeMessageWasProxy = false;
   args.lockEntry.currentIsPersonaJob = false;
   args.lockEntry.activePersonaId = undefined;
+  if (args.lockEntry.activeNaturalNudge) {
+    nudgeOutputQuietUntil.set(args.channelId, Date.now() + SELF_REPLY_SUPPRESSION_TTL_MS);
+  }
+  args.lockEntry.activeNaturalNudge = undefined;
   args.lockEntry.activeIsUserImpersonation = undefined;
   args.lockEntry.activeImpersonatedUserId = undefined;
   args.lockEntry.followUpEligible = false;
   args.lockEntry.isInToolCallChain = false;
+  args.lockEntry.activeToolName = undefined;
   args.lockEntry.isCommandTriggered = false;
   args.lockEntry.activeStreamKill = null;
   args.lockEntry.activeTurnAbortController?.abort();
@@ -567,6 +683,10 @@ export function releaseChannelLockAndReplayQueue(args: {
         log.error("Failed to generate stop response after lock release:", error);
       }
     });
+  } else {
+    // A stop request without a stopContext belongs to the turn that just ended; one left behind by
+    // an exit path that skipped its stop check would abort the next turn at its pre-stream check.
+    StreamOrchestrator.clearStopRequest(args.channelId);
   }
 
   const nextMessageData = args.lockEntry.messageQueue.shift();
@@ -619,11 +739,8 @@ export async function startDiscordTypingKeepalive(
   stopDiscordTypingKeepalive(channel.id, lockEntry, "restart");
   await refreshDiscordTypingIndicator(channel, "lock_scope_start");
   lockEntry.typingKeepaliveTimer = setInterval(() => {
-    if (
-      !lockEntry.isLocked ||
-      lockEntry.currentMessageId !== messageId ||
-      StreamOrchestrator.hasStopRequest(channel.id)
-    ) {
+    // Not gated on stop requests: internal and follow-up stops are cleared while the turn keeps the lock.
+    if (!lockEntry.isLocked || lockEntry.currentMessageId !== messageId) {
       stopDiscordTypingKeepalive(channel.id, lockEntry, "lock_scope_end");
       return;
     }
@@ -638,11 +755,7 @@ export async function startDiscordTypingKeepalive(
 
 export function isChannelProcessingLocked(channelId: string): boolean {
   const lockEntry = channelLocks.get(channelId);
-  if (!lockEntry?.isLocked) return false;
-  if (Date.now() - lockEntry.lockedAt > CHANNEL_LOCK_TIMEOUT_MS) {
-    return false;
-  }
-  return true;
+  return lockEntry ? lockEntry.isLocked && !isChannelLockExpired(lockEntry) : false;
 }
 
 /**
@@ -667,7 +780,7 @@ export function getChannelTurnAbortSignal(channelId: string): AbortSignal | unde
 }
 
 /**
- * Force-kills the active turn for a channel (used by /bot kill).
+ * Force-kills the active turn for a channel (used by /kill).
  * Aborts the turn-level controller (cancels tool execution) and the stream kill (cancels HTTP + unblocks Promise.race).
  * @param channelId - Target channel
  * @returns true if anything was killed
@@ -681,7 +794,7 @@ export function forceKillChannelStream(channelId: string): boolean {
     killed = true;
   }
   if (lockEntry.activeStreamKill) {
-    lockEntry.activeStreamKill(new Error("SDK_CALL_TIMEOUT: killed by /bot kill"));
+    lockEntry.activeStreamKill(new Error("SDK_CALL_TIMEOUT: killed by /kill"));
     killed = true;
   }
   return killed;
@@ -711,10 +824,7 @@ export function enqueueLatestFollowUp(
   const removedMessages: QueuedMessage[] = [];
   lockEntry.messageQueue = lockEntry.messageQueue.filter((queuedMessage) => {
     const shouldRemove =
-      queuedMessage.isFollowUp &&
-      !queuedMessage.isPersonaJob &&
-      !queuedMessage.isStopResponse &&
-      queuedMessage.message.author.id === userDiscId;
+      queuedMessage.followUpUserDiscId === userDiscId && !queuedMessage.isPersonaJob && !queuedMessage.isStopResponse;
     if (shouldRemove) {
       removedMessages.push(queuedMessage);
       return false;
@@ -725,6 +835,40 @@ export function enqueueLatestFollowUp(
   discardQueuedMessages(removedMessages, "superseded_follow_up");
   lockEntry.messageQueue.unshift(followUp);
   return removedCount;
+}
+
+/**
+ * Removes history messages that are still waiting for a turn of their own in the channel queue.
+ *
+ * History is fetched as of "now", so a message that arrives while an earlier turn is being
+ * prepared is visible to that turn even though it is also queued. The model then answers it
+ * early and the queued turn's reply directive makes it answer the same message again.
+ * @param messages - Fetched channel history
+ * @param channelId - Channel whose queue is consulted
+ * @param triggerMessageId - Message the current turn answers; always kept, since persona jobs
+ *   queue further entries for this same message
+ * @param allPersonas - Server personas; their own messages stay visible so a turn never loses
+ *   what another persona just said
+ * @returns The history without messages that have a pending turn
+ */
+export function excludeMessagesAwaitingOwnTurn(
+  messages: Message[],
+  channelId: string,
+  triggerMessageId: string,
+  allPersonas: TomoriState[],
+): Message[] {
+  const queue = channelLocks.get(channelId)?.messageQueue;
+  if (!queue || queue.length === 0) {
+    return messages;
+  }
+
+  const pendingMessageIds = new Set(queue.map((queuedMessage) => queuedMessage.message.id));
+  pendingMessageIds.delete(triggerMessageId);
+  if (pendingMessageIds.size === 0) {
+    return messages;
+  }
+
+  return messages.filter((message) => !pendingMessageIds.has(message.id) || isSelfTriggerMessage(message, allPersonas));
 }
 
 export function clearQueuedSelfReplyWork(
@@ -772,6 +916,48 @@ export function clearQueuedSelfReplyWork(
     clearedPersonaJobCount,
     clearedSelfTriggerCount,
   };
+}
+
+/**
+ * Drops queued Natural Nudges turns so a member who speaks up is answered next; `/generate scene` turns stay.
+ */
+export function clearQueuedNudgeWork(channelId: string): QueuedMessage[] {
+  const lockEntry = channelLocks.get(channelId);
+  if (!lockEntry || lockEntry.messageQueue.length === 0) {
+    return [];
+  }
+
+  const removedMessages: QueuedMessage[] = [];
+  lockEntry.messageQueue = lockEntry.messageQueue.filter((queuedMsg) => {
+    if (!queuedMsg.naturalNudge) {
+      return true;
+    }
+    removedMessages.push(queuedMsg);
+    return false;
+  });
+
+  if (removedMessages.length > 0) {
+    log.info(`Dropped ${removedMessages.length} queued Natural Nudges turn(s) in channel ${channelId}.`);
+    discardQueuedMessages(removedMessages, "scene_interrupted");
+  }
+  return removedMessages;
+}
+
+/** Stops pending nudge turns when a member speaks and returns the next queued speaker, or the active scene speaker. */
+export function interruptNudgeScene(channelId: string): number | undefined {
+  const lockEntry = channelLocks.get(channelId);
+  if (lockEntry?.isLocked && lockEntry.activeNaturalNudge) lockEntry.nudgeInterrupted = true;
+  const [nextSpeaker] = clearQueuedNudgeWork(channelId);
+  if (nextSpeaker) return nextSpeaker.selectedPersonaId;
+  return lockEntry?.isLocked && lockEntry.activeNaturalNudge === "scene" ? lockEntry.activePersonaId : undefined;
+}
+
+/** Whether gateway persona output must be ignored because nudge handoffs are queued after generation. */
+export function isNudgeOutputActive(channelId: string): boolean {
+  const lockEntry = channelLocks.get(channelId);
+  if (lockEntry?.isLocked && lockEntry.activeNaturalNudge) return true;
+  if (lockEntry?.messageQueue.some((queuedMsg) => queuedMsg.naturalNudge)) return true;
+  return Date.now() < (nudgeOutputQuietUntil.get(channelId) ?? 0);
 }
 
 function discardQueuedMessages(messages: QueuedMessage[], reason: QueuedMessageDiscardReason): void {

@@ -1,27 +1,82 @@
 import type { AnyThreadChannel, Guild } from "discord.js";
-import { BaseGuildTextChannel, ChannelType, DMChannel, EmbedBuilder } from "discord.js";
+import { BaseGuildTextChannel, ChannelType, DMChannel, EmbedBuilder, MessageReferenceType } from "discord.js";
 import type { TomoriState } from "@/types/db/schema";
 import { PrivacyLevel } from "@/types/db/schema";
-import { getCachedPrivacyLevel } from "@/utils/cache/userCache";
+import { getCachedBlacklistStatus, getCachedPrivacyLevel, getCachedUserRow } from "@/utils/cache/userCache";
 import { getCachedAllPersonas } from "@/utils/cache/tomoriStateCache";
 import { setCachedVoiceTranscript } from "@/utils/audio/voiceTranscriptCache";
 import { transcribeMessageAudioAttachment } from "@/utils/audio/audioAttachmentTranscription";
 import { extractBridgeUserId } from "@/utils/bridges";
 import { createStandardEmbed, sendStandardEmbed } from "@/utils/discord/embedHelper";
+import { extractTextDisplayContent } from "@/utils/discord/componentNoticeReader";
 import { sendUserTranscriptViaWebhook } from "@/utils/discord/webhook/webhookCore";
+import { getBlockedSendReason } from "@/utils/discord/stream/sendFailureCache";
 import { ColorCode, log } from "@/utils/misc/logger";
-import { escapeRegExp } from "@/utils/text/processors/regexUtils";
-import { doesMessageMatchTrigger, isMatrixRelayMessage, isRealUserLikeMessage } from "@/utils/chat/triggerProcessor";
-import { isActiveNaturalStopTurn, selfReplySuppressionUntil } from "@/utils/chat/channelQueue";
+import {
+  doesMessageMatchTrigger,
+  isMatrixRelayMessage,
+  isRealUserLikeMessage,
+  isSelfTriggerMessage,
+} from "@/utils/chat/triggerProcessor";
+import { getCachedImpersonatedUserIdForWebhook } from "@/utils/chat/webhookIdentity";
+import { escapeRegExp, isUnspacedScriptText, wrapWithWordBoundary } from "@/utils/text/processors/regexUtils";
+import {
+  interruptNudgeScene,
+  isActiveNaturalStopTurn,
+  isNudgeOutputActive,
+  selfReplySuppressionUntil,
+} from "@/utils/chat/channelQueue";
 import { cleanupTextQuotaTriggerStates } from "@/utils/chat/textQuotaState";
 import { evaluateAdmissionQueueAndTriggerGate } from "@/utils/chat/admissionQueue";
+import { applyWelcomeHandoff } from "@/utils/chat/welcomeHandoff";
+import {
+  applyMessageProxyReference,
+  cancelPendingMessageProxyExpectation,
+  createMessageProxyExpectation,
+  consumeVerifiedRepostExpectation,
+  getMessageProxyMessageRecord,
+  getLiveMessageProxyExpectationInstances,
+  hasLiveMessageProxyExpectations,
+  markMessageProxyExpectationProxied,
+  rememberMessageProxyMessage,
+  waitForMessageProxyExpectation,
+  type MessageProxyMessageRecord,
+} from "@/utils/messageProxy/proxyExpectation";
 import {
   getSelfReplyChainOriginUser,
   setSelfReplyChainOriginUser,
   updateSelfReplyChainState,
 } from "@/utils/chat/selfReplyState";
 import type { ChatAdmission, ChatIncoming, NonRunnableChatAdmission, TomoriChatInput } from "@/utils/chat/types";
+import { resolveConfiguredProxyService } from "@/utils/messageProxy/registry";
+import { formatMessageProxyIdentityUserId } from "@/utils/messageProxy/identityUserId";
+import { MAX_CANDIDATE_INSTANCES, routeMessageProxyMessage } from "@/utils/messageProxy/router";
+import { persistMessageProxyAttestationIdentity } from "@/utils/messageProxy/persistence";
+import { messageProxyInstanceRepository } from "@/utils/db/repositories/MessageProxyInstanceRepository";
+import { isMessageProxyInstanceBotPresent } from "@/utils/messageProxy/guildPresence";
 import type { Message } from "discord.js";
+import { verifyMessageWebhook, isManagedWebhookMessage } from "@/utils/chat/webhookIdentity";
+
+/**
+ * Whether a moderator has timed the bot out in this guild.
+ *
+ * Reads the cached member only. Fetching would turn a per-turn gate into a Discord round trip,
+ * and a stale answer is self-correcting: the send path still classifies the resulting 50013.
+ */
+function isBotTimedOut(guild: Guild, client: ChatIncoming["client"]): boolean {
+  if (!client.user) return false;
+  const botMember = guild.members.cache.get(client.user.id);
+  return botMember?.isCommunicationDisabled() ?? false;
+}
+
+/**
+ * Admission runs before the trigger user is loaded or registered, so their stored language
+ * preference is unavailable; the invoker's client locale and then the guild locale are the best
+ * signals at this depth.
+ */
+function resolveAdmissionNoticeLocale(incoming: ChatIncoming): string {
+  return incoming.manualTriggerInvoker?.locale ?? incoming.message.guild?.preferredLocale ?? "en-US";
+}
 
 export function normalizeChatInvocation(input: TomoriChatInput): ChatIncoming {
   return {
@@ -29,6 +84,7 @@ export function normalizeChatInvocation(input: TomoriChatInput): ChatIncoming {
     message: input.message,
     isFromQueue: input.isFromQueue,
     isManuallyTriggered: input.isManuallyTriggered,
+    isDirectChat: input.isDirectChat,
     forceReason: input.forceReason,
     reasoningQuery: input.reasoningQuery,
     llmOverrideCodename: input.llmOverrideCodename,
@@ -56,6 +112,11 @@ export function normalizeChatInvocation(input: TomoriChatInput): ChatIncoming {
     systemTriggerIdentity: input.systemTriggerIdentity,
     manualStreamingContextOverrides: input.manualStreamingContextOverrides,
     sceneTurn: input.sceneTurn,
+    naturalNudge: input.naturalNudge,
+    conditioningInteraction: input.conditioningInteraction,
+    nudgeSceneCatcherPersonaId: input.nudgeSceneCatcherPersonaId,
+    borrowsTriggerMessage: input.borrowsTriggerMessage,
+    carriedExpressionDelivery: input.carriedExpressionDelivery,
     onGenerationResult: input.onGenerationResult,
     onQueueDiscard: input.onQueueDiscard,
   };
@@ -74,12 +135,23 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
 
   const { client, message } = incoming;
   const channel = message.channel;
+  // discord.js resolves message.channel from the cache on every access, so a delayed retry or queue replay
+  // sees null once the channel is deleted or no longer visible, despite the non-null typing.
+  if (!channel) {
+    return { incoming, disposition: "ignore", locale: "en-US", reason: "channel_unavailable" };
+  }
+  await verifyMessageWebhook(message);
+  let referencedMessagePromise: Promise<Message | null> | undefined;
+  const getReferencedMessage = () => (referencedMessagePromise ??= resolveReferencedMessage(message));
   const isBotAuthor = message.author.bot;
   const isWebhookMessage = Boolean(message.webhookId);
   const isInteractionResponse = Boolean(message.interaction);
   const isFromClientUser = Boolean(client.user && message.author.id === client.user.id);
   const isMatrixRelay = isMatrixRelayMessage(message);
-  const isLikelySelfMessage = !isMatrixRelay && (isFromClientUser || isWebhookMessage);
+  const messageProxyRecord = await resolveMessageProxyRecord(message, isWebhookMessage, isMatrixRelay);
+  const isMessageProxy = Boolean(messageProxyRecord);
+  const isLikelySelfMessage =
+    !isMatrixRelay && !isMessageProxy && (isFromClientUser || isManagedWebhookMessage(message));
   const isRealUserMessage = isRealUserLikeMessage(message);
   const isActiveNaturalStopMessage =
     !incoming.isStopResponse &&
@@ -101,6 +173,10 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
     locale: "en-US",
     reason,
   });
+
+  if (isWebhookMessage && !isManagedWebhookMessage(message) && !isMessageProxy && !incoming.isManuallyTriggered) {
+    return ignored("untrusted_webhook");
+  }
 
   const isSeedPlaceholderMessage =
     isFromClientUser &&
@@ -125,18 +201,16 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
     return ignored("self_reply_suppressed");
   }
 
+  if (!incoming.isManuallyTriggered && isLikelySelfMessage && isNudgeOutputActive(channel.id)) {
+    return ignored("nudge_output");
+  }
+
   if (!incoming.isManuallyTriggered && isLikelySelfMessage && message.reference?.messageId) {
-    let referencedMessage = message.channel.messages.cache.get(message.reference.messageId);
-
-    if (!referencedMessage && "messages" in channel) {
-      try {
-        referencedMessage = await channel.messages.fetch(message.reference.messageId);
-      } catch {
-        referencedMessage = undefined;
-      }
-    }
-
-    if (referencedMessage && (referencedMessage.author.id === client.user?.id || referencedMessage.webhookId)) {
+    const referencedMessage = await getReferencedMessage();
+    if (
+      referencedMessage &&
+      (referencedMessage.author.id === client.user?.id || isManagedWebhookMessage(referencedMessage))
+    ) {
       updateSelfReplyChainState(channel.id, false);
       return ignored("self_reply_reference");
     }
@@ -144,6 +218,10 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
 
   if (isRealUserMessage && !isActiveNaturalStopMessage && !incoming.isPersonaJob) {
     updateSelfReplyChainState(channel.id, false);
+    // Before every gate below, so a member the trigger checks would ignore still ends the scene.
+    if (!incoming.isManuallyTriggered && !incoming.isFromQueue) {
+      incoming.nudgeSceneCatcherPersonaId = interruptNudgeScene(channel.id);
+    }
   }
 
   if (channel.type === ChannelType.DM && isBotAuthor && !incoming.isManuallyTriggered) {
@@ -191,9 +269,12 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
   const dmOwnerDiscId = channel instanceof DMChannel ? (channel.recipientId ?? null) : null;
   const authorFallbackDiscId =
     dmOwnerDiscId && message.author.id === client.user?.id ? dmOwnerDiscId : message.author.id;
+  // A system turn borrows an arbitrary channel message as its trigger, so its declared
+  // identity outranks a proxy sender that only happens to own that message.
   const userDiscId =
     incoming.manualTriggerInvoker?.userDiscId ??
     incoming.systemTriggerIdentity?.userDiscId ??
+    messageProxyRecord?.senderDiscId ??
     chainOriginUserDiscId ??
     authorFallbackDiscId;
   const matrixRelayUserId = isMatrixRelay ? extractBridgeUserId(message.author.username) : undefined;
@@ -217,6 +298,17 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
 
   incoming.isManuallyTriggered = channelScope.isManuallyTriggered;
 
+  // Rejected here rather than in the trigger gate because audio admission below spends STT quota
+  // and can echo the transcript through a webhook before the trigger gate ever runs.
+  if (
+    !channelScope.isDMChannel &&
+    !incoming.isStopResponse &&
+    !incoming.borrowsTriggerMessage &&
+    (await getCachedBlacklistStatus(channelScope.serverDiscId, userDiscId))
+  ) {
+    return blocked("server_blacklisted_user");
+  }
+
   if (!channelScope.isDMChannel && "permissionsFor" in channel) {
     const permissions = client.user ? channel.permissionsFor(client.user) : null;
     if (!permissions) {
@@ -228,14 +320,40 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
     if (!canSend) {
       return blocked("cannot_send_in_channel");
     }
+
+    // A timed-out member keeps every permission bit, so the check above passes while Discord
+    // rejects the send with 50013 regardless. Nothing in the bitfield expresses this, so it
+    // has to be read from the member rather than inferred from permissions.
+    if (isBotTimedOut(channel.guild, client)) {
+      return blocked("bot_timed_out_in_guild");
+    }
+
+    // Backstop for whatever the two checks above cannot see. They both reason about state that
+    // should predict a refusal; this one reacts to a refusal that actually happened, so it holds
+    // for causes not yet identified. Cleared the moment a send lands.
+    if (getBlockedSendReason(channel.id)) {
+      return blocked("recent_send_refused");
+    }
+  }
+
+  const messageProxyOriginalDisposition = await evaluateMessageProxyOriginalSpeedbump({
+    incoming,
+    userDiscId,
+    isRealUserMessage,
+    ignored,
+  });
+  if (messageProxyOriginalDisposition) {
+    return messageProxyOriginalDisposition;
   }
 
   const { earlyTomoriState, earlyAllPersonas } = await loadEarlyTomoriState(channelScope.serverDiscId, channel.id);
 
+  const referencedMessage = await getReferencedMessage();
   const botReplyBlockReason = await shouldBlockReplyToOtherBot({
     incoming,
     earlyAllPersonas,
     isBotAuthor,
+    referencedMessage,
   });
   if (botReplyBlockReason) {
     updateSelfReplyChainState(channel.id, false);
@@ -261,9 +379,15 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
     cooldownUserDiscId,
     isActiveNaturalStopMessage,
     isNaturalStopMessage: isNaturalStopMessage(message.content),
+    messageProxyRecord,
+    referencedMessage,
   });
   if (queueDisposition) {
     return queueDisposition;
+  }
+
+  if (!applyWelcomeHandoff(incoming, userDiscId)) {
+    return ignored("answered_by_welcome");
   }
 
   return {
@@ -280,7 +404,154 @@ export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<Cha
     tomoriState: earlyTomoriState ?? undefined,
     allPersonas: earlyAllPersonas,
     cooldownUserDiscId,
+    referencedMessage,
   };
+}
+
+async function resolveMessageProxyRecord(
+  message: Message,
+  isWebhookMessage: boolean,
+  isMatrixRelay: boolean,
+): Promise<MessageProxyMessageRecord | null> {
+  const knownRecord = getMessageProxyMessageRecord(message.id);
+  if (knownRecord) {
+    applyMessageProxyReference(message);
+    return knownRecord;
+  }
+
+  if (!isWebhookMessage || isMatrixRelay || !hasLiveMessageProxyExpectations(message.channelId)) {
+    return null;
+  }
+
+  // Client-owned webhooks (persona replies, user impersonation) can never be message-proxy reposts.
+  // Skipping them avoids guaranteed transport misses that would stall this message's admission for
+  // the full retry cap and extend live speedbump waits. Managed webhook ownership is verified
+  // before this check, so a proxy member may safely share a persona's display name.
+  if (getCachedImpersonatedUserIdForWebhook(message.webhookId)) {
+    return null;
+  }
+  if (message.guildId) {
+    const allPersonas = await getCachedAllPersonas(message.guildId);
+    if (isSelfTriggerMessage(message, allPersonas)) {
+      return null;
+    }
+  }
+
+  const liveInstances = getLiveMessageProxyExpectationInstances(message.channelId);
+  if (liveInstances.length > MAX_CANDIDATE_INSTANCES) return null;
+  const enabledInstances = await Promise.all(
+    liveInstances.map((instance) => messageProxyInstanceRepository.getEnabled(instance.serviceId, instance.instanceId)),
+  );
+  const route = await routeMessageProxyMessage({
+    message,
+    candidateInstances: enabledInstances.filter((instance) => instance !== null),
+  });
+  if (route.status !== "matched_trigger_only" && route.status !== "matched_stable_identity") {
+    return null;
+  }
+
+  const senderRow = await getCachedUserRow(route.attestation.senderDiscordId);
+  const selectedService = resolveConfiguredProxyService(senderRow?.message_proxy_service);
+  if (
+    selectedService !== route.attestation.serviceId ||
+    (senderRow?.message_proxy_instance_id ?? `${selectedService}:official`) !== route.attestation.instanceId
+  )
+    return null;
+
+  await persistMessageProxyAttestationIdentity({
+    messageDiscId: message.id,
+    attestation: route.attestation,
+    serverDiscId: message.guildId ?? null,
+    avatarUrl: message.author.avatar ? message.author.displayAvatarURL() : null,
+  });
+
+  markMessageProxyExpectationProxied(route.expectation);
+  const record = rememberMessageProxyMessage({
+    messageDiscId: message.id,
+    channelId: message.channelId,
+    expectation: route.expectation,
+    identityUserDiscId: route.attestation.identity
+      ? formatMessageProxyIdentityUserId(
+          route.attestation.serviceId,
+          route.attestation.identity.externalKey,
+          route.attestation.identity.instanceId,
+        )
+      : null,
+    verifiedRepostOnly: route.attestation.originalMessageId === null,
+    verifiedRepostReference: route.attestation.replyTarget
+      ? {
+          channelId: route.attestation.replyTarget.channelId,
+          guildId: message.guildId ?? undefined,
+          messageId: route.attestation.replyTarget.messageId,
+          type: MessageReferenceType.Default,
+        }
+      : null,
+  });
+  if (route.attestation.originalMessageId === null) {
+    consumeVerifiedRepostExpectation(route.expectation);
+  }
+  applyMessageProxyReference(message);
+  if (route.attestation.serviceId === "pluralbuddy" && !message.content.trim()) {
+    const text = extractTextDisplayContent(message.components);
+    if (text) {
+      Object.defineProperty(message, "content", { value: text, configurable: true, writable: true });
+    }
+  }
+
+  log.info(
+    `Confirmed ${route.attestation.serviceId} message-proxy message ${message.id} in channel ${message.channelId}`,
+  );
+  return record;
+}
+
+/** @internal Exported for focused admission regression tests. */
+export async function evaluateMessageProxyOriginalSpeedbump(args: {
+  incoming: ChatIncoming;
+  userDiscId: string;
+  isRealUserMessage: boolean;
+  ignored: (reason: string) => NonRunnableChatAdmission;
+}): Promise<NonRunnableChatAdmission | null> {
+  const { incoming, userDiscId, isRealUserMessage, ignored } = args;
+  const { message } = incoming;
+  if (
+    incoming.isFromQueue ||
+    incoming.isManuallyTriggered ||
+    incoming.isStopResponse ||
+    incoming.reminderRecipientID ||
+    incoming.reminderData?.self_reminder ||
+    incoming.isPersonaJob ||
+    !isRealUserMessage ||
+    message.author.bot ||
+    message.webhookId ||
+    !message.guild
+  ) {
+    return null;
+  }
+
+  const userRow = await getCachedUserRow(userDiscId);
+  const serviceId = resolveConfiguredProxyService(userRow?.message_proxy_service);
+  if (!serviceId) return null;
+  const instance = await messageProxyInstanceRepository.getEnabled(serviceId, userRow?.message_proxy_instance_id);
+  if (!instance) return null;
+
+  const expectation = createMessageProxyExpectation({
+    instance,
+    channelId: message.channelId,
+    originalMessageId: message.id,
+    senderDiscId: userDiscId,
+    originalMessage: message,
+    originalReference: message.reference,
+  });
+  void isMessageProxyInstanceBotPresent(message.guild, instance).then((present) => {
+    if (!present) cancelPendingMessageProxyExpectation(expectation);
+  });
+
+  const waitResult = await waitForMessageProxyExpectation(expectation);
+  if (waitResult === "proxied") {
+    return ignored("message_proxy_proxied");
+  }
+
+  return null;
 }
 
 async function evaluateAudioTranscriptionAdmission(args: {
@@ -340,7 +611,16 @@ async function evaluateAudioTranscriptionAdmission(args: {
   log.warn(
     `Audio transcription failed for message ${message.id}: ${transcriptionResult.failureReason ?? "unknown"}${transcriptionResult.failureDetails ? ` (${transcriptionResult.failureDetails})` : ""}`,
   );
-  if (message.content.trim().length === 0) {
+  const hasVisualMedia = message.attachments
+    ? [...message.attachments.values()].some((att) => {
+        const mime = att.contentType?.toLowerCase() ?? "";
+        if (mime.startsWith("video/") || mime.startsWith("image/")) {
+          return true;
+        }
+        return /\.(png|jpe?g|webp|gif|heic|heif|mp4|webm|mov|mpeg|avi)$/i.test(att.name ?? "");
+      })
+    : false;
+  if (message.content.trim().length === 0 && !hasVisualMedia) {
     const shouldSurfaceTranscriptionFailure =
       incoming.shouldSurfaceUserErrors ??
       (Boolean(incoming.manualTriggerInvoker || incoming.reminderRecipientID || incoming.reminderData?.self_reminder) ||
@@ -350,11 +630,15 @@ async function evaluateAudioTranscriptionAdmission(args: {
       transcriptionResult.failureReason !== "no_endpoint" &&
       transcriptionResult.failureReason !== "missing_api_key"
     ) {
-      await sendStandardEmbed(message.channel as Parameters<typeof sendStandardEmbed>[0], "en-US", {
-        color: ColorCode.WARN,
-        titleKey: "general.errors.voice_transcription_failed_title",
-        descriptionKey: "general.errors.voice_transcription_failed_description",
-      });
+      await sendStandardEmbed(
+        message.channel as Parameters<typeof sendStandardEmbed>[0],
+        resolveAdmissionNoticeLocale(incoming),
+        {
+          color: ColorCode.WARN,
+          titleKey: "general.errors.voice_transcription_failed_title",
+          descriptionKey: "general.errors.voice_transcription_failed_description",
+        },
+      );
     }
     return {
       incoming,
@@ -427,15 +711,18 @@ function createNaturalStopPatterns(): RegExp[] {
     "ちょっと待って",
   ];
 
+  // Only the single-word English stops take a word boundary. The Japanese phrases must stay
+  // unwrapped: Japanese writes without inter-word spaces, so a boundary would reject every
+  // natural form that continues past the phrase (「もういい」 inside 「もういいよ」).
   const patterns: RegExp[] = [];
   for (const stop of basicStops) {
-    patterns.push(new RegExp(`\\b${stop}\\b`, "i"));
+    patterns.push(new RegExp(wrapWithWordBoundary(stop), "iu"));
   }
   for (const polite of politeStops) {
     patterns.push(new RegExp(polite, "i"));
   }
   for (const dismiss of dismissive) {
-    patterns.push(new RegExp(`\\b${dismiss}\\b`, "i"));
+    patterns.push(new RegExp(wrapWithWordBoundary(dismiss), "iu"));
   }
   for (const jp of japanese) {
     patterns.push(new RegExp(jp, "i"));
@@ -495,10 +782,10 @@ export async function resolveAdmissionChannelScope(
     Boolean(incoming.manualTriggerInvoker || incoming.reminderRecipientID || incoming.reminderData?.self_reminder);
   if (!hasExplicitErrorVisibility && !shouldShowError && message.content) {
     shouldShowError = BASE_TRIGGER_WORDS.some((baseWord) => {
-      if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(baseWord)) {
+      if (isUnspacedScriptText(baseWord)) {
         return message.content.includes(baseWord);
       }
-      return new RegExp(`\\b${escapeRegExp(baseWord)}\\b`, "i").test(message.content);
+      return new RegExp(wrapWithWordBoundary(escapeRegExp(baseWord)), "iu").test(message.content);
     });
   }
   if (!hasExplicitErrorVisibility && !shouldShowError && client.user && message.mentions.users.has(client.user.id)) {
@@ -514,7 +801,7 @@ export async function resolveAdmissionChannelScope(
   }
 
   if (shouldShowError && "send" in channel && message.author.id !== client.user?.id) {
-    const errorEmbed = createStandardEmbed("en-US", {
+    const errorEmbed = createStandardEmbed(resolveAdmissionNoticeLocale(incoming), {
       color: ColorCode.ERROR,
       titleKey: "general.errors.channel_not_supported_title",
       descriptionKey: "general.errors.channel_not_supported_description",
@@ -555,33 +842,43 @@ async function loadEarlyTomoriState(
   }
 }
 
+/**
+ * Downstream reply-target readers must use this instance rather than the channel cache, because the
+ * capped cache can evict the target and webhook trust is recorded per message object.
+ *
+ * @internal Exported for focused admission regression tests.
+ */
+export async function resolveReferencedMessage(message: Message): Promise<Message | null> {
+  const referenceId = message.reference?.messageId;
+  if (!referenceId || !("messages" in message.channel)) {
+    return null;
+  }
+
+  let referencedMessage = message.channel.messages.cache.get(referenceId) ?? null;
+  // A cached partial has a null author, so it is fetched to hydrate it before any author check.
+  if (!referencedMessage || referencedMessage.partial) {
+    referencedMessage = await message.channel.messages.fetch(referenceId).catch(() => null);
+  }
+  if (referencedMessage) await verifyMessageWebhook(referencedMessage);
+  return referencedMessage;
+}
+
 /** @internal Exported for focused admission regression tests. */
 export async function shouldBlockReplyToOtherBot(args: {
   incoming: ChatIncoming;
   earlyAllPersonas: TomoriState[];
   isBotAuthor: boolean;
+  referencedMessage: Message | null;
 }): Promise<string | null> {
-  const { incoming, earlyAllPersonas, isBotAuthor } = args;
+  const { incoming, earlyAllPersonas, isBotAuthor, referencedMessage } = args;
   const { client, message } = incoming;
 
-  if (incoming.isManuallyTriggered || isBotAuthor || !message.reference?.messageId) {
+  if (incoming.isManuallyTriggered || isBotAuthor || !referencedMessage) {
     return null;
   }
 
-  let referencedMessage = message.channel.messages.cache.get(message.reference.messageId);
-
-  // Cached reply targets may be partial messages with a null author. Let
-  // MessageManager#fetch hydrate partials before making the bot-author check.
-  if ((!referencedMessage || referencedMessage.partial) && "messages" in message.channel) {
-    try {
-      referencedMessage = await message.channel.messages.fetch(message.reference.messageId);
-    } catch {
-      referencedMessage = undefined;
-    }
-  }
-
-  const referencedAuthor = referencedMessage?.author;
-  if (!referencedAuthor?.bot || referencedAuthor.id === client.user?.id || referencedMessage?.webhookId) {
+  const referencedAuthor = referencedMessage.author;
+  if (!referencedAuthor?.bot || referencedAuthor.id === client.user?.id || referencedMessage.webhookId) {
     return null;
   }
 
@@ -591,7 +888,7 @@ export async function shouldBlockReplyToOtherBot(args: {
       if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(word)) {
         return message.content.includes(word);
       }
-      return new RegExp(`\\b${escapeRegExp(word)}\\b`, "i").test(message.content);
+      return new RegExp(wrapWithWordBoundary(escapeRegExp(word)), "iu").test(message.content);
     }) ||
     earlyAllPersonas.some((persona) => {
       const triggers = persona.trigger_words ?? [];

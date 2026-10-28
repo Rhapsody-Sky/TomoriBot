@@ -11,8 +11,19 @@ Users who want to use Docker Compose should skip this wizard, see
 [Docker Compose](/self-hosting/docker-compose/) for the containerized install path.
 :::
 
-`bun run setup` is the recommended self-host path for local Bun-based installs. It creates your `.env`, generates a `CRYPTO_SECRET`, asks for your Discord bot token, configures PostgreSQL, and installs the exact dependencies from `bun.lock` interactively, so just follow the prompts. It's safe
+`bun run setup` is the recommended self-host path for local Bun-based installs. The command installs the dependencies from `bun.lock` before loading the wizard, including on a fresh clone. The wizard creates your `.env`, generates a `CRYPTO_SECRET`, asks for your Discord bot token, and configures PostgreSQL. It's safe
 to re-run; existing `.env` values are kept unless you choose to reconfigure them.
+
+Run the wizard in an interactive terminal. If stdin is piped or the terminal does not support
+prompts, the wizard announces that it will use defaults. A required question without a default
+then stops with an error.
+
+## Get the code
+
+```sh
+git clone https://github.com/Bredrumb/TomoriBot.git
+cd TomoriBot
+```
 
 ## Choose a path
 
@@ -25,13 +36,14 @@ bun run setup
 
 | Path | Use When | What It Does |
 |---|---|---|
-| **Full Install** | You want the recommended setup with lightweight extras. | Runs Base Install, then attempts the four extras below. |
-| **Base Install** | You want only the minimum working bot. | Creates/configures `.env`, Discord token, PostgreSQL, and dependencies. |
+| Full Install | You want the recommended setup with lightweight extras. | Runs Base Install, then attempts the four extras below. |
+| Base Install | You want only the minimum working bot. | Creates/configures `.env`, Discord token, PostgreSQL, and dependencies. |
 
 
 
 ## What to have ready
 
+- **[Bun](https://bun.sh/)** to run the bot and the wizard itself.
 - **A Discord bot token** with the `GuildMembers`, `MessageContent`, and `GuildPresences`
   privileged intents enabled.
 - **A database.** TomoriBot stores everything in PostgreSQL. You don't set it up by hand as
@@ -68,10 +80,11 @@ To install any of these by hand, see the
 
 ```bash
 bun run dev                          # bot only
-bun run launch --searxng --crawl4ai  # bot + sidecars (see bun run launch --help)
+bun run launch --searxng --crawl4ai  # bot + local servers (see bun run launch --help)
 ```
 
-When the bot is online, run `/config setup` in Discord to add your AI provider key.
+When the bot is online, run `/setup` in Discord. It walks you through connecting an AI provider;
+see the [Quickstart](/introduction/quickstart/) for what each step asks.
 
 ## Updating
 

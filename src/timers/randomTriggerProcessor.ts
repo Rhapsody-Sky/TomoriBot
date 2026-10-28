@@ -1,3 +1,4 @@
+import { verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
 import type { Client, Message } from "discord.js";
 import { ChannelType } from "discord.js";
 import { log } from "../utils/misc/logger";
@@ -6,7 +7,9 @@ import { serverScheduleRepository } from "@/utils/db/repositories";
 import type { RandomTriggerRow, TomoriState } from "../types/db/schema";
 import { tomoriChat, suppressNextSelfReply } from "../events/messageCreate/tomoriChat";
 import { getCachedAllPersonas } from "../utils/cache/tomoriStateCache";
+import { resolvePersonaForMessage } from "@/utils/chat/webhookIdentity";
 import { runWithErrorContext } from "@/utils/misc/errorContextStore";
+import { seedTurnAnchor } from "@/utils/discord/turnAnchor";
 
 export class RandomTriggerProcessor {
   private readonly client: Client;
@@ -140,7 +143,9 @@ export class RandomTriggerProcessor {
 
       if (!trigger.respond_to_self && lastMessage) {
         const isPersonaLastSpeaker =
-          lastMessage.webhookId !== null && lastMessage.author.username === chosenPersona.persona_nickname;
+          lastMessage.webhookId !== null &&
+          (await verifyMessageWebhook(lastMessage)) &&
+          resolvePersonaForMessage(lastMessage, allPersonas)?.persona_id === chosenPersona.persona_id;
 
         if (isPersonaLastSpeaker) {
           log.info(
@@ -150,18 +155,8 @@ export class RandomTriggerProcessor {
         }
       }
 
-      if (!lastMessage && "send" in rawChannel) {
-        try {
-          lastMessage = await rawChannel.send({
-            content: "\u2800",
-          });
-          log.info(`Seeded placeholder message in channel ${trigger.channel_disc_id} for random trigger ${triggerId}`);
-        } catch (sendError) {
-          log.warn(
-            `Failed to seed placeholder in channel ${trigger.channel_disc_id} for random trigger ${triggerId}:`,
-            sendError,
-          );
-        }
+      if (!lastMessage && rawChannel.isSendable()) {
+        lastMessage = (await seedTurnAnchor(rawChannel, `random trigger ${triggerId}`)) ?? undefined;
       }
 
       if (!lastMessage) {
@@ -190,6 +185,7 @@ export class RandomTriggerProcessor {
         textQuotaTriggerKey: `random:${triggerId}:${lastMessage.id}`,
         shouldSurfaceUserErrors: false,
         manualSystemPrompt: trigger.custom_prompt ?? undefined,
+        borrowsTriggerMessage: true,
       });
 
       log.success(`Random trigger ${triggerId} fired successfully for persona "${chosenPersona.persona_nickname}"`);

@@ -7,9 +7,7 @@ import { buildContextNative } from "./nativeBuilder";
 import { resolveRandomChoiceMacrosInBuildOutput } from "./templates";
 import type { BuildContextParams, BuildContextResult } from "./types";
 
-/**
- * Builds model context, applying SillyTavern preset reassembly when one is active.
- */
+/** Applies SillyTavern preset reassembly when one is active. */
 export async function buildContext(params: BuildContextParams): Promise<BuildContextResult> {
   const messageIdMap = params.messageIdMap ?? new MessageIdMap();
   const paramsWithMap = { ...params, messageIdMap };
@@ -22,7 +20,7 @@ export async function buildContext(params: BuildContextParams): Promise<BuildCon
       if (presetData) {
         const nativeOutput = await buildContextNative({
           ...paramsWithMap,
-          suppressDefaultSystemPrompt: !params.tomoriConfig.system_prompt?.trim(),
+          presetOwnsSystemPrompt: true,
         });
 
         const lastUserMessage =
@@ -41,6 +39,7 @@ export async function buildContext(params: BuildContextParams): Promise<BuildCon
                   nai_diffusion_model_id: tomoriStateForPreset.config.nai_diffusion_model_id,
                   video_model_id: tomoriStateForPreset.config.video_model_id,
                   config: {
+                    emoji_usage_enabled: params.tomoriConfig.emoji_usage_enabled,
                     sticker_usage_enabled: params.tomoriConfig.sticker_usage_enabled,
                     web_search_enabled: params.tomoriConfig.web_search_enabled,
                     self_teaching_enabled: params.tomoriConfig.self_teaching_enabled,
@@ -49,7 +48,11 @@ export async function buildContext(params: BuildContextParams): Promise<BuildCon
                     videogen_enabled: params.tomoriConfig.videogen_enabled,
                     voice_message_enabled: params.tomoriConfig.voice_message_enabled,
                     user_blocking_enabled: params.tomoriConfig.user_blocking_enabled,
+                    user_info_updates_enabled: params.tomoriConfig.user_info_updates_enabled,
                     thread_creation_enabled: params.tomoriConfig.thread_creation_enabled,
+                    conditioning_interactions_enabled: params.tomoriConfig.conditioning_interactions_enabled,
+                    dice_rolling_enabled: params.tomoriConfig.dice_rolling_enabled,
+                    danbooru_enabled: params.tomoriConfig.danbooru_enabled,
                   },
                 }
               : undefined,
@@ -71,6 +74,8 @@ export async function buildContext(params: BuildContextParams): Promise<BuildCon
             client: params.client,
             guildId: params.guildId,
             triggererName: params.triggererName,
+            triggererFormattedName: params.triggererFormattedName,
+            triggererAddressTerm: params.triggererAddressTerm,
             botName: params.tomoriNickname,
             personalMemoriesEnabled: params.tomoriConfig.personal_memories_enabled ?? true,
             toolPromptMacroResolver: presetToolPromptMacroResolver,

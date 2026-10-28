@@ -15,7 +15,7 @@ type GenerateCustomVideoEndpointParams = Parameters<typeof generateComfyUiVideoV
 export async function generateCustomImageViaEndpoint(
   params: GenerateCustomImageEndpointParams,
 ): Promise<ProviderNativeImageGenerationResult> {
-  const { endpoint, apiKey, prompt, negativePrompt, aspectRatio, referenceImages } = params;
+  const { endpoint, apiKey, prompt, negativePrompt, aspectRatio, referenceImages, abortSignal } = params;
 
   if (endpoint.api_style === "comfyui") {
     return generateComfyUiImageViaEndpoint(params);
@@ -31,10 +31,13 @@ export async function generateCustomImageViaEndpoint(
       size: aspectRatio,
       ...(referenceImages?.length ? { reference_images: referenceImages } : {}),
     }),
+    signal: abortSignal,
   });
 
   if (!response.ok) {
-    throw new Error(`Custom image generation failed: ${response.status} ${response.statusText}`);
+    throw Object.assign(new Error(`Custom image generation failed: ${response.status} ${response.statusText}`), {
+      status: response.status,
+    });
   }
 
   const payload = (await response.json()) as {
@@ -62,6 +65,7 @@ export async function generateCustomVideoViaEndpoint(
     generateAudio,
     audioPrompt,
     loop,
+    abortSignal,
   } = params;
 
   if (endpoint.api_style === "comfyui") {
@@ -84,10 +88,13 @@ export async function generateCustomVideoViaEndpoint(
       loop: loop === true,
       ...(referenceImages?.length ? { reference_images: referenceImages } : {}),
     }),
+    signal: abortSignal,
   });
 
   if (!response.ok) {
-    throw new Error(`Custom video generation failed: ${response.status} ${response.statusText}`);
+    throw Object.assign(new Error(`Custom video generation failed: ${response.status} ${response.statusText}`), {
+      status: response.status,
+    });
   }
 
   const payload = (await response.json()) as {

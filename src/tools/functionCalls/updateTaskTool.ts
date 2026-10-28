@@ -5,8 +5,11 @@
  * The ID is shown in participant context as "ID:N".
  */
 
-import { extractBridgeUserId, isMatrixBridgeWebhookUsername } from "@/utils/bridges";
+import { extractBridgeUserId } from "@/utils/bridges";
+import { isMatrixRelayMessage } from "@/utils/chat/triggerProcessor";
+import { verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
 import { sendTaskEmbedWithExpand } from "@/utils/discord/expandableEmbedNotice";
+import { resolveTriggererDiscordId } from "@/utils/discord/targetResolver";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 import { validateFutureTime } from "@/utils/text/processors/timeUtils";
@@ -15,9 +18,8 @@ import {
   formatUTCOffset,
   isValidUtcOffset,
   parseTimeWithOffset,
-  UTC_OFFSET_MAX,
-  UTC_OFFSET_MIN,
 } from "@/utils/text/timezoneHelper";
+import { UTC_OFFSET_MAX, UTC_OFFSET_MIN } from "@/constants/utcOffset";
 import { BaseTool, type ToolContext, type ToolParameterSchema, type ToolResult } from "@/types/tool/interfaces";
 import type { ReminderRow } from "@/types/db/schema";
 
@@ -246,14 +248,19 @@ function buildFailureResult(
   };
 }
 
-function formatReminderTime(reminderTime: Date, timezoneOffset: number): string {
-  return `${formatTimeWithOffset(reminderTime, timezoneOffset, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })} (${formatUTCOffset(timezoneOffset)})`;
+function formatReminderTime(reminderTime: Date, timezoneOffset: number, locale: string): string {
+  return `${formatTimeWithOffset(
+    reminderTime,
+    timezoneOffset,
+    {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    },
+    locale,
+  )} (${formatUTCOffset(timezoneOffset)})`;
 }
 
 function formatRepeatText(locale: string, repetitionIntervalHours: number | null | undefined): string {
@@ -354,12 +361,12 @@ export class UpdateTaskTool extends BaseTool {
 
     const { serverScheduleRepository, userRepository } = await import("@/utils/db/repositories");
 
-    const isMatrixRelayRequester =
-      !!context.message?.webhookId && isMatrixBridgeWebhookUsername(context.message.author.username ?? "");
+    if (context.message) await verifyMessageWebhook(context.message);
+    const isMatrixRelayRequester = !!context.message && isMatrixRelayMessage(context.message);
     const requesterBridgeUserId = isMatrixRelayRequester
       ? (extractBridgeUserId(context.message?.author.username ?? "") ?? undefined)
       : undefined;
-    const requesterDiscordId = requesterBridgeUserId ? undefined : context.message?.author?.id || context.userId;
+    const requesterDiscordId = requesterBridgeUserId ? undefined : resolveTriggererDiscordId(context);
     const requesterUserRow = requesterDiscordId ? await userRepository.loadByDiscordId(requesterDiscordId) : null;
 
     if (!requesterBridgeUserId && (!requesterDiscordId || !requesterUserRow?.user_id)) {
@@ -404,8 +411,7 @@ export class UpdateTaskTool extends BaseTool {
         context.personaUsername || tomoriState.persona_nickname || context.client.user?.username || "TomoriBot";
 
       await sendTaskEmbedWithExpand(
-        context.channel,
-        context.locale,
+        context,
         {
           color: ColorCode.ERROR,
           titleKey: "reminders.task_deleted_title",
@@ -420,11 +426,6 @@ export class UpdateTaskTool extends BaseTool {
           footerKey: "reminders.task_deleted_footer",
         },
         deleteResult.reminder.reminder_purpose,
-        {
-          webhook: context.webhook,
-          personaUsername: context.personaUsername,
-          personaAvatarUrl: context.personaAvatarUrl,
-        },
       );
 
       return {
@@ -489,7 +490,7 @@ export class UpdateTaskTool extends BaseTool {
       context.personaUsername || tomoriState.persona_nickname || context.client.user?.username || "TomoriBot";
     const reminderPurposeText = truncateReminderPurpose(parsedArgs.newPurpose);
 
-    // Show both clocks when the target user has a personal timezone (/personal timezone)
+    // Show both clocks when the target user has a personal timezone (/personal config)
     // differing from the server's, so lets the user spot a mislabeled/misconverted time.
     // Self tasks target the bot, which has no personal timezone.
     let targetPersonalOffset: number | null = null;
@@ -500,30 +501,39 @@ export class UpdateTaskTool extends BaseTool {
     const reminderTimeText =
       targetPersonalOffset != null && targetPersonalOffset !== timezoneOffset
         ? localizer(context.locale, "reminders.dual_time_display", {
-            server_time: formatTimeWithOffset(finalReminderTime, timezoneOffset, {
-              year: "numeric",
-              month: "long",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
+            server_time: formatTimeWithOffset(
+              finalReminderTime,
+              timezoneOffset,
+              {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              },
+              context.locale,
+            ),
             server_offset: formatUTCOffset(timezoneOffset),
-            user_time: formatTimeWithOffset(finalReminderTime, targetPersonalOffset, {
-              year: "numeric",
-              month: "long",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
+            user_time: formatTimeWithOffset(
+              finalReminderTime,
+              targetPersonalOffset,
+              {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              },
+              context.locale,
+            ),
             user_offset: formatUTCOffset(targetPersonalOffset),
             user_nickname: existingReminder.user_nickname,
           })
-        : formatReminderTime(finalReminderTime, timezoneOffset);
+        : formatReminderTime(finalReminderTime, timezoneOffset, context.locale);
     const repeatText = formatRepeatText(context.locale, finalRepetitionIntervalHours);
 
     await sendTaskEmbedWithExpand(
-      context.channel,
-      context.locale,
+      context,
       {
         color: ColorCode.MEMORY_UPDATE,
         titleKey: "reminders.task_updated_title",
@@ -540,11 +550,7 @@ export class UpdateTaskTool extends BaseTool {
         footerKey: "reminders.task_updated_footer",
       },
       parsedArgs.newPurpose,
-      {
-        webhook: context.webhook,
-        personaUsername: context.personaUsername,
-        personaAvatarUrl: context.personaAvatarUrl,
-      },
+      { kind: "task", id: parsedArgs.reminderId },
     );
 
     return {

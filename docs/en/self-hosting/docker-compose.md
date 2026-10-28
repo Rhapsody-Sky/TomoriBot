@@ -4,20 +4,16 @@ sidebar:
   order: 3
 ---
 
-Docker Compose builds and runs TomoriBot **plus** PostgreSQL as containers. It's the
-third install path alongside the [setup wizard](/self-hosting/setup-wizard/) and
-[manual setup](/self-hosting/manual-setup/) — pick it when you'd rather run everything in Docker than
-install Bun and PostgreSQL on the host. It does **not** use the setup wizard; the database
-connection is auto-configured for you.
+Docker Compose runs TomoriBot and PostgreSQL together in containers. It is the third install option alongside the [setup wizard](/self-hosting/setup-wizard/) and [manual setup](/self-hosting/manual-setup/): choose it when you want to run everything in Docker without installing Bun or PostgreSQL on your host system. It bypasses the interactive setup wizard and configures the database connection automatically.
 
-:::caution[Host-side scripts still need host tooling]
-Running the bot and database in Docker does not containerize the maintenance scripts.
-`bun run backup`, `bun run restore-backup`, `bun run update`, `bun run rotate-keys`, and
-friends still run through host Bun and the host PostgreSQL client tools. See
-[Maintenance & Backups](/self-hosting/maintenance/) for the Compose-specific procedures.
-:::
+## 1. Get the code
 
-## 1. Required `.env` values
+```sh
+git clone https://github.com/Bredrumb/TomoriBot.git
+cd TomoriBot
+```
+
+## 2. Required `.env` values
 
 Start from the example file:
 
@@ -25,7 +21,7 @@ Start from the example file:
 cp .env.example .env
 ```
 
-Then set at minimum:
+Set these required variables in `.env`:
 
 | Variable | Value |
 |---|---|
@@ -33,43 +29,61 @@ Then set at minimum:
 | `CRYPTO_SECRET` | A 32-character encryption key used to encrypt stored API keys. |
 | `POSTGRES_PASSWORD` | The database password. Every other `POSTGRES_*` value is auto-configured. |
 
-Unlike the setup wizard, Compose won't generate `CRYPTO_SECRET` for you — set it yourself
-(any 32-character string). Optional tuning values can be copied from
-`.env.optional.example`.
+Generate a random 32-character value for `CRYPTO_SECRET` using Docker, then copy it into `.env`:
+
+```sh
+docker run --rm alpine:3.22 sh -c "head -c 24 /dev/urandom | base64"
+```
+
+Generate a separate password for `POSTGRES_PASSWORD`. You can copy optional tuning settings from `.env.optional.example`.
 
 :::note[Database connection is automatic]
-The Compose PostgreSQL service runs in development mode (no SSL) on the internal Docker
-network, and the bundled image already has `pgvector` and `pg_cron` configured — so
-document/RAG memory and scheduled cleanup work out of the box. Don't set `POSTGRES_HOST`,
-`POSTGRES_PORT`, `POSTGRES_USER`, or `POSTGRES_DB` for Compose; they're managed for you.
+The Compose PostgreSQL service runs in development mode (without SSL) on an internal Docker network. The bundled image includes `pgvector` and `pg_cron`, so document memory, vector search, and scheduled cleanup work immediately. Do not set `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, or `POSTGRES_DB` in `.env`; Compose configures them automatically.
 :::
 
-## 2. Build and run
+On Linux, the bot container runs as UID 1001 and needs write access to the host's `backups/`,
+`logs/`, and `data/` directories. If they aren't already writable by UID 1001, create them and
+assign ownership before the first start:
+
+```sh
+mkdir -p backups logs data
+sudo chown 1001:1001 backups logs data
+```
+
+If you already ran Compose and Docker created the directories as root, you can run these commands
+afterward. They do not change ownership of files already inside the directories.
+
+## 3. Build and run
 
 ```sh
 docker compose build   # first time, or after code/dependency changes
 docker compose up      # bot + database
 ```
 
-For later starts, `docker compose up` alone is enough unless you changed code or
-dependencies. When the bot is online, run `/config setup` in Discord to add your AI
-provider key — see the [Quickstart](/introduction/quickstart/) for the in-Discord side.
+For later starts, `docker compose up` alone is enough unless you change code or dependencies. Once the bot connects to Discord, run `/setup` in any server channel to add your AI provider key. See the [Quickstart](/introduction/quickstart/) for setup options in Discord.
 
-## 3. Optional sidecars (Compose profiles)
+Compose pins `RUN_ENV=development` in its service definition so `.env` secrets and local HTTP endpoints work. The container healthcheck reports whether the bot process is running; it does not test Discord gateway connectivity. For production mode (`RUN_ENV=production`) differences (secret managers, network restrictions, and metrics), see [Security Architecture](/architecture/subsystems/security/).
 
-Sidecars are opt-in via Compose profiles, so you only run what you need:
+## 4. Optional local servers (Compose profiles)
+
+Run optional local helper servers with Compose profiles so you only start what you need:
 
 ```sh
 # SearXNG (private web search) + Crawl4AI (browser-rendered fetch)
 docker compose --profile searxng --profile fetch-crawl4ai up
 ```
 
-See [SearXNG](/self-hosting/local-endpoints/setup-searxng/), [Crawl4AI](/self-hosting/local-endpoints/setup-crawl4ai/),
-and [Local Monitoring](/self-hosting/local-monitoring/) for per-sidecar details.
+When enabling SearXNG, set `SEARXNG_BASE_URL=http://searxng:8080/` in `.env`. Leave it unset otherwise. Set `SEARXNG_SECRET` to a separate random value for SearXNG request signing.
 
-## Maintenance, updating & backups
+See [SearXNG](/self-hosting/local-endpoints/setup-searxng/), [Crawl4AI](/self-hosting/local-endpoints/setup-crawl4ai/), and [Local Monitoring](/self-hosting/local-monitoring/) for server-specific setup.
 
-Use `bun run update --docker` for the backup-first update procedure on a Compose
-deployment. Backing up and restoring the Compose database (including running host scripts
-against it) is covered on the [Maintenance & Backups](/self-hosting/maintenance/) page. Before pulling a
-new version, start with [Safe Migration](/self-hosting/safe-migration/).
+## Maintenance, updating, and backups
+
+Before updating, stop the bot and back up your database and media; see
+[Maintenance & Backups](/self-hosting/maintenance/) and [Safe Migration](/self-hosting/safe-migration/).
+Then pull the new code and rebuild the container:
+
+```sh
+git pull
+docker compose up -d --build
+```

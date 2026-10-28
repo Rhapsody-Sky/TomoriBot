@@ -16,24 +16,67 @@
 import type { Guild, GuildEmoji, Sticker } from "discord.js";
 import type { ServerEmojiRow, ServerStickerRow, SetupConfig, SetupResult } from "@/types/db/schema";
 import { serverEmojiSchema, serverStickerSchema, setupConfigSchema, setupResultSchema } from "@/types/db/schema";
+import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
 import { toolRepository } from "@/utils/db/repositories/ToolRepository";
 import { userRepository } from "@/utils/db/repositories/UserRepository";
+import { configRepository } from "./ConfigRepository";
 import { sql } from "@/utils/db/client";
 import { log } from "@/utils/misc/logger";
+import { normalizeCustomEndpointUrlForStorage } from "@/utils/provider/customEndpointService";
+import { buildCustomProviderName, buildSyntheticCustomModelCodename } from "@/utils/provider/customProviderUtils";
+import { getStaticProviderInfo } from "@/utils/provider/providerInfoRegistry";
+import { CUSTOM_ENDPOINT_PLACEHOLDER_KEY } from "@/utils/provider/legacyCustomProvider";
+import { encryptApiKey } from "@/utils/security/crypto";
+import { lazyRotateEncryptedRow } from "@/utils/security/encryptedColumns";
 import { keyManager } from "@/utils/security/keyManager";
 import { getBaseTriggerWords } from "@/utils/text/localizer";
 import { dedupeTriggerWords } from "@/utils/text/triggerWords";
 import type { IRepository } from "./IRepository";
+import {
+  customExpressionMediaSchema,
+  customExpressionSchema,
+  type CustomExpressionMedia,
+  type CustomExpressionRow,
+} from "@/types/db/schema";
+import { isValidEmotionKey } from "@/types/misc/emotions";
+import { normalizeStickerNameForLoose } from "@/utils/text/stickerNames";
+import { invalidateEmojiStickerCache } from "@/utils/cache/emojiStickerCache";
+import { nativeExpressionRevision } from "@/utils/text/expressionRevision";
+import { MAX_CUSTOM_EXPRESSIONS_PER_SERVER } from "@/constants/expressionLimits";
+
+type CustomExpressionWrite = {
+  name: string;
+  description: string;
+  emotion_key: string;
+  media: CustomExpressionMedia;
+  nativeStickerNames: string[];
+};
+
+export class ExpressionWriteError extends Error {
+  constructor(public readonly code: "stale" | "collision" | "invalid" | "scope" | "limit") {
+    super(`Expression write rejected: ${code}`);
+  }
+}
 
 export const MANAGED_WEBHOOK_KIND_SHARED_CHANNEL = "shared_channel" as const;
-type ManagedWebhookKind = typeof MANAGED_WEBHOOK_KIND_SHARED_CHANNEL;
+export const MANAGED_WEBHOOK_KINDS = [
+  MANAGED_WEBHOOK_KIND_SHARED_CHANNEL,
+  "avatar_pool_1",
+  "avatar_pool_2",
+  "avatar_pool_3",
+] as const;
+export type ManagedWebhookKind = (typeof MANAGED_WEBHOOK_KINDS)[number];
 
-type ManagedDiscordWebhookRow = {
+export type BlacklistReadResult = { status: "fresh"; memberIds: string[] } | { status: "unavailable"; memberIds: [] };
+
+export type ManagedDiscordWebhookRow = {
   managed_webhook_id: number;
   guild_disc_id: string;
   kind: ManagedWebhookKind;
   channel_disc_id: string;
   webhook_disc_id: string;
+  avatar_fingerprint: string | null;
+  discord_avatar_hash: string | null;
   webhook_token: Buffer;
   key_version: number | null;
   created_at?: Date;
@@ -78,6 +121,7 @@ type ServerChatConfigsRow = {
   self_debug_enabled: boolean;
   model_randomizer_enabled: boolean;
   system_prompt: string | null;
+  response_prefill: string | null;
   context_note: string | null;
   context_note_depth: number;
   llm_stop_strings: string[];
@@ -95,6 +139,7 @@ type ServerChatConfigsRow = {
 /** Row shape for server_notice_embeds_configs (Phase 6). */
 type ServerNoticeEmbedsConfigsRow = {
   tool_notice_hidden_keys: string[];
+  tool_notice_verbosity: string;
 };
 
 /** Row shape for server_member_permissions_configs (Phase 6). */
@@ -138,6 +183,242 @@ type ServerExportShape = {
 };
 
 class ServerRepository implements IRepository<ServerExportShape> {
+  async loadExpressionPanelMetadata(
+    serverId: number,
+  ): Promise<{ emojis: ServerEmojiRow[]; stickers: ServerStickerRow[] }> {
+    const [emojis, stickers] = await Promise.all([
+      sql<
+        ServerEmojiRow[]
+      >`SELECT * FROM server_emojis WHERE server_id = ${serverId} ORDER BY created_at, emoji_disc_id`,
+      sql<
+        ServerStickerRow[]
+      >`SELECT * FROM server_stickers WHERE server_id = ${serverId} ORDER BY created_at, sticker_disc_id`,
+    ]);
+    return {
+      emojis: emojis.map((row) => serverEmojiSchema.parse(row)),
+      stickers: stickers.map((row) => serverStickerSchema.parse(row)),
+    };
+  }
+
+  async synchronizeExpressions(guild: Guild, serverId: number): Promise<void> {
+    const changed = await sql.transaction(async (tx) => {
+      let written = false;
+      const emojis = await tx<
+        Array<{ emoji_disc_id: string; emoji_name: string }>
+      >`SELECT emoji_disc_id, emoji_name FROM server_emojis WHERE server_id = ${serverId}`;
+      const stickers = await tx<
+        Array<{ sticker_disc_id: string; sticker_name: string }>
+      >`SELECT sticker_disc_id, sticker_name FROM server_stickers WHERE server_id = ${serverId}`;
+      if (
+        emojis.length !== guild.emojis.cache.size ||
+        emojis.some((row) => guild.emojis.cache.get(row.emoji_disc_id)?.name !== row.emoji_name)
+      ) {
+        await this.syncEmojis(tx, serverId, [...guild.emojis.cache.values()]);
+        written = true;
+      }
+      if (
+        stickers.length !== guild.stickers.cache.size ||
+        stickers.some((row) => guild.stickers.cache.get(row.sticker_disc_id)?.name !== row.sticker_name)
+      ) {
+        await this.syncStickers(tx, serverId, [...guild.stickers.cache.values()]);
+        written = true;
+      }
+      return written;
+    });
+    if (changed) invalidateEmojiStickerCache(serverId);
+  }
+
+  async writeNativeExpression(
+    serverId: number,
+    kind: "emojis" | "stickers",
+    id: string,
+    revision: string,
+    metadata: { emotion: string; description: string } | null,
+  ): Promise<void> {
+    if (
+      metadata &&
+      (!isValidEmotionKey(metadata.emotion) || !metadata.description.trim() || metadata.description.length > 500)
+    ) {
+      throw new ExpressionWriteError("invalid");
+    }
+    await sql.transaction(async (tx) => {
+      const [row] =
+        kind === "emojis"
+          ? await tx<
+              ServerEmojiRow[]
+            >`SELECT * FROM server_emojis WHERE server_id = ${serverId} AND emoji_disc_id = ${id} FOR UPDATE`
+          : await tx<
+              ServerStickerRow[]
+            >`SELECT * FROM server_stickers WHERE server_id = ${serverId} AND sticker_disc_id = ${id} FOR UPDATE`;
+      if (!row) throw new ExpressionWriteError("stale");
+      const normalized = kind === "emojis" ? serverEmojiSchema.parse(row) : serverStickerSchema.parse(row);
+      if (nativeExpressionRevision(normalized) !== revision) throw new ExpressionWriteError("stale");
+      const emotion = metadata?.emotion ?? "unset";
+      const description = metadata?.description.trim() ?? "";
+      if (kind === "emojis") {
+        await tx`
+          UPDATE server_emojis SET emotion_key = ${emotion}, emoji_desc = ${description}, updated_at = CURRENT_TIMESTAMP
+          WHERE server_id = ${serverId} AND emoji_disc_id = ${id}
+        `;
+      } else {
+        await tx`
+          UPDATE server_stickers SET emotion_key = ${emotion}, sticker_desc = ${description}, updated_at = CURRENT_TIMESTAMP
+          WHERE server_id = ${serverId} AND sticker_disc_id = ${id}
+        `;
+      }
+    });
+    invalidateEmojiStickerCache(serverId);
+  }
+
+  async loadCustomExpressions(serverId: number): Promise<CustomExpressionRow[]> {
+    const rows = await sql<CustomExpressionRow[]>`
+      SELECT c.*, to_json(ARRAY(
+        SELECT p.persona_id FROM custom_expression_personas p
+        WHERE p.custom_expression_id = c.custom_expression_id ORDER BY p.persona_id
+      )) AS persona_ids
+      FROM custom_expressions c WHERE c.server_id = ${serverId}
+      ORDER BY c.created_at, c.custom_expression_id
+    `;
+    return rows.map((row) => customExpressionSchema.parse(row));
+  }
+
+  async loadCustomExpression(serverId: number, id: string): Promise<CustomExpressionRow | null> {
+    const [row] = await sql`
+      SELECT c.*, to_json(ARRAY(
+        SELECT p.persona_id FROM custom_expression_personas p
+        WHERE p.custom_expression_id = c.custom_expression_id ORDER BY p.persona_id
+      )) AS persona_ids
+      FROM custom_expressions c
+      WHERE c.server_id = ${serverId} AND c.custom_expression_id = ${id}
+    `;
+    return row ? customExpressionSchema.parse(row) : null;
+  }
+
+  async saveCustomExpression(
+    serverId: number,
+    id: string,
+    expectedRevision: number | null,
+    input: CustomExpressionWrite,
+  ): Promise<void> {
+    const name = input.name.trim();
+    const description = input.description.trim();
+    const nameKey = normalizeStickerNameForLoose(name);
+    if (
+      !nameKey ||
+      name.length > 100 ||
+      !description ||
+      description.length > 500 ||
+      !isValidEmotionKey(input.emotion_key)
+    ) {
+      throw new ExpressionWriteError("invalid");
+    }
+    const media = customExpressionMediaSchema.parse(input.media);
+    await sql.transaction(async (tx) => {
+      // The server lock serializes name and count checks across concurrent creations.
+      const [server] = await tx`SELECT server_id FROM servers WHERE server_id = ${serverId} FOR UPDATE`;
+      if (!server) throw new ExpressionWriteError("scope");
+      const [current] = await tx`
+        SELECT revision FROM custom_expressions
+        WHERE server_id = ${serverId} AND custom_expression_id = ${id} FOR UPDATE
+      `;
+      if (expectedRevision === null ? current : !current || current.revision !== expectedRevision) {
+        throw new ExpressionWriteError("stale");
+      }
+      if (expectedRevision === null) {
+        const [row] = await tx<Array<{ count: number }>>`
+          SELECT COUNT(*)::int AS count FROM custom_expressions WHERE server_id = ${serverId}
+        `;
+        if (row.count >= MAX_CUSTOM_EXPRESSIONS_PER_SERVER) throw new ExpressionWriteError("limit");
+      }
+      const stickers = await tx<
+        Array<{ sticker_name: string }>
+      >`SELECT sticker_name FROM server_stickers WHERE server_id = ${serverId}`;
+      const [collision] = await tx`
+        SELECT custom_expression_id FROM custom_expressions
+        WHERE server_id = ${serverId} AND name_key = ${nameKey} AND custom_expression_id <> ${id}
+      `;
+      if (
+        collision ||
+        [...input.nativeStickerNames, ...stickers.map((row) => String(row.sticker_name))].some(
+          (stickerName) => normalizeStickerNameForLoose(stickerName) === nameKey,
+        )
+      ) {
+        throw new ExpressionWriteError("collision");
+      }
+      if (expectedRevision === null) {
+        await tx`
+          INSERT INTO custom_expressions (
+            custom_expression_id, server_id, name, name_key, description, emotion_key,
+            source_kind, delivery_kind, original_link, storage_reference, mime_type, extension, byte_size
+          ) VALUES (
+            ${id}, ${serverId}, ${name}, ${nameKey}, ${description}, ${input.emotion_key},
+            ${media.source_kind}, ${media.delivery_kind}, ${media.original_link}, ${media.storage_reference},
+            ${media.mime_type}, ${media.extension}, ${media.byte_size}
+          )
+        `;
+      } else {
+        await tx`
+          UPDATE custom_expressions SET name = ${name}, name_key = ${nameKey},
+            description = ${description}, emotion_key = ${input.emotion_key},
+            source_kind = ${media.source_kind}, delivery_kind = ${media.delivery_kind},
+            original_link = ${media.original_link}, storage_reference = ${media.storage_reference},
+            mime_type = ${media.mime_type}, extension = ${media.extension}, byte_size = ${media.byte_size},
+            revision = revision + 1
+          WHERE server_id = ${serverId} AND custom_expression_id = ${id}
+        `;
+      }
+    });
+    invalidateEmojiStickerCache(serverId);
+  }
+
+  async deleteCustomExpression(serverId: number, id: string, expectedRevision: number): Promise<boolean> {
+    const rows = await sql`
+      DELETE FROM custom_expressions
+      WHERE server_id = ${serverId} AND custom_expression_id = ${id} AND revision = ${expectedRevision}
+      RETURNING custom_expression_id
+    `;
+    if (!rows.length) return false;
+    invalidateEmojiStickerCache(serverId);
+    return true;
+  }
+
+  async setCustomExpressionPersona(
+    serverId: number,
+    id: string,
+    expectedRevision: number,
+    personaId: number,
+    add: boolean,
+  ): Promise<void> {
+    await sql.transaction(async (tx) => {
+      const [expression] = await tx`
+        SELECT revision FROM custom_expressions
+        WHERE server_id = ${serverId} AND custom_expression_id = ${id} FOR UPDATE
+      `;
+      if (!expression || expression.revision !== expectedRevision) throw new ExpressionWriteError("stale");
+      const [persona] =
+        await tx`SELECT persona_id FROM personas WHERE server_id = ${serverId} AND persona_id = ${personaId}`;
+      if (!persona) throw new ExpressionWriteError("scope");
+      if (add) {
+        await tx`
+          INSERT INTO custom_expression_personas (custom_expression_id, server_id, persona_id)
+          VALUES (${id}, ${serverId}, ${personaId}) ON CONFLICT DO NOTHING
+        `;
+      } else {
+        await tx`
+          DELETE FROM custom_expression_personas
+          WHERE server_id = ${serverId} AND custom_expression_id = ${id} AND persona_id = ${personaId}
+        `;
+      }
+      await tx`
+        UPDATE custom_expressions SET restricted = EXISTS (
+          SELECT 1 FROM custom_expression_personas WHERE custom_expression_id = ${id}
+        ), revision = revision + 1
+        WHERE server_id = ${serverId} AND custom_expression_id = ${id}
+      `;
+    });
+    invalidateEmojiStickerCache(serverId);
+  }
+
   /**
    * Atomically sets up a new server: creates server, tomori, config, and emoji rows.
    *
@@ -307,6 +588,13 @@ class ServerRepository implements IRepository<ServerExportShape> {
   }
 
   /**
+   * Returns all blacklisted user Discord IDs for a server with read status provenance.
+   */
+  async getBlacklistedMemberIdsResult(serverId: number): Promise<BlacklistReadResult> {
+    return this.sqlGetBlacklistedMemberIdsResult(serverId);
+  }
+
+  /**
    * Returns true if a Brave Search API key is configured for the server.
    *
    */
@@ -325,6 +613,8 @@ class ServerRepository implements IRepository<ServerExportShape> {
     channelDiscId: string;
     webhookDiscId: string;
     rawToken: string;
+    avatarFingerprint?: string | null;
+    discordAvatarHash?: string | null;
   }): Promise<boolean> {
     return this.sqlUpsertManagedWebhook(params);
   }
@@ -341,17 +631,28 @@ class ServerRepository implements IRepository<ServerExportShape> {
     return this.sqlLoadManagedWebhookByChannel(channelDiscId, kind);
   }
 
-  /**
-   * Loads a managed Discord webhook row by channel and webhook Discord ID.
-   *
-   * @param kind - Webhook kind (defaults to shared_channel)
-   */
   async loadManagedWebhookByChannelAndWebhookId(
     channelDiscId: string,
     webhookDiscId: string,
-    kind: ManagedWebhookKind = MANAGED_WEBHOOK_KIND_SHARED_CHANNEL,
+    kind?: ManagedWebhookKind,
   ): Promise<ManagedDiscordWebhookRow | null> {
     return this.sqlLoadManagedWebhookByChannelAndWebhookId(channelDiscId, webhookDiscId, kind);
+  }
+
+  async listManagedWebhooksByChannel(channelDiscId: string): Promise<ManagedDiscordWebhookRow[]> {
+    try {
+      return await sql<ManagedDiscordWebhookRow[]>`
+        SELECT * FROM discord_managed_webhooks
+        WHERE channel_disc_id = ${channelDiscId} AND kind IN ${sql([...MANAGED_WEBHOOK_KINDS])}
+        ORDER BY managed_webhook_id
+      `;
+    } catch (error) {
+      log.error("[ManagedWebhookDb] Failed to list stored webhooks", {
+        errorType: "managed_webhook_read_error",
+        metadata: { channelId: channelDiscId, error },
+      });
+      throw error;
+    }
   }
 
   /**
@@ -369,10 +670,9 @@ class ServerRepository implements IRepository<ServerExportShape> {
   }
 
   /**
-   * Decrypts the token for a managed Discord webhook row, rotating the key if outdated.
+   * Rotates the key when the row's key is outdated.
    *
-   * @param row - ManagedDiscordWebhookRow with encrypted webhook_token
-   * @returns Decrypted token string or null on failure
+   * @returns The decrypted token, or null on failure
    */
   async decryptManagedWebhookToken(row: ManagedDiscordWebhookRow): Promise<string | null> {
     return this.sqlDecryptManagedWebhookToken(row);
@@ -436,19 +736,40 @@ class ServerRepository implements IRepository<ServerExportShape> {
     const isDMChannel = guild === null;
     log.section(`Starting server setup transaction (${isDMChannel ? "DM" : "Guild"} context)`);
 
+    // Provider access is a discriminated union with no legacy fallback: the pre-wizard `/setup` modal
+    // was the last caller to build the boolean flags this used to resolve from.
+    const resolvedAccess = validConfig.providerAccess;
+
+    if (resolvedAccess?.mode === "custom-endpoint") {
+      const apiStyle = resolvedAccess.connection.apiStyle;
+      if (apiStyle !== "openai-compatible" && apiStyle !== "ollama-native") {
+        throw new Error(`Custom endpoint API style '${apiStyle}' does not support text capability`);
+      }
+      const modelCode = resolvedAccess.textModel.modelCode.trim();
+      if (!modelCode) {
+        throw new Error("Custom endpoint setup requires a non-empty text model code");
+      }
+    }
+
+    let placeholderApiKey: { encrypted: Buffer; version: number } | null = null;
+    if (resolvedAccess?.mode === "custom-endpoint" && !resolvedAccess.connection.encryptedAuthToken) {
+      placeholderApiKey = await encryptApiKey(CUSTOM_ENDPOINT_PLACEHOLDER_KEY);
+    }
+
     try {
       const result = await sql.transaction(async (tx) => {
         let selectedLlm: { llm_id: number; llm_codename: string } | null = null;
         let selectedDiffusionModel: { diffusion_model_id: number; codename: string } | null = null;
         let selectedEmbeddingModel: { embedding_model_id: number; codename: string } | null = null;
 
-        if (validConfig.provider) {
+        if (resolvedAccess?.mode === "catalog") {
+          const catalogProvider = resolvedAccess.provider;
           // Find the default model for the selected provider within the transaction
           // First try to get the default model (is_default = true), excluding deprecated
           selectedLlm = (
             await tx`
               SELECT * FROM llms
-              WHERE llm_provider = ${validConfig.provider}
+              WHERE llm_provider = ${catalogProvider}
                 AND is_default = true
                 AND is_deprecated = false
               ORDER BY llm_id ASC
@@ -461,7 +782,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
             selectedLlm = (
               await tx`
                 SELECT * FROM llms
-                WHERE llm_provider = ${validConfig.provider}
+                WHERE llm_provider = ${catalogProvider}
                   AND is_deprecated = false
                 ORDER BY llm_id ASC
                 LIMIT 1
@@ -469,21 +790,21 @@ class ServerRepository implements IRepository<ServerExportShape> {
             )[0];
 
             if (!selectedLlm) {
-              throw new Error(`No available models found for provider: ${validConfig.provider}`);
+              throw new Error(`No available models found for provider: ${catalogProvider}`);
             }
 
             log.warn(
-              `No default model found for provider ${validConfig.provider}, using fallback: ${selectedLlm.llm_codename}`,
+              `No default model found for provider ${catalogProvider}, using fallback: ${selectedLlm.llm_codename}`,
             );
           } else {
-            log.info(`Using default model for ${validConfig.provider}: ${selectedLlm.llm_codename}`);
+            log.info(`Using default model for ${catalogProvider}: ${selectedLlm.llm_codename}`);
           }
 
           // Find the default diffusion model for the selected provider
           selectedDiffusionModel = (
             await tx`
               SELECT * FROM image_diffusion_models
-              WHERE provider = ${validConfig.provider}
+              WHERE provider = ${catalogProvider}
                 AND is_default = true
                 AND is_deprecated = false
               ORDER BY diffusion_model_id ASC
@@ -495,7 +816,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
             selectedDiffusionModel = (
               await tx`
                 SELECT * FROM image_diffusion_models
-                WHERE provider = ${validConfig.provider}
+                WHERE provider = ${catalogProvider}
                   AND is_deprecated = false
                 ORDER BY diffusion_model_id ASC
                 LIMIT 1
@@ -504,22 +825,22 @@ class ServerRepository implements IRepository<ServerExportShape> {
 
             if (selectedDiffusionModel) {
               log.warn(
-                `No default diffusion model found for provider ${validConfig.provider}, using fallback: ${selectedDiffusionModel.codename}`,
+                `No default diffusion model found for provider ${catalogProvider}, using fallback: ${selectedDiffusionModel.codename}`,
               );
             } else {
               log.info(
-                `No diffusion models available for provider ${validConfig.provider} (image generation not supported)`,
+                `No diffusion models available for provider ${catalogProvider} (image generation not supported)`,
               );
             }
           } else {
-            log.info(`Using default diffusion model for ${validConfig.provider}: ${selectedDiffusionModel.codename}`);
+            log.info(`Using default diffusion model for ${catalogProvider}: ${selectedDiffusionModel.codename}`);
           }
 
           // Find the default embedding model for the selected provider
           selectedEmbeddingModel = (
             await tx`
               SELECT * FROM embedding_models
-              WHERE provider = ${validConfig.provider}
+              WHERE provider = ${catalogProvider}
                 AND is_default = true
                 AND is_deprecated = false
               ORDER BY embedding_model_id ASC
@@ -531,7 +852,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
             selectedEmbeddingModel = (
               await tx`
                 SELECT * FROM embedding_models
-                WHERE provider = ${validConfig.provider}
+                WHERE provider = ${catalogProvider}
                   AND is_deprecated = false
                 ORDER BY embedding_model_id ASC
                 LIMIT 1
@@ -540,29 +861,23 @@ class ServerRepository implements IRepository<ServerExportShape> {
 
             if (selectedEmbeddingModel) {
               log.warn(
-                `No default embedding model found for provider ${validConfig.provider}, using fallback: ${selectedEmbeddingModel.codename}`,
+                `No default embedding model found for provider ${catalogProvider}, using fallback: ${selectedEmbeddingModel.codename}`,
               );
             } else {
               log.info(
-                `No embedding models available for provider ${validConfig.provider} (document retrieval not supported)`,
+                `No embedding models available for provider ${catalogProvider} (document retrieval not supported)`,
               );
             }
           } else {
-            log.info(`Using default embedding model for ${validConfig.provider}: ${selectedEmbeddingModel.codename}`);
+            log.info(`Using default embedding model for ${catalogProvider}: ${selectedEmbeddingModel.codename}`);
           }
+        } else if (resolvedAccess?.mode === "user-byok") {
+          log.info("Setup is bootstrapping BYOK-only mode with no server text provider");
+        } else if (resolvedAccess?.mode === "custom-endpoint") {
+          log.info("Setup is bootstrapping custom endpoint mode");
         } else {
-          if (validConfig.userByokMode) {
-            log.info("Setup is bootstrapping BYOK-only mode with no server text provider");
-          } else if (validConfig.deferredCustomEndpointSetup) {
-            log.info("Setup is bootstrapping deferred custom-endpoint mode with no server text provider");
-          } else {
-            log.info("Setup is bootstrapping with no immediate server text provider");
-          }
+          log.info("Setup is bootstrapping with no immediate server text provider");
         }
-
-        const selectedLlmId = selectedLlm ? selectedLlm.llm_id : null;
-        const selectedDiffusionModelId = selectedDiffusionModel ? selectedDiffusionModel.diffusion_model_id : null;
-        const selectedEmbeddingModelId = selectedEmbeddingModel ? selectedEmbeddingModel.embedding_model_id : null;
 
         const presetRows = await tx<
           Array<{
@@ -585,12 +900,50 @@ class ServerRepository implements IRepository<ServerExportShape> {
           dedupedPresetTriggers.length > 0 ? dedupedPresetTriggers : getBaseTriggerWords(validConfig.locale);
         const presetPersonaPrompt = presetRows[0]?.persona_preset_desc?.trim() || null;
 
+        const [existingServer] = await tx<Array<{ server_id: number }>>`
+          SELECT server_id FROM servers
+          WHERE server_disc_id = ${validConfig.serverId}
+          LIMIT 1
+        `;
+
+        let isOrphanedRecovery = false;
+        if (existingServer) {
+          const [mainPersona] = await tx<Array<{ persona_id: number }>>`
+            SELECT persona_id FROM personas
+            WHERE server_id = ${existingServer.server_id}
+              AND is_alter = false
+            LIMIT 1
+          `;
+          isOrphanedRecovery = !mainPersona;
+        }
+
         const [server] = await tx`
           INSERT INTO servers (server_disc_id, is_dm_channel, registration_locale)
           VALUES (${validConfig.serverId}, ${isDMChannel}, ${validConfig.registrationLocale})
           ON CONFLICT (server_disc_id) DO UPDATE
           SET is_dm_channel = EXCLUDED.is_dm_channel
           RETURNING *
+        `;
+
+        if (isOrphanedRecovery) {
+          // When a workspace exists without a main persona, wipe stale config rows before inserting
+          // replacement rows so orphaned alters survive while configs reset cleanly.
+          await configRepository.resetAllServerConfigs(server.server_id, tx);
+        }
+
+        // Setup reaches here only when the server has no main persona, and it deliberately
+        // preserves alters while clearing config rows. An alter can therefore already hold the
+        // default name (swapPersona demotes the old main into one), and the persona INSERT below
+        // is the only write in this transaction without an ON CONFLICT clause, so the collision
+        // surfaced as a raw constraint violation that blocked recovery entirely.
+        // Suffixing the alter rather than the incoming main matches the priority schema.sql
+        // already applies to legacy duplicates: `ORDER BY is_alter ASC` keeps mains unsuffixed.
+        await tx`
+          UPDATE personas
+          SET persona_nickname = persona_nickname || ' [dup-' || persona_id::TEXT || ']'
+          WHERE server_id = ${server.server_id}
+            AND is_alter = true
+            AND lower(btrim(persona_nickname)) = lower(btrim(${validConfig.tomoriName}))
         `;
 
         const [tomori] = await tx`
@@ -603,7 +956,8 @@ class ServerRepository implements IRepository<ServerExportShape> {
             persona_lineage_id,
             is_pointer,
             preset_lineage_id,
-            preset_language
+            preset_language,
+            is_nsfw
           )
           VALUES (
             ${server.server_id},
@@ -617,7 +971,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
             ),
             (SELECT preset_lineage_id IS NOT NULL FROM persona_presets WHERE persona_preset_id = ${validConfig.presetId}),
             (SELECT preset_lineage_id FROM persona_presets WHERE persona_preset_id = ${validConfig.presetId}),
-            (SELECT preset_language FROM persona_presets WHERE persona_preset_id = ${validConfig.presetId})
+            (SELECT preset_language FROM persona_presets WHERE persona_preset_id = ${validConfig.presetId}),
+            COALESCE(
+              (SELECT is_nsfw FROM persona_presets WHERE persona_preset_id = ${validConfig.presetId}),
+              false
+            )
           )
           RETURNING *
         `;
@@ -643,34 +1001,178 @@ class ServerRepository implements IRepository<ServerExportShape> {
         // Format trigger words as PostgreSQL array
         const triggerWordsArrayLiteral = `{${defaultTriggers.map((t) => `"${t.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
 
+        let customLlmId: number | null = null;
+        let customApiKey: Buffer | null = null;
+        let customKeyVersion = 1;
+        let customProviderName: string | null = null;
+
+        if (resolvedAccess?.mode === "custom-endpoint") {
+          const conn = resolvedAccess.connection;
+          const normalizedUrl = normalizeCustomEndpointUrlForStorage(conn.apiStyle, conn.endpointUrl);
+          const hasAuth = Boolean(conn.encryptedAuthToken && conn.encryptedAuthToken.length > 0);
+
+          if (hasAuth && conn.encryptedAuthToken) {
+            customApiKey = conn.encryptedAuthToken;
+            customKeyVersion = conn.keyVersion ?? 1;
+          } else {
+            customApiKey = placeholderApiKey?.encrypted ?? null;
+            customKeyVersion = placeholderApiKey?.version ?? 1;
+          }
+
+          const [connRow] = await tx<Array<{ connection_id: number }>>`
+            INSERT INTO custom_endpoint_connections (
+              server_id, user_id, label, capability, api_style, endpoint_url, requires_auth
+            ) VALUES (
+              ${server.server_id}, NULL, ${conn.label}, 'text', ${conn.apiStyle}, ${normalizedUrl}, ${hasAuth}
+            )
+            ON CONFLICT (server_id, label, capability) WHERE user_id IS NULL
+            DO UPDATE SET
+              api_style = EXCLUDED.api_style,
+              endpoint_url = EXCLUDED.endpoint_url,
+              requires_auth = custom_endpoint_connections.requires_auth OR EXCLUDED.requires_auth,
+              updated_at = CURRENT_TIMESTAMP
+            RETURNING connection_id
+          `;
+
+          const connectionId = connRow.connection_id;
+          customProviderName = buildCustomProviderName(connectionId);
+          const modelCode = resolvedAccess.textModel.modelCode.trim();
+          const codename = buildSyntheticCustomModelCodename(conn.label, modelCode);
+          const displayName = modelCode;
+
+          const caps = new Set(resolvedAccess.textModel.capabilities ?? []);
+          const hasTools = caps.has("tools");
+          const seesImages = caps.has("vision");
+          const seesVideos = caps.has("video");
+          const supportsStructOutput = caps.has("structured_output") || caps.has("json");
+          const strictRoleAlternation = caps.has("strict_role_alternation");
+          const supportsPrefixCompletion = caps.has("prefix_completion");
+          const supportsAssistantPrefill = caps.has("assistant_prefill");
+          const verbatimToolCalling = caps.has("verbatim_tool_calling");
+
+          const [syntheticLlm] = await tx<Array<{ llm_id: number }>>`
+            INSERT INTO llms (
+              llm_provider, llm_codename, has_tools, sees_images, sees_videos,
+              sees_youtube, supports_structoutput, strict_role_alternation, supports_prefix_completion,
+              supports_assistant_prefill, verbatim_tool_calling,
+              is_smartest, is_default, is_reasoning, is_deprecated, is_free, is_uncensored,
+              llm_description, descriptions
+            ) VALUES (
+              ${customProviderName}, ${codename}, ${hasTools}, ${seesImages}, ${seesVideos},
+              false, ${supportsStructOutput}, ${strictRoleAlternation}, ${supportsPrefixCompletion},
+              ${supportsAssistantPrefill}, ${verbatimToolCalling},
+              false, true, false, false, false, false,
+              ${displayName}, ${{ "en-US": displayName }}
+            )
+            ON CONFLICT (llm_provider, llm_codename) DO UPDATE SET
+              has_tools = EXCLUDED.has_tools,
+              sees_images = EXCLUDED.sees_images,
+              sees_videos = EXCLUDED.sees_videos,
+              supports_structoutput = EXCLUDED.supports_structoutput,
+              strict_role_alternation = EXCLUDED.strict_role_alternation,
+              supports_prefix_completion = EXCLUDED.supports_prefix_completion,
+              supports_assistant_prefill = EXCLUDED.supports_assistant_prefill,
+              verbatim_tool_calling = EXCLUDED.verbatim_tool_calling,
+              llm_description = EXCLUDED.llm_description,
+              descriptions = jsonb_set(COALESCE(llms.descriptions, '{}'::jsonb), '{en-US}', to_jsonb(${displayName}::text)),
+              updated_at = CURRENT_TIMESTAMP
+            RETURNING llm_id
+          `;
+          customLlmId = syntheticLlm.llm_id;
+
+          await tx`
+            INSERT INTO scoped_model_registrations (server_id, user_id, llm_id)
+            VALUES (${server.server_id}, NULL, ${customLlmId})
+            ON CONFLICT (server_id, llm_id) WHERE user_id IS NULL AND llm_id IS NOT NULL
+            DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+          `;
+
+          await tx`
+            INSERT INTO custom_endpoints (
+              connection_id, model_name, model_ref_id, num_ctx,
+              extra_config, has_tools, sees_images, sees_videos,
+              supports_structoutput, strict_role_alternation, supports_prefix_completion,
+              supports_assistant_prefill, verbatim_tool_calling, is_default
+            ) VALUES (
+              ${connectionId}, ${modelCode}, ${customLlmId}, ${resolvedAccess.textModel.numCtx ?? null},
+              '{}'::jsonb, ${hasTools}, ${seesImages}, ${seesVideos},
+              ${supportsStructOutput}, ${strictRoleAlternation}, ${supportsPrefixCompletion},
+              ${supportsAssistantPrefill}, ${verbatimToolCalling}, true
+            )
+            ON CONFLICT (connection_id, COALESCE(model_name, ''))
+            DO UPDATE SET
+              model_ref_id = EXCLUDED.model_ref_id,
+              num_ctx = EXCLUDED.num_ctx,
+              extra_config = EXCLUDED.extra_config,
+              has_tools = EXCLUDED.has_tools,
+              sees_images = EXCLUDED.sees_images,
+              sees_videos = EXCLUDED.sees_videos,
+              supports_structoutput = EXCLUDED.supports_structoutput,
+              strict_role_alternation = EXCLUDED.strict_role_alternation,
+              supports_prefix_completion = EXCLUDED.supports_prefix_completion,
+              supports_assistant_prefill = EXCLUDED.supports_assistant_prefill,
+              verbatim_tool_calling = EXCLUDED.verbatim_tool_calling,
+              is_default = EXCLUDED.is_default,
+              updated_at = CURRENT_TIMESTAMP
+          `;
+        }
+
+        let finalLlmId: number | null = null;
+        let finalDiffusionId: number | null = null;
+        let finalNaiDiffusionId: number | null = null;
+        let finalEmbeddingId: number | null = null;
+        let finalApiKey: Buffer | null = null;
+        let finalKeyVersion = 1;
+
+        if (resolvedAccess?.mode === "catalog") {
+          const imageGenerationStyle =
+            getStaticProviderInfo(resolvedAccess.provider)?.featureSupport.imageGeneration ?? "none";
+          finalLlmId = selectedLlm?.llm_id ?? null;
+          finalDiffusionId =
+            imageGenerationStyle === "chat-completion" ? (selectedDiffusionModel?.diffusion_model_id ?? null) : null;
+          finalNaiDiffusionId =
+            imageGenerationStyle === "nai-pipeline" ? (selectedDiffusionModel?.diffusion_model_id ?? null) : null;
+          finalEmbeddingId = selectedEmbeddingModel?.embedding_model_id ?? null;
+          finalApiKey = resolvedAccess.encryptedApiKey;
+          finalKeyVersion = resolvedAccess.keyVersion ?? 1;
+        } else if (resolvedAccess?.mode === "custom-endpoint") {
+          finalLlmId = customLlmId;
+          finalDiffusionId = null;
+          finalNaiDiffusionId = null;
+          finalEmbeddingId = null;
+          finalApiKey = customApiKey;
+          finalKeyVersion = customKeyVersion;
+        }
+
         // Seed the split config tables
         await tx`
           INSERT INTO server_model_configs (
             server_id, llm_id, embedding_model_id, diffusion_model_id, api_key, key_version
           ) VALUES (
-            ${server.server_id}, ${selectedLlmId}, ${selectedEmbeddingModelId}, ${selectedDiffusionModelId}, ${validConfig.encryptedApiKey}, ${validConfig.keyVersion}
+            ${server.server_id}, ${finalLlmId}, ${finalEmbeddingId}, ${finalDiffusionId}, ${finalApiKey}, ${finalKeyVersion}
           ) ON CONFLICT (server_id) DO NOTHING
         `;
-        // system_prompt stays NULL so DEFAULT_SYSTEM_PROMPT resolves at read time.
-        // Seeding it here froze every server on the constant's value at setup, which
-        // is why tuning the default needed a migration to reach anyone.
+        // system_prompt is written as NULL for built-in default so DEFAULT_SYSTEM_PROMPT
+        // resolves dynamically at read time, or as the resolved preset prompt text.
+        const resolvedSystemPrompt = validConfig.systemPrompt?.trim() || null;
         await tx`
           INSERT INTO server_chat_configs (
-            server_id, humanizer_degree, timezone_offset
+            server_id, humanizer_degree, timezone_offset, system_prompt
           ) VALUES (
-            ${server.server_id}, ${validConfig.humanizer}, ${validConfig.timezoneOffset}
+            ${server.server_id}, ${validConfig.humanizer}, ${validConfig.timezoneOffset}, ${resolvedSystemPrompt}
           ) ON CONFLICT (server_id) DO NOTHING
         `;
         await tx`
           INSERT INTO server_member_permissions_configs (
-            server_id, attribute_memteaching_enabled, sampledialogue_memteaching_enabled
+            server_id, server_memteaching_enabled, attribute_memteaching_enabled, sampledialogue_memteaching_enabled
           ) VALUES (
-            ${server.server_id}, ${isDMChannel}, ${isDMChannel}
+            ${server.server_id}, ${isDMChannel}, ${isDMChannel}, ${isDMChannel}
           ) ON CONFLICT (server_id) DO NOTHING
         `;
+        const isUserByok = resolvedAccess?.mode === "user-byok";
         await tx`
           INSERT INTO server_byok_configs (server_id, user_byok_mode)
-          VALUES (${server.server_id}, ${validConfig.userByokMode})
+          VALUES (${server.server_id}, ${isUserByok})
           ON CONFLICT (server_id) DO NOTHING
         `;
         await tx`INSERT INTO server_notice_embeds_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
@@ -678,8 +1180,40 @@ class ServerRepository implements IRepository<ServerExportShape> {
         await tx`INSERT INTO server_welcome_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
         await tx`INSERT INTO server_trigger_behavior_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
         await tx`INSERT INTO server_auto_trigger_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
-        await tx`INSERT INTO server_capabilities_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
-        await tx`INSERT INTO server_novelai_imagegen_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
+        const features = new Set(validConfig.features);
+        await tx`
+          INSERT INTO server_capabilities_configs (
+            server_id, emoji_usage_enabled, sticker_usage_enabled, conditioning_interactions_enabled,
+            danbooru_enabled, dice_rolling_enabled, manage_message_enabled, thread_creation_enabled,
+            user_blocking_enabled, user_info_updates_enabled, short_term_memory_enabled
+          ) VALUES (
+            ${server.server_id}, ${features.has("expressions")}, ${features.has("expressions")},
+            ${features.has("playful_interactions")}, ${features.has("danbooru")}, ${features.has("dice_rolls")},
+            ${features.has("self_message_management")}, ${features.has("self_message_management")},
+            ${features.has("user_blocking")}, ${features.has("user_info_updates")}, ${features.has("short_term_memory")}
+          ) ON CONFLICT (server_id) DO NOTHING
+        `;
+        if (
+          !(await naturalNudgeRepository.saveServerConfig(
+            server.server_id,
+            {
+              idle_nudges_enabled: features.has("natural_nudges"),
+              active_nudges_enabled: features.has("natural_nudges"),
+            },
+            tx,
+          ))
+        ) {
+          throw new Error("Could not save setup Natural Nudges settings");
+        }
+        if (finalNaiDiffusionId) {
+          await tx`
+            INSERT INTO server_novelai_imagegen_configs (server_id, nai_diffusion_model_id)
+            VALUES (${server.server_id}, ${finalNaiDiffusionId})
+            ON CONFLICT (server_id) DO UPDATE SET nai_diffusion_model_id = EXCLUDED.nai_diffusion_model_id
+          `;
+        } else {
+          await tx`INSERT INTO server_novelai_imagegen_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
+        }
         await tx`INSERT INTO server_nsfw_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
         await tx`INSERT INTO server_speech_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
         await tx`INSERT INTO server_memory_configs (server_id) VALUES (${server.server_id}) ON CONFLICT (server_id) DO NOTHING`;
@@ -690,8 +1224,8 @@ class ServerRepository implements IRepository<ServerExportShape> {
           ON CONFLICT (persona_id) DO NOTHING
         `;
 
-        // Seed the saved_provider_configs row for the provider registered at setup.
-        if (validConfig.provider && validConfig.encryptedApiKey && selectedLlmId) {
+        // Seed saved_provider_configs row for catalog or custom-endpoint
+        if (resolvedAccess?.mode === "catalog" && finalLlmId && finalApiKey) {
           await tx`
             INSERT INTO saved_provider_configs (
               server_id, provider, api_key, key_version,
@@ -703,8 +1237,31 @@ class ServerRepository implements IRepository<ServerExportShape> {
               llm_max_output_tokens,
               llm_logit_biases, llm_disabled_params
             ) VALUES (
-              ${server.server_id}, ${validConfig.provider}, ${validConfig.encryptedApiKey}, ${validConfig.keyVersion},
-              ${selectedLlmId}, ${selectedDiffusionModelId}, ${selectedEmbeddingModelId},
+              ${server.server_id}, ${resolvedAccess.provider}, ${finalApiKey}, ${finalKeyVersion},
+              ${finalLlmId}, ${finalDiffusionId}, ${finalEmbeddingId},
+              NULL, NULL, NULL,
+              NULL, 'auto', '[]'::jsonb,
+              NULL, NULL, NULL,
+              NULL, NULL, NULL,
+              NULL,
+              '[]'::jsonb, '{}'::text[]
+            )
+            ON CONFLICT (server_id, provider) DO NOTHING
+          `;
+        } else if (resolvedAccess?.mode === "custom-endpoint" && customProviderName && customLlmId && customApiKey) {
+          await tx`
+            INSERT INTO saved_provider_configs (
+              server_id, provider, api_key, key_version,
+              llm_id, diffusion_model_id, embedding_model_id,
+              nai_diffusion_model_id, video_model_id, vision_llm_id,
+              nai_preset_name, thinking_level, fallback_model_refs,
+              llm_temperature, llm_top_p, llm_top_k,
+              llm_frequency_penalty, llm_presence_penalty, llm_min_p,
+              llm_max_output_tokens,
+              llm_logit_biases, llm_disabled_params
+            ) VALUES (
+              ${server.server_id}, ${customProviderName}, ${customApiKey}, ${customKeyVersion},
+              ${customLlmId}, NULL, NULL,
               NULL, NULL, NULL,
               NULL, 'auto', '[]'::jsonb,
               NULL, NULL, NULL,
@@ -830,14 +1387,25 @@ class ServerRepository implements IRepository<ServerExportShape> {
         return null;
       }
 
-      const parsedEmojis = serverEmojiSchema.array().safeParse(emojiRows);
-
-      if (!parsedEmojis.success) {
-        log.error(`Failed to validate emojis for server ID ${internalServerId}:`, parsedEmojis.error.flatten());
-        return null;
+      // Parsed per row so one malformed emoji cannot hide the server's whole catalogue from context.
+      const validEmojis: ServerEmojiRow[] = [];
+      const invalidEmojiIds: string[] = [];
+      for (const row of emojiRows) {
+        const parsed = serverEmojiSchema.safeParse(row);
+        if (parsed.success) {
+          validEmojis.push(parsed.data);
+        } else {
+          invalidEmojiIds.push(String(row.emoji_disc_id));
+        }
       }
 
-      return parsedEmojis.data;
+      if (invalidEmojiIds.length > 0) {
+        log.error(
+          `Skipped ${invalidEmojiIds.length} invalid emoji rows for server ID ${internalServerId}: ${invalidEmojiIds.join(", ")}`,
+        );
+      }
+
+      return validEmojis.length > 0 ? validEmojis : null;
     } catch (error) {
       log.error(`Error loading emojis for server ID ${internalServerId}:`, error);
       return null;
@@ -891,7 +1459,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
     }
   }
 
-  private async sqlGetBlacklistedMemberIds(serverId: number): Promise<string[]> {
+  private async sqlGetBlacklistedMemberIdsResult(serverId: number): Promise<BlacklistReadResult> {
     try {
       const result = await sql`
         SELECT user_disc_id FROM personalization_blacklist
@@ -900,17 +1468,23 @@ class ServerRepository implements IRepository<ServerExportShape> {
       `;
 
       if (!result || result.length === 0) {
-        return [];
+        return { status: "fresh", memberIds: [] };
       }
 
-      // Map to array of Discord IDs
       const memberIds = result.map((row: unknown) => (row as { user_disc_id: string }).user_disc_id);
-      log.info(`Found ${memberIds.length} blacklisted members for server ${serverId}`);
-      return memberIds;
+      return { status: "fresh", memberIds };
     } catch (error) {
       log.error(`Error loading blacklisted members for server ${serverId}:`, error);
-      return [];
+      return { status: "unavailable", memberIds: [] };
     }
+  }
+
+  private async sqlGetBlacklistedMemberIds(serverId: number): Promise<string[]> {
+    const result = await this.sqlGetBlacklistedMemberIdsResult(serverId);
+    if (result.status === "fresh" && result.memberIds.length > 0) {
+      log.info(`Found ${result.memberIds.length} blacklisted members for server ${serverId}`);
+    }
+    return result.memberIds;
   }
 
   private async sqlUpsertManagedWebhook(params: {
@@ -919,10 +1493,27 @@ class ServerRepository implements IRepository<ServerExportShape> {
     channelDiscId: string;
     webhookDiscId: string;
     rawToken: string;
+    avatarFingerprint?: string | null;
+    discordAvatarHash?: string | null;
   }): Promise<boolean> {
-    const { guildDiscId, kind = MANAGED_WEBHOOK_KIND_SHARED_CHANNEL, channelDiscId, webhookDiscId, rawToken } = params;
+    const {
+      guildDiscId,
+      kind = MANAGED_WEBHOOK_KIND_SHARED_CHANNEL,
+      channelDiscId,
+      webhookDiscId,
+      rawToken,
+      avatarFingerprint = null,
+      discordAvatarHash = null,
+    } = params;
 
-    if (!guildDiscId || !channelDiscId || !webhookDiscId || !rawToken.trim()) {
+    if (
+      !guildDiscId ||
+      !channelDiscId ||
+      !webhookDiscId ||
+      !rawToken.trim() ||
+      !MANAGED_WEBHOOK_KINDS.includes(kind) ||
+      (avatarFingerprint !== null && !/^[a-f0-9]{64}$/.test(avatarFingerprint))
+    ) {
       log.warn("[ManagedWebhookDb] Missing required parameters for webhook upsert");
       return false;
     }
@@ -933,18 +1524,20 @@ class ServerRepository implements IRepository<ServerExportShape> {
 
       await sql`
         INSERT INTO discord_managed_webhooks (
-          guild_disc_id, kind, channel_disc_id, webhook_disc_id, webhook_token, key_version
+          guild_disc_id, kind, channel_disc_id, webhook_disc_id, webhook_token, key_version, avatar_fingerprint, discord_avatar_hash
         )
         VALUES (
           ${guildDiscId}, ${kind}, ${channelDiscId}, ${webhookDiscId},
           pgp_sym_encrypt(${rawToken.trim()}, ${currentKey}, 'compress-algo=1, cipher-algo=aes256'),
-          ${currentVersion}
+          ${currentVersion}, ${avatarFingerprint}, ${discordAvatarHash}
         )
         ON CONFLICT (kind, channel_disc_id) DO UPDATE SET
           guild_disc_id = EXCLUDED.guild_disc_id,
           webhook_disc_id = EXCLUDED.webhook_disc_id,
           webhook_token = EXCLUDED.webhook_token,
           key_version = EXCLUDED.key_version,
+          avatar_fingerprint = EXCLUDED.avatar_fingerprint,
+          discord_avatar_hash = EXCLUDED.discord_avatar_hash,
           updated_at = CURRENT_TIMESTAMP
       `;
 
@@ -967,7 +1560,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
     try {
       const [row] = await sql`
         SELECT managed_webhook_id, guild_disc_id, kind, channel_disc_id, webhook_disc_id,
-               webhook_token, key_version, created_at, updated_at
+               webhook_token, key_version, avatar_fingerprint, discord_avatar_hash, created_at, updated_at
         FROM discord_managed_webhooks
         WHERE channel_disc_id = ${channelDiscId} AND kind = ${kind}
         LIMIT 1
@@ -983,18 +1576,18 @@ class ServerRepository implements IRepository<ServerExportShape> {
   private async sqlLoadManagedWebhookByChannelAndWebhookId(
     channelDiscId: string,
     webhookDiscId: string,
-    kind: ManagedWebhookKind,
+    kind: ManagedWebhookKind | undefined,
   ): Promise<ManagedDiscordWebhookRow | null> {
     if (!channelDiscId || !webhookDiscId) return null;
 
     try {
       const [row] = await sql`
         SELECT managed_webhook_id, guild_disc_id, kind, channel_disc_id, webhook_disc_id,
-               webhook_token, key_version, created_at, updated_at
+               webhook_token, key_version, avatar_fingerprint, discord_avatar_hash, created_at, updated_at
         FROM discord_managed_webhooks
         WHERE channel_disc_id = ${channelDiscId}
           AND webhook_disc_id = ${webhookDiscId}
-          AND kind = ${kind}
+          AND kind IN ${sql(kind ? [kind] : [...MANAGED_WEBHOOK_KINDS])}
         LIMIT 1
       `;
 
@@ -1056,17 +1649,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
       }
 
       const decryptedToken = result.decrypted_token.toString();
-      const currentVersion = keyManager.getCurrentVersion();
-      if (keyVersion !== currentVersion) {
-        const currentKey = keyManager.getCurrentKey();
-        await sql`
-          UPDATE discord_managed_webhooks
-          SET webhook_token = pgp_sym_encrypt(${decryptedToken}, ${currentKey}, 'compress-algo=1, cipher-algo=aes256'),
-              key_version = ${currentVersion},
-              updated_at = CURRENT_TIMESTAMP
-          WHERE managed_webhook_id = ${row.managed_webhook_id}
-        `;
-      }
+      await lazyRotateEncryptedRow(sql, "discord_managed_webhooks", {
+        id: row.managed_webhook_id,
+        ciphertext: row.webhook_token,
+        key_version: row.key_version,
+      });
 
       return decryptedToken;
     } catch (error) {
@@ -1113,14 +1700,14 @@ class ServerRepository implements IRepository<ServerExportShape> {
       );
       log.info(`[Sync] BEFORE bulk insert: ${beforeCount.count} ${config.tableName} exist`);
 
+      // Reconcile Discord fields only; a manager may edit classification after the snapshot read.
       for (const item of dbItems) {
         if (config.tableName === "server_emojis") {
           await tx`
             INSERT INTO server_emojis (server_id, emoji_disc_id, emoji_name, emoji_desc, emotion_key, is_animated)
             VALUES (${item.server_id}, ${item.emoji_disc_id}, ${item.emoji_name}, ${item.emoji_desc}, ${item.emotion_key}, ${item.is_animated})
             ON CONFLICT (server_id, emoji_disc_id) DO UPDATE SET
-              emoji_name = EXCLUDED.emoji_name, emoji_desc = EXCLUDED.emoji_desc,
-              emotion_key = EXCLUDED.emotion_key, is_animated = EXCLUDED.is_animated,
+              emoji_name = EXCLUDED.emoji_name, is_animated = EXCLUDED.is_animated,
               updated_at = CURRENT_TIMESTAMP
           `;
         } else {
@@ -1128,8 +1715,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
             INSERT INTO server_stickers (server_id, sticker_disc_id, sticker_name, sticker_desc, emotion_key, sticker_format)
             VALUES (${item.server_id}, ${item.sticker_disc_id}, ${item.sticker_name}, ${item.sticker_desc}, ${item.emotion_key}, ${item.sticker_format})
             ON CONFLICT (server_id, sticker_disc_id) DO UPDATE SET
-              sticker_name = EXCLUDED.sticker_name, sticker_desc = EXCLUDED.sticker_desc,
-              emotion_key = EXCLUDED.emotion_key, sticker_format = EXCLUDED.sticker_format,
+              sticker_name = EXCLUDED.sticker_name, sticker_format = EXCLUDED.sticker_format,
               updated_at = CURRENT_TIMESTAMP
           `;
         }
@@ -1344,6 +1930,26 @@ class ServerRepository implements IRepository<ServerExportShape> {
     }
   }
 
+  /**
+   * Removes the link for a room by its room ID, so a link replaced concurrently with another room
+   * is left alone.
+   *
+   * @returns The unlinked Discord channel ID, or null when no link remained or the delete failed.
+   */
+  async unlinkMatrixRoom(matrixRoomId: string): Promise<string | null> {
+    try {
+      const [row] = await sql<[{ channel_disc_id: string }]>`
+        DELETE FROM matrix_channel_links
+        WHERE matrix_room_id = ${matrixRoomId}
+        RETURNING channel_disc_id
+      `;
+      return row?.channel_disc_id ?? null;
+    } catch (e) {
+      log.error(`Error unlinking matrix room ${matrixRoomId}:`, e);
+      return null;
+    }
+  }
+
   private async resolveServerInternalId(serverDiscId: string): Promise<number | null> {
     const [row] = await sql`
       SELECT server_id FROM servers WHERE server_disc_id = ${serverDiscId} LIMIT 1
@@ -1356,7 +1962,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
       const [row] = await sql`
         SELECT humanizer_degree, message_fetch_limit, send_message_limit, match_limit,
                cascade_limit, timezone_offset, self_debug_enabled, model_randomizer_enabled,
-               system_prompt,
+               system_prompt, response_prefill,
                context_note, context_note_depth, llm_stop_strings,
                llm_stop_speaker_pattern_enabled, llm_max_output_tokens,
                llm_top_p, llm_top_k, llm_frequency_penalty, llm_presence_penalty,
@@ -1374,7 +1980,9 @@ class ServerRepository implements IRepository<ServerExportShape> {
   private async sqlLoadNoticeEmbedsConfigs(serverId: number): Promise<ServerNoticeEmbedsConfigsRow | null> {
     try {
       const [row] = await sql`
-        SELECT tool_notice_hidden_keys FROM server_notice_embeds_configs WHERE server_id = ${serverId}
+        SELECT tool_notice_hidden_keys, tool_notice_verbosity
+        FROM server_notice_embeds_configs
+        WHERE server_id = ${serverId}
       `;
       return row ? (row as unknown as ServerNoticeEmbedsConfigsRow) : null;
     } catch (error) {
@@ -1436,7 +2044,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
         server_id, humanizer_degree, message_fetch_limit, send_message_limit,
         match_limit, cascade_limit, timezone_offset, self_debug_enabled,
         model_randomizer_enabled,
-        system_prompt, context_note, context_note_depth, llm_stop_strings,
+        system_prompt, response_prefill, context_note, context_note_depth, llm_stop_strings,
         llm_stop_speaker_pattern_enabled, llm_max_output_tokens,
         llm_top_p, llm_top_k, llm_frequency_penalty, llm_presence_penalty,
         llm_min_p, llm_logit_biases, fallback_model_refs
@@ -1444,7 +2052,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
         ${serverId}, ${row.humanizer_degree}, ${row.message_fetch_limit},
         ${row.send_message_limit}, ${row.match_limit}, ${row.cascade_limit},
         ${row.timezone_offset}, ${row.self_debug_enabled}, ${row.model_randomizer_enabled},
-        ${row.system_prompt},
+        ${row.system_prompt}, ${row.response_prefill},
         ${row.context_note}, ${row.context_note_depth},
         ${sql.array(row.llm_stop_strings, "TEXT")}, ${row.llm_stop_speaker_pattern_enabled},
         ${row.llm_max_output_tokens}, ${row.llm_top_p}, ${row.llm_top_k},
@@ -1461,6 +2069,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
         self_debug_enabled               = EXCLUDED.self_debug_enabled,
         model_randomizer_enabled         = EXCLUDED.model_randomizer_enabled,
         system_prompt                    = EXCLUDED.system_prompt,
+        response_prefill                 = EXCLUDED.response_prefill,
         context_note                     = EXCLUDED.context_note,
         context_note_depth               = EXCLUDED.context_note_depth,
         llm_stop_strings                 = EXCLUDED.llm_stop_strings,
@@ -1479,10 +2088,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
 
   private async sqlUpsertNoticeEmbedsConfigs(serverId: number, row: ServerNoticeEmbedsConfigsRow): Promise<void> {
     await sql`
-      INSERT INTO server_notice_embeds_configs (server_id, tool_notice_hidden_keys)
-      VALUES (${serverId}, ${sql.array(row.tool_notice_hidden_keys, "TEXT")})
+      INSERT INTO server_notice_embeds_configs (server_id, tool_notice_hidden_keys, tool_notice_verbosity)
+      VALUES (${serverId}, ${sql.array(row.tool_notice_hidden_keys, "TEXT")}, ${row.tool_notice_verbosity})
       ON CONFLICT (server_id) DO UPDATE SET
         tool_notice_hidden_keys = EXCLUDED.tool_notice_hidden_keys,
+        tool_notice_verbosity   = EXCLUDED.tool_notice_verbosity,
         updated_at              = NOW()
     `;
   }
@@ -1535,24 +2145,22 @@ class ServerRepository implements IRepository<ServerExportShape> {
   }
 
   /**
-   * Minimal classification shape used by initializeExpressions.
-   * Mirrors ExpressionClassification from structuredOutput.ts without importing from providers.
-   */
-
-  /**
-   * Load all server emojis that have not yet been classified (emotion_key is null/unset
-   * or description is empty).
+   * Load the server emojis an `/expressions initialize` run should classify.
    *
+   * @param includeClassified - When true (overwrite mode), return every emoji instead of only
+   *   rows whose emotion_key or description is still unset
    */
-  async loadUninitializedEmojis(
+  async loadEmojisForClassification(
     serverId: number,
+    includeClassified: boolean,
   ): Promise<Array<{ emoji_disc_id: string; emoji_name: string; is_animated: boolean }>> {
     return await sql<Array<{ emoji_disc_id: string; emoji_name: string; is_animated: boolean }>>`
       SELECT emoji_disc_id, emoji_name, is_animated
       FROM server_emojis
       WHERE server_id = ${serverId}
         AND (
-          emotion_key IS NULL
+          ${includeClassified}
+          OR emotion_key IS NULL
           OR emotion_key = 'unset'
           OR emoji_desc IS NULL
           OR emoji_desc = ''
@@ -1561,18 +2169,22 @@ class ServerRepository implements IRepository<ServerExportShape> {
   }
 
   /**
-   * Load all server stickers that have not yet been classified.
+   * Load the server stickers an `/expressions initialize` run should classify.
    *
+   * @param includeClassified - When true (overwrite mode), return every sticker instead of only
+   *   rows whose emotion_key or description is still unset
    */
-  async loadUninitializedStickers(
+  async loadStickersForClassification(
     serverId: number,
+    includeClassified: boolean,
   ): Promise<Array<{ sticker_disc_id: string; sticker_name: string; sticker_format: number }>> {
     return await sql<Array<{ sticker_disc_id: string; sticker_name: string; sticker_format: number }>>`
       SELECT sticker_disc_id, sticker_name, sticker_format
       FROM server_stickers
       WHERE server_id = ${serverId}
         AND (
-          emotion_key IS NULL
+          ${includeClassified}
+          OR emotion_key IS NULL
           OR emotion_key = 'unset'
           OR sticker_desc IS NULL
           OR sticker_desc = ''
@@ -1581,42 +2193,28 @@ class ServerRepository implements IRepository<ServerExportShape> {
   }
 
   /**
-   * Clear emotion_key and description from all server emojis.
-   * Called before a full overwrite re-initialization.
-   *
-   */
-  async clearEmojiExpressions(serverId: number): Promise<void> {
-    await sql`UPDATE server_emojis SET emotion_key = NULL, emoji_desc = NULL WHERE server_id = ${serverId}`;
-  }
-
-  /**
-   * Clear emotion_key and description from all server stickers.
-   * Called before a full overwrite re-initialization.
-   *
-   */
-  async clearStickerExpressions(serverId: number): Promise<void> {
-    await sql`UPDATE server_stickers SET emotion_key = NULL, sticker_desc = NULL WHERE server_id = ${serverId}`;
-  }
-
-  /**
    * Apply LLM expression classification results to server_emojis and server_stickers
    * within a single transaction.
-   * Each result is matched by name (case-insensitive) and only written when the row
-   * is still uninitialized (guards against clobbering manual edits mid-batch).
+   * Each result is matched by name (case-insensitive) against the rows in `scope`, and a row
+   * is written at most once per call. Without `scope.overwrite`, a row is also only written
+   * while still unclassified, which guards against clobbering manual edits mid-run.
    *
-   * @returns Object with counts of emojis and stickers that were updated
+   * @param scope - The batch the model was shown. Matching is confined to these Discord IDs
+   *   because overwrite mode makes every row eligible, so an emoji and a sticker sharing a name
+   *   would otherwise both resolve to the emoji and leave the sticker unclassified.
+   * @returns Discord IDs of the emojis and stickers that were written
    */
   async initializeExpressions(
     serverId: number,
     results: Array<{ name: string; emotion_key: string; description: string }>,
-  ): Promise<{ emojiCount: number; stickerCount: number }> {
-    let emojiCount = 0;
-    let stickerCount = 0;
+    scope: { overwrite: boolean; emojiDiscIds: string[]; stickerDiscIds: string[] },
+  ): Promise<{ emojiDiscIds: string[]; stickerDiscIds: string[] }> {
+    const emojiDiscIds: string[] = [];
+    const stickerDiscIds: string[] = [];
 
     await sql.transaction(async (tx) => {
       for (const result of results) {
-        // Try emoji first (only update if still uninitialized)
-        const emojiRows = await tx`
+        const emojiRows = await tx<Array<{ emoji_disc_id: string }>>`
           UPDATE server_emojis
           SET
             emotion_key = ${result.emotion_key},
@@ -1624,8 +2222,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
             updated_at  = CURRENT_TIMESTAMP
           WHERE server_id = ${serverId}
             AND LOWER(emoji_name) = LOWER(${result.name})
+            AND emoji_disc_id = ANY(${sql.array(scope.emojiDiscIds, "TEXT")})
+            AND NOT (emoji_disc_id = ANY(${sql.array(emojiDiscIds, "TEXT")}))
             AND (
-              emotion_key IS NULL
+              ${scope.overwrite}
+              OR emotion_key IS NULL
               OR emotion_key = 'unset'
               OR emoji_desc IS NULL
               OR emoji_desc = ''
@@ -1634,12 +2235,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
         `;
 
         if (emojiRows.length > 0) {
-          emojiCount++;
+          emojiDiscIds.push(...emojiRows.map((row) => row.emoji_disc_id));
           continue;
         }
 
-        // Fall through to sticker if no emoji matched
-        const stickerRows = await tx`
+        const stickerRows = await tx<Array<{ sticker_disc_id: string }>>`
           UPDATE server_stickers
           SET
             emotion_key  = ${result.emotion_key},
@@ -1647,8 +2247,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
             updated_at   = CURRENT_TIMESTAMP
           WHERE server_id = ${serverId}
             AND LOWER(sticker_name) = LOWER(${result.name})
+            AND sticker_disc_id = ANY(${sql.array(scope.stickerDiscIds, "TEXT")})
+            AND NOT (sticker_disc_id = ANY(${sql.array(stickerDiscIds, "TEXT")}))
             AND (
-              emotion_key IS NULL
+              ${scope.overwrite}
+              OR emotion_key IS NULL
               OR emotion_key = 'unset'
               OR sticker_desc IS NULL
               OR sticker_desc = ''
@@ -1656,69 +2259,11 @@ class ServerRepository implements IRepository<ServerExportShape> {
           RETURNING sticker_disc_id
         `;
 
-        if (stickerRows.length > 0) {
-          stickerCount++;
-        }
+        stickerDiscIds.push(...stickerRows.map((row) => row.sticker_disc_id));
       }
     });
 
-    return { emojiCount, stickerCount };
-  }
-
-  /**
-   * Manually overwrite a single emoji's emotion classification and usage description.
-   * Used by `/server expressions edit`. Unlike {@link initializeExpressions}, this
-   * writes unconditionally (no "still uninitialized" guard) because the invoking user
-   * is deliberately correcting an existing classification.
-   *
-   * @param emojiDiscId - Discord emoji snowflake identifying the row to update
-   * @param emotionKey - New emotion key (must be one of the 28 valid EmotionKey values)
-   * @param description - New usage/description text surfaced to the model
-   * @returns True if a matching emoji row was updated, false otherwise
-   */
-  async updateEmojiExpression(
-    serverId: number,
-    emojiDiscId: string,
-    emotionKey: string,
-    description: string,
-  ): Promise<boolean> {
-    const rows = await sql<Array<{ emoji_disc_id: string }>>`
-      UPDATE server_emojis
-      SET
-        emotion_key = ${emotionKey},
-        emoji_desc  = ${description},
-        updated_at  = CURRENT_TIMESTAMP
-      WHERE server_id = ${serverId} AND emoji_disc_id = ${emojiDiscId}
-      RETURNING emoji_disc_id
-    `;
-    return rows.length > 0;
-  }
-
-  /**
-   * Manually overwrite a single sticker's emotion classification and usage description.
-   * Sibling of {@link updateEmojiExpression} for the server_stickers table.
-   *
-   * @param stickerDiscId - Discord sticker snowflake identifying the row to update
-   * @param emotionKey - New emotion key (must be one of the 28 valid EmotionKey values)
-   * @param description - New usage/description text surfaced to the model
-   * @returns True if a matching sticker row was updated, false otherwise
-   */
-  async updateStickerExpression(
-    serverId: number,
-    stickerDiscId: string,
-    emotionKey: string,
-    description: string,
-  ): Promise<boolean> {
-    const rows = await sql<Array<{ sticker_disc_id: string }>>`
-      UPDATE server_stickers
-      SET
-        emotion_key  = ${emotionKey},
-        sticker_desc = ${description},
-        updated_at   = CURRENT_TIMESTAMP
-      WHERE server_id = ${serverId} AND sticker_disc_id = ${stickerDiscId}
-      RETURNING sticker_disc_id
-    `;
-    return rows.length > 0;
+    return { emojiDiscIds, stickerDiscIds };
   }
 
   /**
@@ -1737,6 +2282,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
    *  - `error_logs`; uses ON DELETE SET NULL; nuke leaves history intact
    *  - `discord_managed_webhooks`: keyed by `guild_disc_id` (handled separately)
    *  - `documents`: has nullable `persona_id`; serverwide rows handled separately
+   *  - `custom_endpoints`: cascade from server-owned `custom_endpoint_connections`
    *  - Global seed catalogs (`nai_presets`, `system_prompt_presets`): shared
    *    across all servers, have NO `server_id` column; never wipe these.
    */
@@ -1784,15 +2330,13 @@ class ServerRepository implements IRepository<ServerExportShape> {
     "matrix_channel_links",
     "channel_llm_overrides",
     "guild_mcp_servers",
-    "custom_endpoints",
+    "custom_endpoint_connections",
     // Model registrations
-    "openrouter_model_registrations",
-    "openrouter_embedding_model_registrations",
-    "openrouter_image_model_registrations",
-    "openrouter_video_model_registrations",
+    "scoped_model_registrations",
     // Misc server-scoped
     "server_emojis",
     "server_stickers",
+    "custom_expressions",
     "voice_samples",
     "personal_spotlights",
   ];
@@ -1807,7 +2351,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
     try {
       const rows = (await sql`
         SELECT managed_webhook_id, guild_disc_id, kind, channel_disc_id, webhook_disc_id,
-               webhook_token, key_version, created_at, updated_at
+               webhook_token, key_version, avatar_fingerprint, discord_avatar_hash, created_at, updated_at
         FROM discord_managed_webhooks
         WHERE guild_disc_id = ${guildDiscId}
       `) as ManagedDiscordWebhookRow[];
@@ -1842,6 +2386,7 @@ class ServerRepository implements IRepository<ServerExportShape> {
    *
    * Discord-side webhook cleanup (calling `webhook.delete()` on Discord) is the
    * caller's responsibility: use `listManagedWebhooksDecrypted` beforehand.
+   * Both modes collect custom media references under lock and delete owned objects after commit.
    *
    * @param serverDiscId - Discord guild snowflake (needed for webhook table)
    * @param options.preservePersonas - When true, keep personas + their subtree
@@ -1849,15 +2394,20 @@ class ServerRepository implements IRepository<ServerExportShape> {
    */
   async nukeServer(serverId: number, serverDiscId: string, options: { preservePersonas: boolean }): Promise<boolean> {
     try {
-      if (!options.preservePersonas) {
-        // Full nuke: cascade-delete via the servers row
-        const result = await sql`DELETE FROM servers WHERE server_id = ${serverId}`;
-        return result.count > 0;
-      }
-
-      // Preserve mode: atomic selective wipe inside a transaction
-      let totalDeleted = 0;
-      await sql.transaction(async (tx) => {
+      const { deleteExpressionMedia } = await import("@/utils/storage/expressionStorage");
+      const result = await sql.transaction(async (tx) => {
+        // Registry creates and replacements take this lock too, so their references cannot race the wipe.
+        const [server] = await tx`SELECT server_id FROM servers WHERE server_id = ${serverId} FOR UPDATE`;
+        if (!server) return { deleted: false, media: [] };
+        const media = await tx<Array<{ custom_expression_id: string; storage_reference: string }>>`
+          SELECT custom_expression_id, storage_reference FROM custom_expressions
+          WHERE server_id = ${serverId} AND storage_reference IS NOT NULL FOR UPDATE
+        `;
+        if (!options.preservePersonas) {
+          const deleted = await tx`DELETE FROM servers WHERE server_id = ${serverId}`;
+          return { deleted: deleted.count > 0, media };
+        }
+        let totalDeleted = 0;
         // Wipe every server-scoped table in the maintained list
         for (const table of ServerRepository.PRESERVE_MODE_WIPE_TABLES) {
           // table name is a constant from a private allowlist, not user input, so safe to interpolate
@@ -1869,14 +2419,23 @@ class ServerRepository implements IRepository<ServerExportShape> {
           DELETE FROM discord_managed_webhooks WHERE guild_disc_id = ${serverDiscId}
         `;
         totalDeleted += whResult.count ?? 0;
-        // Documents: only wipe serverwide rows; persona-scoped docs stay
-        const docResult = await tx`
-          DELETE FROM documents WHERE server_id = ${serverId} AND persona_id IS NULL
-        `;
-        totalDeleted += docResult.count ?? 0;
+        // Hosts without pgvector skip the RAG schema, so documents may not exist.
+        const [ragSchema] = await tx`SELECT to_regclass('public.documents') IS NOT NULL AS has_documents`;
+        if (ragSchema.has_documents) {
+          const docResult = await tx`
+            DELETE FROM documents WHERE server_id = ${serverId} AND persona_id IS NULL
+          `;
+          totalDeleted += docResult.count ?? 0;
+        }
+        return { deleted: totalDeleted > 0, media };
       });
-
-      return totalDeleted > 0;
+      if (result.deleted) {
+        invalidateEmojiStickerCache(serverId);
+        for (const media of result.media) {
+          await deleteExpressionMedia(media.storage_reference, serverId, media.custom_expression_id);
+        }
+      }
+      return result.deleted;
     } catch (error) {
       log.error(`[Nuke] Failed to nuke server ${serverId} (preserve=${options.preservePersonas})`, error);
       throw error;

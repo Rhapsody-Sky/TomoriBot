@@ -18,30 +18,20 @@
  * Read/aggregation methods (§6) live on this same class, below the write path,
  * and read straight from the DB (no read cache in Phase 1).
  */
+import { REWARD_HEAT_MULTIPLIER } from "@/modules/natural-nudges/runtime/tuning";
 import type { StatMetric } from "@/constants/statMetrics";
 import { PERSONA_AGNOSTIC_METRICS } from "@/constants/statMetrics";
-import { sql } from "@/utils/db/client";
+import { sql, withTransientDbRetry } from "@/utils/db/client";
 import { log } from "@/utils/misc/logger";
 import type { SQL } from "bun";
 import type { IRepository } from "./IRepository";
 
-/**
- * Reads a non-negative integer env var, falling back to a default when unset or
- * malformed. Mirrors the readIntEnv pattern used by the preset avatar reconciler.
- */
-function readIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
-}
-
 /** Master kill switch: set false to disable all stat recording (write side). */
 const STAT_TRACKING_ENABLED = (process.env.STAT_TRACKING_ENABLED?.trim().toLowerCase() ?? "true") !== "false";
 /** Interval between automatic buffer flushes. */
-const FLUSH_INTERVAL_MS = readIntEnv("STAT_FLUSH_INTERVAL_MS", 5000);
+const FLUSH_INTERVAL_MS = 5000;
 /** Buffer entry count that forces an immediate flush before the next interval. */
-const FLUSH_MAX_BUFFER = readIntEnv("STAT_FLUSH_MAX_BUFFER", 1000);
+const FLUSH_MAX_BUFFER = 1000;
 
 /** Delimiter for buffer keys: unit separator, never present in metric data. */
 const KEY_DELIMITER = "\x1f";
@@ -511,6 +501,16 @@ class StatRepository implements IRepository<null> {
     return STAT_TRACKING_ENABLED;
   }
 
+  async getPresenceRetentionPairs(): Promise<{ server_disc_id: string; user_disc_id: string }[]> {
+    return await sql<{ server_disc_id: string; user_disc_id: string }[]>`
+      SELECT DISTINCT s.server_disc_id, u.user_disc_id
+      FROM stat_counters sc
+      JOIN servers s ON s.server_id = sc.server_id
+      JOIN users u ON u.user_id = sc.user_id
+      WHERE sc.metric IN ('message_sent', 'presence_seen') AND s.is_dm_channel = FALSE
+    `;
+  }
+
   /**
    * Persists the behavioral presence clock immediately so a context being built
    * in another channel observes the successful turn. Buffered telemetry cannot
@@ -817,7 +817,12 @@ class StatRepository implements IRepository<null> {
           SELECT llm_codename,
             MAX(input_price_per_million) AS input_price_per_million,
             MAX(output_price_per_million) AS output_price_per_million
-          FROM llms
+          FROM (
+            SELECT llm_codename, input_price_per_million, output_price_per_million FROM llms
+            UNION ALL
+            SELECT 'decision:' || decision_model_id::text AS llm_codename,
+              input_price_per_million, output_price_per_million FROM decision_models
+          ) prices
           GROUP BY llm_codename
         ) l ON l.llm_codename = sc.metric_key
         WHERE sc.metric IN ('tokens_in', 'tokens_out')
@@ -885,7 +890,7 @@ class StatRepository implements IRepository<null> {
    * independently. Each cell is collapsed to a single week-hour index
    * `wh = dow*24 + hour` (0-167), the offset (in hours) is added, taken mod 168, then
    * re-split into (dow, hour). Pass offsetHours for the personal scope (sourced from
-   * `users.timezone_offset`, the same source the histogram's peak-hour read uses);
+   * `user_personalization_configs.timezone_offset`, the same source the histogram's peak-hour read uses);
    * omit it for server/persona scope, which use server wall-clock like the rest of
    * the dashboard.
    *
@@ -919,8 +924,8 @@ class StatRepository implements IRepository<null> {
         GROUP BY dow, hour
       `;
 
-      // Normalize the offset into whole hours (0 when unset / server scope).
-      const offset = Math.trunc(args.offsetHours ?? 0);
+      // Counters are bucketed by UTC hour, so a half-hour offset can only land in its nearest hour cell.
+      const offset = Math.round(args.offsetHours ?? 0);
 
       for (const r of rows) {
         const dow = Number(r.dow);
@@ -1059,6 +1064,27 @@ class StatRepository implements IRepository<null> {
     }
   }
 
+  async getServerExpressionCount(
+    serverId: number,
+    metric: "emoji_used" | "sticker_used" | "custom_expression_used",
+    metricKey: string,
+  ): Promise<number | null> {
+    try {
+      const [row] = await sql`
+        SELECT COALESCE(SUM(count), 0) AS total FROM stat_counters
+        WHERE server_id = ${serverId} AND metric = ${metric} AND metric_key = ${metricKey}
+          AND bucket >= ${ALL_TIME_FLOOR}::date
+      `;
+      return Number(row?.total ?? 0);
+    } catch (error) {
+      log.error("StatRepository.getServerExpressionCount: failed", error, {
+        serverId,
+        metadata: { metric, metricKey },
+      });
+      return null;
+    }
+  }
+
   /**
    * Earliest bucket containing a metric in a scope. This lets visual summaries
    * normalize all-time weekday activity into a representative week.
@@ -1141,7 +1167,12 @@ class StatRepository implements IRepository<null> {
           SELECT llm_codename,
             MAX(input_price_per_million) AS input_price_per_million,
             MAX(output_price_per_million) AS output_price_per_million
-          FROM llms
+          FROM (
+            SELECT llm_codename, input_price_per_million, output_price_per_million FROM llms
+            UNION ALL
+            SELECT 'decision:' || decision_model_id::text AS llm_codename,
+              input_price_per_million, output_price_per_million FROM decision_models
+          ) prices
           GROUP BY llm_codename
         ) l ON l.llm_codename = sc.metric_key
         WHERE sc.metric IN ('tokens_in', 'tokens_out')
@@ -1349,6 +1380,73 @@ class StatRepository implements IRepository<null> {
     }
   }
 
+  /** Daily heat contributions preserve message counts while weighting human rewards more strongly. */
+  async getServerDailyHeatCounts(args: { serverId: number; from: Date }): Promise<Map<string, number>> {
+    const rows = await withTransientDbRetry(
+      () => sql<{ bucket: Date | string; total: number | string }[]>`
+        SELECT bucket::text AS bucket,
+          SUM(count * CASE WHEN metric_key = 'reward' THEN ${REWARD_HEAT_MULTIPLIER} ELSE 1 END) AS total
+        FROM stat_counters
+        WHERE metric = 'message_sent'
+          AND server_id = ${args.serverId}
+          AND bucket >= ${windowFloor(args.from)}::date
+        GROUP BY bucket
+      `,
+      "load server daily heat counts",
+    );
+    return new Map(rows.map((row) => [String(row.bucket), Number(row.total)]));
+  }
+
+  /** `message_sent` totals per persona lineage in one server since `from`. */
+  async getServerPersonaMessageCounts(args: { serverId: number; from: Date }): Promise<Map<number, number>> {
+    const rows = await withTransientDbRetry(
+      () => sql<{ persona_lineage_id: number | string; total: number | string }[]>`
+        SELECT persona_lineage_id, SUM(count) AS total
+        FROM stat_counters
+        WHERE metric = 'message_sent'
+          AND server_id = ${args.serverId}
+          AND bucket >= ${windowFloor(args.from)}::date
+        GROUP BY persona_lineage_id
+      `,
+      "load server persona message counts",
+    );
+    return new Map(rows.map((row) => [Number(row.persona_lineage_id), Number(row.total)]));
+  }
+
+  /** UTC hour-of-day totals of completed turns in one server since `from`, indexed 0-23. */
+  async getServerActiveHourHistogram(args: { serverId: number; from: Date }): Promise<number[]> {
+    const histogram = Array.from({ length: 24 }, () => 0);
+    const rows = await withTransientDbRetry(
+      () => sql<{ metric_key: string; total: number | string }[]>`
+        SELECT metric_key, SUM(count) AS total
+        FROM stat_counters
+        WHERE metric = 'active_hour'
+          AND server_id = ${args.serverId}
+          AND bucket >= ${windowFloor(args.from)}::date
+        GROUP BY metric_key
+      `,
+      "load server active hour histogram",
+    );
+    for (const row of rows) {
+      const hour = Number.parseInt(row.metric_key, 10);
+      if (Number.isInteger(hour) && hour >= 0 && hour < 24) histogram[hour] = Number(row.total);
+    }
+    return histogram;
+  }
+
+  /** Most recent write of a metric anywhere in one server, or null when it was never recorded. */
+  async getServerMetricLastAt(args: { serverId: number; metric: StatMetric }): Promise<Date | null> {
+    const [row] = await withTransientDbRetry(
+      () => sql<{ last_at: Date | null }[]>`
+        SELECT MAX(last_at) AS last_at
+        FROM stat_counters
+        WHERE metric = ${args.metric} AND server_id = ${args.serverId}
+      `,
+      "load server metric last activity",
+    );
+    return row?.last_at ? new Date(row.last_at) : null;
+  }
+
   /**
    * Per-persona personal-memory counts for one user (personal_memories grouped by
    * lineage), highest first. personal_memories is not daily-bucketed (it has no
@@ -1484,7 +1582,7 @@ class StatRepository implements IRepository<null> {
       const rows = await sql<
         { model: string; in_tokens: number | string; out_tokens: number | string; cost: number | string }[]
       >`
-        SELECT sc.metric_key AS model,
+        SELECT COALESCE(MAX(l.display_name), sc.metric_key) AS model,
           COALESCE(SUM(CASE WHEN sc.metric = 'tokens_in'  THEN sc.count ELSE 0 END), 0) AS in_tokens,
           COALESCE(SUM(CASE WHEN sc.metric = 'tokens_out' THEN sc.count ELSE 0 END), 0) AS out_tokens,
           COALESCE(SUM(
@@ -1500,8 +1598,14 @@ class StatRepository implements IRepository<null> {
         LEFT JOIN (
           SELECT llm_codename,
             MAX(input_price_per_million) AS input_price_per_million,
-            MAX(output_price_per_million) AS output_price_per_million
-          FROM llms
+            MAX(output_price_per_million) AS output_price_per_million,
+            MAX(display_name) AS display_name
+          FROM (
+            SELECT llm_codename, llm_codename AS display_name, input_price_per_million, output_price_per_million FROM llms
+            UNION ALL
+            SELECT 'decision:' || decision_model_id::text AS llm_codename, codename AS display_name,
+              input_price_per_million, output_price_per_million FROM decision_models
+          ) prices
           GROUP BY llm_codename
         ) l ON l.llm_codename = sc.metric_key
         WHERE sc.metric IN ('tokens_in', 'tokens_out')
@@ -1529,9 +1633,10 @@ class StatRepository implements IRepository<null> {
   }
 
   /**
-   * Top emotion categories expressed, highest first. Sums three streams by emotion:
+   * Top emotion categories expressed, highest first. Sums delivery metrics by emotion:
    *   - emoji_used  : joined to the per-server emotion_key on server_emojis
    *   - sticker_used: joined to the per-server emotion_key on server_stickers
+   *   - custom_expression_used: joined by server and stable custom UUID
    *   - sprite_emotion: the sprite's user-given tag IS the emotion key (no join;
    *      identity sprites were already excluded upstream when this metric was recorded)
    * Emojis/stickers not yet classified (NULL emotion_key) are excluded; sprite tags are
@@ -1574,6 +1679,15 @@ class StatRepository implements IRepository<null> {
           SELECT LOWER(sc.metric_key) AS emotion_key, sc.count AS cnt
           FROM stat_counters sc
           WHERE sc.metric = 'sprite_emotion'
+            AND (${userId}::int IS NULL OR sc.user_id = ${userId})
+            AND (${serverId}::int IS NULL OR sc.server_id = ${serverId})
+            AND (${lineageId}::bigint IS NULL OR sc.persona_lineage_id = ${lineageId})
+            AND sc.bucket >= ${from}::date
+          UNION ALL
+          SELECT ce.emotion_key AS emotion_key, sc.count AS cnt
+          FROM stat_counters sc
+          JOIN custom_expressions ce ON ce.server_id = sc.server_id AND ce.custom_expression_id::text = sc.metric_key
+          WHERE sc.metric = 'custom_expression_used'
             AND (${userId}::int IS NULL OR sc.user_id = ${userId})
             AND (${serverId}::int IS NULL OR sc.server_id = ${serverId})
             AND (${lineageId}::bigint IS NULL OR sc.persona_lineage_id = ${lineageId})

@@ -2,71 +2,69 @@
 title: "Multiple Personas"
 # Keyword-rich <title> targeting "AI companion Discord" queries; replaces
 # Starlight's default "{title} | TomoriBot" for this page only. H1 and sidebar
-# keep the plain title. The homepage title bets on "AI agent" + "roleplay" —
+# keep the plain title. The homepage title bets on "AI agent" + "roleplay";
 # this page carries the "companion" keyword instead.
 head:
   - tag: title
     content: "TomoriBot | AI Companions & Personas for Your Discord Server"
 # Hand-written search snippet; overrides the auto-derived description from
 # routeData.ts middleware.
-description: "Run multiple AI companions in one Discord server. Custom personas with their own avatars, triggers, and speaking styles. Free and open-source."
+description: "Run multiple AI companions in one Discord server. Custom personas with their own avatars, triggers, and speaking styles."
 sidebar:
   order: 2
 ---
 
-TomoriBot's personality lives in a **persona**: her name, avatar, traits, speaking style, and
-behavior. You can run several personas at once, each a distinct character with its own
-triggers and webhook avatar. This page is about *how she behaves* — for *what she knows*
-(facts and memories), see [Memory](/features/knowledge/memory/).
 
-## Creating a Persona
+TomoriBot's personality lives in a persona: her name, avatar, traits, speaking style,
+and behavior. You can run multiple personas at once, each as a distinct character with
+its own trigger words and webhook avatar. For
+facts and memories that each persona can hold, see [Memory](/features/knowledge/memory/).
 
-- `/persona create` — build a custom personality from scratch.
-- `/persona generate` — have the AI generate a personality from a description and an image.
-  Requires a provider that supports structured output. You can also upload an existing
-  TomoriBot preset or a SillyTavern card here to transform an existing character (see
-  [SillyTavern Support](/features/integrations/sillytavern-support/)).
-- `/persona default` — switch to one of the built-in default personalities as a foundation.
-- `/persona export` / `/persona import` — share or back up a persona as a file. Import
-  supports bringing a persona in as an **alter** with its own triggers and webhook avatar.
-- `/persona remove` — remove an alter persona.
+## Persona Management
+- `/config` > Persona: configure existing personas
+- `/persona create`: build a custom persona from scratch.
+- `/persona generate`: have the AI generate a persona from a prompt and an image (requires
+  a provider that supports structured output). You can also provide an existing TomoriBot
+  preset or SillyTavern card (see [SillyTavern Support](/features/integrations/sillytavern-support/)).
+- `/persona default`: switch to one of the built-in default characters.
+- `/persona export`: back up or share persona files.
+- `/persona import`: import a shared character card (Sillytavern, etc.) or a TomoriBot card as a Main persona or an Alter persona.
+- `/persona remove`: delete an alter persona.
 
-A good starting workflow: pick a default or generate one, then refine it with attributes
-and sample dialogues below.
+### Main and Alter Personas
 
-## Alter Personas
+The **Main** persona is the bot's face in the server: the name and avatar in the member list, and the persona that answers when someone @mentions the bot directly. **Alter** personas let multiple characters coexist in one server:
 
-Alter personas let multiple characters coexist in one server:
-
-- Each alter has its own personality, trigger words, and **webhook avatar** — so different
-  characters appear with different names and pictures in the same channel.
-- Multiple alters can respond to a single message, up to the `/config trigger-match-limit`
-  limit.
-- **Replying to a webhook message** continues the conversation as that persona.
-- Add alters via `/persona import` (alter option); manage them with `/persona` and
-  `/persona remove`.
-
-This is what makes group roleplay and multi-character servers possible. For the runtime
-details of how triggers route to personas and how webhook identities work, see the
-architecture reference on [multi-persona behavior](/architecture/subsystems/multi-persona/).
+- Each alter has its own personality, trigger words, and webhook avatar, so different
+  characters post under their own name and image in the same channel.
+- Multiple alters can reply to a single message, up to the limit set in
+  `/config` > Behavior > Trigger Behavior.
+- Replying directly to a webhook message continues the conversation with that specific persona.
 
 ## Shaping Personality
 
-Two commands do most of the work of teaching her how to talk and act:
+Fine-tune how a persona looks, talks, and behaves:
 
 ### Attributes
+<!-- anchor: attributes -->
 
-`/persona attribute add` adds personality traits or physical characteristics — for example
-`friendly`, `red hair`, or `ends sentences with *Nya~*`. Remove them with
-`/persona attribute remove`.
+Open `/config` > Persona > Identity & Personality to define personality traits or physical
+details (such as `friendly`, `red hair`, or `ends sentences with *Nya~*`).
+
+:::tip
+When you add or edit an attribute, check `Public attribute` under `Visibility` so other personas can
+use that detail when they share a conversation. Keep secrets private, and mark details other
+characters would notice, such as appearance or mannerisms, as public.
+:::
 
 ### Sample Dialogues
+<!-- anchor: sample-dialogues -->
 
-`/persona sample-dialogue add` teaches her *how she speaks* by example. Use the `{user}` and
-`{bot}` placeholders so dialogues work for everyone (and when you share the persona):
+Open `/config` > Persona > Identity & Personality to teach her speaking style by example
+using `{user}` and `{bot}` placeholders:
 
-- `{user}` — replaced with the actual user's name/nickname
-- `{bot}` — replaced with her current name
+- `{user}`: replaced with the actual user's display name or nickname.
+- `{bot}`: replaced with her current persona name.
 
 ```text
 {user}: What's your favorite hobby?
@@ -75,49 +73,49 @@ Two commands do most of the work of teaching her how to talk and act:
 
 Tips for effective sample dialogues:
 
-- Write natural, conversational exchanges.
-- Bake in the attributes and traits you want her to exhibit.
-- Demonstrate the tone you're after, and add variety so she generalizes.
-
-Remove examples with `/persona sample-dialogue remove`.
+- Write natural exchanges that show rather than tell.
+- Demonstrate the tone and vocabulary you want her to use.
+- Add variety across several examples so she generalizes well.
 
 ### Name and Avatar
 
-- `/persona rename` — set what she calls herself.
-- `/persona avatar` (or `/server avatar`) — set her profile picture for this server.
+Open `/config` > Persona > Identity & Personality to set what she calls herself and upload
+her profile picture.
 
-You can also set a custom system prompt with `/config system-prompt set` to further shape
-behavior — see [Behavior Tweaking](/features/chatting-personality/behavior-tweaking/).
+### Naming Habits
+
+Server managers can open `/config` > Persona > Naming Habits to set how a persona addresses
+members:
+
+- Configure separate masculine, feminine, and neutral prefixes, suffixes, and address terms.
+- Different personas can address the same user with different titles (such as one calling
+  them "Captain" and another calling them "Senpai").
+- Personal overrides follow each user across servers; see
+  [Personalization](/features/knowledge/personalization/).
 
 ## Sprites (Emotion Avatars)
+<!-- anchor: sprites-emotion-avatars -->
 
-Sprites are alternate avatar images a persona can switch to mid-conversation to express an
-emotion or situation — think of them as her facial expressions. Each sprite is a labeled
-image (for example `happy`, `mad`, `embarrassed`) that she displays in place of her normal
-avatar when it fits the moment.
+Sprites are alternate avatars a persona switches to during conversation to reflect emotions
+(such as `happy`, `mad`, or `embarrassed`).
 
-How she uses them: the available sprites and their usage notes are given to the model each
-turn. To show one, she starts a reply line with `PersonaName (label):`; that line is then
-delivered with the matching sprite image. If no sprite fits, she replies normally.
+When replying, she picks the sprite matching her emotion. To use one, she starts the reply
+line with `PersonaName (label):`, and Discord delivers that message with the matching sprite
+avatar. If no sprite fits, she replies with her default avatar.
 
-Manage a persona's sprites with the `/persona sprites` command group (adding and removing
-require the **Manage Server** permission):
+Manage sprites in `/config` > Persona > Sprites (requires Manage Server):
 
-- `/persona sprites add` — add or replace a sprite: pick the persona, give it a **label**,
-  upload the **image** (PNG, JPG, or GIF), and optionally add **usage instructions** telling
-  her when to use it. Reusing a label replaces that sprite. Each persona has a maximum sprite
-  count.
-- `/persona sprites edit` — change an existing sprite's name, image, instructions, or
-  identity toggle.
-- `/persona sprites remove` — delete sprites from a persona.
-- `/persona sprites import` / `/persona sprites export` — back up or share a persona's whole
-  sprite set as a file.
+- **Add or replace**: select the persona, provide a label, upload an image (PNG, JPG, or GIF),
+  and optionally write usage instructions describing when to display it.
+- **Edit**: update an existing sprite's label, image, or instructions.
+- **Delete**: remove sprites you no longer want.
+- **Export and import**: share or back up the persona's complete sprite pack as a file.
 
-The **identity** toggle decorates the message name as `Label (Persona)` in Discord, which is
-especially useful for [alter personas](#alter-personas) that speak as distinct characters.
+The `Save as Identity` toggle displays the message author as `Label (Persona)` in Discord,
+useful for characters with multiple forms.
 
 ## Per-Channel Persona Picks
 
-Want to control which persona answers *you* in a specific channel without changing the
-server-wide setup? That's Personal Spotlight — see
+To choose which persona replies to you in a specific channel without changing server-wide
+settings, use Personal Spotlight; see
 [Personalization](/features/knowledge/personalization/#personal-spotlight).

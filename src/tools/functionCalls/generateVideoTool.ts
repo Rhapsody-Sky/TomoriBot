@@ -1,3 +1,14 @@
+import { providerContentRejectionSchema } from "@/utils/provider/providerErrorClassification";
+import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
+import {
+  findProviderRequestDeniedError,
+  notifyProviderToolFailure,
+  reportProviderUsage,
+  type ProviderUsageContext,
+} from "@/utils/provider/providerUsage";
+import { reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { classifySendFailure } from "@/utils/discord/stream/sendFailureCache";
 /**
  * Video Generation Tool
  * Allows TomoriBot to generate videos using the active provider's native video API.
@@ -10,7 +21,8 @@
 import { AttachmentBuilder } from "discord.js";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
-import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/personaDispatch";
+import { mediaDeliveryFailure, sendToolMediaPost } from "@/utils/discord/webhook/toolMediaDelivery";
+import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
 import { buildGeneratedVideoComponentsV2Payload } from "@/utils/discord/generatedVideoMessage";
 import {
   buildReferencedMessageUrl,
@@ -22,19 +34,24 @@ import { checkVideoQuota, incrementVideoQuota, type VideoQuotaCheckResult } from
 import { statRepository } from "@/utils/db/repositories";
 import { resolveProviderFeatureImplementation } from "@/utils/provider/providerInfoRegistry";
 import { generateCustomVideoViaEndpoint } from "@/providers/custom/customEndpointDispatcher";
-import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
+import { formatCustomModelDisplay } from "@/utils/provider/customProviderUtils";
 import type { ProviderNativeVideoResolution } from "@/types/provider/featureInterfaces";
-import { getResolvedCapabilityModelId, resolveCapabilityCredentials } from "@/utils/provider/credentialResolver";
+import { getResolvedCapabilityModelId } from "@/utils/provider/credentialResolver";
+import { resolveCredentialsWithMediaQuota } from "@/utils/quota/mediaQuotaGate";
 import { llmModelRepo } from "@/utils/db/repositories/LlmModelRepository";
 import { MessageIdMap } from "@/utils/text/messageIdMap";
-import { isOpenRouterVideoCapabilityError } from "@/providers/openrouter/openrouterVideoRequest";
+import {
+  getDefaultOpenRouterVideoResolution,
+  isOpenRouterVideoCapabilityError,
+} from "@/providers/openrouter/openrouterVideoRequest";
+import { isExpectedVideoFailure, ProviderVideoFilteredError } from "@/providers/utils/providerVideoErrors";
 import { resolveMessageImageUrls } from "@/utils/image/imageExtractor";
+import { beginTextModelHandoffBeforeComfyUi } from "@/utils/provider/textModelComfyUiHandoff";
 
 /** Discord file size limit for non-boosted servers (25 MB) */
 const DISCORD_FILE_SIZE_LIMIT = 25 * 1024 * 1024;
 const DEFAULT_VIDEO_DURATION_SECONDS = 5;
 const MAX_VIDEO_DURATION_SECONDS = 20;
-const DEFAULT_VIDEO_RESOLUTION: ProviderNativeVideoResolution = "720p";
 
 /**
  * Tool for generating videos using the active provider's native video API.
@@ -50,6 +67,10 @@ export class GenerateVideoTool extends BaseTool {
   parameters: ToolParameterSchema = {
     type: "object",
     properties: {
+      nsfw: {
+        type: "boolean",
+        description: "Set true when the video requires a Discord spoiler, useful for NSFW videos.",
+      },
       prompt: {
         type: "string",
         description:
@@ -74,7 +95,7 @@ export class GenerateVideoTool extends BaseTool {
       resolution: {
         type: "string",
         description:
-          "Optional: Target video resolution. Defaults to '720p'. Supported values are '480p' (SD), '720p' (HD), and '1080p' (FHD). Providers may fall back to the nearest supported resolution.",
+          "Optional: Target video resolution. Defaults to '480p' for Grok Imagine Video 1.5 Lite and '720p' otherwise. Supported values are '480p' (SD), '720p' (HD), and '1080p' (FHD). Providers may fall back to the nearest supported resolution.",
         enum: ["480p", "720p", "1080p"],
       },
       generate_audio: {
@@ -109,12 +130,12 @@ export class GenerateVideoTool extends BaseTool {
     return Math.min(normalized, MAX_VIDEO_DURATION_SECONDS);
   }
 
-  private normalizeResolution(rawResolution: unknown): ProviderNativeVideoResolution {
+  private normalizeResolution(rawResolution: unknown, model: string): ProviderNativeVideoResolution {
     if (rawResolution === "480p" || rawResolution === "720p" || rawResolution === "1080p") {
       return rawResolution;
     }
 
-    return DEFAULT_VIDEO_RESOLUTION;
+    return getDefaultOpenRouterVideoResolution(model);
   }
 
   private resolveMediaId(rawMediaId: string | undefined, context: ToolContext): string | undefined {
@@ -165,136 +186,20 @@ export class GenerateVideoTool extends BaseTool {
     return model.codename;
   }
 
-  /**
-   * Send a generated video to the Discord channel via webhook or bot message.
-   *
-   * The video is sent inside a Components V2 Media Gallery so a "Generated in Xs"
-   * footer can sit BELOW the inline player (a plain `content` caption would render
-   * above the attachment). Each path falls back to a plain attachment-only message
-   * if Components V2 is rejected, so that fallback preserves Discord's native inline
-   * video player, just without the timing footer.
-   * @param videoData - Raw video bytes
-   * @param elapsedMs - Wall-clock generation time in milliseconds, used for the "Generated in Xs" footer
-   */
   private async sendGeneratedVideo(
     context: ToolContext,
     videoData: Buffer,
     filename: string,
     elapsedMs: number,
+    spoiler: boolean,
   ): Promise<import("discord.js").Message> {
-    const threadId =
-      "isThread" in context.channel && typeof context.channel.isThread === "function" && context.channel.isThread()
-        ? context.channel.id
-        : undefined;
-    const componentsPayload = buildGeneratedVideoComponentsV2Payload(filename, elapsedMs, context.locale);
-
-    // Try persona webhook first (Components V2, then plain attachment fallback)
-    if (context.webhook && context.personaUsername) {
-      try {
-        const webhookAttachment = new AttachmentBuilder(videoData, {
-          name: filename,
-        });
-        return await sendWebhookMessageWithIdentity(
-          context.webhook,
-          {
-            files: [webhookAttachment],
-            ...componentsPayload,
-            withComponents: true,
-            ...(threadId ? { threadId } : {}),
-          },
-          {
-            username: context.personaUsername,
-            avatarUrl: context.personaAvatarUrl,
-            avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/") ? context.personaAvatarUrl : undefined,
-          },
-        );
-      } catch (error) {
-        log.warn(
-          "Failed to send generated video via webhook with Components V2, retrying without components",
-          error as Error,
-        );
-        try {
-          const webhookAttachment = new AttachmentBuilder(videoData, {
-            name: filename,
-          });
-          return await sendWebhookMessageWithIdentity(
-            context.webhook,
-            {
-              files: [webhookAttachment],
-              ...(threadId ? { threadId } : {}),
-            },
-            {
-              username: context.personaUsername,
-              avatarUrl: context.personaAvatarUrl,
-              avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/") ? context.personaAvatarUrl : undefined,
-            },
-          );
-        } catch (fallbackError) {
-          const discordError = fallbackError as Error & {
-            code?: string | number;
-            status?: number;
-            method?: string;
-            url?: string;
-            rawError?: unknown;
-          };
-          log.warn(
-            `Failed to send generated video via webhook; falling back to bot message ${JSON.stringify({
-              filename,
-              bytes: videoData.length,
-              error: discordError.message,
-              code: discordError.code ?? null,
-              status: discordError.status ?? null,
-              method: discordError.method ?? null,
-              url: discordError.url ?? null,
-              rawError: discordError.rawError ?? null,
-            })}`,
-          );
-        }
-      }
-    }
-
-    // Bot message path (Components V2, then plain attachment fallback)
-    try {
-      const channelAttachment = new AttachmentBuilder(videoData, {
-        name: filename,
-      });
-      return await context.channel.send({
-        files: [channelAttachment],
-        ...componentsPayload,
-      });
-    } catch (error) {
-      log.warn(
-        "Failed to send generated video with Components V2, falling back to attachment-only message",
-        error as Error,
-      );
-      try {
-        const channelAttachment = new AttachmentBuilder(videoData, {
-          name: filename,
-        });
-        return await context.channel.send({ files: [channelAttachment] });
-      } catch (fallbackError) {
-        const discordError = fallbackError as Error & {
-          code?: string | number;
-          status?: number;
-          method?: string;
-          url?: string;
-          rawError?: unknown;
-        };
-        log.error(
-          `Failed to send generated video via bot message ${JSON.stringify({
-            filename,
-            bytes: videoData.length,
-            error: discordError.message,
-            code: discordError.code ?? null,
-            status: discordError.status ?? null,
-            method: discordError.method ?? null,
-            url: discordError.url ?? null,
-            rawError: discordError.rawError ?? null,
-          })}`,
-        );
-        throw fallbackError;
-      }
-    }
+    const componentsPayload = buildGeneratedVideoComponentsV2Payload(filename, elapsedMs, context.locale, spoiler);
+    const files = () => [new AttachmentBuilder(videoData, { name: filename })];
+    return sendToolMediaPost(
+      context,
+      () => ({ files: files(), ...componentsPayload, withComponents: true }),
+      () => ({ files: files() }),
+    );
   }
 
   /**
@@ -374,7 +279,6 @@ export class GenerateVideoTool extends BaseTool {
     const messageId = this.resolveMediaId(rawMediaId, context);
     const aspectRatio = (args.aspect_ratio as string) || "16:9";
     const durationSeconds = this.normalizeDuration(args.duration);
-    const resolution = this.normalizeResolution(args.resolution);
     const generateAudio = args.generate_audio === true;
     const audioPrompt =
       typeof args.audio_prompt === "string" && args.audio_prompt.trim() ? args.audio_prompt.trim() : undefined;
@@ -400,17 +304,20 @@ export class GenerateVideoTool extends BaseTool {
 
     // Default to allowed; overwritten below for server-credential users
     let quotaCheck: VideoQuotaCheckResult = { allowed: true };
+    let usageContext: ProviderUsageContext | undefined;
+    let failureProvider: string | undefined;
+    let failureScope: "server" | "personal" | undefined;
 
     try {
-      // Resolve credentials first so we can skip server quota for personal BYOK users
-      const creds = await resolveCapabilityCredentials(context.tomoriState.server_id, "video", {
-        userId: context.internalUserId ?? null,
-      });
-
-      // Personal BYOK users bring their own API quota, so bypass server quota entirely
-      if (creds.source === "server") {
-        quotaCheck = await checkVideoQuota(context.tomoriState.server_id, userDiscId);
-      }
+      const { credentials: creds, quotaCheck: serverQuotaCheck } = await resolveCredentialsWithMediaQuota(
+        context.tomoriState.server_id,
+        "video",
+        context.internalUserId ?? null,
+        checkVideoQuota,
+        userDiscId,
+        quotaCheck,
+      );
+      quotaCheck = serverQuotaCheck;
 
       if (!quotaCheck.allowed) {
         let errorMessage = "";
@@ -462,13 +369,15 @@ export class GenerateVideoTool extends BaseTool {
       }
 
       const modelCodename = await this.getVideoModelCodename(videoModelId);
-      const displayModelName = creds.customEndpoint
-        ? formatCustomEndpointModelDisplay(creds.customEndpoint)
-        : modelCodename;
+      const resolution = this.normalizeResolution(args.resolution, modelCodename);
+      const displayModelName = creds.customEndpoint ? formatCustomModelDisplay(creds.customEndpoint) : modelCodename;
       log.info(`Using video model: ${modelCodename} for video generation`);
 
       const apiKey = creds.apiKey;
+      usageContext = creds.usageContext;
+      failureScope = creds.source;
       const executionProvider = creds.provider;
+      failureProvider = executionProvider;
 
       // Send progress notice, so video generation takes 1-3 minutes
       if (!context.suppressProgressNotices) {
@@ -529,20 +438,32 @@ export class GenerateVideoTool extends BaseTool {
       const videoImplementation = resolveProviderFeatureImplementation(executionProvider, "videoGeneration");
 
       if (creds.customEndpoint) {
-        const result = await generateCustomVideoViaEndpoint({
-          endpoint: creds.customEndpoint,
-          apiKey,
-          prompt,
-          aspectRatio,
-          durationSeconds,
-          resolution,
-          referenceImages,
-          generateAudio,
-          audioPrompt,
-          loop,
-        });
-        videoData = result.videoData;
-        videoFilename = result.filename ?? videoFilename;
+        const handoff =
+          creds.customEndpoint.api_style === "comfyui"
+            ? await beginTextModelHandoffBeforeComfyUi({
+                tomoriState: context.tomoriState,
+                comfyUi: { endpointUrl: creds.customEndpoint.endpoint_url, apiKey },
+              })
+            : null;
+        try {
+          const result = await generateCustomVideoViaEndpoint({
+            endpoint: creds.customEndpoint,
+            apiKey,
+            prompt,
+            aspectRatio,
+            durationSeconds,
+            resolution,
+            referenceImages,
+            generateAudio,
+            audioPrompt,
+            loop,
+            abortSignal: context.abortSignal,
+          });
+          videoData = result.videoData;
+          videoFilename = result.filename ?? videoFilename;
+        } finally {
+          void handoff?.restore();
+        }
       } else if (videoImplementation === "google") {
         const { generateGoogleNativeVideo } = await import("@/providers/google/googleVideoGeneration");
         const result = await generateGoogleNativeVideo({
@@ -556,22 +477,31 @@ export class GenerateVideoTool extends BaseTool {
           generateAudio,
           audioPrompt,
           loop,
+          abortSignal: context.abortSignal,
         });
         videoData = result.videoData;
         videoFilename = result.filename ?? videoFilename;
       } else if (videoImplementation === "openrouter") {
         const { generateOpenRouterNativeVideo } = await import("@/providers/openrouter/openrouterVideoGeneration");
-        const result = await generateOpenRouterNativeVideo({
-          apiKey,
-          model: modelCodename,
-          prompt,
-          aspectRatio,
-          durationSeconds,
-          resolution,
-          referenceImages,
-          generateAudio,
-          audioPrompt,
-          loop,
+        const result = await withProviderUsageContext(usageContext, async () =>
+          generateOpenRouterNativeVideo({
+            apiKey,
+            model: modelCodename,
+            prompt,
+            aspectRatio,
+            durationSeconds,
+            resolution,
+            referenceImages,
+            generateAudio,
+            audioPrompt,
+            loop,
+            abortSignal: context.abortSignal,
+          }),
+        );
+        reportProviderUsage(usageContext, {
+          modelCodename,
+          costUsd: result.costUsd,
+          providerRequestId: result.providerRequestId,
         });
         videoData = result.videoData;
         videoFilename = result.filename ?? videoFilename;
@@ -588,6 +518,7 @@ export class GenerateVideoTool extends BaseTool {
           generateAudio,
           audioPrompt,
           loop,
+          abortSignal: context.abortSignal,
         });
         videoData = result.videoData;
         videoFilename = result.filename ?? videoFilename;
@@ -603,6 +534,12 @@ export class GenerateVideoTool extends BaseTool {
           success: false,
           error: "No video data received from API. The generation may have been blocked or failed.",
         };
+      }
+
+      // /kill stops awaiting this tool but cannot stop it, so a native provider that ignores the
+      // signal still finishes here; posting now would deliver and charge for a reply the user killed.
+      if (context.abortSignal?.aborted) {
+        return { success: false, error: "Video generation was cancelled." };
       }
 
       if (videoData.length > DISCORD_FILE_SIZE_LIMIT) {
@@ -623,7 +560,11 @@ export class GenerateVideoTool extends BaseTool {
       );
 
       const elapsedMs = Date.now() - startedAtMs;
-      const sentMessage = await this.sendGeneratedVideo(context, videoData, videoFilename, elapsedMs);
+      const spoiler = args.nsfw === true;
+      if (spoiler) {
+        videoFilename = `SPOILER_${videoFilename}`;
+      }
+      const sentMessage = await this.sendGeneratedVideo(context, videoData, videoFilename, elapsedMs, spoiler);
 
       log.success("Successfully generated and sent video to Discord");
 
@@ -659,8 +600,33 @@ export class GenerateVideoTool extends BaseTool {
         endTurn: context.streamContext?.endTurnAfterTools?.includes(this.name) ?? false,
       };
     } catch (error) {
+      if (error instanceof DiscordDeliveryError) return mediaDeliveryFailure(context, error.outcome);
+      if (context.abortSignal?.aborted) {
+        return { success: false, error: "Video generation was cancelled." };
+      }
+      const denied = findProviderRequestDeniedError(error, usageContext);
+      if (denied) return notifyProviderToolFailure(context, denied);
+      const toolFailure = createProviderToolFailure(error, {
+        locale: context.locale,
+        provider: failureProvider ?? "unknown",
+        credentialScope: failureScope,
+        kind: error instanceof ProviderVideoFilteredError ? "content_blocked" : undefined,
+      });
       const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error("Video generation failed:", error as Error);
+      if (!(error instanceof ProviderVideoFilteredError)) {
+        await reportProviderFailure({
+          summary: "Video generation failed",
+          errorType: "VideoGenerationFailed",
+          error,
+          expected:
+            providerContentRejectionSchema.safeParse(toolFailure.failure?.code).success ||
+            isExpectedVideoFailure(errorMessage, toolFailure.failure?.code) ||
+            classifySendFailure(error) !== null,
+          serverId: context.tomoriState.server_id,
+          userId: context.internalUserId ?? null,
+          dimensions: { operation: "video-generation", provider: failureProvider ?? "unknown" },
+        });
+      }
 
       if (isOpenRouterVideoCapabilityError(error)) {
         const localizedMessage = localizer(
@@ -674,27 +640,11 @@ export class GenerateVideoTool extends BaseTool {
           success: false,
           error: localizedMessage,
           message: localizedMessage,
+          failure: { code: error.code, reason: localizedMessage, suggestedActions: [] },
         };
       }
 
-      if (errorMessage.includes("timed out")) {
-        return {
-          success: false,
-          error: "Video generation timed out. The provider may be experiencing high load. Please try again later.",
-        };
-      }
-
-      if (errorMessage.includes("content") || errorMessage.includes("safety") || errorMessage.includes("blocked")) {
-        return {
-          success: false,
-          error: "Video generation was blocked by the provider's content safety filter. Please try a different prompt.",
-        };
-      }
-
-      return {
-        success: false,
-        error: `Video generation failed: ${errorMessage}`,
-      };
+      return toolFailure;
     }
   }
 }

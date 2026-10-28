@@ -2,9 +2,11 @@ import type { Client, Message } from "discord.js";
 import { DMChannel } from "discord.js";
 import type { AssembledServerConfig, TomoriState } from "@/types/db/schema";
 import { isMatrixBridgeWebhookUsername } from "@/utils/bridges";
+import { isKnownMessageProxyMessage } from "@/utils/messageProxy/proxyExpectation";
 import { normalizeRenderModifierName, resolveRenderModifierSourcePersona } from "@/utils/discord/renderModifierParser";
-import { escapeRegExp } from "@/utils/text/processors/regexUtils";
+import { escapeRegExp, isUnspacedScriptText, wrapWithWordBoundary } from "@/utils/text/processors/regexUtils";
 import { normalizeTriggerWord } from "@/utils/text/triggerWords";
+import { isManagedWebhookMessage } from "@/utils/chat/webhookIdentity";
 
 const NEVER_MATCH_REGEX = /a^/i;
 
@@ -28,7 +30,7 @@ function createScreamingRegex(trigger: string): RegExp {
     }
   }
 
-  return new RegExp(`\\b${pattern}\\b`, "i");
+  return new RegExp(wrapWithWordBoundary(pattern), "iu");
 }
 
 function createDeliberateTriggerRegex(trigger: string): RegExp {
@@ -68,8 +70,7 @@ export function getDeliberateTriggerMatch(content: string, trigger: string): Reg
     return null;
   }
 
-  const isJapanese = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]/.test(normalizedTrigger);
-  const hasFullTriggerMatch = isJapanese
+  const hasFullTriggerMatch = isUnspacedScriptText(normalizedTrigger)
     ? content.includes(normalizedTrigger)
     : createScreamingRegex(normalizedTrigger).test(content);
   if (!hasFullTriggerMatch) {
@@ -102,8 +103,7 @@ export function getTriggerFirstMatchIndexInContent(content: string, trigger: str
     return deliberateMatch?.index ?? Number.POSITIVE_INFINITY;
   }
 
-  const isJapanese = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]/.test(normalizedTrigger);
-  if (isJapanese) {
+  if (isUnspacedScriptText(normalizedTrigger)) {
     const index = content.indexOf(normalizedTrigger);
     return index >= 0 ? index : Number.POSITIVE_INFINITY;
   }
@@ -134,12 +134,16 @@ export function doesMessageMatchTrigger(message: Message, trigger: string, delib
   return getTriggerFirstMatchIndex(message, trigger, deliberateOnly) !== Number.POSITIVE_INFINITY;
 }
 
-export function isMatrixRelayMessage(message: Pick<Message, "webhookId" | "author">): boolean {
-  return Boolean(message.webhookId) && isMatrixBridgeWebhookUsername(message.author.username);
+export function isMatrixRelayMessage(message: Message): boolean {
+  return isManagedWebhookMessage(message) && isMatrixBridgeWebhookUsername(message.author.username);
+}
+
+export function isMessageProxyMessage(message: Pick<Message, "id" | "webhookId">): boolean {
+  return isKnownMessageProxyMessage(message);
 }
 
 export function isRealUserLikeMessage(message: Message): boolean {
-  return (!message.author.bot && !message.webhookId) || isMatrixRelayMessage(message);
+  return (!message.author.bot && !message.webhookId) || isMatrixRelayMessage(message) || isMessageProxyMessage(message);
 }
 
 export function isSelfTriggerMessage(message: Message, allPersonas: TomoriState[]): boolean {
@@ -150,7 +154,10 @@ export function isSelfTriggerMessage(message: Message, allPersonas: TomoriState[
     return true;
   }
 
-  if (!message.webhookId) {
+  if (!isManagedWebhookMessage(message)) {
+    return false;
+  }
+  if (isMessageProxyMessage(message)) {
     return false;
   }
 
@@ -243,6 +250,7 @@ export function hasExplicitCrossPersonaTrigger(
   message: Message,
   allPersonas: TomoriState[],
   activePersonaId: number,
+  refMessage: Message | null,
 ): boolean {
   const mainPersona = allPersonas.find((p) => !p.is_alter);
 
@@ -255,15 +263,12 @@ export function hasExplicitCrossPersonaTrigger(
   const clientUserId = message.client.user?.id;
 
   const isBotMentioned = clientUserId ? message.mentions.users.has(clientUserId) : false;
-  const refMessage = message.reference?.messageId
-    ? message.channel.messages.cache.get(message.reference.messageId)
-    : undefined;
   const isReplyToBot = refMessage ? refMessage.author.id === clientUserId : false;
   if ((isBotMentioned || isReplyToBot) && mainPersona?.persona_id !== activePersonaId) {
     return true;
   }
 
-  if (refMessage?.webhookId) {
+  if (refMessage && isManagedWebhookMessage(refMessage)) {
     const webhookPersona =
       resolveRenderModifierSourcePersona(refMessage.author.username, personaByNickname)?.persona ??
       personaByNickname.get(normalizeRenderModifierName(refMessage.author.username));
@@ -287,6 +292,7 @@ export function determineMatchingPersonas(
   message: Message,
   allPersonas: TomoriState[],
   client: Client,
+  referenceMessage: Message | null,
   isReplyToBot: boolean,
   replyPersona: TomoriState | null,
   isBotMentioned: boolean,
@@ -342,7 +348,7 @@ export function determineMatchingPersonas(
     if (!nicknameKey || personaByNickname.has(nicknameKey)) continue;
     personaByNickname.set(nicknameKey, persona);
   }
-  if (message.webhookId) {
+  if (isManagedWebhookMessage(message)) {
     const webhookName = message.author.username;
     senderPersona =
       resolveRenderModifierSourcePersona(webhookName, personaByNickname)?.persona ??
@@ -352,17 +358,14 @@ export function determineMatchingPersonas(
   }
 
   let repliedToPersona: TomoriState | undefined;
-  if (message.reference?.messageId) {
-    const referenceMessage = message.channel.messages.cache.get(message.reference.messageId);
-    if (referenceMessage) {
-      if (referenceMessage.author.id === client.user?.id) {
-        repliedToPersona = allPersonas.find((persona) => !persona.is_alter);
-      } else if (referenceMessage.webhookId) {
-        const webhookName = referenceMessage.author.username;
-        repliedToPersona =
-          resolveRenderModifierSourcePersona(webhookName, personaByNickname)?.persona ??
-          personaByNickname.get(normalizeRenderModifierName(webhookName));
-      }
+  if (referenceMessage) {
+    if (referenceMessage.author.id === client.user?.id) {
+      repliedToPersona = allPersonas.find((persona) => !persona.is_alter);
+    } else if (isManagedWebhookMessage(referenceMessage)) {
+      const webhookName = referenceMessage.author.username;
+      repliedToPersona =
+        resolveRenderModifierSourcePersona(webhookName, personaByNickname)?.persona ??
+        personaByNickname.get(normalizeRenderModifierName(webhookName));
     }
   }
 

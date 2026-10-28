@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
-  PRESET_LINEAGE_BY_AVATAR,
+  resolveAlterPersonaName,
   resolveAvailablePersonaName,
   resolvePresetLineageId,
   resolvePresetTriggerWords,
 } from "@/commands/persona/default";
 import type { TomoriPresetRow } from "@/types/db/schema";
+import { EMPTY_PERSONA_NAMING_CONFIG } from "@/types/personaNaming";
 
 /** Minimal preset fixture: only the fields used by the pure helpers. */
 function makePreset(overrides: Partial<TomoriPresetRow> = {}): TomoriPresetRow {
@@ -21,6 +22,11 @@ function makePreset(overrides: Partial<TomoriPresetRow> = {}): TomoriPresetRow {
     preset_language: "en-US",
     preset_avatar_path: null,
     preset_trigger_words: [],
+    preset_naming_config: structuredClone(EMPTY_PERSONA_NAMING_CONFIG),
+    is_nsfw: false,
+    natural_nudge_interests: [],
+    natural_nudge_talkativeness: 2,
+    natural_nudge_idle_nudges: [],
     ...overrides,
   };
 }
@@ -84,40 +90,13 @@ describe("persona default — name resolution helpers", () => {
       expect(resolvePresetLineageId(makePreset({ preset_lineage_id: 42 }))).toBe(42);
     });
 
-    it("falls back to avatar filename lookup when lineage id is null", () => {
-      const preset = makePreset({ preset_lineage_id: null, preset_avatar_path: "default.png" });
-      expect(resolvePresetLineageId(preset)).toBe(PRESET_LINEAGE_BY_AVATAR["default.png"]);
-    });
-
-    it("avatar path lookup is case-insensitive to directory separators", () => {
-      const preset = makePreset({ preset_lineage_id: null, preset_avatar_path: "avatars/bratty.png" });
-      expect(resolvePresetLineageId(preset)).toBe(PRESET_LINEAGE_BY_AVATAR["bratty.png"]);
-    });
-
-    it("falls back to name-based heuristic when avatar path is unrecognized", () => {
+    it("returns null for a row without a lineage id, whatever its avatar or name", () => {
       const preset = makePreset({
         preset_lineage_id: null,
-        preset_avatar_path: "custom.png",
-        persona_preset_name: "The Gloomy One",
-      });
-      expect(resolvePresetLineageId(preset)).toBe(1770);
-    });
-
-    it("returns null when no lineage can be resolved", () => {
-      const preset = makePreset({
-        preset_lineage_id: null,
-        preset_avatar_path: "",
-        persona_preset_name: "UnknownPersona",
+        preset_avatar_path: "bratty.png",
+        persona_preset_name: "Locke",
       });
       expect(resolvePresetLineageId(preset)).toBeNull();
-    });
-
-    it("all PRESET_LINEAGE_BY_AVATAR keys map to known lineage ids", () => {
-      const knownIds = new Set([4, 716, 1770, 3585, 50]);
-      for (const [filename, lineageId] of Object.entries(PRESET_LINEAGE_BY_AVATAR)) {
-        expect(knownIds.has(lineageId)).toBe(true);
-        expect(filename.endsWith(".png")).toBe(true);
-      }
     });
   });
 
@@ -144,5 +123,23 @@ describe("persona default — name resolution helpers", () => {
         expect(typeof word).toBe("string");
       }
     });
+  });
+});
+
+describe("resolveAlterPersonaName", () => {
+  it("names the alter after a trigger it still answers to when the main owns the default name's trigger", () => {
+    expect(resolveAlterPersonaName("Tomori", ["tomori", "locke"], ["locke"], ["Mirri"])).toBe("Locke");
+  });
+
+  it("keeps the default name when the alter still answers to it", () => {
+    expect(resolveAlterPersonaName("Tomori", ["tomori", "locke"], ["tomori", "locke"], ["Mirri"])).toBe("Tomori");
+  });
+
+  it("skips an answered trigger whose name is taken", () => {
+    expect(resolveAlterPersonaName("Tomori", ["tomori", "locke", "lo"], ["locke", "lo"], ["Locke"])).toBe("Lo");
+  });
+
+  it("falls back to the default name when every trigger is claimed", () => {
+    expect(resolveAlterPersonaName("Tomori", ["tomori", "locke"], [], ["Mirri"])).toBe("Tomori");
   });
 });

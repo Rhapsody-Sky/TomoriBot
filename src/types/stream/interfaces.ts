@@ -1,3 +1,5 @@
+import type { ProviderUsageContext } from "@/utils/provider/providerUsage";
+import type { PersonaDeliveryMode, PersonaDeliveryReceipt } from "@/utils/discord/webhook/personaPost";
 /**
  * Streaming interfaces for modular LLM provider architecture
  *
@@ -28,6 +30,7 @@ import type { TomoriState } from "../db/schema";
 import type { StructuredContextItem } from "../misc/context";
 import type { DeliveredStreamMessage } from "../tool/interfaces";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
+import { recordProviderErrorStat } from "@/utils/provider/providerErrorMetrics";
 
 /**
  * Normalized chunk format that all providers convert their raw chunks to
@@ -44,9 +47,6 @@ export interface ProcessedChunk {
   metadata?: Record<string, unknown>;
 }
 
-/**
- * Provider-specific error with normalized format
- */
 export interface ProviderError {
   type: "api_error" | "rate_limit" | "content_blocked" | "timeout" | "provider_overloaded" | "model_error" | "unknown";
   message: string;
@@ -84,6 +84,10 @@ export interface StreamConfig extends ProviderConfig {
  * Contains all the Discord and application context needed for streaming
  */
 export interface StreamContext {
+  deliveryMode?: PersonaDeliveryMode;
+  deliveryReceipts?: PersonaDeliveryReceipt[];
+  deliveryState?: { unconfirmed: boolean };
+  usageContext?: ProviderUsageContext;
   channel: BaseGuildTextChannel | BaseGuildVoiceChannel | DMChannel | NewsChannel | TextChannel | AnyThreadChannel;
   client: Client;
   initialInteraction?: CommandInteraction;
@@ -115,15 +119,20 @@ export interface StreamContext {
   personaAvatarUrl?: string; // Avatar URL or data URI for current persona
   personaUsername?: string; // Username override for current persona (shown in Discord UI)
   prefixStrippingName?: string; // Name used for prefix stripping (may differ from personaUsername for user impersonation)
+  impersonatedSpeakerLabel?: string; // Naming-aware label the impersonation prompt asks the model to open with; stripped like prefixStrippingName
 
   forcedMentions?: Array<{
     handle: string;
     userId: string;
   }>;
+  /** When set, delivered text may ping only these users: no roles, no everyone, nobody else. */
+  mentionableUserIds?: readonly string[];
 
+  /** The attempt's `{bot}: {text}` prefill: stripped when the model echoes it, never shown. */
   outputPrefill?: string;
-  outputPrefillState?: { sent: boolean };
 
+  holdResponseText?: boolean;
+  pendingResponseLimit?: import("@/types/stream/pendingResponse").PendingResponseLimit;
   suppressTextOutput?: boolean;
 
   // NAI GLM-4.6 prompt continuation: incomplete trailing fragment from previous stream, appended to the
@@ -140,8 +149,12 @@ export interface StreamContext {
 
   messageIdMap?: MessageIdMap;
 
+  /** Internal `users` FK of the turn's triggerer; scopes provider-failure telemetry. */
+  triggererUserId?: number;
+  triggererDiscId?: string;
+
   // Shared sink (reference threaded from StreamingContext) that the orchestrator appends to on
-  // every successful send, so runGenerationTurn can delete a superseded attempt's partial output.
+  // every successful send, so sends from an abandoned timed-out stream still reach the turn.
   deliveredMessageRefs?: DeliveredStreamMessage[];
 }
 
@@ -208,8 +221,6 @@ export interface StreamAdapterInfo {
 }
 
 /**
- * Base class for provider stream adapters.
- *
  * Provider subclasses still own request construction, provider-native parsing,
  * and error normalization. The base class centralizes adapter lifecycle identity
  * and small lifecycle hooks/wrappers used when handing work to StreamOrchestrator.
@@ -227,7 +238,16 @@ export abstract class BaseStreamAdapter implements StreamProvider {
 
   protected onRawChunk(_chunk: RawStreamChunk): void {}
 
-  protected onProviderError(_error: unknown): void {}
+  /**
+   * Fired once per terminal provider failure, before the error chunk is yielded.
+   *
+   * The base implementation records the `provider_error` counter, which is the only aggregate
+   * record of provider failures that exists: `error_logs` is dead by decision, so a subclass that
+   * overrides this must call `super.onProviderError(...)` or that provider goes dark.
+   */
+  protected onProviderError(_error: unknown, providerError: ProviderError, context?: StreamContext): void {
+    recordProviderErrorStat(this.adapterInfo.name, providerError, context);
+  }
 
   getProviderInfo(): {
     name: string;
@@ -260,15 +280,21 @@ export abstract class BaseStreamAdapter implements StreamProvider {
     return chunk;
   }
 
+  /**
+   * @param context - The failing stream's context; omit only where none is in scope. Without it
+   *                  the failure cannot be scoped to a server and goes unrecorded.
+   */
   protected createProviderErrorChunk(
     error: unknown,
+    context?: StreamContext,
     metadata?: Record<string, unknown>,
     providerName = this.adapterInfo.name,
   ): RawStreamChunk {
-    this.onProviderError(error);
+    const providerError = this.handleProviderError(error);
+    this.onProviderError(error, providerError, context);
     return this.createRawChunk(
       {
-        error: this.handleProviderError(error),
+        error: providerError,
       },
       {
         error: true,

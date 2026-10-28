@@ -25,8 +25,10 @@ import {
   type ThinkingConfig,
 } from "@google/genai";
 import type { FunctionCall, ThoughtLogEntry } from "../../types/provider/interfaces";
-import { ContextItemTag, type StructuredContextItem } from "../../types/misc/context";
+import type { StructuredContextItem } from "../../types/misc/context";
 import { log } from "../../utils/misc/logger";
+import { isProviderTimeoutMessage } from "@/utils/provider/providerErrorClassification";
+import { createGoogleApiErrorDescription } from "@/providers/google/googleStreamAdapter";
 import { localizer } from "../../utils/text/localizer";
 import { truncateBeforeGenericSpeakerLine } from "@/utils/text/processors/llmOutputProcessor";
 import {
@@ -35,7 +37,13 @@ import {
 } from "@/utils/discord/renderModifierParser";
 import { collectPersonaNameAliases } from "@/utils/discord/stream/textConfig";
 import { safeDownload } from "@/utils/security/safeDownload";
-import { relocateAssistantMediaContextItems, unseenToolImageNotice } from "@/providers/utils/strictChatCompat";
+import {
+  buildGifToolHint,
+  buildGifUrlPlaceholder,
+  buildInlineGifPlaceholder,
+} from "@/providers/utils/gifContextPlaceholders";
+import { buildGeminiToolMediaParts } from "@/providers/utils/geminiToolMediaParts";
+import { isSystemInstructionContextItem, relocateAssistantMediaContextItems } from "@/providers/utils/strictChatCompat";
 import { buildProviderStopStrings } from "../utils/stopStrings";
 import { BaseStreamAdapter } from "../../types/stream/interfaces";
 import type {
@@ -96,15 +104,6 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
   private static readonly SPEAKER_GUARD_HOLDBACK_CHARS = 32;
   private static readonly STREAM_TEXT_TAIL_CHARS = 4096;
   private static readonly STREAM_TEXT_MIN_DEDUP_CHARS = 8;
-  public static readonly SYSTEM_INSTRUCTION_TAGS: ContextItemTag[] = [
-    ContextItemTag.SYSTEM_HUMANIZER_RULES,
-    ContextItemTag.SYSTEM_PERSONA_PROMPT,
-    ContextItemTag.SYSTEM_PERSONALITY,
-    ContextItemTag.KNOWLEDGE_SERVER_INFO,
-    ContextItemTag.KNOWLEDGE_SERVER_EMOJIS,
-    ContextItemTag.KNOWLEDGE_SERVER_STICKERS,
-    ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
-  ];
   private speakerGuardPendingTail = "";
   private streamedTextTail = "";
   private speakerGuardEnabled = false;
@@ -204,7 +203,7 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
     const botName = context.prefixStrippingName ?? context.personaUsername ?? context.tomoriState.persona_nickname;
     this.speakerGuardAllowedSourceNames = collectRenderModifierSourceNames(
       botName,
-      collectPersonaNameAliases(context.tomoriState, botName),
+      collectPersonaNameAliases(context.tomoriState, botName, context.impersonatedSpeakerLabel),
     );
     const speakerStopPatternEnabled = context.tomoriState.config.llm_stop_speaker_pattern_enabled ?? false;
     this.speakerGuardEnabled = speakerStopPatternEnabled;
@@ -290,46 +289,12 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
           parts: [item.functionResponse as Part],
         });
 
-        const toolMediaParts: Part[] = [];
-
-        if (item.imageMetadata?.imageUrls?.length) {
-          if (context.tomoriState.llm.sees_images) {
-            log.info(`Adding ${item.imageMetadata.imageUrls.length} image(s) to function response for LLM visibility`);
-
-            for (const imageInfo of item.imageMetadata.imageUrls) {
-              try {
-                const optimized = await fetchAndOptimizeImage(imageInfo.url, imageInfo.mimeType || "image/jpeg");
-
-                toolMediaParts.push({
-                  inlineData: {
-                    mimeType: optimized.mimeType,
-                    data: optimized.data,
-                  },
-                });
-
-                log.success(`Successfully added image to function response: ${imageInfo.url}`);
-              } catch (imgErr) {
-                log.warn(`Error processing image for function response: ${imageInfo.url}`, {
-                  error: imgErr instanceof Error ? imgErr.message : String(imgErr),
-                });
-              }
-            }
-          } else {
-            // The tool response already told the model it delivered images, so dropping them
-            // silently invites it to describe pictures it never received.
-            toolMediaParts.push({
-              text: unseenToolImageNotice(item.imageMetadata.imageUrls.length),
-            });
-            log.info("VertexStreamAdapter: Skipping tool images (model does not support images)");
-          }
-        }
-
-        // Surface Discord message IDs for image references
-        if (item.imageMetadata?.messageIds && item.imageMetadata.messageIds.length > 0) {
-          toolMediaParts.push({
-            text: `[System: Images were sent to Discord in message ID(s): ${item.imageMetadata.messageIds.map((id) => context.messageIdMap?.register(id, "media") ?? id).join(", ")}]`,
-          });
-        }
+        const toolMediaParts = await buildGeminiToolMediaParts({
+          adapterName: "VertexStreamAdapter",
+          imageMetadata: item.imageMetadata,
+          seesImages: context.tomoriState.llm.sees_images,
+          messageIdMap: context.messageIdMap,
+        });
 
         if (toolMediaParts.length > 0) {
           finalContents.push({
@@ -348,7 +313,7 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
     log.info(`Generating content with Vertex AI model ${config.model}`);
 
     // Log sanitized request
-    this.logSanitizedRequest(requestConfig, finalContents);
+    if (!context.holdResponseText) this.logSanitizedRequest(requestConfig, finalContents);
 
     try {
       const stream = await genAI.models.generateContentStream({
@@ -431,7 +396,7 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
         }
       }
 
-      yield this.createProviderErrorChunk(error, undefined, this.providerName);
+      yield this.createProviderErrorChunk(error, context, undefined, this.providerName);
     }
   }
 
@@ -939,7 +904,7 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
         ) {
           errorType = "rate_limit";
           retryable = true;
-        } else if (errorMessage.includes("timeout") || errorMessage.includes("DEADLINE_EXCEEDED")) {
+        } else if (isProviderTimeoutMessage(errorMessage) || errorMessage.includes("DEADLINE_EXCEEDED")) {
           errorType = "timeout";
           retryable = true;
         } else if (errorMessage.includes("overloaded") || errorMessage.includes("UNAVAILABLE")) {
@@ -977,65 +942,17 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
   }
 
   createErrorDescription(error: ProviderError, locale: string): string | null {
+    // The configuration message quotes the stored composite key, and the authentication message
+    // carries SDK text, so both use fixed copy.
     if (error.code === "vertex_config_error") {
-      return `Vertex Configuration Error: ${error.userMessage ?? error.message}`;
+      return localizer(locale, "genai.vertex.config_error_message");
     }
 
     if (error.code === "vertex_auth_error") {
-      return `Vertex Authentication Error: ${error.userMessage ?? error.message}`;
+      return localizer(locale, "genai.vertex.auth_error_message");
     }
 
-    let apiMessage = error.userMessage;
-
-    if (!apiMessage) {
-      const errorCode = error.code;
-      let messageKey: string;
-
-      switch (error.type) {
-        case "content_blocked":
-          messageKey = "content_blocked_default_message";
-          break;
-        case "rate_limit":
-          messageKey = "429_default_message";
-          break;
-        case "timeout":
-          messageKey = "504_default_message";
-          break;
-        case "provider_overloaded":
-          messageKey = "503_default_message";
-          break;
-        case "api_error":
-          if (errorCode === "400" && error.message.includes("billing")) {
-            messageKey = "400_billing_default_message";
-          } else {
-            messageKey = `${errorCode}_default_message`;
-          }
-          break;
-        default:
-          messageKey = "unknown_default_message";
-          break;
-      }
-
-      try {
-        apiMessage = localizer(locale, `genai.google.${messageKey}`);
-
-        if (messageKey === "unknown_default_message") {
-          const maxErrorLength = 1000;
-          const apiErrorSnippet =
-            error.message.length > maxErrorLength ? `${error.message.substring(0, maxErrorLength)}...` : error.message;
-          apiMessage += `\n\n**API Response:**\n${apiErrorSnippet}`;
-        }
-      } catch {
-        apiMessage = localizer(locale, "genai.google.unknown_default_message");
-        const maxErrorLength = 1000;
-        const apiErrorSnippet =
-          error.message.length > maxErrorLength ? `${error.message.substring(0, maxErrorLength)}...` : error.message;
-        apiMessage += `\n\n**API Response:**\n${apiErrorSnippet}`;
-      }
-    }
-
-    const errorCode = error.code || "unknown";
-    return `Error Code ${errorCode}: ${apiMessage}`;
+    return createGoogleApiErrorDescription(error, locale);
   }
 
   private async assembleVertexContext(
@@ -1062,12 +979,7 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
           .join("\n");
       }
 
-      if (
-        item.role === "system" ||
-        (item.role === "user" &&
-          item.metadataTag &&
-          VertexStreamAdapter.SYSTEM_INSTRUCTION_TAGS.includes(item.metadataTag))
-      ) {
+      if (isSystemInstructionContextItem(item)) {
         if (itemTextContent) systemInstructionParts.push(itemTextContent);
       } else if (item.role === "user" || item.role === "model") {
         const geminiParts: Part[] = [];
@@ -1087,23 +999,15 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
             try {
               if (part.mimeType === "image/gif") {
                 // GIF handling: same environment-based logic as Google
-                const isProduction = process.env.RUN_ENV === "production";
-                if (isProduction) {
-                  if (part.uri.includes("tenor.com")) {
-                    geminiParts.push({
-                      text: `[System: This message contains a GIF from Tenor: ${part.uri}. GIF processing disabled in production.]`,
-                    });
-                  } else {
-                    geminiParts.push({
-                      text: "[System: This message contains a GIF. GIF processing disabled in production.]",
-                    });
-                  }
+                if (process.env.RUN_ENV === "production") {
+                  geminiParts.push({ text: buildGifUrlPlaceholder(part.uri) });
                 } else {
-                  const mediaMessageId = item.messageId
-                    ? (messageIdMap?.register(item.messageId, "media") ?? item.messageId)
-                    : "unknown";
                   geminiParts.push({
-                    text: `[System: This message (ID: ${mediaMessageId}) contains a GIF. Use process_gif tool with this message ID to process it if needed for context.]`,
+                    text: buildGifToolHint({
+                      messageId: item.messageId,
+                      messageIdMap,
+                      subject: "a GIF",
+                    }),
                   });
                 }
               } else {
@@ -1140,11 +1044,8 @@ export class VertexStreamAdapter extends BaseStreamAdapter {
             };
             if (typeof inlineData === "object" && inlineData.mimeType && inlineData.data) {
               if (inlineData.mimeType === "image/gif") {
-                const isProduction = process.env.RUN_ENV === "production";
-                if (isProduction) {
-                  geminiParts.push({
-                    text: "[System: This context contains inline GIF data. GIF processing disabled in production.]",
-                  });
+                if (process.env.RUN_ENV === "production") {
+                  geminiParts.push({ text: buildInlineGifPlaceholder() });
                 } else {
                   // Dev mode: skip GIF processing to keep code manageable
                   geminiParts.push({

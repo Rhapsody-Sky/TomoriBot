@@ -4,78 +4,52 @@ sidebar:
   order: 3
 ---
 
-TomoriBot can **speak** (text-to-speech) and **listen** (speech-to-text):
+TomoriBot can send voice replies with text-to-speech (TTS) and understand audio messages through
+speech-to-text (STT). Choose speech providers in `/providers` or configure your own Google or
+OpenRouter speech models in `/personal providers`.
 
-- **TTS** lets her reply with native Discord voice messages.
-- **STT** turns user audio attachments into text she can use as conversation context.
+## Text-to-speech
+<!-- anchor: text-to-speech -->
 
-Both work through the same endpoint system. The quickest path is **ElevenLabs** (cloud,
-documented in full below). If you'd rather run voice on your own hardware, use a local engine
-and follow the self-hosting guides.
+Ask a persona to send a voice message or use `/generate voice-message`. Enable voice messages under
+`/config` > `Permissions` and configure the persona's voice under `/config` > `Persona` > `Voice`.
 
-## Text-to-Speech
+There are two TTS types:
 
-### ElevenLabs (cloud, easiest)
+- **Voice design** creates a voice from a written description, such as "a warm, soft-spoken voice."
+- **Voice clone** uses a reference recording to create a voice that resembles the sample.
 
-1. Get an API key from [ElevenLabs](https://elevenlabs.io/app/settings/api-keys).
-2. Run `/speech elevenlabs` and paste the key. This single command:
-   - registers the ElevenLabs **speech** endpoint (and the **transcription** endpoint too),
-   - selects them as active,
-   - can assign a voice to one persona on the spot.
-3. Assign voices to additional personas with `/speech voice-assign`. Browse voices in the
-   [ElevenLabs Voice Library](https://elevenlabs.io/app/voice-library), where you can also
-   clone your own.
+Each type needs a compatible model. Save a description or assign a reference on the persona's Voice
+page, where you can also choose which type to prefer. If the preferred option is unavailable,
+TomoriBot can use the other saved option. Descriptions are included in exported persona cards; voice
+reference assignments are not.
 
-Run `/speech elevenlabs` again anytime to update the saved key.
+:::tip
+Use `voice_design` or `voice_sample` on `/generate voice-message` to try a voice for one message
+without changing the persona's saved voice.
+:::
 
-Notes:
+### Providers and models
 
-- On the **free plan, only premade voices work**. Browse the
-  [premade voice list](https://elevenlabs-sdk.mintlify.app/voices/premade-voices).
-- Characters are counted when she generates and reads voice messages; the free tier has
-  monthly limits — check your ElevenLabs dashboard.
-- Voice replies are gated by `voice_message_enabled` and require the active persona to have a
-  voice assigned.
+Google supports voice design, while OpenRouter offers voice design and cloning models. Configure
+models under `/config` > `Models` > `Switch Models`, or choose personal models under
+`/personal config`. Personal model failures may use the server's model if server fallback is enabled.
+An explicitly selected one-off model does not fall back to another model.
 
-Run `/help speech` for the same walkthrough in Discord.
+ElevenLabs offers cloud voices and transcription. Add its key through `/providers` and assign a
+voice to each persona. Its free plan supports premade voices and has usage limits.
 
-### Local voice-cloning engines (self-hosted)
+For local voice cloning and voice design, see the
+[Text-to-Speech guides](/self-hosting/local-endpoints/text-to-speech/). Local cloning requires a
+reference sample, which you can upload under `/config` > `Models` > `TTS Parameters & Voices`.
 
-On a self-hosted instance you can run a local voice-clone server instead. The general flow is:
-start the wrapper server, register it with `/provider custom-endpoint add`, select it with
-`/model speech`, upload a sample with `/speech voice-add`, then assign it with
-`/speech voice-assign`. Any audio format is accepted (auto-converted to mono WAV); 10–20
-second clips with no background music work best.
+## Speech-to-text
+<!-- anchor: speech-to-text -->
 
-Each engine has its own setup guide:
+A transcription model turns audio attachments into text TomoriBot can use in conversation. Choose it
+separately from TTS under `/config` > `Models` > `Switch Models`. Adding ElevenLabs also registers a
+transcription endpoint. For local options, see the
+[Speech-to-Text guides](/self-hosting/local-endpoints/speech-to-text/).
 
-- [Chatterbox-Turbo](/self-hosting/local-endpoints/text-to-speech/chatterbox/) — fast, English-only, supports
-  bracket delivery tags like `[excited]`.
-- [Qwen3-TTS](/self-hosting/local-endpoints/text-to-speech/qwen3tts/) — multilingual (10 languages), plus a
-  natural-language VoiceDesign mode.
-- [IrodoriTTS](/self-hosting/local-endpoints/text-to-speech/irodoritts/) — Japanese-specialized, reads emoji
-  as emotion cues.
-
-See the [Text-to-Speech](/self-hosting/local-endpoints/text-to-speech/) hub for the full list.
-
-## Speech-to-Text
-
-Transcription endpoints turn user audio attachments into text for background conversation
-context. Whether transcripts are **visibly posted** in chat is controlled separately by
-`/speech transcripts`.
-
-### ElevenLabs (cloud)
-
-Already covered above — `/speech elevenlabs` registers the transcription endpoint alongside
-speech. Use `/model transcription` to pick between transcription endpoints.
-
-### Local engines (self-hosted)
-
-- [WhisperX](/self-hosting/local-endpoints/speech-to-text/whisperx/) — the recommended local path; ~100
-  languages, GPU-accelerated, multiple model sizes.
-- [KoboldCPP](/self-hosting/local-endpoints/speech-to-text/koboldcpp/) — works if your build exposes an
-  OpenAI-compatible transcription endpoint.
-- [whisper.cpp](/self-hosting/local-endpoints/speech-to-text/whispercpp/).
-
-See the [Speech-to-Text](/self-hosting/local-endpoints/speech-to-text/) hub for the full list. Run
-`/help transcription` for the Discord summary.
+You can hide visible transcripts under `/config` > `Behavior` > `Notice Behavior` >
+`Speech Transcripts`. The text still reaches the conversation context.

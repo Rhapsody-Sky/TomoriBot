@@ -3,13 +3,27 @@ title: "セットアップウィザード"
 sidebar:
   label: "セットアップウィザード"
   order: 1
+aiGenerated: false
 ---
 
 :::note
-Docker Composeを使用したいユーザーはこのウィザードをスキップし、コンテナ化されたインストールパスについては[Docker Compose](/ja/self-hosting/docker-compose/)を参照してください。
+Docker Composeを使用したいユーザーはこのウィザードをスキップし、コンテナ化されたインストールパスについては
+[Docker Compose](/ja/self-hosting/docker-compose/)を参照してください。
 :::
 
-`bun run setup` は、ローカルでのBunベースのインストールに推奨されるセルフホストパスです。`.env` を作成し、`CRYPTO_SECRET` を生成し、Discordボットのトークンを尋ね、PostgreSQLを設定し、`bun.lock` に記録された正確な依存関係をインタラクティブにインストールするため、プロンプトに従うだけで済みます。再実行しても安全です。既存の `.env` の値は、再設定を選択しない限り保持されます。
+`bun run setup` は、ローカルでのBunベースのインストールに推奨されるセルフホストパスです。
+`.env` を作成し、`CRYPTO_SECRET` を生成し、Discordボットのトークンを尋ね、PostgreSQLを設定し、
+`bun.lock` に記録された正確な依存関係をインタラクティブにインストールするため、プロンプトに従うだけで済みます。
+再実行しても安全です。既存の `.env` の値は、再設定を選択しない限り保持されます。
+
+ウィザードは対話型ターミナルで実行してください。標準入力がパイプで接続されている場合や、ターミナルが入力に対応していない場合は、デフォルト値を使用することを通知します。デフォルト値のない必須項目ではエラーで停止します。
+
+## コードを取得する
+
+```sh
+git clone https://github.com/Bredrumb/TomoriBot.git
+cd TomoriBot
+```
 
 ## パスの選択
 
@@ -19,28 +33,36 @@ Docker Composeを使用したいユーザーはこのウィザードをスキッ
 bun run setup
 ```
 
-
 | パス | 使用する場合 | 実行内容 |
 |---|---|---|
-| **フルインストール** | 軽量な追加機能を含む推奨のセットアップを行いたい場合。 | 基本インストールを実行後、以下の4つの追加機能を試行します。 |
-| **基本インストール** | 最低限動作するボットのみが必要な場合。 | `.env`、Discordトークン、PostgreSQL、および依存関係を作成・設定します。 |
-
-
+| フルインストール | 軽量な追加機能を含む推奨のセットアップを行いたい場合。 | 基本インストールを実行後、以下の4つの追加機能を試行します。 |
+| 基本インストール | 最低限動作するボットのみが必要な場合。 | `.env`、Discordトークン、PostgreSQL、および依存関係を作成・設定します。 |
 
 ## 用意しておくもの
 
-- `GuildMembers`、`MessageContent`、および `GuildPresences` の特権インテントが有効になっている**Discordボットのトークン**。
-- **データベース。** TomoriBotはすべてをPostgreSQLに保存します。ウィザードが自動で行うため、手動で設定する必要はありません。PostgreSQLがすでにインストールされている場合はそれを使用し、インストールされていない場合は[Docker](https://www.docker.com/)上で実行します。始める前に、どちらか一方がインストールされていることだけを確認してください。
+- [Bun](https://bun.sh/)（ボットおよびウィザード自体の実行に必要です）。
+- `GuildMembers`、`MessageContent`、および `GuildPresences` の特権インテントが有効になっている
+  Discordボットのトークン。
+- データベース。 TomoriBotはすべてをPostgreSQLに保存します。
+  ウィザードが自動で行うため、手動で設定する必要はありません。
+  PostgreSQLがすでにインストールされている場合はそれを使用し、
+  インストールされていない場合は[Docker](https://www.docker.com/)上で実行します。
+  始める前に、どちらか一方がインストールされていることだけを確認してください。
 
 :::caution
-- **バンドルされているDocker版PostgreSQLは、データベースのみをDockerで実行します。** ボット自体、スタートアップバックアップ、`bun run backup`、および `restore-backup` は、引き続きホストのBunとホストのPostgreSQLクライアントツールを通じて実行されます。すべてをDockerで実行したい場合は、代わりに[Docker Compose](/ja/self-hosting/docker-compose/)を使用してください。
+- バンドルされているDocker版PostgreSQLは、データベースのみをDockerで実行します。
+  ボット自体、スタートアップバックアップ、`bun run backup`、および `restore-backup` は、
+  引き続きホストのBunとホストのPostgreSQLクライアントツールを通じて実行されます。
+  すべてをDockerで実行したい場合は、代わりに[Docker Compose](/ja/self-hosting/docker-compose/)を使用してください。
 :::
 
-`psql` が見つからない場合やプロビジョニングに失敗した場合、ウィザードは手動で実行するためのSQLを出力します。いずれにせよ、TomoriBotは初回起動時にスキーマ、シード、移行、`pgcrypto`、およびRAGスキーマを自動的に初期化します。
+`psql` が見つからない場合やプロビジョニングに失敗した場合、ウィザードは手動で実行するためのSQLを出力します。
+いずれにせよ、TomoriBotは初回起動時にスキーマ、シード、移行、`pgcrypto`、およびRAGスキーマを自動的に初期化します。
 
 ## フルインストールの追加機能
 
-フルインストールでは、まず基本インストールが実行され、その後以下の追加機能のインストールが試行されます。いずれかが失敗した場合、ウィザードは手動で完了させるためのコマンドやガイドを出力し、そのまま処理を続行します。
+フルインストールでは、まず基本インストールが実行され、その後以下の追加機能のインストールが試行されます。
+いずれかが失敗した場合、ウィザードは手動で完了させるためのコマンドやガイドを出力し、そのまま処理を続行します。
 
 | 追加機能 | 目的 |
 |---|---|
@@ -48,19 +70,23 @@ bun run setup
 | `pg_cron` | オプションのスケジュールされたクールダウン/リマインダー行のクリーンアップ。 |
 | トークナイザーアセット | モデルを意識したロジットバイアス用のローカルのトークナイザーアセット。 |
 
-これらを手動でインストールする場合は、[オプションの追加機能（手動での「フルインストール」）](/ja/self-hosting/manual-setup/#オプションの追加機能手動でのフルインストール)を参照してください。
+これらを手動でインストールする場合は、
+[マニュアルセットアップの追加機能](/ja/self-hosting/manual-setup/#オプションの追加機能手動でのフルインストール)を参照してください。
 
 ## セットアップ後
 
 ```bash
 bun run dev                          # ボットのみ
-bun run launch --searxng --crawl4ai  # ボットとサイドカー（bun run launch --help を参照）
+bun run launch --searxng --crawl4ai  # ボットとローカルサーバー（bun run launch --help を参照）
 ```
 
-ボットがオンラインになったら、Discordで `/config setup` を実行してAIプロバイダーのキーを追加します。
+ボットがオンラインになったら、Discordで `/setup` を実行します。AIプロバイダーへの接続手順が案内されます。各ステップで求められる内容については[クイックスタート](/introduction/quickstart/)を参照してください。
 
 ## 更新
 
 バックアップ優先のアップデーターコマンドである `bun run update` を使用してください。
 
-これにより、`bun run backup` が実行され、続いて `git pull --rebase --autostash`、そして `bun install --frozen-lockfile` が実行されます。`dist/` から実行する場合は `--build` を、Composeデプロイメントの場合は `--docker` を追加してください。詳細については[メンテナンスとバックアップ](/ja/self-hosting/maintenance/)ページを参照してください。
+これにより、`bun run backup` が実行され、続いて `git pull --rebase --autostash`、
+そして `bun install --frozen-lockfile` が実行されます。
+`dist/` から実行する場合は `--build` を、Composeデプロイメントの場合は `--docker` を追加してください。
+詳細については[メンテナンスとバックアップ](/ja/self-hosting/maintenance/)ページを参照してください。

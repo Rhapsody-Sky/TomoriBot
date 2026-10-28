@@ -1,4 +1,10 @@
 import { z } from "zod";
+import { NOTICE_VERBOSITY_LEVELS, TOOL_NOTICE_DEFINITIONS, TOOL_NOTICE_KEYS } from "@/constants/toolNotices";
+import { RESPONSE_REVIEW_ITEMS } from "@/constants/responseReview";
+import { responseReviewerPromptSchema, responseReviewItemsSchema, utcOffsetSchema } from "@/types/db/schema";
+import { ASSISTANT_PREFILL_MAX_LENGTH } from "@/utils/chat/assistantPrefill";
+import { localizer } from "@/utils/text/localizer";
+import { MAX_MESSAGES_PER_CHANNEL } from "@/utils/cache/shortTermMemoryCache";
 
 export const SETTINGS_SECTION_IDS = [
   "modelBehavior",
@@ -9,6 +15,7 @@ export const SETTINGS_SECTION_IDS = [
   "memberPermissions",
   "notices",
   "memory",
+  "stm",
   "channelScope",
   "autochat",
   "speech",
@@ -79,12 +86,20 @@ const chatSchema = z
     send_message_limit: z.number().int().min(0).max(40).optional(),
     match_limit: z.number().int().min(1).max(10).optional(),
     cascade_limit: z.number().int().min(0).max(10).optional(),
-    timezone_offset: z.number().int().min(-12).max(14).optional(),
+    timezone_offset: utcOffsetSchema.optional(),
     self_debug_enabled: z.boolean().optional(),
     model_randomizer_enabled: z.boolean().optional(),
     system_prompt: nullableText(12_000),
     context_note: nullableText(4_000),
     context_note_depth: z.number().int().min(0).max(100).optional(),
+    response_prefill: nullableText(ASSISTANT_PREFILL_MAX_LENGTH),
+    response_reviewer_prompt: z
+      .preprocess(
+        (value) => (typeof value === "string" && !value.trim() ? null : value),
+        responseReviewerPromptSchema.nullable(),
+      )
+      .optional(),
+    response_review_items: responseReviewItemsSchema.optional(),
   })
   .strict();
 
@@ -114,29 +129,8 @@ const triggersSchema = z
 
 const noticesSchema = z
   .object({
-    tool_notice_hidden_keys: z
-      .array(
-        z.enum([
-          "web_search",
-          "image_search",
-          "video_search",
-          "news_search",
-          "web_fetch",
-          "document_reading",
-          "image_generation",
-          "video_generation",
-          "image_editing",
-          "image_analysis",
-          "gif_processing",
-          "youtube_processing",
-          "mcp_tool_call",
-          "respond_embed",
-          "impersonation_notice",
-          "fallback_model_usage",
-        ]),
-      )
-      .max(16)
-      .optional(),
+    tool_notice_hidden_keys: z.array(z.enum(TOOL_NOTICE_KEYS)).max(TOOL_NOTICE_KEYS.length).optional(),
+    tool_notice_verbosity: z.enum(NOTICE_VERBOSITY_LEVELS).optional(),
   })
   .strict();
 
@@ -153,7 +147,12 @@ const capabilitiesSchema = z
     user_blocking_enabled: z.boolean().optional(),
     time_awareness_enabled: z.boolean().optional(),
     tool_use_enabled: z.boolean().optional(),
-    verbatim_tool_calling_enabled: z.boolean().optional(),
+    response_drafting_enabled: z.boolean().optional(),
+    conditioning_interactions_enabled: z.boolean().optional(),
+    dice_rolling_enabled: z.boolean().optional(),
+    danbooru_enabled: z.boolean().optional(),
+    short_term_memory_enabled: z.boolean().optional(),
+    user_info_updates_enabled: z.boolean().optional(),
   })
   .strict();
 
@@ -173,6 +172,18 @@ const memorySchema = z
   .object({
     memory_tagging_enabled: z.boolean().optional(),
     channel_memory_enabled: z.boolean().optional(),
+  })
+  .strict();
+
+const stmSchema = z
+  .object({
+    refresh_cadence: z.number().int().min(1).max(100).optional(),
+    render_mode: z.enum(["supersede", "crude_summary"]).optional(),
+    crude_message_count: z.number().int().min(1).max(MAX_MESSAGES_PER_CHANNEL).optional(),
+    nudge_injection_depth: z.number().int().min(0).max(20).optional(),
+    content_injection_depth: z.number().int().min(-1).max(20).optional(),
+    tool_description_override: nullableText(4000),
+    update_nudge_override: nullableText(4000),
   })
   .strict();
 
@@ -251,6 +262,7 @@ export const SETTINGS_SECTION_SCHEMAS = {
   memberPermissions: memberPermissionsSchema,
   notices: noticesSchema,
   memory: memorySchema,
+  stm: stmSchema,
   channelScope: channelScopeSchema,
   autochat: autochatSchema,
   speech: speechSchema,
@@ -260,7 +272,14 @@ export const SETTINGS_SECTION_SCHEMAS = {
   nsfw: nsfwSchema,
 } satisfies Record<SettingsSectionId, z.ZodType>;
 
-const SETTINGS_FIELD_HINTS: Record<string, string> = {
+const getSettingsFieldHints = (): Record<string, string> => ({
+  refresh_cadence: localizer("en-US", "general.dashboard.stm_cadence_hint"),
+  render_mode: localizer("en-US", "general.dashboard.stm_render_hint"),
+  crude_message_count: localizer("en-US", "general.dashboard.stm_messages_hint"),
+  nudge_injection_depth: localizer("en-US", "general.dashboard.stm_nudge_hint"),
+  content_injection_depth: localizer("en-US", "general.dashboard.stm_depth_hint"),
+  tool_description_override: localizer("en-US", "general.dashboard.stm_tool_hint"),
+  update_nudge_override: localizer("en-US", "general.dashboard.stm_update_hint"),
   llm_temperature: "Controls response variety. Lower values are steadier; higher values are more creative.",
   thinking_level: "Sets the reasoning effort used by models that support adjustable thinking.",
   hide_respond_embed: "Hides the technical response-details panel shown below Tomori's messages.",
@@ -300,7 +319,16 @@ const SETTINGS_FIELD_HINTS: Record<string, string> = {
   sticker_usage_enabled: "Allows Tomori to send available Discord stickers.",
   user_blocking_enabled: "Allows configured blocking tools to restrict users from interacting with Tomori.",
   time_awareness_enabled: "Adds current date and time information to Tomori's context.",
-  verbatim_tool_calling_enabled: "Allows tool arguments to be passed through with minimal rewriting when supported.",
+  response_drafting_enabled: localizer("en-US", "general.dashboard.response_drafting_hint"),
+  conditioning_interactions_enabled: localizer("en-US", "commands.capabilities.manage.conditioninginteractions_desc"),
+  dice_rolling_enabled: localizer("en-US", "commands.capabilities.manage.dicerolling_desc"),
+  danbooru_enabled: localizer("en-US", "commands.capabilities.manage.danbooru_desc"),
+  short_term_memory_enabled: localizer("en-US", "general.dashboard.short_term_memory_hint"),
+  user_info_updates_enabled: localizer("en-US", "commands.capabilities.manage.userinfo_desc"),
+  response_prefill: localizer("en-US", "general.dashboard.response_prefill_hint"),
+  response_reviewer_prompt: localizer("en-US", "general.dashboard.response_reviewer_hint"),
+  response_review_items: localizer("en-US", "general.dashboard.response_review_items_hint"),
+  tool_notice_verbosity: localizer("en-US", "general.dashboard.notice_verbosity_hint"),
   server_memteaching_enabled: "Lets members teach shared memories scoped to themselves and a persona lineage.",
   attribute_memteaching_enabled: "Lets regular members add or change persona memory attributes.",
   sampledialogue_memteaching_enabled: "Lets regular members teach example dialogue for persona behavior.",
@@ -338,7 +366,7 @@ const SETTINGS_FIELD_HINTS: Record<string, string> = {
   uncensor_injection_enabled: "Adds an optional prompt workaround for overly strict provider filters.",
   uncensor_unicode_space_enabled: "Uses Unicode spacing to reduce false-positive text filtering.",
   uncensor_sanitize_enabled: "Cleans provider filter artifacts from output before it is sent.",
-};
+});
 
 const toggle = (key: string, label: string, hint?: string): SettingsFieldDefinition => ({
   key,
@@ -355,7 +383,40 @@ const number = (
   options: Pick<SettingsFieldDefinition, "step" | "nullable" | "hint"> = {},
 ): SettingsFieldDefinition => ({ key, label, type: "number", min, max, ...options });
 
-const SETTINGS_CATALOG_SOURCE: SettingsSectionDefinition[] = [
+const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
+  {
+    id: "stm",
+    eyebrow: localizer("en-US", "general.dashboard.memory"),
+    title: localizer("en-US", "general.dashboard.stm_title"),
+    description: localizer("en-US", "general.dashboard.stm_description"),
+    fields: [
+      number("refresh_cadence", localizer("en-US", "general.dashboard.stm_cadence"), 1, 100),
+      {
+        key: "render_mode",
+        label: localizer("en-US", "general.dashboard.stm_render"),
+        type: "select",
+        options: [
+          { value: "crude_summary", label: localizer("en-US", "general.dashboard.stm_combined") },
+          { value: "supersede", label: localizer("en-US", "general.dashboard.stm_supersede") },
+        ],
+      },
+      number("crude_message_count", localizer("en-US", "general.dashboard.stm_messages"), 1, MAX_MESSAGES_PER_CHANNEL),
+      number("nudge_injection_depth", localizer("en-US", "general.dashboard.stm_nudge"), 0, 20),
+      number("content_injection_depth", localizer("en-US", "general.dashboard.stm_depth"), -1, 20),
+      {
+        key: "tool_description_override",
+        label: localizer("en-US", "general.dashboard.stm_tool"),
+        type: "textarea",
+        nullable: true,
+      },
+      {
+        key: "update_nudge_override",
+        label: localizer("en-US", "general.dashboard.stm_update"),
+        type: "textarea",
+        nullable: true,
+      },
+    ],
+  },
   {
     id: "modelBehavior",
     eyebrow: "Models",
@@ -400,12 +461,30 @@ const SETTINGS_CATALOG_SOURCE: SettingsSectionDefinition[] = [
       number("send_message_limit", "Reply message limit", 0, 40),
       number("match_limit", "Persona match limit", 1, 10),
       number("cascade_limit", "Cascade limit", 0, 10),
-      number("timezone_offset", "Timezone offset", -12, 14),
+      number("timezone_offset", "Timezone offset", -12, 14, { step: 0.25 }),
       toggle("self_debug_enabled", "Self-debug"),
       toggle("model_randomizer_enabled", "Model randomizer"),
       { key: "system_prompt", label: "System prompt", type: "textarea", nullable: true },
       { key: "context_note", label: "Context note", type: "textarea", nullable: true },
       number("context_note_depth", "Context note depth", 0, 100),
+      {
+        key: "response_prefill",
+        label: localizer("en-US", "general.dashboard.response_prefill"),
+        type: "textarea",
+        nullable: true,
+      },
+      {
+        key: "response_reviewer_prompt",
+        label: localizer("en-US", "general.dashboard.response_reviewer"),
+        type: "textarea",
+        nullable: true,
+      },
+      {
+        key: "response_review_items",
+        label: localizer("en-US", "general.dashboard.response_review_items"),
+        type: "multiselect",
+        options: RESPONSE_REVIEW_ITEMS.map((item) => ({ value: item.value, label: localizer("en-US", item.labelKey) })),
+      },
     ],
   },
   {
@@ -467,7 +546,15 @@ const SETTINGS_CATALOG_SOURCE: SettingsSectionDefinition[] = [
       toggle("sticker_usage_enabled", "Sticker use"),
       toggle("user_blocking_enabled", "User blocking"),
       toggle("time_awareness_enabled", "Time awareness"),
-      toggle("verbatim_tool_calling_enabled", "Verbatim tool calling"),
+      toggle("response_drafting_enabled", localizer("en-US", "general.dashboard.response_drafting")),
+      toggle(
+        "conditioning_interactions_enabled",
+        localizer("en-US", "commands.capabilities.manage.conditioninginteractions_option"),
+      ),
+      toggle("dice_rolling_enabled", localizer("en-US", "commands.capabilities.manage.dicerolling_option")),
+      toggle("danbooru_enabled", localizer("en-US", "commands.capabilities.manage.danbooru_option")),
+      toggle("short_term_memory_enabled", localizer("en-US", "general.dashboard.short_term_memory")),
+      toggle("user_info_updates_enabled", localizer("en-US", "commands.capabilities.manage.userinfo_option")),
     ],
   },
   {
@@ -495,24 +582,19 @@ const SETTINGS_CATALOG_SOURCE: SettingsSectionDefinition[] = [
         key: "tool_notice_hidden_keys",
         label: "Hidden notice types",
         type: "multiselect",
-        options: [
-          { value: "web_search", label: "Web search" },
-          { value: "image_search", label: "Image search" },
-          { value: "video_search", label: "Video search" },
-          { value: "news_search", label: "News search" },
-          { value: "web_fetch", label: "Web fetch" },
-          { value: "document_reading", label: "Document reading" },
-          { value: "image_generation", label: "Image generation" },
-          { value: "video_generation", label: "Video generation" },
-          { value: "image_editing", label: "Image editing" },
-          { value: "image_analysis", label: "Image analysis" },
-          { value: "gif_processing", label: "GIF processing" },
-          { value: "youtube_processing", label: "YouTube processing" },
-          { value: "mcp_tool_call", label: "MCP tool call" },
-          { value: "respond_embed", label: "Response details" },
-          { value: "impersonation_notice", label: "Impersonation notice" },
-          { value: "fallback_model_usage", label: "Fallback model use" },
-        ],
+        options: TOOL_NOTICE_DEFINITIONS.map((notice) => ({
+          value: notice.key,
+          label: localizer("en-US", notice.labelKey),
+        })),
+      },
+      {
+        key: "tool_notice_verbosity",
+        label: localizer("en-US", "general.dashboard.notice_verbosity"),
+        type: "select",
+        options: NOTICE_VERBOSITY_LEVELS.map((value) => ({
+          value,
+          label: localizer("en-US", `general.dashboard.notice_${value}`),
+        })),
       },
     ],
   },
@@ -609,13 +691,13 @@ const SETTINGS_CATALOG_SOURCE: SettingsSectionDefinition[] = [
   },
 ];
 
-export const SETTINGS_CATALOG: SettingsSectionDefinition[] = SETTINGS_CATALOG_SOURCE.map((section) => ({
-  ...section,
-  fields: section.fields.map((field) => ({
-    ...field,
-    hint: field.hint ?? SETTINGS_FIELD_HINTS[field.key],
-  })),
-}));
+export function getSettingsCatalog(): SettingsSectionDefinition[] {
+  const hints = getSettingsFieldHints();
+  return getSettingsCatalogSource().map((section) => ({
+    ...section,
+    fields: section.fields.map((field) => ({ ...field, hint: field.hint ?? hints[field.key] })),
+  }));
+}
 
 export function isSettingsSectionId(value: string): value is SettingsSectionId {
   return (SETTINGS_SECTION_IDS as readonly string[]).includes(value);
@@ -631,7 +713,7 @@ export function serializeSettingsValues(
   config: Record<string, unknown>,
 ): Record<SettingsSectionId, Record<string, unknown>> {
   return Object.fromEntries(
-    SETTINGS_CATALOG.map((section) => [
+    getSettingsCatalog().map((section) => [
       section.id,
       Object.fromEntries(section.fields.map((field) => [field.key, config[field.key] ?? null])),
     ]),

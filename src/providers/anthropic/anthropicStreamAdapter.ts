@@ -13,8 +13,12 @@
  */
 
 import type { FunctionCall, FunctionResponseImageMetadata, ThoughtLogEntry } from "../../types/provider/interfaces";
-import { ContextItemTag, type StructuredContextItem } from "../../types/misc/context";
+import type { StructuredContextItem } from "../../types/misc/context";
 import { log } from "../../utils/misc/logger";
+import {
+  formatProviderErrorCodeForDisplay,
+  isProviderTimeoutMessage,
+} from "@/utils/provider/providerErrorClassification";
 import { localizer } from "../../utils/text/localizer";
 import { fetchAndOptimizeImage } from "../../utils/image/imageProcessor";
 import { isParamDisabled, selectAnthropicSamplingParams } from "@/utils/provider/samplingControl";
@@ -23,12 +27,14 @@ import {
   assistantMediaRelocationNotice,
   CONVERSATION_START_USER_TEXT,
   ensureLeadingUserTurn,
+  isSystemInstructionContextItem,
   mergeConsecutiveSameRole,
   type NormalizableMessage,
   providerRequiresAlternation,
   relocateAssistantMediaContextItems,
 } from "../utils/strictChatCompat";
 import { buildProviderStopStrings } from "../utils/stopStrings";
+import { parseAccumulatedToolArguments } from "../utils/toolCallArguments";
 import { BaseStreamAdapter } from "../../types/stream/interfaces";
 import type {
   ProcessedChunk,
@@ -90,9 +96,6 @@ type AnthropicContentBlock =
   | AnthropicToolResultBlock
   | AnthropicThinkingBlock;
 
-/**
- * Anthropic message format
- */
 interface AnthropicMessage {
   role: "user" | "assistant";
   content: string | AnthropicContentBlock[];
@@ -107,9 +110,6 @@ interface AccumulatedToolCall {
   argumentsJson: string;
 }
 
-/**
- * SSE event types from Anthropic's streaming API
- */
 type AnthropicSseEventType =
   | "message_start"
   | "content_block_start"
@@ -131,16 +131,6 @@ interface ParsedSseEvent {
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION = "2023-06-01";
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
-// Tags that should be extracted to the top-level system parameter
-const SYSTEM_INSTRUCTION_TAGS: ContextItemTag[] = [
-  ContextItemTag.SYSTEM_HUMANIZER_RULES,
-  ContextItemTag.SYSTEM_PERSONA_PROMPT,
-  ContextItemTag.SYSTEM_PERSONALITY,
-  ContextItemTag.KNOWLEDGE_SERVER_INFO,
-  ContextItemTag.KNOWLEDGE_SERVER_EMOJIS,
-  ContextItemTag.KNOWLEDGE_SERVER_STICKERS,
-  ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
-];
 
 export class AnthropicStreamAdapter extends BaseStreamAdapter {
   private toolCallAccumulator: Map<number, AccumulatedToolCall> = new Map();
@@ -171,10 +161,9 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
 
     const anthropicConfig = config as AnthropicStreamConfig;
 
-    // Assemble context into Anthropic message format.
-    //    Strict role alternation is resolved from the active llms column (D4 column-is-truth);
+    // Strict role alternation is resolved from the active llms column (D4 column-is-truth);
     //    providerRequiresAlternation("anthropic") is the request-time safety net that keeps it
-    //    ON even if a row were mis-seeded.
+    //    ON even if a row were mis-seeded, so a mis-seeded row can never emit an invalid body.
     const enforceAlternation =
       providerRequiresAlternation("anthropic") || (context.tomoriState.llm?.strict_role_alternation ?? false);
     const { systemPrompt, messages } = await this.assembleAnthropicContext(
@@ -256,19 +245,9 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
       log.info(`AnthropicStreamAdapter: Added stop sequences`);
     }
 
-    if (context.outputPrefill?.trim()) {
-      // Anthropic supports assistant prefill natively by adding an assistant message
-      const prefill = context.outputPrefill.trim();
-      messages.push({
-        role: "assistant",
-        content: prefill,
-      });
-      log.info(`AnthropicStreamAdapter: Added prefill assistant message (${prefill.length} chars)`);
-    }
-
     log.info(`AnthropicStreamAdapter: Starting stream for model ${config.model}, max_tokens ${requestBody.max_tokens}`);
 
-    this.logSanitizedRequest(requestBody);
+    if (!context.holdResponseText) this.logSanitizedRequest(requestBody);
 
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -292,11 +271,11 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
         errorData = { message: errorText };
       }
 
-      log.error(`AnthropicStreamAdapter: HTTP ${response.status} error: ${errorText}`);
+      log.warn(`AnthropicStreamAdapter: HTTP ${response.status} error: ${errorText}`);
 
       const anthropicError = new Error(JSON.stringify({ error: errorData }));
       Object.assign(anthropicError, { statusCode: response.status });
-      yield this.createProviderErrorChunk(anthropicError);
+      yield this.createProviderErrorChunk(anthropicError, context);
       return;
     }
 
@@ -308,11 +287,13 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
     const decoder = new TextDecoder();
     let buffer = "";
     let pendingEventType: string | null = null;
+    let completed = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
+          completed = true;
           break;
         }
 
@@ -376,7 +357,11 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
         }
       }
     } finally {
-      reader.releaseLock();
+      // `releaseLock` only detaches the reader: the body stays open and keeps its buffers and
+      // connection. A consumer that stops iterating this generator early would otherwise leak them.
+      if (!completed) {
+        await reader.cancel().catch(() => undefined);
+      }
     }
   }
 
@@ -485,19 +470,19 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
         const accumulated = this.toolCallAccumulator.get(blockIdx);
 
         if (accumulated?.name) {
-          let parsedArgs: Record<string, unknown> = {};
-          try {
-            if (accumulated.argumentsJson) {
-              parsedArgs = JSON.parse(accumulated.argumentsJson);
-            }
-          } catch (parseErr) {
-            log.warn(`AnthropicStreamAdapter: Failed to parse tool arguments for ${accumulated.name}: ${parseErr}`);
-          }
+          const { args: parsedArgs, truncated: argumentsTruncated } = parseAccumulatedToolArguments({
+            adapterName: "AnthropicStreamAdapter",
+            toolName: accumulated.name,
+            rawArguments: accumulated.argumentsJson,
+          });
 
           const functionCall: FunctionCall = {
             name: accumulated.name,
             args: parsedArgs,
           };
+          if (argumentsTruncated) {
+            functionCall.argumentsTruncated = true;
+          }
 
           log.info(
             `AnthropicStreamAdapter: Tool call finalized: ${accumulated.name} (id: ${accumulated.id}) args: ${JSON.stringify(parsedArgs)}`,
@@ -565,7 +550,7 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
         const errorData = data as { error?: { type?: string; message?: string } };
         const error = errorData.error;
 
-        log.error(`AnthropicStreamAdapter: Stream error: ${error?.type} - ${error?.message}`);
+        log.warn(`AnthropicStreamAdapter: Stream error: ${error?.type} - ${error?.message}`);
 
         return {
           type: "error",
@@ -658,7 +643,7 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
         } else if (statusCode === 503) {
           providerErrorType = "provider_overloaded";
           retryable = true;
-        } else if (statusCode === 504 || statusCode === 408) {
+        } else if (statusCode === 504 || statusCode === 408 || isProviderTimeoutMessage(errorMessage)) {
           providerErrorType = "timeout";
           retryable = true;
         }
@@ -679,34 +664,22 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
    * Create provider-specific error description for display in embeds
    */
   createErrorDescription(error: ProviderError, locale: string): string | null {
-    const errorCode = error.code;
-    let message = error.userMessage;
+    const errorCode = formatProviderErrorCodeForDisplay(error.code);
     const isTemperatureTopPConflict =
-      errorCode === "invalid_request_error" &&
+      error.code === "invalid_request_error" &&
       typeof error.userMessage === "string" &&
       error.userMessage.includes("`temperature` and `top_p` cannot both be specified");
 
+    let message: string;
     if (isTemperatureTopPConflict) {
       message = localizer(locale, "genai.anthropic.temperature_top_p_conflict_message");
+    } else {
+      const messageKey = `genai.anthropic.${errorCode}_default_message`;
+      message = localizer(locale, messageKey);
+      if (message === messageKey) message = localizer(locale, "genai.anthropic.unknown_default_message");
     }
 
-    if (!message) {
-      const messageKey = errorCode ? `genai.anthropic.${errorCode}_default_message` : null;
-
-      if (messageKey) {
-        message = localizer(locale, messageKey);
-      }
-
-      if (!message || message === messageKey) {
-        message = localizer(locale, "genai.anthropic.unknown_default_message");
-      }
-    }
-
-    if (errorCode) {
-      return `Error Code ${errorCode}: ${message}`;
-    }
-
-    return message || null;
+    return error.code ? `Error Code ${errorCode}: ${message}` : message;
   }
 
   /**
@@ -739,10 +712,7 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
       }
 
       // Check if this should go to system prompt (top-level parameter)
-      if (
-        item.role === "system" ||
-        (item.role === "user" && item.metadataTag && SYSTEM_INSTRUCTION_TAGS.includes(item.metadataTag))
-      ) {
+      if (isSystemInstructionContextItem(item)) {
         if (itemTextContent) {
           systemParts.push(itemTextContent);
         }
@@ -944,10 +914,10 @@ export class AnthropicStreamAdapter extends BaseStreamAdapter {
       }
     }
 
-    // Enforce strict user/assistant alternation by merging consecutive same-role messages and
-    //    prepending a leading user turn when needed. Delegated to the shared strict-chat helpers
-    //    so behavior is identical to the previous private implementation. Gated by the resolved
-    //    flag (always ON for anthropic via the safety net, so this is byte-identical).
+    // Merging consecutive same-role messages and prepending a leading user turn is delegated
+    //    to the shared strict-chat helpers, so a fix there reaches every adapter that needs
+    //    it. The resolved flag gates the merge and is always ON for anthropic via the safety
+    //    net, so this stays byte-identical to the inline implementation it replaced.
     const mergedMessages = enforceAlternation ? this.enforceStrictAlternation(messages) : messages;
 
     log.info(`AnthropicStreamAdapter: Assembled ${mergedMessages.length} messages (after alternation merge)`);

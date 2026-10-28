@@ -31,6 +31,7 @@ type ImageGenerationStyle = "chat-completion" | "nai-pipeline" | "none";
 type VideoGenerationStyle = "chat-completion" | "none";
 
 interface ProviderFeatureSupport {
+  decisions: boolean;
   imageGeneration: ImageGenerationStyle;
   videoGeneration: VideoGenerationStyle;
   embeddings: boolean;
@@ -65,6 +66,9 @@ export type StreamStopReason =
   | "speaker_guard"
   | "send_message_limit"
   | "flush_limit"
+  | "channel_deleted"
+  | "missing_access"
+  | "pending_response_limit"
   | "unknown";
 
 type ThoughtLogKind = "summary" | "raw";
@@ -86,9 +90,6 @@ export interface ThoughtLogPayload {
   servingProvider?: string;
 }
 
-/**
- * Generic stream response result
- */
 export interface StreamResult {
   status:
     | "completed"
@@ -99,7 +100,10 @@ export interface StreamResult {
     | "empty_response"
     | "follow_up_interrupt";
   data?: unknown | Error; // Function call data or error details
+  pendingResponse?: import("@/types/stream/pendingResponse").PendingStreamResponse;
   accumulatedText?: string; // Text sent to Discord (for short-term memory storage)
+  /** Discord ID of the first message this segment delivered. */
+  firstMessageId?: string;
   /** Extracted <details> block body text (with <summary> stripped), for routing to STM. */
   detailsContent?: string;
   stopReason?: StreamStopReason; // Specific stop source for debugging/logging
@@ -168,6 +172,12 @@ export interface FunctionCall {
   name: string;
   args?: Record<string, unknown>;
   /**
+   * True when the provider's argument payload was truncated and the arguments here were
+   * recovered from an incomplete stream. They hold only the keys that arrived whole, so a
+   * dispatcher must not treat them as the call the model intended to make.
+   */
+  argumentsTruncated?: boolean;
+  /**
    * Optional thought signature for providers that require it (e.g., Gemini).
    * Encoded as base64 when present.
    */
@@ -233,7 +243,7 @@ export interface LLMProvider {
    * Get available tools/functions based on Tomori's configuration
    * @param tomoriState - The current Tomori state with configuration
    */
-  getTools(tomoriState: TomoriState): Promise<Array<Record<string, unknown>>>;
+  getTools(tomoriState: TomoriState, streamingContext?: StreamingContext): Promise<Array<Record<string, unknown>>>;
 
   /**
    * Stream LLM response directly to a Discord channel
@@ -295,7 +305,10 @@ export abstract class BaseLLMProvider implements LLMProvider {
   abstract getInfo(): ProviderInfo;
   abstract validateApiKey(apiKey: string): Promise<ApiKeyValidationResult>;
   abstract formatErrorDescription(error: ProviderError, locale: string): string | null;
-  abstract getTools(tomoriState: TomoriState): Promise<Array<Record<string, unknown>>>;
+  abstract getTools(
+    tomoriState: TomoriState,
+    streamingContext?: StreamingContext,
+  ): Promise<Array<Record<string, unknown>>>;
   abstract streamToDiscord(
     channel: BaseGuildTextChannel | BaseGuildVoiceChannel | DMChannel | AnyThreadChannel,
     client: Client,

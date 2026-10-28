@@ -6,6 +6,8 @@ import type {
 import { log } from "@/utils/misc/logger";
 import { pollForCompletion } from "@/utils/async/pollForCompletion";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { PROVIDER_VIDEO_DOWNLOAD_MAX_MB } from "@/providers/utils/providerVideoDownload";
+import { readProviderErrorBody, redactProviderDetail } from "@/utils/provider/providerErrorMetrics";
 
 /** Z.ai video generation API endpoint */
 const ZAI_VIDEO_GENERATIONS_URL = "https://api.z.ai/api/paas/v4/videos/generations";
@@ -18,11 +20,6 @@ const POLL_INTERVAL_MS = 10_000;
 
 /** Maximum poll attempts before timeout (~5 minutes at 10s intervals) */
 const MAX_POLL_ATTEMPTS = 30;
-
-const PROVIDER_VIDEO_DOWNLOAD_MAX_MB = Math.max(
-  1,
-  Number.parseInt(process.env.PROVIDER_VIDEO_DOWNLOAD_MAX_MB ?? "25", 10) || 25,
-);
 
 function selectClosestSupportedDuration(
   requestedDuration: number | undefined,
@@ -169,12 +166,16 @@ export async function generateZaiNativeVideo(
   });
 
   if (!response.ok) {
-    const errorBody = await response.text();
-    log.error(
-      `Z.ai video generation request failed (model: ${request.model}, status: ${response.status})`,
-      new Error(errorBody),
+    const errorBody = await readProviderErrorBody(response, request.apiKey);
+    throw Object.assign(
+      new Error(
+        redactProviderDetail(
+          `Z.ai video generation failed (model: ${request.model}, HTTP ${response.status} ${response.statusText}): ${errorBody}`,
+          request.apiKey,
+        ),
+      ),
+      { status: response.status },
     );
-    throw new Error(`Z.ai video generation failed: ${response.status} ${response.statusText}`);
   }
 
   const submitResult = (await response.json()) as ZaiVideoResponse;
@@ -215,6 +216,7 @@ export async function generateZaiNativeVideo(
     intervalMs: POLL_INTERVAL_MS,
     maxAttempts: MAX_POLL_ATTEMPTS,
     logLabel: "ZaiVideoGeneration",
+    abortSignal: request.abortSignal,
   });
 
   const videoUrl = completedResult.video_result?.[0]?.url;

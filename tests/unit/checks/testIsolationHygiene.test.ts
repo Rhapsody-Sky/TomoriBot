@@ -34,7 +34,7 @@ import {
  */
 const SCAN_EXEMPT_DIRECTORY = "tests/unit/checks/";
 
-/** Every discovered test file, normalized to forward slashes for stable matching. */
+/** Normalized to forward slashes for stable matching. */
 async function discoverTestFiles(): Promise<string[]> {
   const glob = new Bun.Glob("**/*.test.ts");
   const files: string[] = [];
@@ -51,6 +51,12 @@ async function readScannableFiles(): Promise<Array<[string, string]>> {
 }
 
 describe("test isolation hygiene", () => {
+  it("keeps database credentials out of unit processes", () => {
+    for (const name of ["DATABASE_URL", "POSTGRES_URL", "POSTGRES_PASSWORD", "TEST_DB_READY"]) {
+      expect(process.env[name] === undefined, name).toBe(true);
+    }
+  });
+
   it("keeps database-touching tests out of the concurrently-running unit lanes", async () => {
     const offenders = (await readScannableFiles())
       .filter(([file]) => file.startsWith("tests/unit/"))
@@ -90,6 +96,11 @@ describe("testIsolation detectors", () => {
     expect(usesModuleMocks("const spy = spyOn(obj, 'method');")).toBe(false);
   });
 
+  it("ignores module-mock markers in comments", () => {
+    expect(usesModuleMocks(`/** ${MOCK_CALL} */\nconst value = 1;`)).toBe(false);
+    expect(usesModuleMocks(`// ${SCOPED_MOCK_CALL}\nconst value = 1;`)).toBe(false);
+  });
+
   it("detects reachability of the fixture database", () => {
     expect(reachesTestDatabase(DB_IMPORT)).toBe(true);
     expect(reachesTestDatabase(`import { resolveTls } from "@/utils/db/client"`)).toBe(false);
@@ -127,6 +138,38 @@ describe("testIsolation detectors", () => {
       it("leaks", () => { globalThis.fetch = stub; });
     `;
     expect(findUnrestoredMutations(source)).toEqual(["globalThis.fetch"]);
+  });
+
+  it("flags a bracket-form env write with no restore", () => {
+    expect(findUnrestoredMutations(`it("leaks", () => { process.env[RUN_ENV_NAME] = "production"; });`)).toEqual([
+      "process.env[RUN_ENV_NAME]",
+    ]);
+    expect(findProcessWideMutations(`process.env["RUN_ENV"] = "production";`)).toEqual(["process.env.RUN_ENV"]);
+  });
+
+  it("flags env deletes and Object.assign onto process.env with no restore", () => {
+    expect(findUnrestoredMutations(`it("leaks", () => { delete process.env.RUN_ENV; });`)).toEqual([
+      "process.env.RUN_ENV",
+    ]);
+    expect(findUnrestoredMutations(`it("leaks", () => { delete process.env[name]; });`)).toEqual(["process.env[name]"]);
+    expect(findUnrestoredMutations(`it("leaks", () => { Object.assign(process.env, secrets); });`)).toEqual([
+      "Object.assign(process.env",
+    ]);
+  });
+
+  it("treats a full env sandbox as a restore for every env mutation but nothing else", () => {
+    const source = `useFullEnvSandbox();\nObject.assign(process.env, secrets);\ndelete process.env.RUN_ENV;\nglobalThis.fetch = stub;`;
+    expect(findUnrestoredMutations(source)).toEqual(["globalThis.fetch"]);
+  });
+
+  it("treats an env sandbox as a restore only for the names it lists", () => {
+    const sandbox = `useEnvSandbox(["RUN_ENV"]);\n`;
+    expect(findUnrestoredMutations(`${sandbox}process.env.RUN_ENV = "production";`)).toEqual([]);
+    expect(findUnrestoredMutations(`${sandbox}process.env[RUN_ENV_NAME] = "production";`)).toEqual([]);
+    expect(findUnrestoredMutations(`${sandbox}process.env.LOG_LEVEL = "debug";`)).toEqual(["process.env.LOG_LEVEL"]);
+    expect(findUnrestoredMutations(`// useEnvSandbox(["LOG_LEVEL"])\nprocess.env.LOG_LEVEL = "debug";`)).toEqual([
+      "process.env.LOG_LEVEL",
+    ]);
   });
 
   it("exempts files that already run in their own process", () => {

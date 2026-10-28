@@ -21,6 +21,7 @@ import type {
   ServerSpeechConfigRow,
   ServerTriggerBehaviorConfigRow,
   ServerMemoryRow,
+  ServerStmConfigRow,
   UserSavedProviderConfigRow,
   UserRow,
 } from "@/types/db/schema";
@@ -37,18 +38,17 @@ import {
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { invalidateUserCache } from "@/utils/cache/userCache";
 import { loadStoredPersonaAvatarBuffer } from "@/utils/storage/avatarStorage";
-import {
-  registerCustomEndpoint,
-  removeCustomEndpointRegistration,
-  validateCustomEndpointReachability,
-} from "@/utils/provider/customEndpointService";
-import { isCustomProvider, prettifyModelCodename } from "@/utils/provider/customProviderUtils";
+import { registerCustomEndpoint, validateCustomEndpointReachability } from "@/utils/provider/customEndpointService";
+import { isCustomProvider } from "@/utils/provider/customProviderUtils";
+import { providerPanelOperations, removeScopedRegistration } from "@/utils/provider/providerPanelOperations";
+import { DashboardServiceError } from "./errors";
+import { shortTermMemoryRepository } from "@/utils/db/repositories/ShortTermMemoryRepository";
+import { serverStmConfigSchema } from "@/types/db/schema";
 import {
   type OpenRouterModelCapability,
   type RegisteredOpenRouterModelEntry,
-  loadRegisteredOpenRouterModelsForScope,
+  loadRegisteredOpenRouterEntriesForCapability,
   registerOpenRouterModelForScope,
-  removeOpenRouterModelForScope,
 } from "@/utils/provider/openrouterModelRegistry";
 import { ProviderFactory } from "@/utils/provider/providerFactory";
 import { getAllProviderChoices, getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
@@ -61,7 +61,11 @@ import {
   buildSavedProviderConfigFromExistingOrDefaults,
   buildUserSavedProviderConfigFromExistingOrDefaults,
 } from "@/utils/provider/savedProviderConfig";
-import { activateServerTextModelFromSavedConfig } from "@/utils/provider/providerActivation";
+import {
+  configModelOperations,
+  loadConfigModelChoices,
+  loadConfigModelProviders,
+} from "@/utils/discord/interactions/configModelOperations";
 import { encryptApiKey } from "@/utils/security/crypto";
 import type { SettingsSectionId } from "./settingsCatalog";
 import type { DashboardGuildSnapshot, DashboardPersona } from "./types";
@@ -89,7 +93,6 @@ export interface DashboardCustomEndpointInput {
   capability: CustomEndpointCapability;
   apiStyle: CustomEndpointApiStyle;
   endpointUrl: string;
-  displayName: string;
   modelName: string | null;
   authToken: string | null;
   numCtx: number | null;
@@ -188,11 +191,25 @@ export class TomoriDashboardCore {
   }
 
   async loadServerOpenRouterModels(serverId: number): Promise<RegisteredOpenRouterModelEntry[]> {
-    return loadRegisteredOpenRouterModelsForScope({ kind: "server", ownerId: serverId });
+    const capabilities: OpenRouterModelCapability[] = ["text", "embedding", "image", "video", "decision"];
+    return (
+      await Promise.all(
+        capabilities.map((capability) =>
+          loadRegisteredOpenRouterEntriesForCapability({ kind: "server", ownerId: serverId }, capability),
+        ),
+      )
+    ).flat();
   }
 
   async loadPersonalOpenRouterModels(userId: number): Promise<RegisteredOpenRouterModelEntry[]> {
-    return loadRegisteredOpenRouterModelsForScope({ kind: "personal", ownerId: userId });
+    const capabilities: OpenRouterModelCapability[] = ["text", "embedding", "image", "video", "decision"];
+    return (
+      await Promise.all(
+        capabilities.map((capability) =>
+          loadRegisteredOpenRouterEntriesForCapability({ kind: "personal", ownerId: userId }, capability),
+        ),
+      )
+    ).flat();
   }
 
   async saveServerProviderCredential(
@@ -298,28 +315,33 @@ export class TomoriDashboardCore {
 
   async removeDashboardCustomEndpoint(
     scope: DashboardProviderScope,
-    endpoint: Pick<CustomEndpointRow, "custom_endpoint_id" | "label" | "capability" | "model_ref_id">,
+    endpoint: Pick<CustomEndpointRow, "custom_endpoint_id" | "connection_id">,
   ): Promise<boolean> {
     if (!endpoint.custom_endpoint_id) return false;
-    const removed = await removeCustomEndpointRegistration({
-      scope:
-        scope.kind === "server"
-          ? {
-              kind: "server",
-              ownerId: scope.snapshot.serverId,
-              baseConfig: scope.snapshot.config,
-              serverDiscId: scope.snapshot.serverDiscordId,
-            }
-          : {
-              kind: "personal",
-              ownerId: scope.userId,
-              baseConfig: scope.snapshot.config,
-            },
-      customEndpointId: endpoint.custom_endpoint_id,
-      label: endpoint.label,
-      capability: endpoint.capability,
-      modelRefId: endpoint.model_ref_id ?? null,
+    const panel =
+      scope.kind === "server"
+        ? await providerPanelOperations.loadServerProviderPanelScope(scope.snapshot.serverDiscordId)
+        : await providerPanelOperations.loadPersonalProviderPanelScope(
+            scope.userDiscordId,
+            scope.snapshot.serverDiscordId,
+          );
+    const entry = panel?.data.entries.find(
+      (entry) => entry.kind === "endpoint" && entry.connectionIds.includes(endpoint.connection_id),
+    );
+    if (!panel || !entry) return false;
+    const result = await providerPanelOperations.removeServerProviderEntry({
+      ...panel,
+      serverDiscId: scope.snapshot.serverDiscordId,
+      entry,
     });
+    if (result.status === "active") {
+      throw new DashboardServiceError(
+        "provider_active",
+        409,
+        "Select a different text provider before removing this connection.",
+      );
+    }
+    const removed = result.status === "success";
     if (removed && scope.kind === "personal") invalidateUserCache(scope.userDiscordId);
     return removed;
   }
@@ -346,16 +368,23 @@ export class TomoriDashboardCore {
     capability: OpenRouterModelCapability,
     modelName: string,
   ) {
-    const result = await removeOpenRouterModelForScope(
+    const models = await loadRegisteredOpenRouterEntriesForCapability(
       scope.kind === "server"
         ? { kind: "server", ownerId: scope.snapshot.serverId }
         : { kind: "personal", ownerId: scope.userId },
       capability,
-      modelName,
     );
+    const model = models.find((entry) => entry.codename.toLowerCase() === modelName.trim().toLowerCase());
+    if (!model) return { status: "not_found" as const };
+    const removed = await removeScopedRegistration(
+      scope.kind === "server" ? { serverId: scope.snapshot.serverId } : { userId: scope.userId },
+      capability,
+      model.modelId,
+    );
+    if (!removed) return { status: "write_failed" as const };
     if (scope.kind === "personal") invalidateUserCache(scope.userDiscordId);
     else invalidateTomoriStateCache(scope.snapshot.serverDiscordId);
-    return result;
+    return { status: "removed" as const };
   }
 
   async loadServerFallbackOptions(snapshot: DashboardGuildSnapshot) {
@@ -380,7 +409,7 @@ export class TomoriDashboardCore {
       .filter((endpoint) => endpoint.capability === "text" && endpoint.custom_endpoint_id)
       .map((endpoint) => ({
         ref: { type: "custom_endpoint" as const, id: endpoint.custom_endpoint_id as number },
-        label: `${endpoint.display_name} / ${endpoint.model_name || endpoint.label}`,
+        label: `${endpoint.label} / ${endpoint.model_name || endpoint.label}`,
       }));
     return [...models, ...endpoints];
   }
@@ -390,31 +419,6 @@ export class TomoriDashboardCore {
   }
 
   async loadServerModelWorkspace(snapshot: DashboardGuildSnapshot): Promise<DashboardServerModelWorkspace> {
-    const configs = await llmProviderRepo.loadSavedProviderConfigs(snapshot.serverId);
-    const providerNames = Array.from(
-      new Set([
-        ...configs.map((config) => config.provider.toLowerCase()),
-        ...snapshot.rawPersonas.flatMap((persona) => (persona.llm ? [persona.llm.llm_provider.toLowerCase()] : [])),
-      ]),
-    );
-    const scope = { kind: "server" as const, ownerId: snapshot.serverId };
-    const groups = await Promise.all(
-      providerNames.map(async (provider) => {
-        const [llms, embeddings, images, videos] = await Promise.all([
-          llmModelRepo.loadAvailableModelsForProvider(provider, false, scope),
-          llmModelRepo.loadAvailableEmbeddingModels(provider, false, scope),
-          llmModelRepo.loadAvailableDiffusionModels(provider, false, scope),
-          llmModelRepo.loadAvailableVideoGenerationModels(provider, false, scope),
-        ]);
-        return {
-          llms: llms ?? [],
-          embeddings: embeddings ?? [],
-          images: images ?? [],
-          videos: videos ?? [],
-        };
-      }),
-    );
-
     const options: DashboardServerModelWorkspace["options"] = {
       text: [],
       vision: [],
@@ -423,33 +427,13 @@ export class TomoriDashboardCore {
       imageNai: [],
       video: [],
     };
-    const add = (kind: DashboardServerModelKind, id: number | null | undefined, provider: string, codename: string) => {
-      if (!id || options[kind].some((option) => option.id === id)) return;
-      options[kind].push({
-        id,
-        provider,
-        label: `${getProviderDisplayName(provider)} / ${codename}`,
-      });
-    };
-
-    for (const group of groups) {
-      for (const model of group.llms) {
-        add("text", model.llm_id, model.llm_provider, model.llm_codename);
-        if (model.sees_images) add("vision", model.llm_id, model.llm_provider, model.llm_codename);
-      }
-      for (const model of group.embeddings) {
-        add("embedding", model.embedding_model_id, model.provider, model.codename);
-      }
-      for (const model of group.images) {
-        add(
-          model.provider.toLowerCase() === "novelai" ? "imageNai" : "image",
-          model.diffusion_model_id,
-          model.provider,
-          model.codename,
-        );
-      }
-      for (const model of group.videos) {
-        add("video", model.video_model_id, model.provider, model.codename);
+    for (const kind of Object.keys(options) as DashboardServerModelKind[]) {
+      const capability = kind === "imageNai" ? "nai-image" : kind;
+      for (const provider of await loadConfigModelProviders(snapshot.serverId, capability)) {
+        for (const model of await loadConfigModelChoices(snapshot.serverId, capability, provider, "en-US")) {
+          if (options[kind].some((entry) => entry.id === model.id)) continue;
+          options[kind].push({ id: model.id, provider, label: `${getProviderDisplayName(provider)} / ${model.name}` });
+        }
       }
     }
 
@@ -475,38 +459,19 @@ export class TomoriDashboardCore {
     kind: DashboardServerModelKind,
     modelId: number | null,
   ): Promise<boolean> {
-    if (kind === "text") {
-      if (!modelId) return false;
-      const model = await llmModelRepo.loadById(modelId);
-      const tomoriState = snapshot.rawPersonas.find((persona) => !persona.is_alter) ?? snapshot.rawPersonas[0];
-      if (!model?.llm_id || !tomoriState) return false;
-      const savedConfig = await llmProviderRepo.loadSavedProviderConfig(snapshot.serverId, model.llm_provider);
-      if (!savedConfig) return false;
-      const result = await activateServerTextModelFromSavedConfig({
-        serverDiscId: snapshot.serverDiscordId,
-        tomoriState,
-        savedConfig,
-        llmId: model.llm_id,
-      });
-      return result.status === "activated";
+    const tomoriState = await personaRepository.loadState(snapshot.serverDiscordId);
+    if (!tomoriState) return false;
+    const capability = kind === "imageNai" ? "nai-image" : kind;
+    const input = { tomoriState, serverDiscId: snapshot.serverDiscordId, capability } as const;
+    if (modelId === null) {
+      const result = await configModelOperations.clearCapabilityModel(input);
+      return result.status === "success" || result.status === "already-clear";
     }
-
-    const updated =
-      kind === "imageNai"
-        ? await configRepository.updateNovelaiImagegenConfig(snapshot.serverId, {
-            nai_diffusion_model_id: modelId,
-          })
-        : await configRepository.updateModelConfig(snapshot.serverId, {
-            [kind === "vision"
-              ? "vision_llm_id"
-              : kind === "embedding"
-                ? "embedding_model_id"
-                : kind === "image"
-                  ? "diffusion_model_id"
-                  : "video_model_id"]: modelId,
-          });
-    if (updated) invalidateTomoriStateCache(snapshot.serverDiscordId);
-    return updated;
+    const workspace = await this.loadServerModelWorkspace(snapshot);
+    const option = workspace.options[kind].find((entry) => entry.id === modelId);
+    if (!option) return false;
+    const result = await configModelOperations.setCapabilityModel({ ...input, provider: option.provider, modelId });
+    return result.status === "success" || result.status === "already-selected";
   }
 
   private async validateProviderCredential(provider: string, apiKey: string): Promise<boolean> {
@@ -557,7 +522,7 @@ export class TomoriDashboardCore {
         count: entry.count,
       })),
       models: models.map((entry) => ({
-        name: prettifyModelCodename(entry.model),
+        name: entry.model,
         inputTokens: entry.inputTokens,
         outputTokens: entry.outputTokens,
         cost: entry.cost,
@@ -717,6 +682,20 @@ export class TomoriDashboardCore {
     return removed;
   }
 
+  async loadStmSettings(serverId: number) {
+    const row =
+      (await shortTermMemoryRepository.getStmConfig(serverId)) ?? serverStmConfigSchema.parse({ server_id: serverId });
+    return {
+      refresh_cadence: row.refresh_cadence,
+      render_mode: row.render_mode,
+      crude_message_count: row.crude_message_count,
+      nudge_injection_depth: row.nudge_injection_depth,
+      content_injection_depth: row.content_injection_depth,
+      tool_description_override: row.tool_description_override ?? null,
+      update_nudge_override: row.update_nudge_override ?? null,
+    };
+  }
+
   async updateSettings(
     snapshot: DashboardGuildSnapshot,
     sectionId: SettingsSectionId,
@@ -726,7 +705,8 @@ export class TomoriDashboardCore {
     if (!updated) return null;
 
     invalidateTomoriStateCache(snapshot.serverDiscordId);
-    return (await personaRepository.loadState(snapshot.serverDiscordId))?.config ?? null;
+    const config = (await personaRepository.loadState(snapshot.serverDiscordId))?.config;
+    return config ? { ...config, ...(await this.loadStmSettings(snapshot.serverId)) } : null;
   }
 
   async updatePersonaIdentity(
@@ -883,6 +863,8 @@ export class TomoriDashboardCore {
         return configRepository.updateNoticeEmbedsConfig(serverId, patch as Partial<ServerNoticeEmbedsConfigRow>);
       case "memory":
         return configRepository.updateMemoryConfig(serverId, patch as Partial<ServerMemoryConfigRow>);
+      case "stm":
+        return shortTermMemoryRepository.upsertStmConfig(serverId, patch as Partial<ServerStmConfigRow>);
       case "channelScope":
         return configRepository.updateChannelScopeConfig(serverId, patch as Partial<ServerChannelScopeConfigRow>);
       case "autochat":

@@ -11,29 +11,19 @@ import {
 } from "discord.js";
 import { getCachedRenderedMarkdownTable } from "@/utils/text/markdownTableCache";
 import { log } from "@/utils/misc/logger";
+import { resolveAuthoringWebhook } from "@/utils/discord/webhook/fallback";
 import { localizer } from "@/utils/text/localizer";
 
 /** Custom id carried by every rendered-table "Show Markdown" button. */
 const SHOW_MARKDOWN_BUTTON_ID = "markdown_table_show_source";
 
-const DEFAULT_SHOW_MARKDOWN_BUTTON_TIMEOUT_MS = 7_200_000;
+// Two hours, matching the markdown-table cache TTL: a live button whose cache entry already
+// expired would only ever return the expired notice.
+const SHOW_MARKDOWN_BUTTON_TIMEOUT_MS = 7_200_000;
 
 /** Discord's per-message content limit, minus room for the ```markdown fence and newlines. */
 const MARKDOWN_FENCE_OVERHEAD = 32;
 const DISCORD_MESSAGE_CONTENT_LIMIT = 2000;
-
-/**
- * Reads the button's active window from the environment.
- *
- * Defaults to two hours so it matches `MARKDOWN_TABLE_CACHE_TTL_MINUTES`' own default, so a
- * live button whose cache entry already expired would only ever return the expired notice.
- *
- * @returns Collector lifetime in milliseconds
- */
-function getShowMarkdownButtonTimeoutMs(): number {
-  const parsed = Number.parseInt(process.env.MARKDOWN_TABLE_BUTTON_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SHOW_MARKDOWN_BUTTON_TIMEOUT_MS;
-}
 
 /**
  * Builds the single-button row attached to a rendered markdown-table image.
@@ -101,16 +91,6 @@ async function replyWithMarkdownSource(
   });
 }
 
-/**
- * Disables the button once its collector window closes.
- *
- * Webhook-authored messages cannot be edited with the bot token, so the send path's webhook
- * is reused when the table was delivered under a persona identity.
- *
- * @param locale - Viewer locale for the (disabled) button label
- * @param webhook - Webhook that authored the message, when there was one
- * @param threadId - Thread the message lives in, when applicable
- */
 async function disableShowMarkdownButton(
   message: Message,
   locale: string,
@@ -119,13 +99,17 @@ async function disableShowMarkdownButton(
 ): Promise<void> {
   const disabledRow = createShowMarkdownButtonRow(locale, true);
 
-  if (webhook && message.webhookId) {
-    await webhook
-      .editMessage(message.id, {
+  if (message.webhookId) {
+    try {
+      const author = await resolveAuthoringWebhook(message.channel, message.webhookId, webhook);
+      if (!author) throw new Error("Authoring webhook unavailable for markdown button edit");
+      await author.editMessage(message.id, {
         components: [disabledRow],
         ...(threadId ? { threadId } : {}),
-      })
-      .catch((error: unknown) => log.warn("[MarkdownTable] Failed to disable Show Markdown button via webhook", error));
+      });
+    } catch (error) {
+      log.warn("[MarkdownTable] Failed to disable Show Markdown button via webhook", error);
+    }
     return;
   }
 
@@ -143,7 +127,6 @@ async function disableShowMarkdownButton(
  *
  * @param message - The message carrying the rendered table and its button
  * @param locale - Viewer locale for button label and notices
- * @param webhook - Webhook that authored the message, when there was one
  * @param threadId - Thread the message lives in, when applicable
  */
 export function attachShowMarkdownCollector(
@@ -154,7 +137,7 @@ export function attachShowMarkdownCollector(
 ): void {
   const collector = message.createMessageComponentCollector({
     componentType: ComponentType.Button,
-    time: getShowMarkdownButtonTimeoutMs(),
+    time: SHOW_MARKDOWN_BUTTON_TIMEOUT_MS,
     filter: (interaction) => interaction.customId === SHOW_MARKDOWN_BUTTON_ID && !interaction.user.bot,
   });
 

@@ -13,13 +13,20 @@ export type CharRefUploadOptions = {
   buffer: Buffer;
 };
 
-type CharRefStorageConfig = {
+export type CharRefStorageConfig = {
   bucket: string;
   region: string;
   prefix: string;
   publicBaseUrl: string;
   endpoint?: string;
 };
+
+export type CharRefDisplayAsset = { type: "url"; url: string } | { type: "buffer"; buffer: Buffer };
+
+export interface CharRefDisplayResolverDependencies {
+  storageConfig?: CharRefStorageConfig | null;
+  loadLocalBuffer?: (absolutePath: string) => Promise<Buffer | null>;
+}
 
 const IS_PRODUCTION = process.env.RUN_ENV === "production";
 const LOCAL_CHARREF_BASE_DIR = path.resolve(process.cwd(), "data", "charreferences");
@@ -99,6 +106,36 @@ function resolveLocalCharRefPath(storedPath: string): string | null {
   return null;
 }
 
+/**
+ * A local reference resolved only inside its owner's directory. Imports can store any path on a
+ * user or persona, so the shared base-directory check alone would let one owner read another's file.
+ */
+function resolveOwnedLocalCharRefPath(
+  storedPath: string,
+  entityType: CharRefEntityType,
+  entityId: string | number,
+): string | null {
+  const normalizedPath = storedPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const ownerPrefix = `data/charreferences/${entityType}/${String(entityId)}/`;
+  if (!normalizedPath.startsWith(ownerPrefix)) {
+    return null;
+  }
+
+  const resolvedPath = resolveLocalCharRefPath(storedPath);
+  if (!resolvedPath) {
+    return null;
+  }
+
+  const ownerBaseDir = path.resolve(process.cwd(), "data", "charreferences", entityType, String(entityId));
+  const relativePath = path.relative(ownerBaseDir, resolvedPath);
+  if (relativePath === "" || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    log.warn(`[CharRef Storage] Rejected character reference path for ${entityType} ${entityId}: ${storedPath}`);
+    return null;
+  }
+
+  return resolvedPath;
+}
+
 function extractKeyFromRemoteUrl(config: CharRefStorageConfig, url: string): string | null {
   try {
     const parsedUrl = new URL(url);
@@ -120,6 +157,72 @@ function extractKeyFromRemoteUrl(config: CharRefStorageConfig, url: string): str
 
     return pathName;
   } catch {
+    return null;
+  }
+}
+
+function extractKeyFromConfiguredPublicUrl(config: CharRefStorageConfig, url: string): string | null {
+  try {
+    const parsedUrl = new URL(url);
+    const publicBaseUrl = new URL(config.publicBaseUrl);
+    if (parsedUrl.origin !== publicBaseUrl.origin) {
+      return null;
+    }
+
+    const basePath = decodeURIComponent(publicBaseUrl.pathname).replace(/^\/+|\/+$/g, "");
+    const pathName = decodeURIComponent(parsedUrl.pathname).replace(/^\/+/, "");
+    const relativePath = basePath
+      ? pathName.startsWith(`${basePath}/`)
+        ? pathName.slice(basePath.length + 1)
+        : null
+      : pathName;
+    if (!relativePath?.startsWith(`${config.prefix}/`)) {
+      return null;
+    }
+
+    return relativePath;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveCharRefDisplayAsset(
+  reference: string | null | undefined,
+  personaId: number,
+  dependencies: CharRefDisplayResolverDependencies = {},
+): Promise<CharRefDisplayAsset | null> {
+  const target = reference?.trim();
+  if (!target) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(target)) {
+    const config = dependencies.storageConfig === undefined ? getCharRefStorageConfig() : dependencies.storageConfig;
+    if (!config) {
+      return null;
+    }
+
+    const key = extractKeyFromConfiguredPublicUrl(config, target);
+    const ownerPrefix = `${config.prefix}/personas/${String(personaId)}/`;
+    if (!key?.startsWith(ownerPrefix) || key.length === ownerPrefix.length) {
+      return null;
+    }
+
+    return { type: "url", url: target };
+  }
+
+  const absolutePath = resolveOwnedLocalCharRefPath(target, "personas", personaId);
+  if (!absolutePath) {
+    return null;
+  }
+
+  try {
+    const buffer = dependencies.loadLocalBuffer
+      ? await dependencies.loadLocalBuffer(absolutePath)
+      : await fs.readFile(absolutePath);
+    return buffer ? { type: "buffer", buffer } : null;
+  } catch (error) {
+    log.warn(`[CharRef Storage] Failed to load local character reference ${target}`, error);
     return null;
   }
 }
@@ -149,7 +252,10 @@ export async function uploadCharRef(options: CharRefUploadOptions): Promise<stri
       log.success(`[CharRef Storage] Uploaded ${options.entityType} character reference to ${publicUrl}`);
       return publicUrl;
     } catch (error) {
-      log.warn(`[CharRef Storage] Failed to upload ${options.entityType} character reference to S3`, error);
+      await log.error(`[CharRef Storage] Failed to upload ${options.entityType} character reference to S3`, error, {
+        errorType: "S3UploadError",
+        metadata: { bucket: config.bucket, key },
+      });
       return null;
     }
   }
@@ -171,7 +277,16 @@ export async function uploadCharRef(options: CharRefUploadOptions): Promise<stri
   }
 }
 
-export async function deleteCharRef(urlOrPath: string): Promise<boolean> {
+/**
+ * Deletes a stored reference only when it lives under the owner's own key prefix or directory.
+ * Imports can set any reference string, so replacing an imported value must not delete a file or
+ * object that belongs to another user or persona.
+ */
+export async function deleteCharRef(
+  urlOrPath: string,
+  entityType: CharRefEntityType,
+  entityId: string | number,
+): Promise<boolean> {
   const target = urlOrPath.trim();
   if (!target) {
     return false;
@@ -184,7 +299,7 @@ export async function deleteCharRef(urlOrPath: string): Promise<boolean> {
     }
 
     const key = extractKeyFromRemoteUrl(config, target);
-    if (!key) {
+    if (!key?.startsWith(`${config.prefix}/${entityType}/${String(entityId)}/`)) {
       return false;
     }
 
@@ -198,12 +313,15 @@ export async function deleteCharRef(urlOrPath: string): Promise<boolean> {
       log.info(`[CharRef Storage] Deleted remote character reference ${key}`);
       return true;
     } catch (error) {
-      log.warn(`[CharRef Storage] Failed to delete remote character reference ${key}`, error);
+      await log.error(`[CharRef Storage] Failed to delete remote character reference ${key}`, error, {
+        errorType: "S3DeleteError",
+        metadata: { bucket: config.bucket, key },
+      });
       return false;
     }
   }
 
-  const absolutePath = resolveLocalCharRefPath(target);
+  const absolutePath = resolveOwnedLocalCharRefPath(target, entityType, entityId);
   if (!absolutePath) {
     return false;
   }
@@ -222,7 +340,15 @@ export async function deleteCharRef(urlOrPath: string): Promise<boolean> {
   }
 }
 
-export async function loadCharRefAsBase64(urlOrPath: string): Promise<string | null> {
+/**
+ * Loads a reference image for generation. Remote URLs go through the SSRF-gated downloader; a
+ * local path must sit in the owner's own directory.
+ */
+export async function loadCharRefAsBase64(
+  urlOrPath: string,
+  entityType: CharRefEntityType,
+  entityId: string | number,
+): Promise<string | null> {
   const target = urlOrPath.trim();
   if (!target) {
     return null;
@@ -246,7 +372,7 @@ export async function loadCharRefAsBase64(urlOrPath: string): Promise<string | n
     }
   }
 
-  const absolutePath = resolveLocalCharRefPath(target);
+  const absolutePath = resolveOwnedLocalCharRefPath(target, entityType, entityId);
   if (!absolutePath) {
     return null;
   }

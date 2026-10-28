@@ -2,10 +2,11 @@
  * Shared raw-SQL boundary scanner.
  *
  * TomoriBot's code-quality standard: every raw `sql`/`tx` template literal must
- * live inside `src/utils/db/repositories/` (the repository layer), with a small,
- * explicitly-listed set of exemptions (security primitives, observability, the
- * RAG service facade). This module is the SINGLE source of truth for detecting
- * violations: it is consumed by both:
+ * live inside a repository layer (`src/utils/db/repositories/` for shared code,
+ * or `src/modules/<module>/db/repositories*` for removable feature modules),
+ * with a small, explicitly-listed set of exemptions (security primitives,
+ * observability, the RAG service facade). This module is the SINGLE source of
+ * truth for detecting violations: it is consumed by both:
  *   - `scripts/checks/audit_sql.ts` (the CLI report + `bun run vl` gate), and
  *   - `tests/unit/db/rawSqlBoundary.test.ts` (the unit-test enforcement).
  *
@@ -71,6 +72,15 @@ export const IGNORE_PATHS = [
 ] as const;
 
 /**
+ * Module-local repository layers: `src/modules/<module>/db/repositories.ts` (or
+ * a `repositories/` directory). Removable feature modules (supporter-billing
+ * established the layout) keep their SQL in their own repository file so the
+ * whole module can be deleted cleanly: that file IS a repository layer, the
+ * per-module analogue of `src/utils/db/repositories/`, not a boundary breach.
+ */
+export const MODULE_REPOSITORY_PATH_RE = /^src\/modules\/[^/]+\/db\/repositories(\.ts$|\/)/;
+
+/**
  * Files allowed to contain raw SQL outside the repository layer, each paired
  * with a justification. Hits here are reported as EXEMPTIONS (not violations).
  * Keep this list intentional and small; prefer moving SQL into a repository.
@@ -82,6 +92,7 @@ export const EXEMPT_PATHS = new Map<string, string>([
   ["src/utils/security/crypto.ts", "security primitive"],
   ["src/utils/security/keyRotation.ts", "security primitive"],
   ["src/utils/documents/documentService.ts", "RAG service layer; SQL invoked exclusively through RagRepository facade"],
+  ["src/db/seed/catalog/presetAssetLock.ts", "catalog seeding concurrency lock"],
 ]);
 
 /** Normalize a path to POSIX separators for stable comparison across OSes. */
@@ -170,7 +181,7 @@ export function scanFileForSqlQueries(content: string): Array<{ line: number; qu
       const match = line.match(matchRegex);
       if (match) {
         queryStartLine = i + 1;
-        const splitPoint = match.index! + match[0].length;
+        const splitPoint = (match.index ?? 0) + match[0].length;
         const restOfLine = line.substring(splitPoint);
         if (restOfLine.includes("`")) {
           hits.push({ line: queryStartLine, query: restOfLine.split("`")[0].trim() });
@@ -220,6 +231,7 @@ export async function auditRawSqlBoundary(): Promise<SqlAuditResult> {
       if (!absolute.endsWith(".ts")) continue;
       const relativePath = toRepoRelative(absolute);
       if (IGNORE_PATHS.some((ignore) => relativePath.includes(ignore))) continue;
+      if (MODULE_REPOSITORY_PATH_RE.test(relativePath)) continue;
       candidateFiles.push(absolute);
     }
   }

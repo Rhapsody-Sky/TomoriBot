@@ -30,18 +30,28 @@ import {
   type TomoriState,
 } from "@/types/db/schema";
 import type { PersonaAutochRuntimeStateRow } from "@/types/db/schema";
+import { EMPTY_PERSONA_NAMING_CONFIG, type PersonaNamingConfig } from "@/types/personaNaming";
 import type { SqlParameterArray } from "@/types/db/sqlOperations";
 import { DatabaseUnavailableError } from "@/types/errors";
 import { getCachedLLM } from "@/utils/cache/llmCache";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCacheStore";
+import { invalidatePersonaAppearance } from "@/utils/cache/personaAppearanceCacheStore";
 import { sql, withTransientDbRetry } from "@/utils/db/client";
 import { validateTomoriFields } from "@/utils/db/sqlSecurity";
 import { llmModelRepo } from "@/utils/db/repositories/LlmModelRepository";
+import {
+  loadPersonaSpeechCredentialOwners,
+  loadSpeechCredentialForCleanup,
+} from "@/utils/db/repositories/SpeechRepository";
+import { cleanupPendingGoogleVoices } from "@/utils/speech/googleVoiceLifecycle";
+import { decryptApiKey } from "@/utils/security/crypto";
 import { llmProviderRepo } from "@/utils/db/repositories/LlmProviderRepository";
+import { userNamingRepository } from "@/utils/db/repositories/UserNamingRepository";
+import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
 import { type MemoryValidationResult, getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { getUnconfiguredLlm } from "@/utils/provider/unconfiguredLlm";
 import { log } from "@/utils/misc/logger";
-import { getBaseTriggerWords } from "@/utils/text/localizer";
+import { getAllBaseTriggerWords, getBaseTriggerWords } from "@/utils/text/localizer";
 import { dedupeTriggerWords, normalizeTriggerWord, selectUnclaimedTriggerWords } from "@/utils/text/triggerWords";
 import type { IRepository } from "./IRepository";
 
@@ -59,6 +69,7 @@ type PersonaVoiceConfigsRow = {
   speech_voice_id: string | null;
   speech_voice_name: string | null;
   speech_voice_design_prompt: string | null;
+  voice_source_priority: "design" | "clone";
 };
 
 /** Row shape for persona_imagegen_configs (Phase 6). */
@@ -149,14 +160,19 @@ const TOMORI_POINTER_CONTENT_FIELDS = new Set<string>([
 
 /** Fields where SQL NULL carries semantic meaning ("not configured") and must not be coerced to undefined. */
 const MEANINGFULLY_NULLABLE_CONFIG_FIELDS = new Set([
+  "response_reviewer_llm_id",
+  "response_reviewer_prompt",
+  "response_rule_checker_ref",
   "llm_id",
   "embedding_model_id",
+  "decision_model_id",
   "diffusion_model_id",
   "video_model_id",
   "vision_llm_id",
   "api_key",
   "system_prompt",
   "context_note",
+  "response_prefill",
   "llm_max_output_tokens",
   "custom_endpoint_url",
   "custom_model_name",
@@ -176,6 +192,8 @@ const MEANINGFULLY_NULLABLE_CONFIG_FIELDS = new Set([
   "welcome_persona_id",
   "thought_log_channel_disc_id",
 ]);
+
+type PersonaSwapResult = "swapped" | "roles-changed" | "failed";
 
 /**
  * A main persona whose Discord guild avatar is out of date with its preset:
@@ -725,9 +743,13 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
    * @param personaId - Internal persona DB ID
    * @param voice - Complete voice config row excluding persona_id
    */
-  async setVoiceConfig(personaId: number, voice: Omit<PersonaVoiceConfigsRow, "persona_id">): Promise<boolean> {
+  async setVoiceConfig(
+    personaId: number,
+    voice: Omit<PersonaVoiceConfigsRow, "persona_id">,
+    options: { materialize?: boolean } = {},
+  ): Promise<boolean> {
     try {
-      const materialized = await this.materializeIfPointer(personaId);
+      const materialized = options.materialize === false || (await this.materializeIfPointer(personaId));
       if (!materialized) {
         return false;
       }
@@ -913,11 +935,43 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
   async removePersona(personaId: number): Promise<boolean> {
     try {
-      const result = await sql`
-        DELETE FROM personas
-        WHERE persona_id = ${personaId}
-        RETURNING persona_id
-      `;
+      const speechOwners = await loadPersonaSpeechCredentialOwners(personaId);
+      const result = await sql.transaction(async (tx) => {
+        const affected = await tx`
+          SELECT c.custom_expression_id FROM custom_expressions c
+          JOIN custom_expression_personas p USING (custom_expression_id)
+          WHERE p.persona_id = ${personaId} ORDER BY c.custom_expression_id FOR UPDATE OF c
+        `;
+        const deleted = await tx`
+          DELETE FROM personas WHERE persona_id = ${personaId} RETURNING persona_id, server_id
+        `;
+        for (const row of affected) {
+          // Cascading membership removal preserves restricted, including a now-empty whitelist.
+          await tx`UPDATE custom_expressions SET revision = revision + 1 WHERE custom_expression_id = ${row.custom_expression_id}`;
+        }
+        return deleted;
+      });
+      for (const row of result) invalidateEmojiStickerCache(Number(row.server_id));
+      if (result.length > 0) invalidatePersonaAppearance(personaId);
+      if (result.length > 0) {
+        for (const owner of speechOwners) {
+          try {
+            const credential = await loadSpeechCredentialForCleanup(owner, owner.provider);
+            if (credential)
+              await cleanupPendingGoogleVoices(
+                owner,
+                credential.credentialId,
+                credential.credentialRevision,
+                await decryptApiKey(credential.apiKey, credential.keyVersion),
+                [],
+              );
+          } catch {
+            log.error("Persona speech cleanup failed; remove unused voices in the provider console.", undefined, {
+              personaId,
+            });
+          }
+        }
+      }
       return result.length > 0;
     } catch (e) {
       log.error(`Error removing persona ${personaId}:`, e);
@@ -977,9 +1031,15 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     }
   }
 
-  async swapPersona(mainPersonaId: number, alterPersonaId: number): Promise<boolean> {
+  /**
+   * Demotes the main persona to an alter and promotes the alter to main in one transaction.
+   *
+   * @returns `roles-changed` when the rows no longer hold the main/alter roles the caller expected.
+   *   That is a lost race against a concurrent promotion, not a defect, so it is not logged as an error.
+   */
+  async swapPersona(mainPersonaId: number, alterPersonaId: number): Promise<PersonaSwapResult> {
     try {
-      await sql.transaction(async (tx) => {
+      return await sql.transaction(async (tx): Promise<PersonaSwapResult> => {
         const rows = await tx<Array<{ persona_id: number; server_id: number; is_alter: boolean }>>`
           SELECT persona_id, server_id, is_alter
           FROM personas
@@ -995,7 +1055,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         }
 
         if (mainPersona.is_alter || !alterPersona.is_alter) {
-          throw new Error("Persona swap requires the first persona to be main and the second persona to be an alter.");
+          return "roles-changed";
         }
 
         await tx`
@@ -1008,11 +1068,11 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           SET is_alter = false
           WHERE persona_id = ${alterPersonaId}
         `;
+        return "swapped";
       });
-      return true;
     } catch (e) {
       log.error(`Error swapping personas ${mainPersonaId} and ${alterPersonaId}:`, e);
-      return false;
+      return "failed";
     }
   }
 
@@ -1053,6 +1113,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     naiAttgTags?: string | null;
     naiAttgGenre?: string | null;
     naiAttgStars?: number | null;
+    isNsfw?: boolean;
   }): Promise<TomoriRow | null> {
     const row = await sql.transaction(async (tx) => {
       const [insertedRow] = await tx`
@@ -1063,7 +1124,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           sample_dialogues_in,
           sample_dialogues_out,
           is_alter,
-          persona_lineage_id
+          persona_lineage_id,
+          is_nsfw
         )
         VALUES (
           ${params.serverId},
@@ -1072,7 +1134,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           ${sql.array(params.sampleDialoguesIn, "TEXT")},
           ${sql.array(params.sampleDialoguesOut, "TEXT")},
           true,
-          COALESCE(${params.personaLineageId ?? null}::bigint, nextval('persona_lineage_id_seq'))
+          COALESCE(${params.personaLineageId ?? null}::bigint, nextval('persona_lineage_id_seq')),
+          ${params.isNsfw === true}
         )
         RETURNING *
       `;
@@ -1131,6 +1194,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     personaLineageId?: number | null;
     triggerWords?: string[];
     personaPrompt?: string | null;
+    preservedNamingConfig?: PersonaNamingConfig;
   }): Promise<TomoriRow | null> {
     const pointerLineageId = normalizeLineageId(params.preset.preset_lineage_id);
     if (pointerLineageId === null) {
@@ -1151,12 +1215,14 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
             is_pointer = true,
             preset_lineage_id = ${pointerLineageId},
             preset_language = ${params.preset.preset_language},
+            is_nsfw = ${params.preset.is_nsfw},
             -- Re-pointing is a fresh pointer: drop any stored avatar so the persona
             -- resolves the official preset avatar again (alters live-resolve the
             -- shared image; mains re-receive it via the guild-avatar reconciler).
             -- The caller deletes the old server-owned image (shared presets/ images
             -- are immutable and skipped by the delete guard).
             webhook_avatar_url = NULL,
+            applied_avatar_hash = NULL,
             updated_at = NOW()
           WHERE persona_id = ${params.personaId}
           RETURNING *
@@ -1171,15 +1237,21 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           params.personaId,
           params.triggerWords ?? resolvePresetTriggerWords(params.preset),
           params.personaPrompt ?? resolvePresetPersonaPrompt(params.preset),
+          params.preservedNamingConfig !== undefined,
         );
+        if (params.preservedNamingConfig) {
+          await userNamingRepository.savePersonaConfig(params.personaId, params.preservedNamingConfig, tx);
+        }
         // Re-pointing resets sprites: drop the persona's own rows so it resolves
         // the official preset sprite set live again. Server-owned sprite IMAGES
         // are cleaned up by the caller (the shared preset images are immutable).
         await tx`DELETE FROM persona_sprites WHERE persona_id = ${params.personaId}`;
+        await naturalNudgeRepository.clearPersonaConfig(tx, params.personaId);
 
         return updatedRow;
       });
 
+      if (row) invalidatePersonaAppearance(params.personaId);
       return row ? (row as unknown as TomoriRow) : null;
     } catch (error) {
       log.error(`Error applying preset pointer to persona ${params.personaId}:`, error);
@@ -1190,7 +1262,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
   /**
    * Records that a server's main persona guild avatar is now in sync with its
    * preset; call this immediately after a SUCCESSFUL guild-avatar PATCH at an
-   * apply site (`/config setup`, `/persona default`). It stamps
+   * apply site (`/setup`, `/persona default`). It stamps
    * `applied_avatar_hash = preset_avatar_hash` so the background fan-out
    * reconciler skips this persona until the catalog art actually changes again
    * (preventing a redundant re-PATCH on the next boot).
@@ -1323,7 +1395,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           persona_lineage_id,
           is_pointer,
           preset_lineage_id,
-          preset_language
+          preset_language,
+          is_nsfw
         )
         VALUES (
           ${params.serverId},
@@ -1335,7 +1408,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           ${memoryLineageId},
           true,
           ${pointerLineageId},
-          ${params.preset.preset_language}
+          ${params.preset.preset_language},
+          ${params.preset.is_nsfw}
         )
         RETURNING *
       `;
@@ -1447,67 +1521,6 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     } catch (e) {
       log.error(`Error setting persona config for persona ${personaId}:`, e);
       return false;
-    }
-  }
-
-  /**
-   * Check if a server has reached its trigger word limit.
-   *
-   * @param serverId  - Internal server DB ID
-   * @param personaId  - Optional tomori ID for persona-scoped trigger words
-   * @returns MemoryValidationResult indicating whether the limit is exceeded
-   */
-  async checkTriggerWordLimit(serverId: number, personaId?: number): Promise<MemoryValidationResult> {
-    const limits = getMemoryLimits();
-
-    try {
-      const [configResult] = personaId
-        ? await sql`
-            SELECT
-              CASE
-                WHEN pp.persona_preset_id IS NOT NULL THEN array_length(pp.preset_trigger_words, 1)
-                ELSE array_length(pc.trigger_words, 1)
-              END as trigger_count
-            FROM personas p
-            LEFT JOIN persona_configs pc ON pc.persona_id = p.persona_id
-            LEFT JOIN persona_presets pp
-              ON p.is_pointer = true
-              AND pp.preset_lineage_id = p.preset_lineage_id
-              AND pp.preset_language = p.preset_language
-            WHERE p.persona_id = ${personaId}
-          `
-        : await sql`
-            SELECT
-              CASE
-                WHEN pp.persona_preset_id IS NOT NULL THEN array_length(pp.preset_trigger_words, 1)
-                ELSE array_length(pc.trigger_words, 1)
-              END as trigger_count
-            FROM persona_configs pc
-            JOIN personas t ON t.persona_id = pc.persona_id
-            LEFT JOIN persona_presets pp
-              ON t.is_pointer = true
-              AND pp.preset_lineage_id = t.preset_lineage_id
-              AND pp.preset_language = t.preset_language
-            WHERE t.server_id = ${serverId}
-              AND t.is_alter = false
-            LIMIT 1
-          `;
-
-      const currentCount = configResult?.trigger_count || 0;
-
-      if (currentCount >= limits.maxTriggerWords) {
-        return {
-          isValid: false,
-          error: "TRIGGER_WORD_LIMIT_EXCEEDED",
-          currentCount,
-          maxAllowed: limits.maxTriggerWords,
-        };
-      }
-
-      return { isValid: true, currentCount, maxAllowed: limits.maxTriggerWords };
-    } catch (error) {
-      log.error(`Error checking trigger word limit for server ${serverId}:`, error);
-      return { isValid: false, error: "TRIGGER_WORD_LIMIT_EXCEEDED" };
     }
   }
 
@@ -1715,7 +1728,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     try {
       const [row] = await sql`
         SELECT persona_id, speech_voice_sample_id, speech_voice_id, speech_voice_name,
-               speech_voice_design_prompt
+               speech_voice_design_prompt, voice_source_priority
         FROM persona_voice_configs WHERE persona_id = ${personaId}
       `;
       return row ? (row as unknown as PersonaVoiceConfigsRow) : null;
@@ -1766,16 +1779,17 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     await sql`
       INSERT INTO persona_voice_configs (
         persona_id, speech_voice_sample_id, speech_voice_id, speech_voice_name,
-        speech_voice_design_prompt
+        speech_voice_design_prompt, voice_source_priority
       ) VALUES (
         ${row.persona_id}, ${row.speech_voice_sample_id}, ${row.speech_voice_id},
-        ${row.speech_voice_name}, ${row.speech_voice_design_prompt}
+        ${row.speech_voice_name}, ${row.speech_voice_design_prompt}, ${row.voice_source_priority}
       )
       ON CONFLICT (persona_id) DO UPDATE SET
         speech_voice_sample_id    = EXCLUDED.speech_voice_sample_id,
         speech_voice_id           = EXCLUDED.speech_voice_id,
         speech_voice_name         = EXCLUDED.speech_voice_name,
         speech_voice_design_prompt = EXCLUDED.speech_voice_design_prompt,
+        voice_source_priority = EXCLUDED.voice_source_priority,
         updated_at                = NOW()
     `;
   }
@@ -1910,7 +1924,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         s.server_id,
         smc.created_at, smc.updated_at,
         -- 1. server_model_configs
-        smc.llm_id, smc.embedding_model_id, smc.diffusion_model_id, smc.video_model_id,
+        smc.llm_id, smc.embedding_model_id, smc.diffusion_model_id, smc.video_model_id, smc.decision_model_id,
         smc.vision_llm_id, smc.api_key, smc.key_version, smc.llm_temperature,
         smc.thinking_level, smc.llm_disabled_params, smc.custom_endpoint_url,
         smc.custom_model_name, smc.custom_num_ctx, smc.fallback_llm_ids,
@@ -1920,7 +1934,12 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         scc.humanizer_degree, scc.message_fetch_limit, scc.send_message_limit,
         scc.match_limit, scc.cascade_limit, scc.timezone_offset, scc.self_debug_enabled,
         scc.model_randomizer_enabled,
-        scc.system_prompt, scc.context_note, scc.context_note_depth,
+        scc.response_reviewer_llm_id,
+        scc.response_reviewer_prompt,
+        scc.response_rule_checker_ref,
+        scc.response_review_items,
+        scaps.response_drafting_enabled,
+        scc.system_prompt, scc.context_note, scc.context_note_depth, scc.response_prefill,
         scc.llm_stop_strings, scc.llm_stop_speaker_pattern_enabled,
         scc.llm_max_output_tokens, scc.llm_top_p, scc.llm_top_k,
         scc.llm_frequency_penalty, scc.llm_presence_penalty, scc.llm_min_p,
@@ -1932,17 +1951,19 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         smpc.prompt_snapshot_enabled,
         -- 4. server_capabilities_configs
         scaps.emoji_usage_enabled, scaps.sticker_usage_enabled, scaps.web_search_enabled,
-        scaps.manage_message_enabled, scaps.thread_creation_enabled, scaps.imagegen_enabled,
-        scaps.videogen_enabled, scaps.voice_message_enabled, scaps.user_blocking_enabled,
+        scaps.manage_message_enabled, scaps.thread_creation_enabled, scaps.conditioning_interactions_enabled, scaps.dice_rolling_enabled, scaps.imagegen_enabled,
+        scaps.danbooru_enabled, scaps.videogen_enabled, scaps.voice_message_enabled, scaps.user_blocking_enabled,
         scaps.time_awareness_enabled,
-        scaps.tool_use_enabled, scaps.verbatim_tool_calling_enabled,
-        scaps.short_term_memory_enabled,
+        scaps.tool_use_enabled,
+        scaps.short_term_memory_enabled, scaps.user_info_updates_enabled,
         -- 5. server_notice_embeds_configs
-        snec.tool_notice_hidden_keys,
+        snec.tool_notice_hidden_keys, snec.tool_notice_verbosity,
         -- 6. server_nsfw_configs
         snsfw.uncensor_injection_enabled, snsfw.uncensor_unicode_space_enabled,
         snsfw.uncensor_sanitize_enabled,
         -- 7. server_speech_configs
+        sspeech.speech_design_endpoint_id, sspeech.speech_clone_endpoint_id,
+        sspeech.speech_design_model_id, sspeech.speech_clone_model_id,
         sspeech.voice_transcript_chat_mode, sspeech.chatterbox_turbo_enabled,
         sspeech.chatterbox_cfg_weight, sspeech.chatterbox_exaggeration,
         -- 8. server_auto_trigger_configs (persona overrides aggregated from junction table)
@@ -2015,7 +2036,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         s.server_id,
         smc.created_at, smc.updated_at,
         -- 1. server_model_configs
-        smc.llm_id, smc.embedding_model_id, smc.diffusion_model_id, smc.video_model_id,
+        smc.llm_id, smc.embedding_model_id, smc.diffusion_model_id, smc.video_model_id, smc.decision_model_id,
         smc.vision_llm_id, smc.api_key, smc.key_version, smc.llm_temperature,
         smc.thinking_level, smc.llm_disabled_params, smc.custom_endpoint_url,
         smc.custom_model_name, smc.custom_num_ctx, smc.fallback_llm_ids,
@@ -2025,7 +2046,12 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         scc.humanizer_degree, scc.message_fetch_limit, scc.send_message_limit,
         scc.match_limit, scc.cascade_limit, scc.timezone_offset, scc.self_debug_enabled,
         scc.model_randomizer_enabled,
-        scc.system_prompt, scc.context_note, scc.context_note_depth,
+        scc.response_reviewer_llm_id,
+        scc.response_reviewer_prompt,
+        scc.response_rule_checker_ref,
+        scc.response_review_items,
+        scaps.response_drafting_enabled,
+        scc.system_prompt, scc.context_note, scc.context_note_depth, scc.response_prefill,
         scc.llm_stop_strings, scc.llm_stop_speaker_pattern_enabled,
         scc.llm_max_output_tokens, scc.llm_top_p, scc.llm_top_k,
         scc.llm_frequency_penalty, scc.llm_presence_penalty, scc.llm_min_p,
@@ -2037,17 +2063,19 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         smpc.prompt_snapshot_enabled,
         -- 4. server_capabilities_configs
         scaps.emoji_usage_enabled, scaps.sticker_usage_enabled, scaps.web_search_enabled,
-        scaps.manage_message_enabled, scaps.thread_creation_enabled, scaps.imagegen_enabled,
-        scaps.videogen_enabled, scaps.voice_message_enabled, scaps.user_blocking_enabled,
+        scaps.manage_message_enabled, scaps.thread_creation_enabled, scaps.conditioning_interactions_enabled, scaps.dice_rolling_enabled, scaps.imagegen_enabled,
+        scaps.danbooru_enabled, scaps.videogen_enabled, scaps.voice_message_enabled, scaps.user_blocking_enabled,
         scaps.time_awareness_enabled,
-        scaps.tool_use_enabled, scaps.verbatim_tool_calling_enabled,
-        scaps.short_term_memory_enabled,
+        scaps.tool_use_enabled,
+        scaps.short_term_memory_enabled, scaps.user_info_updates_enabled,
         -- 5. server_notice_embeds_configs
-        snec.tool_notice_hidden_keys,
+        snec.tool_notice_hidden_keys, snec.tool_notice_verbosity,
         -- 6. server_nsfw_configs
         snsfw.uncensor_injection_enabled, snsfw.uncensor_unicode_space_enabled,
         snsfw.uncensor_sanitize_enabled,
         -- 7. server_speech_configs
+        sspeech.speech_design_endpoint_id, sspeech.speech_clone_endpoint_id,
+        sspeech.speech_design_model_id, sspeech.speech_clone_model_id,
         sspeech.voice_transcript_chat_mode, sspeech.chatterbox_turbo_enabled,
         sspeech.chatterbox_cfg_weight, sspeech.chatterbox_exaggeration,
         -- 8. server_auto_trigger_configs (persona overrides aggregated from junction table)
@@ -2121,6 +2149,20 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     }
   }
 
+  async updateNamingConfig(personaId: number, config: PersonaNamingConfig): Promise<boolean> {
+    try {
+      return await sql.transaction(async (tx) => {
+        const materialized = await this.materializeIfPointerWithClient(personaId, tx);
+        if (!materialized) return false;
+        await userNamingRepository.savePersonaConfig(personaId, config, tx);
+        return true;
+      });
+    } catch (error) {
+      log.error(`Error updating naming config for persona ${personaId}:`, error);
+      return false;
+    }
+  }
+
   private async materializeIfPointerWithClient(personaId: number, client: SQL): Promise<boolean> {
     const [personaRow] = await client<
       Array<{
@@ -2170,16 +2212,29 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
       WHERE persona_id = ${personaId}
     `;
     await this.replacePresetAttributesWithClient(client, personaId, preset);
+    const [identityConfig] = await client<PersonaConfigRow[]>`
+      SELECT * FROM persona_configs WHERE persona_id = ${personaId}
+    `;
+    const preserveIdentity = identityConfig?.preserve_preset_identity === true;
     await this.writePresetPersonaConfigWithClient(
       client,
       personaId,
-      resolvePresetTriggerWords(preset),
+      preserveIdentity ? identityConfig.trigger_words : resolvePresetTriggerWords(preset),
       resolvePresetPersonaPrompt(preset),
+      preserveIdentity,
     );
+    if (!preserveIdentity) {
+      await userNamingRepository.savePersonaConfig(personaId, preset.preset_naming_config, client);
+    }
     // Copy the shared preset sprites into this persona's own rows, reusing the
     // shared image URL (no byte duplication). The persona stops resolving sprites
     // live once materialized, so this freezes its current default sprite set.
     await this.copyPresetSpritesWithClient(client, personaId, pointerLineageId, pointerLanguage);
+    await naturalNudgeRepository.copyPresetDefaults(client, personaId, {
+      talkativeness: preset.natural_nudge_talkativeness,
+      interests: preset.natural_nudge_interests,
+      idleNudges: preset.natural_nudge_idle_nudges,
+    });
     // Freeze the alter avatar by reference too: a pointer alter live-resolves the
     // shared preset avatar, so once it materializes it must keep that exact
     // reference (still the immutable presets/ URL: no byte duplication, and the
@@ -2255,12 +2310,15 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
     const lineageIds = [...new Set(pointerRefs.map((row) => row.lineageId))];
     const languages = [...new Set(pointerRefs.map((row) => row.language))];
-    const presetRows = await sql<TomoriPresetRow[]>`
+    const presetRows = await withTransientDbRetry(
+      () => sql<TomoriPresetRow[]>`
       SELECT *
       FROM persona_presets
       WHERE preset_lineage_id = ANY(${sql.array(lineageIds, "int8")})
         AND preset_language = ANY(${sql.array(languages, "TEXT")})
-    `;
+    `,
+      "load pointer persona presets",
+    );
 
     const presetsByPointerKey = new Map<string, TomoriPresetRow>();
     for (const preset of presetRows) {
@@ -2379,15 +2437,17 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     personaId: number,
     triggerWords: string[],
     personaPrompt: string | null,
+    preservePresetIdentity = false,
   ): Promise<void> {
     const normalizedTriggers = dedupeTriggerWords(triggerWords, { lowercase: false });
     await client`
-      INSERT INTO persona_configs (persona_id, trigger_words, persona_prompt)
-      VALUES (${personaId}, ${sql.array(normalizedTriggers, "TEXT")}, ${personaPrompt})
+      INSERT INTO persona_configs (persona_id, trigger_words, persona_prompt, preserve_preset_identity)
+      VALUES (${personaId}, ${sql.array(normalizedTriggers, "TEXT")}, ${personaPrompt}, ${preservePresetIdentity})
       ON CONFLICT (persona_id) DO UPDATE
       SET
         trigger_words = EXCLUDED.trigger_words,
         persona_prompt = EXCLUDED.persona_prompt,
+        preserve_preset_identity = EXCLUDED.preserve_preset_identity,
         updated_at = NOW()
     `;
   }
@@ -2401,6 +2461,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
       speech_voice_id: (row.split_speech_voice_id as string | null | undefined) ?? null,
       speech_voice_name: (row.split_speech_voice_name as string | null | undefined) ?? null,
       speech_voice_design_prompt: (row.split_speech_voice_design_prompt as string | null | undefined) ?? null,
+      voice_source_priority: (row.split_voice_source_priority as "design" | "clone" | undefined) ?? "design",
       physical_appearance_tags: Array.isArray(row.split_physical_appearance_tags)
         ? (row.split_physical_appearance_tags as string[])
         : [],
@@ -2415,7 +2476,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
   private async loadTomoriState(serverDiscId: string): Promise<TomoriState | null> {
     try {
-      const tomoriRows = await sql`
+      const tomoriRows = await withTransientDbRetry(
+        () => sql`
         SELECT
           t.*,
           pcnc.context_note AS split_context_note,
@@ -2424,6 +2486,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           pvc.speech_voice_id AS split_speech_voice_id,
           pvc.speech_voice_name AS split_speech_voice_name,
           pvc.speech_voice_design_prompt AS split_speech_voice_design_prompt,
+          pvc.voice_source_priority AS split_voice_source_priority,
           pic.physical_appearance_tags AS split_physical_appearance_tags,
           pic.nai_char_ref_url AS split_nai_char_ref_url,
           ptc.nai_attg_author AS split_nai_attg_author,
@@ -2440,7 +2503,9 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         WHERE s.server_disc_id = ${serverDiscId}
         ORDER BY t.is_alter ASC, t.updated_at DESC NULLS LAST, t.persona_id DESC
         LIMIT 1
-      `;
+      `,
+        "load main persona row",
+      );
 
       if (!tomoriRows.length) {
         log.warn(`No Tomori instance found for server ${serverDiscId}`);
@@ -2454,6 +2519,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
       const serverId = tomoriData.server_id;
       const pointerPresetsByPersonaId = await this.loadPointerPresetsForRows([tomoriData]);
       const pointerPreset = pointerPresetsByPersonaId.get(personaId);
+      const personaNamingConfigs = await userNamingRepository.loadPersonaConfigs([personaId]);
       let configData = await this.sqlLoadTomoriConfigByServerId(serverId);
 
       // Backward compatibility: fall back to persona_id if server_id config missing
@@ -2478,11 +2544,14 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         // Fallback to database if cache miss (cache not initialized or LLM not found)
         if (!cachedLlm) {
           log.info(`Cache miss for LLM ID ${configData.llm_id}, querying database`);
-          const llmRows = await sql`
+          const llmRows = await withTransientDbRetry(
+            () => sql`
             SELECT * FROM llms
             WHERE llm_id = ${configData.llm_id}
             LIMIT 1
-          `;
+          `,
+            "load main persona LLM",
+          );
 
           if (!llmRows.length) {
             log.error(`Found Tomori config but no LLM data for server ${serverDiscId}, llm_id: ${configData.llm_id}`);
@@ -2494,12 +2563,15 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         }
       }
 
-      const personaConfigRows = await sql`
+      const personaConfigRows = await withTransientDbRetry(
+        () => sql`
         SELECT *
         FROM persona_configs
         WHERE persona_id = ${personaId}
         LIMIT 1
-      `;
+      `,
+        "load main persona config",
+      );
       let personaConfig: PersonaConfigRow | null = null;
       if (personaConfigRows.length > 0) {
         const parsedPersonaConfig = personaConfigSchema.safeParse(personaConfigRows[0]);
@@ -2555,6 +2627,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         FROM api_key_rotation akr
         LEFT JOIN api_key_rotation_runtime_state rs USING (rotation_key_id)
         WHERE akr.server_id = ${tomoriData.server_id}
+          AND akr.provider = ${llmData.llm_provider.toLowerCase()}
         ORDER BY COALESCE(rs.usage_count, 0) ASC, akr.rotation_key_id ASC
       `;
 
@@ -2572,11 +2645,14 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
       let naiPreset: NaiPresetRow | undefined;
       const presetName = configData.nai_preset_name;
       if (presetName) {
-        const presetRows = await sql`
+        const presetRows = await withTransientDbRetry(
+          () => sql`
           SELECT * FROM nai_presets
           WHERE preset_name = ${presetName}
           LIMIT 1
-        `;
+        `,
+          "load main persona NAI preset",
+        );
         if (presetRows.length > 0) {
           const parsedPreset = naiPresetSchema.safeParse(presetRows[0]);
           if (parsedPreset.success) {
@@ -2631,9 +2707,12 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
       if (configData.vision_llm_id) {
         visionLlm = getCachedLLM(configData.vision_llm_id) as LlmRow | undefined;
         if (!visionLlm) {
-          const visionLlmRows = await sql`
+          const visionLlmRows = await withTransientDbRetry(
+            () => sql`
             SELECT * FROM llms WHERE llm_id = ${configData.vision_llm_id} LIMIT 1
-          `;
+          `,
+            "load main persona vision LLM",
+          );
           if (visionLlmRows.length) {
             visionLlm = visionLlmRows[0] as LlmRow;
           }
@@ -2654,12 +2733,17 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
       const sampleDialoguesOut = pointerPreset
         ? pointerPreset.preset_sample_dialogues_out
         : ((tomoriData.sample_dialogues_out as string[] | undefined) ?? []);
-      const triggerWords = pointerPreset
-        ? resolvePresetTriggerWords(pointerPreset)
-        : (personaConfig?.trigger_words ?? []);
+      const triggerWords =
+        pointerPreset && !personaConfig?.preserve_preset_identity
+          ? resolvePresetTriggerWords(pointerPreset)
+          : (personaConfig?.trigger_words ?? []);
       const personaPrompt = pointerPreset
         ? resolvePresetPersonaPrompt(pointerPreset)
         : (personaConfig?.persona_prompt ?? null);
+      const namingConfig =
+        pointerPreset && !personaConfig?.preserve_preset_identity
+          ? pointerPreset.preset_naming_config
+          : (personaNamingConfigs.get(personaId) ?? EMPTY_PERSONA_NAMING_CONFIG);
 
       // Per-persona humanizer override: overlay onto a copy of the server config at
       // load time so every runtime consumer of config.humanizer_degree (providers,
@@ -2679,6 +2763,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         llm: llmData,
         trigger_words: triggerWords,
         persona_prompt: personaPrompt,
+        naming_config: namingConfig,
         reward_conditioning_enabled: personaConfig?.reward_conditioning_enabled ?? true,
         punish_conditioning_enabled: personaConfig?.punish_conditioning_enabled ?? true,
         humanizer_degree_override: humanizerOverride,
@@ -2718,6 +2803,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
               pvc.speech_voice_id AS split_speech_voice_id,
               pvc.speech_voice_name AS split_speech_voice_name,
               pvc.speech_voice_design_prompt AS split_speech_voice_design_prompt,
+          pvc.voice_source_priority AS split_voice_source_priority,
               pic.physical_appearance_tags AS split_physical_appearance_tags,
               pic.nai_char_ref_url AS split_nai_char_ref_url,
               ptc.nai_attg_author AS split_nai_attg_author,
@@ -2745,6 +2831,9 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         );
         const serverId = typedTomoriRows[0].server_id;
         const pointerPresetsByPersonaId = await this.loadPointerPresetsForRows(typedTomoriRows);
+        const personaNamingConfigs = await userNamingRepository.loadPersonaConfigs(
+          typedTomoriRows.flatMap((row) => (typeof row.persona_id === "number" ? [row.persona_id] : [])),
+        );
 
         // Load server-scoped config once (fallback to main persona config)
         let configData = await this.sqlLoadTomoriConfigByServerId(serverId);
@@ -2840,6 +2929,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
             FROM api_key_rotation akr
             LEFT JOIN api_key_rotation_runtime_state rs USING (rotation_key_id)
             WHERE akr.server_id = ${serverId}
+              AND akr.provider = ${llmData.llm_provider.toLowerCase()}
             ORDER BY COALESCE(rs.usage_count, 0) ASC, akr.rotation_key_id ASC
           `;
 
@@ -3015,16 +3105,19 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           const sampleDialoguesOut = pointerPreset
             ? pointerPreset.preset_sample_dialogues_out
             : ((tomoriRow.sample_dialogues_out as string[] | undefined) ?? []);
-          // A live pointer resolves trigger_words from its preset (mirrors
-          // persona_prompt below), so preset edits propagate until the first
-          // content edit forks the persona. Once forked, `pointerPreset` is
-          // undefined and the persona's own persona_configs triggers are used.
-          const triggerWords = pointerPreset
-            ? resolvePresetTriggerWords(pointerPreset)
-            : (personaConfig?.trigger_words ?? []);
+          // Resynced pointers retain the workspace's triggers and naming habits while
+          // content continues following the preset.
+          const triggerWords =
+            pointerPreset && !personaConfig?.preserve_preset_identity
+              ? resolvePresetTriggerWords(pointerPreset)
+              : (personaConfig?.trigger_words ?? []);
           const personaPrompt = pointerPreset
             ? resolvePresetPersonaPrompt(pointerPreset)
             : (personaConfig?.persona_prompt ?? null);
+          const namingConfig =
+            pointerPreset && !personaConfig?.preserve_preset_identity
+              ? pointerPreset.preset_naming_config
+              : (personaNamingConfigs.get(personaId) ?? EMPTY_PERSONA_NAMING_CONFIG);
 
           // Per-persona humanizer override: overlay onto a copy of the shared server
           // config so only this persona's state sees the overridden degree. Each
@@ -3043,6 +3136,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
             llm: llmData,
             trigger_words: triggerWords,
             persona_prompt: personaPrompt,
+            naming_config: namingConfig,
             reward_conditioning_enabled: personaConfig?.reward_conditioning_enabled ?? true,
             punish_conditioning_enabled: personaConfig?.punish_conditioning_enabled ?? true,
             humanizer_degree_override: humanizerOverride,
@@ -3115,10 +3209,9 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
    * @param personas - Assembled persona states for one server.
    */
   private applyTriggerWordOwnership(personas: TomoriState[]): void {
-    // Seed the claimed set with base trigger words for both shipped locales so
-    //    the main persona implicitly owns the bot's name in any language.
+    // Seeding from every authored locale lets the main persona own the bot's name in any language.
     const claimedTriggerKeys = new Set<string>();
-    for (const baseWord of [...getBaseTriggerWords("en-US"), ...getBaseTriggerWords("ja")]) {
+    for (const baseWord of getAllBaseTriggerWords()) {
       const normalizedBaseWord = normalizeTriggerWord(baseWord);
       if (normalizedBaseWord.length > 0) {
         claimedTriggerKeys.add(normalizedBaseWord);
@@ -3180,13 +3273,11 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
   private async updateTomori(personaId: number, tomoriData: Partial<TomoriRow>): Promise<TomoriRow | null> {
     try {
-      // Validate the partial data with Zod (Rule #7)
       const validTomoriData = tomoriSchema.partial().parse(tomoriData);
 
-      // Extract field names and values for the SQL query.
-      // Filter to only keys present in the original input, because Zod injects defaults
-      // for all schema fields with .default(), which would incorrectly expand the
-      // SET clause (e.g. attribute_list: [] would overwrite existing data).
+      // Filter to only keys present in the original input: Zod injects defaults for every
+      // schema field with .default(), which would expand the SET clause and overwrite existing
+      // data (e.g. attribute_list: []).
       const fields = Object.keys(validTomoriData).filter((key) => key !== "persona_id" && key in tomoriData);
 
       if (fields.length === 0) {
@@ -3261,6 +3352,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         return null;
       }
 
+      invalidatePersonaAppearance(personaId);
       return updatedTomori.data;
     } catch (error) {
       const context: ErrorContext = {
@@ -3278,3 +3370,4 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
 /** Singleton instance: import this in callers. */
 export const personaRepository = new PersonaRepository();
+import { invalidateEmojiStickerCache } from "@/utils/cache/emojiStickerCache";

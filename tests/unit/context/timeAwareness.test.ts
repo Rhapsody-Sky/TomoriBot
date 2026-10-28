@@ -1,13 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import type { Client } from "discord.js";
 import { HumanizerDegree, type AssembledServerConfig } from "@/types/db/schema";
-import { appendDialogueHistoryContext } from "@/utils/text/context/dialogueHistory";
+import type { StructuredContextItem } from "@/types/misc/context";
+import { appendDialogueHistoryContext, DOCUMENT_HINT_TEMPLATE } from "@/utils/text/context/dialogueHistory";
 import { buildDateSpacer, buildReunionNote, SPACER_TEMPLATE } from "@/utils/text/context/timeAwareness";
 import type { SimplifiedMessageForContext } from "@/utils/text/context/types";
 import { getCalendarDayWithOffset } from "@/utils/text/timezoneHelper";
 
 const NOW = Date.parse("2026-07-15T12:00:00Z");
-const EXPANDED_TEMPLATE = SPACER_TEMPLATE.replace("{message_metadata_tool}", "`reveal_message_metadata`");
+const EXPANDED_TEMPLATE = SPACER_TEMPLATE.replace("{{if tool:reveal_message_metadata}}", "")
+  .replace("{{/if}}", "")
+  .replace("{message_metadata_tool}", "`reveal_message_metadata`");
 
 function makeMessage(id: string, createdAt?: number): SimplifiedMessageForContext {
   return {
@@ -33,7 +36,6 @@ function makeConfig(timezoneOffset = 0): AssembledServerConfig {
     uncensor_sanitize_enabled: false,
     timezone_offset: timezoneOffset,
     time_awareness_enabled: true,
-    verbatim_tool_calling_enabled: false,
   } as AssembledServerConfig;
 }
 
@@ -66,7 +68,7 @@ describe("buildReunionNote", () => {
         reunionDays: 3,
       }),
     ).toBe(
-      "Alice is talking to you for the very first time! Welcome them naturally and ask something friendly to get to know them.",
+      "Alice is talking to you directly for the very first time! Welcome them naturally and ask something friendly to get to know them.",
     );
 
     expect(
@@ -88,7 +90,7 @@ describe("buildReunionNote", () => {
         reunionDays: 3,
       }),
     ).toBe(
-      "Alice is talking to you again for the first time since July 12, 2026. It's been 3 days! Acknowledge their return naturally and ask what they've been up to.",
+      "Alice hasn't interacted with you specifically since July 12, 2026 (3 days ago), though they may have been around the server. Acknowledge them interacting with you again.",
     );
 
     expect(
@@ -100,6 +102,41 @@ describe("buildReunionNote", () => {
         reunionDays: 3,
       }),
     ).toBeNull();
+  });
+
+  it("attributes a proxied speaker's absence to that speaker, never to the account it shares", () => {
+    // Siblings speak from the same host account between this identity's turns, so the note
+    // may only describe the identity's own gap.
+    const note = buildReunionNote({
+      lastPreviousDayAt: new Date("2026-07-12T12:00:00Z"),
+      seenToday: false,
+      displayName: "Locke",
+      nowMs: NOW,
+      reunionDays: 3,
+      isSharedAccount: true,
+    });
+
+    expect(note).toBe(
+      "Locke hasn't interacted with you specifically since July 12, 2026 (3 days ago). Acknowledge them interacting with you again.",
+    );
+    expect(note).not.toContain("the account they share");
+    expect(note).not.toContain("has not been around");
+    expect(note).not.toContain("may have been around the server");
+  });
+
+  it("marks a member's first meeting as a first meeting with that member of a known account", () => {
+    expect(
+      buildReunionNote({
+        lastPreviousDayAt: null,
+        seenToday: false,
+        displayName: "Locke",
+        nowMs: NOW,
+        reunionDays: 3,
+        isSharedAccount: true,
+      }),
+    ).toBe(
+      "Locke is talking to you for the very first time, from an account you already know. Welcome them naturally and ask something friendly to get to know them.",
+    );
   });
 
   it("uses personal, then server, then UTC timezone fallback", () => {
@@ -154,7 +191,7 @@ describe("buildDateSpacer", () => {
 
 describe("appendDialogueHistoryContext — time-awareness injections", () => {
   it("injects the producer-supplied reunion note above the newest messages", async () => {
-    const contextItems = [];
+    const contextItems: StructuredContextItem[] = [];
     await appendDialogueHistoryContext({
       contextItems,
       client: {} as Client,
@@ -169,9 +206,11 @@ describe("appendDialogueHistoryContext — time-awareness injections", () => {
       botName: "Tomori",
       tomoriConfig: makeConfig(),
       tomoriState: null,
-      reunionNote: "Alice is talking to you for the very first time!",
+      reunionNote: "Alice is talking to you directly for the very first time!",
+      documentHintTemplate: DOCUMENT_HINT_TEMPLATE,
       includeTimestamps: false,
       isUserImpersonation: false,
+      triggererFormattedName: "Alice",
       uncensorInputOptions: { unicodeSpacesEnabled: false, sanitizeEnabled: false },
       convertMentions: async (text) => text,
     });
@@ -183,12 +222,88 @@ describe("appendDialogueHistoryContext — time-awareness injections", () => {
     expect(noteIndex).toBe(depthTargetIndex - 1);
 
     const noteText = itemText(contextItems[noteIndex]);
-    expect(noteText).toBe("[System: Alice is talking to you for the very first time!]");
+    expect(noteText).toBe("[System: Alice is talking to you directly for the very first time!]");
     expect(contextItems.filter((item) => itemText(item).startsWith("[System: Alice"))).toHaveLength(1);
   });
 
+  it("injects a member's first-meeting note as guidance above the newest messages", async () => {
+    const memberNote = buildReunionNote({
+      lastPreviousDayAt: null,
+      seenToday: false,
+      displayName: "Locke",
+      nowMs: NOW,
+      isSharedAccount: true,
+    });
+    if (!memberNote) throw new Error("Expected a member first-meeting note");
+
+    const contextItems: StructuredContextItem[] = [];
+    await appendDialogueHistoryContext({
+      contextItems,
+      client: {} as Client,
+      guildId: "guild-1",
+      simplifiedMessageHistory: [makeMessage("one"), makeMessage("two"), makeMessage("three")],
+      botName: "Tomori",
+      tomoriConfig: makeConfig(),
+      tomoriState: null,
+      reunionNote: memberNote,
+      documentHintTemplate: DOCUMENT_HINT_TEMPLATE,
+      includeTimestamps: false,
+      isUserImpersonation: false,
+      triggererFormattedName: "Locke",
+      uncensorInputOptions: { unicodeSpacesEnabled: false, sanitizeEnabled: false },
+      convertMentions: async (text) => text,
+    });
+
+    // The prompt carries guidance, not a greeting the model must reproduce. From a shared
+    // account it may only claim this identity is new, never that the account is.
+    const notes = contextItems.filter((item) => itemText(item).startsWith("[System: Locke"));
+    expect(notes).toHaveLength(1);
+    const noteText = itemText(notes[0]);
+    expect(noteText).toContain("Locke is talking to you for the very first time");
+    expect(noteText).toContain("from an account you already know");
+    expect(noteText).toContain("Welcome them naturally");
+    expect(noteText).not.toContain("has not been around");
+  });
+
+  it("injects a member reunion note without an account-level absence claim", async () => {
+    const memberNote = buildReunionNote({
+      lastPreviousDayAt: new Date("2026-07-12T12:00:00Z"),
+      seenToday: false,
+      displayName: "Locke",
+      nowMs: NOW,
+      reunionDays: 3,
+      isSharedAccount: true,
+    });
+    if (!memberNote) throw new Error("Expected a member reunion note");
+
+    const contextItems: StructuredContextItem[] = [];
+    await appendDialogueHistoryContext({
+      contextItems,
+      client: {} as Client,
+      guildId: "guild-1",
+      simplifiedMessageHistory: [makeMessage("one"), makeMessage("two"), makeMessage("three")],
+      botName: "Tomori",
+      tomoriConfig: makeConfig(),
+      tomoriState: null,
+      reunionNote: memberNote,
+      documentHintTemplate: DOCUMENT_HINT_TEMPLATE,
+      includeTimestamps: false,
+      isUserImpersonation: false,
+      triggererFormattedName: "Locke",
+      uncensorInputOptions: { unicodeSpacesEnabled: false, sanitizeEnabled: false },
+      convertMentions: async (text) => text,
+    });
+
+    const notes = contextItems.filter((item) => itemText(item).startsWith("[System: Locke"));
+    expect(notes).toHaveLength(1);
+    const noteText = itemText(notes[0]);
+    expect(noteText).toContain("Locke hasn't interacted with you specifically since July 12, 2026");
+    expect(noteText).toContain("Acknowledge them interacting with you again");
+    expect(noteText).not.toContain("the account they share");
+  });
+
   it("emits exactly one spacer per boundary across a multi-day history", async () => {
-    const contextItems = [];
+    const contextItems: StructuredContextItem[] = [];
     await appendDialogueHistoryContext({
       contextItems,
       client: {} as Client,
@@ -203,8 +318,10 @@ describe("appendDialogueHistoryContext — time-awareness injections", () => {
       tomoriConfig: makeConfig(),
       tomoriState: null,
       dateSpacerTemplate: EXPANDED_TEMPLATE,
+      documentHintTemplate: DOCUMENT_HINT_TEMPLATE,
       includeTimestamps: false,
       isUserImpersonation: false,
+      triggererFormattedName: "Alice",
       uncensorInputOptions: { unicodeSpacesEnabled: false, sanitizeEnabled: false },
       convertMentions: async (text) => text,
     });
@@ -223,22 +340,18 @@ describe("appendDialogueHistoryContext — time-awareness injections", () => {
     expect(nativeBuilder).toContain("dateSpacerTemplate,");
   });
 
-  it("keeps both phases of the reunion presence protocol wired", async () => {
-    // The clock only works if phase 1 (resolve, at context build) and phase 2
-    // (commit, post-turn) both run. They live in one module so they stay in sync;
-    // this guards the two call sites that drain it.
+  it("keeps the context-build phase of the reunion presence protocol wired", async () => {
+    // The clock only works if phase 1 (resolve, at context build) and phase 2 (commit, post-turn)
+    // both run. Phase 2's call site and its response gate are proven by behavior in
+    // postTurnEffects.test.ts and reunionPresence.test.ts; building a whole turn context to prove
+    // phase 1 the same way would cost more than this scan.
     const producer = await Bun.file("src/utils/chat/contextPipeline.ts").text();
-    const postTurn = await Bun.file("src/utils/chat/postTurnEffects.ts").text();
     const presence = await Bun.file("src/utils/chat/reunionPresence.ts").text();
 
     expect(producer).toContain("resolveReunionNote");
     expect(producer).toContain("reunionPresence,");
-    expect(postTurn).toContain("recordReunionPresence(context.reunionPresence, result)");
-
-    // Phase 2 must stay response-gated: a turn that never answered delivered no
-    // acknowledgment, so it must not consume the reunion.
-    expect(presence).toContain("result.personaResponses.length === 0");
-    // ...and must NOT inherit recordUsageStats' DM exclusion.
+    // The protocol must NOT inherit recordUsageStats' DM exclusion, and its inputs carry no
+    // channel type a behavioral test could vary.
     expect(presence).not.toContain("isDMChannel");
   });
 });

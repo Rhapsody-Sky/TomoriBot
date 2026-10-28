@@ -14,9 +14,14 @@
  *                     consistency.
  *   - command_used  → full command path, space-joined (e.g. "config humanizer",
  *                     "server welcome-channel set"); not just the top-level category
+ *   - panel_action  → stable action identifier (e.g. "providers.workspace.provider.add",
+ *                     "moderation.workspace.member-access.set"); one per successfully completed
+ *                     semantic panel operation from the closed registry in panelActions.ts
  *   - model_used    → model id / codename
  *   - tokens_in     → model id / codename (count accumulates input token deltas, not 1)
  *   - tokens_out    → model id / codename (count accumulates output token deltas, not 1)
+ *   - reviewer_tokens_in/out: reviewer subset of tokens_in/out, keyed by model codename.
+ *   - decision_tokens_in/out: decision subset of tokens_in/out, keyed by model codename.
  *   - tool_used     → tool name
  *   - sprite_shown      → sprite name (every delivered sprite, identity or not)
  *   - sprite_emotion    → sprite name, recorded ONLY for non-identity sprites so the
@@ -25,7 +30,15 @@
  *                         sprites. sprite_shown stays the all-inclusive leaderboard count.
  *   - emoji_used        → emoji name
  *   - sticker_used      → sticker name/id
+ *   - custom_expression_used → stable custom UUID (one per accepted delivery)
+ *   - message_sent      → "reward" or "punish" for human conditioning commands, otherwise "".
  *   - active_hour       → hour-of-day "0".."23"
+ *   Natural Nudges turns record neither message_sent nor active_hour: both drive nudge heat and
+ *   learned waking hours, so a nudge counting itself would feed its own frequency.
+ *   - channel_turn      → channel ID, the parent channel's ID for a thread turn (one per completed
+ *                         turn). It is the automatic Natural Nudges channel set, so turns that
+ *                         borrow a trigger (nudges, random triggers) skip it. Persona-agnostic.
+ *                         Operational only: no stats surface lists its keys.
  *   - text_generated    → "" (one per completed chat turn)
  *   - user_impersonation_triggered → impersonated Discord user id (one per
  *                                    completed user-impersonation chat turn)
@@ -33,8 +46,16 @@
  *                         so the total is SUM(count) over keys while still exposing a
  *                         per-model breakdown that cannot be backfilled later)
  *   - video_generated   → model codename (one per successful video generation)
+ *   - provider_error    → "{provider}:{code}" (e.g. "nvidia:500"), one per terminal provider
+ *                         failure. Low cardinality by construction: no model id, no user content,
+ *                         no upstream message text. Paired with model_used (successful turns per
+ *                         model) it makes a per-model success rate computable, which is the signal
+ *                         that catches a default model failing 100% of the time without waiting
+ *                         for a bug report. OPERATIONAL TELEMETRY ONLY: nothing behavioral may
+ *                         read it, so no persona or routing decision ever takes it as input.
  *   - audio_generated   → TTS backend label ("elevenlabs" | "tts-clone" |
- *                         "tts-voice-design"); one per successful voice message.
+ *                         "tts-voice-design" | "openrouter-speech" | "google-speech" |
+ *                         "vertex-speech"); one per successful voice message.
  *                         Backend (not raw voice id) is used: low-cardinality,
  *                         privacy-safe, and answers "paid API vs local TTS" for cost.
  *   - (all others)      → "" (scalar event counter)
@@ -46,6 +67,10 @@ const STAT_METRICS = [
   "model_used",
   "tokens_in",
   "tokens_out",
+  "reviewer_tokens_in",
+  "reviewer_tokens_out",
+  "decision_tokens_in",
+  "decision_tokens_out",
   "tool_used",
   "web_search",
   "memory_taught",
@@ -54,12 +79,16 @@ const STAT_METRICS = [
   "sprite_emotion",
   "emoji_used",
   "sticker_used",
+  "custom_expression_used",
   "active_hour",
+  "channel_turn",
   "text_generated",
   "user_impersonation_triggered",
   "image_generated",
   "video_generated",
   "audio_generated",
+  "provider_error",
+  "panel_action",
 ] as const;
 
 /** Union of all valid `stat_counters.metric` values. */
@@ -70,4 +99,9 @@ export type StatMetric = (typeof STAT_METRICS)[number];
  * are always written with the lineage-0 sentinel (see plan §5). All other
  * metrics carry the active persona's lineage id.
  */
-export const PERSONA_AGNOSTIC_METRICS = new Set<StatMetric>(["command_used"]);
+export const PERSONA_AGNOSTIC_METRICS = new Set<StatMetric>([
+  "command_used",
+  "provider_error",
+  "panel_action",
+  "channel_turn",
+]);

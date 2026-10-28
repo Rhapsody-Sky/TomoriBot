@@ -7,7 +7,9 @@
 import { log } from "../../../utils/misc/logger";
 import type { ToolContext, ToolResult } from "../../../types/tool/interfaces";
 import { sendStandardEmbed } from "../../../utils/discord/embedHelper";
-import { sendWebhookMessageWithIdentity } from "../../../utils/discord/webhookManager";
+import { buildToolPersonaPostContext } from "@/utils/discord/webhook/toolPersonaDelivery";
+import { mediaDeliveryFailure, sendToolMediaPost } from "@/utils/discord/webhook/toolMediaDelivery";
+import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
 import { ColorCode } from "../../../utils/misc/logger";
 import sharp from "sharp";
 import {
@@ -24,22 +26,14 @@ import {
 } from "./braveSearchService";
 import { safeDownload } from "@/utils/security/safeDownload";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
-
-const BRAVE_IMAGE_DISCORD_LIMIT_MB = Math.max(
-  1,
-  Number.parseInt(process.env.BRAVE_IMAGE_DISCORD_LIMIT_MB ?? "8", 10) || 8,
-);
-const BRAVE_IMAGE_COMPRESSION_TARGET_MB = Math.max(
-  1,
-  Number.parseInt(process.env.BRAVE_IMAGE_COMPRESSION_TARGET_MB ?? "7", 10) || 7,
-);
-const BRAVE_IMAGE_DOWNLOAD_MAX_MB = Math.max(
-  BRAVE_IMAGE_DISCORD_LIMIT_MB,
-  Number.parseInt(process.env.BRAVE_IMAGE_DOWNLOAD_MAX_MB ?? "25", 10) || 25,
-);
-// Minimum image size in bytes, so rejects tiny placeholders/error images that Discord
-// renders as raw file attachments rather than inline media (default 5 KB).
-const BRAVE_IMAGE_MIN_SIZE_BYTES = Math.max(1, Number.parseInt(process.env.IMAGE_MIN_SIZE_BYTES ?? "5120", 10) || 5120);
+import {
+  buildImageSearchDeliveryMessage,
+  buildImageSearchTextFallback,
+  IMAGE_COMPRESSION_TARGET_MB,
+  IMAGE_DISCORD_LIMIT_MB,
+  IMAGE_DOWNLOAD_MAX_MB,
+  IMAGE_MIN_SIZE_BYTES,
+} from "@/tools/restAPIs/imageSearchResults";
 
 /**
  * Extract server ID from tool context
@@ -76,11 +70,7 @@ async function sendApiKeyErrorEmbed(context?: ToolContext, searchType = "search"
         color: ColorCode.ERROR,
         footerKey: "general.errors.brave_api.missing_key.footer",
       },
-      {
-        webhook: context.webhook,
-        personaUsername: context.personaUsername,
-        personaAvatarUrl: context.personaAvatarUrl,
-      },
+      buildToolPersonaPostContext(context, context.tomoriState),
     );
   } catch (embedError) {
     log.warn(`Failed to send Brave API key error embed: ${embedError}`);
@@ -255,7 +245,7 @@ export async function brave_image_search(args: Record<string, unknown>, context?
 
     if (imageUrls.length > 0 && context?.channel) {
       // Pre-validate URLs and create Discord attachments only for accessible images
-      const attachments = [];
+      const attachments: import("discord.js").AttachmentBuilder[] = [];
       const failedUrls: string[] = [];
       const validatedUrls: string[] = [];
 
@@ -269,7 +259,7 @@ export async function brave_image_search(args: Record<string, unknown>, context?
       ): Promise<{ success: boolean; buffer?: Buffer; reason?: string }> => {
         try {
           const response = await safeDownload(imageUrl, {
-            maxSizeMB: BRAVE_IMAGE_DOWNLOAD_MAX_MB,
+            maxSizeMB: IMAGE_DOWNLOAD_MAX_MB,
             timeoutMs: 5000,
             requestInit: {
               method: "GET",
@@ -289,7 +279,7 @@ export async function brave_image_search(args: Record<string, unknown>, context?
           const imageBuffer = response.buffer;
 
           // Compress with sharp - target 7MB max to leave safety margin
-          const targetSize = BRAVE_IMAGE_COMPRESSION_TARGET_MB * 1024 * 1024;
+          const targetSize = IMAGE_COMPRESSION_TARGET_MB * 1024 * 1024;
           let quality = 80; // Start with 80% quality
           let compressedBuffer: Buffer;
 
@@ -356,9 +346,9 @@ export async function brave_image_search(args: Record<string, unknown>, context?
 
           if (response.ok && response.headers.get("content-type")?.startsWith("image/")) {
             const contentLength = response.headers.get("content-length");
-            const discordLimit = BRAVE_IMAGE_DISCORD_LIMIT_MB * 1024 * 1024;
+            const discordLimit = IMAGE_DISCORD_LIMIT_MB * 1024 * 1024;
 
-            if (contentLength && parseInt(contentLength, 10) < BRAVE_IMAGE_MIN_SIZE_BYTES) {
+            if (contentLength && parseInt(contentLength, 10) < IMAGE_MIN_SIZE_BYTES) {
               return { url: imageUrl, valid: false, reason: "too_small" };
             }
 
@@ -544,42 +534,21 @@ export async function brave_image_search(args: Record<string, unknown>, context?
       // Send attachments to Discord channel (prefer webhook if available)
       if (attachments.length > 0) {
         try {
-          const threadId =
-            "isThread" in context.channel &&
-            typeof context.channel.isThread === "function" &&
-            context.channel.isThread()
-              ? context.channel.id
-              : undefined;
-          const sentMessage =
-            context.webhook && context.personaUsername
-              ? await sendWebhookMessageWithIdentity(
-                  context.webhook,
-                  {
-                    files: attachments,
-                    ...(threadId ? { threadId } : {}),
-                  },
-                  {
-                    username: context.personaUsername,
-                    avatarUrl: context.personaAvatarUrl,
-                    avatarDataUri: context.personaAvatarUrl?.startsWith("data:image/")
-                      ? context.personaAvatarUrl
-                      : undefined,
-                  },
-                )
-              : await context.channel.send({
-                  files: attachments,
-                });
+          const sentMessage = await sendToolMediaPost(context, () => ({ files: attachments }));
           log.success(`Sent ${attachments.length} validated image attachments to Discord`);
           const sentAttachments = Array.from(sentMessage.attachments.values());
 
-          // Return simplified response to LLM - no URLs or image data to prevent duplicate processing
           const queryTerm = args.query || "images";
-          let completionMessage = `Found and sent ${attachments.length} ${queryTerm} images directly to Discord (message ID: ${sentMessage.id}). The images are now displayed for the user.`;
-
-          if (failedUrls.length > 0) {
-            completionMessage += ` (Note: ${failedUrls.length} image URLs were inaccessible and were filtered out.)`;
-          }
-
+          const completionMessage = buildImageSearchDeliveryMessage({
+            query: queryTerm,
+            sentCount: attachments.length,
+            messageId: sentMessage.id,
+            providerPhrase: "",
+            note:
+              failedUrls.length > 0
+                ? `(Note: ${failedUrls.length} image URLs were inaccessible and were filtered out.)`
+                : undefined,
+          });
           const imageMetadata = {
             imageUrls: sentAttachments.map((att, index) => ({
               url: att.url,
@@ -605,6 +574,7 @@ export async function brave_image_search(args: Record<string, unknown>, context?
             imageMetadata,
           };
         } catch (sendError) {
+          if (sendError instanceof DiscordDeliveryError) return mediaDeliveryFailure(context, sendError.outcome);
           log.error("Failed to send image attachments to Discord:", sendError as Error);
 
           // Fall back to formatted results if Discord sending fails
@@ -615,20 +585,12 @@ export async function brave_image_search(args: Record<string, unknown>, context?
           );
         }
       } else {
-        // Soft degradation: engine succeeded but no URLs passed validation (hotlink
-        // protection, timeouts, too-small placeholders). Return success with a text
-        // listing so the dispatcher doesn't fall through to "category unavailable".
         const queryTerm = args.query || "images";
-        const formattedFallback = formatBraveSearchResults(result.data, "image");
-        return createToolResult(
-          true,
-          `Found ${queryTerm} images via Brave but none were directly accessible. Showing result links instead.`,
-          {
-            results: formattedFallback,
-            imagesFiltered: failedUrls.length,
-            status: "text_fallback",
-          },
-        );
+        return buildImageSearchTextFallback({
+          message: `Found ${queryTerm} images via Brave but none were directly accessible. Showing result links instead.`,
+          formattedResults: formatBraveSearchResults(result.data, "image"),
+          filteredCount: failedUrls.length,
+        });
       }
     }
 

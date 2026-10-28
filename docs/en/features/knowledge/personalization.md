@@ -4,110 +4,99 @@ sidebar:
   order: 3
 ---
 
-TomoriBot can be configured for **you specifically** with the `/personal` commands — settings
-that follow you across every server you share with her, independent of any server's
-configuration.
+TomoriBot can remember personal details, custom names, and AI provider credentials that
+follow you across every server you share with her. You can manage these settings with
+the `/personal` commands without altering any server's shared configuration.
 
-## Personal Memories
+## Personal memories
 
-Facts she remembers about you follow you between servers. Managing them (add, remove, export)
-is covered on the [Memory](/features/knowledge/memory/#personal-vs-server-memories) page.
+Facts she learns or remembers about you follow you between servers. Managing them (adding,
+removing, exporting, or clearing context) is covered on the
+[Memory](/features/knowledge/memory/#personal-vs-server-memories) page.
 
-## Your Own Providers
+## Profile and names
 
-Personal providers let *your own requests* use *your own* API keys and models instead of the
-server's defaults. This is bring-your-own-key (BYOK) at the individual level.
+Configure how TomoriBot addresses and refers to you across servers in `/personal config` >
+Profile.
 
-Two scopes are in play, and it's worth keeping them straight:
+### Profile details
 
-- **Server default**: shared configuration for one server, managed through `/provider` and
-  `/model` by members with the required server permission. It applies to everyone there.
-- **Personal override**: configuration used only for your own requests. When enabled it
-  overrides the server default for that capability **across every server** where you use
-  TomoriBot, not just the one you set it up in.
+Your profile can include your gender, pronouns, and preferred addressing style. These are independent
+settings. Profile details are sent to the AI only when your privacy level is `None`.
 
-**Setup:**
+You can also set a UTC offset for your local time. It is a fixed offset, so it does not update
+automatically for daylight saving time.
 
-1. `/personal provider add` saves a provider (your key is encrypted). This also enables your
-   personal **Text** override immediately, using that provider's default text model.
-2. `/personal provider model-text` is optional. Use it only if you want a different text model
-   than the default chosen in step 1. Picking a model here keeps Text enabled.
-3. `/personal provider toggle-models` enables or disables overrides per capability (Text,
-   Embedding, Image, Video, Vision).
+### Naming inheritance
 
-Step 3 is not required after every model selection. Selecting a model with any
-`/personal provider model-*` command already activates that capability; the toggle command is
-how you turn one back **off** and hand the capability back to each server's default.
+You can set a nickname, prefix, and suffix for all personas or for a specific persona across servers.
+Persona-specific preferences take priority over global preferences. If you leave your nickname blank,
+TomoriBot uses your current Discord display name.
 
-Turning a capability off remembers which provider was serving it, so switching it back on
-returns to that same provider rather than to whichever one you happen to have saved first.
+Prefixes and suffixes inherit independently, so preferences from different scopes can combine.
+You can also ask a persona in chat to stop using a title it gave you.
 
-Because steps 1 and 2 switch you onto a cross-server override, TomoriBot asks you to confirm
-before saving whenever a capability moves from the server default to a personal one. Rotating
-the key on a provider that already answers your requests skips that confirmation, since the
-routing isn't changing.
+Server managers configure server-wide persona defaults under `/config` > Persona >
+Identity & Personality. When the User Info Updates capability is enabled, personas can also
+update your profile details when requested during conversation.
 
-Thought logs attribute those turns to you, and you can tune them with `/personal parameters`
-and `/personal model fallback`. Both affect your requests everywhere and never touch this
-server's settings. You can also register personal custom endpoints with
-`/personal custom-endpoint add`; see
-[Custom Endpoints](/features/setup-administration/providers-and-models/#custom-endpoints).
+Restrictive privacy levels prevent automatic additions and edits, but you can still clear existing
+data. Server managers control this feature with `User Info Updates` under `/config` > `Permissions`.
 
-If a request fails while using your personal provider, the error's "What you can do" tips name
-the personal commands that can actually fix it (`/personal provider model-text`,
-`/personal model fallback`, `/personal parameters`) rather than the server-manager ones. Turning
-**Text** off in `/personal provider toggle-models` usually hands the turn back to the server
-model, unless that server runs User BYOK mode, which requires a personal provider.
+## Your own providers
+<!-- anchor: your-own-providers -->
+
+Personal providers let your requests use your own API keys and models across servers. Add a provider
+with `/personal providers` and choose models in `/personal config`. Your API key is encrypted, and
+thought logs attribute requests using it to you. See
+[Custom Endpoints](/features/setup-administration/providers-and-models/#custom-endpoints) for private
+endpoints.
+
+Saving a provider immediately enables your personal text override with its default model. You can
+configure personal providers in any server or in DMs, even where TomoriBot has not been set up.
 
 :::note[BYOK-required servers]
-A server can require member-provided providers with User BYOK mode
-([Server Moderation](/features/setup-administration/server-moderation/#user-byok-bring-your-own-key)). When that's
-on, your user-triggered messages need a personal provider before she can answer. Personal
-providers apply across every server you use her in.
+A server can require members to supply their own API keys via User BYOK mode
+([Server Moderation](/features/setup-administration/server-moderation/#user-byok-bring-your-own-key)).
+When enabled, your messages require a configured personal provider before TomoriBot will respond,
+and failed personal routes do not fall back to server credentials.
 :::
 
-## Other Personal Settings
+### Fallbacks
 
-- `/personal nickname` — change what she calls you.
-- `/personal image-tags` — your own appearance tags (booru-style), used when an
-  [image generation](/features/capabilities/media-generation/image-generation/#tag-customization)
-  references you. Submit an empty box to clear them.
-- `/personal privacy` — control your visibility to her, up to **full invisibility** (opt out
-  of memory features entirely).
-- `/personal dtm` — your personal override for
+You can choose up to five backup models from your saved providers in `/personal config` > `Models` >
+`Fallbacks`. TomoriBot tries them in order if your personal text model fails.
+
+:::tip
+Keep at least one fallback on a different provider. Fallbacks can come from any saved provider, so a
+second service can answer when one provider has an outage, rate limit, or billing problem.
+:::
+
+If all your personal models fail, TomoriBot can use the server's text model. This uses the server's
+credentials and quota. Server fallback is enabled by default and can be turned off in `Fallbacks`.
+
+## Other personal settings
+
+Use `/personal config` to customize additional features:
+
+- **Appearance**: save tags used when [image generation](/features/capabilities/media-generation/image-generation/#tag-customization)
+  references you.
+- **Privacy Controls** (`Privacy` > `Privacy Controls`): choose your visibility level
+  (`None`, `Partial`, or `Full`), toggle cross-server short-term memory sharing, or turn off
+  [Pings from Personas](/features/chatting-personality/natural-nudges/#ping-user) so personas never
+  ping you to start a conversation.
+- **Response Modes** (`Advanced` > `Response Modes`): toggle your personal override for
   [Deliberate Trigger Mode](/features/chatting-personality/chatting-and-triggers/#deliberate-trigger-mode).
-- `/personal stm` — opt into cross-server short-term memory sharing;
-  `/personal stm clear` wipes your STM.
-- `/personal impersonate prompt` — set a reusable prompt for when she impersonates you via
-  `/bot impersonate`.
-  
+- **Impersonation** (`Advanced` > `Impersonation`): set a reusable prompt used when someone
+  invokes `/impersonate user` for you.
+
 ## Personal Spotlight
+<!-- anchor: personal-spotlight -->
 
-**Personal Spotlight: per-channel persona picks.** Spotlight lets *you* narrow which personas
-you can trigger in one channel — and optionally assign one to auto-trigger for your own
-messages there. It's scoped to **you + one channel** and doesn't affect anyone else.
+Personal Spotlight narrows which personas you can trigger in a specific channel, and optionally
+assigns a fallback auto-trigger persona for your messages there. It is scoped to you and one
+channel: it does not affect anyone else in the server.
 
-**Set one up** with `/personal spotlight set`, choosing:
-
-- a duration in hours (use **0** to keep it until you remove it manually),
-- the target channel,
-- the personas you want in your spotlight.
-
-After choosing personas, you can optionally pick one as your **personal auto-trigger
-persona** — the fallback responder for your messages in that channel. Direct triggers still
-target whichever persona you explicitly call. Press Finish to skip.
-
-**Important rules:**
-
-- Spotlight only **narrows** access; it never expands it. The selected personas are the
-  *only* ones you can trigger there.
-- It still respects server-level limits like `/server whitelist persona`.
-- Proxy chains are blocked: if your spotlight only includes Alice, an Alice reply can't hand
-  off to Bob for your message chain.
-
-Review or remove entries with `/personal spotlight manage` (uncheck to remove; timed
-spotlights expire on their own). Run `/help spotlight` for the Discord summary.
-
-
-
-
+Configure it in `/personal config` > `Advanced` > `Personal Spotlight`. Spotlight respects server
+persona permissions and restricts persona handoffs to the personas you selected. A timed spotlight
+expires automatically.

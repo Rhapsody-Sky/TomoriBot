@@ -8,21 +8,22 @@ import { ContextItemTag } from "@/types/misc/context";
 import { tomoriChat, suppressNextSelfReply } from "@/events/messageCreate/tomoriChat";
 import { getCachedAllPersonas, getCachedTomoriState } from "@/utils/cache/tomoriStateCache";
 import { userRepository } from "@/utils/db/repositories";
-import { buildForcedMentionsForUser, ensureDiscordUserMention } from "@/utils/discord/mentionHelper";
-import { getOrCreateWebhook } from "@/utils/discord/webhook/lifecycle";
-import { resolvePersonaWebhookIdentity } from "@/utils/discord/webhook/identity";
-import { sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/personaDispatch";
+import {
+  buildForcedMentionsForUser,
+  ensureDiscordUserMention,
+  sendPersonaMention,
+} from "@/utils/discord/mentionHelper";
 import { resolvePreferredDiscordDisplayName } from "@/utils/discord/displayName";
 import { downloadImage } from "@/utils/image/avatarHelper";
 import { log } from "@/utils/misc/logger";
 import { decryptApiKey } from "@/utils/security/crypto";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
-import {
-  toZaiApiModelName,
-  ZAI_CODING_CHAT_COMPLETIONS_URL,
-  ZAI_GENERAL_CHAT_COMPLETIONS_URL,
-} from "@/providers/zai/zaiShared";
-import { resolveWelcomeDelayMs, waitForWelcomeDelay } from "@/events/guildMemberAdd/helpers/welcomeDelay";
+import { resolveVisionApiModelName } from "@/utils/provider/visionCaption";
+import { buildOpenRouterAttributionHeaders } from "@/utils/provider/openrouterAttribution";
+import { ZAI_CODING_CHAT_COMPLETIONS_URL, ZAI_GENERAL_CHAT_COMPLETIONS_URL } from "@/providers/zai/zaiShared";
+import { waitForWelcomeGate } from "@/events/guildMemberAdd/helpers/welcomeGate";
+import { type WelcomeMembershipCheck, checkWelcomeMembership } from "@/events/guildMemberAdd/helpers/welcomeMembership";
+import { type WelcomeHandoff, openWelcomeHandoff } from "@/utils/chat/welcomeHandoff";
 
 /**
  * Provider-to-chat-completions-URL mapping for vision model routing.
@@ -94,6 +95,7 @@ async function callOpenAICompatibleVisionForAvatar(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
+      ...(endpointUrl === VISION_PROVIDER_URLS.openrouter && buildOpenRouterAttributionHeaders()),
     },
     body: JSON.stringify(requestBody),
   });
@@ -133,8 +135,7 @@ async function getAvatarVisionDescription(member: GuildMember, persona: TomoriSt
   if (!apiKey) return null;
 
   const provider = visionLlm.llm_provider.toLowerCase();
-  const apiModelName =
-    provider === "zai" || provider === "zaicoding" ? toZaiApiModelName(visionLlm.llm_codename) : visionLlm.llm_codename;
+  const apiModelName = resolveVisionApiModelName(provider, visionLlm.llm_codename);
 
   log.info(`newUser: Delegating avatar analysis to vision model ${provider}/${apiModelName} for member ${member.id}`);
 
@@ -218,6 +219,19 @@ async function buildWelcomeContextItem(params: {
   };
 }
 
+/**
+ * An unverified membership is logged at error level because it is an operational fault rather than
+ * a departure, and `log.info` is dropped entirely under `RUN_ENV=production`.
+ */
+function logSkippedWelcome(member: GuildMember, check: WelcomeMembershipCheck, stage: string): void {
+  if (check.status === "unverified") {
+    log.error(`Skipping welcome for ${member.user.tag}: could not verify membership ${stage}`, check.error);
+    return;
+  }
+
+  log.info(`Skipping welcome for ${member.user.tag}: original membership ended ${stage}`);
+}
+
 async function triggerWelcomeMessage(client: Client, member: GuildMember): Promise<void> {
   const initialTomoriState = await getCachedTomoriState(member.guild.id);
   if (!initialTomoriState) return;
@@ -226,19 +240,22 @@ async function triggerWelcomeMessage(client: Client, member: GuildMember): Promi
   const additionalPrompt = initialTomoriState.config.welcome_prompt?.trim();
   if (!welcomeChannelId || !additionalPrompt) return;
 
-  const welcomeDelayMs = resolveWelcomeDelayMs();
-  if (welcomeDelayMs > 0) {
-    log.info(`Waiting ${welcomeDelayMs}ms before welcoming ${member.user.tag}`);
-    await waitForWelcomeDelay(welcomeDelayMs);
+  const gate = await waitForWelcomeGate(member);
+  if (gate.outcome !== "open") {
+    log.info(
+      `Skipping welcome for ${member.user.tag}: ${gate.outcome === "ended" ? "left before finishing onboarding" : "onboarding not finished in time"}`,
+    );
+    return;
+  }
+  const greetedMember = gate.member;
 
-    const currentMember = member.guild.members.cache.get(member.id);
-    if (!currentMember || currentMember.joinedTimestamp !== member.joinedTimestamp) {
-      log.info(`Skipping welcome for ${member.user.tag}: original membership ended during the onboarding grace period`);
-      return;
-    }
+  const graceMembership = await checkWelcomeMembership(member);
+  if (graceMembership.status !== "active") {
+    logSkippedWelcome(member, graceMembership, "after onboarding finished");
+    return;
   }
 
-  const tomoriState = welcomeDelayMs > 0 ? await getCachedTomoriState(member.guild.id) : initialTomoriState;
+  const tomoriState = await getCachedTomoriState(member.guild.id);
   if (!tomoriState) return;
 
   const currentWelcomeChannelId = tomoriState.config.welcome_channel_disc_id;
@@ -254,6 +271,40 @@ async function triggerWelcomeMessage(client: Client, member: GuildMember): Promi
   }
 
   const welcomeChannel = rawChannel as TextChannel;
+  const handoff = openWelcomeHandoff(
+    welcomeChannel.id,
+    member.id,
+    await buildWelcomeContextItem({
+      member: greetedMember,
+      additionalPrompt: currentAdditionalPrompt,
+      includeAvatarContext: false,
+    }),
+  );
+  try {
+    await sendWelcome({
+      client,
+      member,
+      greetedMember,
+      welcomeChannel,
+      tomoriState,
+      additionalPrompt: currentAdditionalPrompt,
+      handoff,
+    });
+  } finally {
+    handoff.release();
+  }
+}
+
+async function sendWelcome(params: {
+  client: Client;
+  member: GuildMember;
+  greetedMember: GuildMember;
+  welcomeChannel: TextChannel;
+  tomoriState: TomoriState;
+  additionalPrompt: string;
+  handoff: WelcomeHandoff;
+}): Promise<void> {
+  const { client, member, greetedMember, welcomeChannel, tomoriState, additionalPrompt, handoff } = params;
   const allPersonas = await getCachedAllPersonas(member.guild.id);
   const availablePersonas = allPersonas.length > 0 ? allPersonas : [tomoriState];
   const selectedWelcomePersonaId = tomoriState.config.welcome_persona_id;
@@ -286,14 +337,14 @@ async function triggerWelcomeMessage(client: Client, member: GuildMember): Promi
     }
   }
 
-  if (!lastMessage) return;
+  if (!lastMessage || handoff.isTakenByMember()) return;
 
   const includeAvatarContext = chosenPersona.llm.sees_images;
   let avatarDescription: string | undefined;
 
   if (!includeAvatarContext && chosenPersona.vision_llm) {
     try {
-      avatarDescription = (await getAvatarVisionDescription(member, chosenPersona)) ?? undefined;
+      avatarDescription = (await getAvatarVisionDescription(greetedMember, chosenPersona)) ?? undefined;
       log.success(`Obtained vision description for welcome avatar of member ${member.id}`);
     } catch (error) {
       log.warn(`Failed to get vision description for welcome (${member.id}):`, error);
@@ -301,12 +352,24 @@ async function triggerWelcomeMessage(client: Client, member: GuildMember): Promi
   }
 
   const welcomeContextItem = await buildWelcomeContextItem({
-    member,
-    additionalPrompt: currentAdditionalPrompt,
+    member: greetedMember,
+    additionalPrompt,
     includeAvatarContext,
     avatarDescription,
   });
   const forcedMentions = await buildForcedMentionsForUser(member.id, client, member.guild);
+
+  const generationMembership = await checkWelcomeMembership(member);
+  if (generationMembership.status !== "active") {
+    logSkippedWelcome(member, generationMembership, "before welcome generation");
+    return;
+  }
+
+  if (!handoff.claimForWelcome(lastMessage.id)) {
+    log.info(`Skipping welcome for ${member.user.tag}: their own message turn is carrying the greeting`);
+    return;
+  }
+
   const welcomeStartTime = Date.now();
 
   suppressNextSelfReply(welcomeChannel.id);
@@ -337,36 +400,7 @@ async function triggerWelcomeMessage(client: Client, member: GuildMember): Promi
     afterMessageId: lastMessage.id,
     triggerStartTime: welcomeStartTime,
     contextLabel: `welcome for member ${member.id} in server ${member.guild.id}`,
-    fallbackSender: async (content) => {
-      if (!chosenPersona.is_alter) return false;
-
-      const supportsWebhooks =
-        welcomeChannel.type === ChannelType.GuildText ||
-        welcomeChannel.type === ChannelType.PublicThread ||
-        welcomeChannel.type === ChannelType.PrivateThread ||
-        welcomeChannel.type === ChannelType.AnnouncementThread;
-      if (!supportsWebhooks) return false;
-
-      try {
-        const webhookResult = await getOrCreateWebhook(welcomeChannel);
-        const webhook = webhookResult.webhook;
-        if (!webhook) return false;
-
-        const identity = await resolvePersonaWebhookIdentity(chosenPersona, member.guild);
-        await sendWebhookMessageWithIdentity(
-          webhook,
-          {
-            content,
-            allowedMentions: { users: [member.id], roles: [], parse: [] },
-          },
-          identity,
-        );
-        return true;
-      } catch (error) {
-        log.warn(`Failed to send Alter persona fallback welcome mention for member ${member.id}:`, error);
-        return false;
-      }
-    },
+    fallbackSender: (content) => sendPersonaMention(welcomeChannel, chosenPersona, member.id, content),
   });
 }
 

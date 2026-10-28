@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import type { PersonalProviderCapability, UserSavedProviderConfigRow } from "@/types/db/schema";
+import type { FallbackModelRef, PersonalProviderCapability, UserSavedProviderConfigRow } from "@/types/db/schema";
 import { llmProviderRepo } from "@/utils/db/repositories";
 import {
   assignPersonalCapabilityToProvider,
@@ -7,6 +7,7 @@ import {
   getAssignedPersonalProviderForCapability,
   getStoredPersonalProviderForCapability,
   setPersonalCapabilityEnabled,
+  setPersonalTextPrimary,
   withCapabilityEnabled,
   withCapabilityUnassigned,
 } from "@/utils/provider/personalProviderHelpers";
@@ -14,7 +15,6 @@ import {
 function makeRow(overrides: Partial<UserSavedProviderConfigRow> & { provider: string }): UserSavedProviderConfigRow {
   return {
     user_id: 1,
-    provider: overrides.provider,
     enabled_capabilities: [],
     assigned_capabilities: [],
     llm_id: null,
@@ -23,7 +23,6 @@ function makeRow(overrides: Partial<UserSavedProviderConfigRow> & { provider: st
     nai_diffusion_model_id: null,
     video_model_id: null,
     vision_llm_id: null,
-    fallback_model_refs: [],
     ...overrides,
   } as unknown as UserSavedProviderConfigRow;
 }
@@ -43,7 +42,10 @@ function makeAccount(): UserSavedProviderConfigRow[] {
 /**
  * Drives the real helpers against an in-memory row set so a toggle sequence can be
  * asserted end to end. Production resolves both repo members at call time, so
- * spying on the singleton avoids `mock.module`, which Bun cannot unregister.
+ * spying on the singleton avoids a module-level mock registration, which Bun
+ * cannot unregister. Naming that registrar in full here would also make
+ * scripts/checks/lib/testIsolation.ts read this file as a mock user and hand it a
+ * private process, hiding whether it really is safe to batch.
  */
 function stubRepo(rows: UserSavedProviderConfigRow[]): { rows: UserSavedProviderConfigRow[] } {
   const state = { rows };
@@ -69,6 +71,8 @@ const providerOf = (rows: UserSavedProviderConfigRow[], capability: PersonalProv
 afterEach(() => {
   spyOn(llmProviderRepo, "loadUserSavedProviderConfigs").mockRestore();
   spyOn(llmProviderRepo, "upsertUserSavedProviderConfig").mockRestore();
+  spyOn(llmProviderRepo, "loadPersonalFallbackSettings").mockRestore();
+  spyOn(llmProviderRepo, "updatePersonalFallbackModelRefs").mockRestore();
 });
 
 describe("withCapabilityEnabled", () => {
@@ -166,6 +170,29 @@ describe("setPersonalCapabilityEnabled", () => {
     expect(providerOf(state.rows, "text")).toEqual({ active: "deepseek", assigned: "deepseek" });
   });
 
+  it("reports success when disabling a capability no provider serves", async () => {
+    // The quick-toggle modal submits all six capabilities and ANDs the results, so an
+    // unconfigured capability returning false turned an unrelated successful write into
+    // "Operation Failed".
+    const state = stubRepo(makeAccount());
+
+    expect(await setPersonalCapabilityEnabled(1, "video", false)).toBe(true);
+    expect(providerOf(state.rows, "text")).toEqual({ active: "deepseek", assigned: "deepseek" });
+  });
+
+  it("still refuses to enable a capability no provider serves", async () => {
+    stubRepo(makeAccount());
+
+    expect(await setPersonalCapabilityEnabled(1, "video", true)).toBe(false);
+  });
+
+  it("still reports failure when the underlying upsert fails", async () => {
+    stubRepo(makeAccount());
+    spyOn(llmProviderRepo, "upsertUserSavedProviderConfig").mockImplementation(async () => false);
+
+    expect(await setPersonalCapabilityEnabled(1, "text", false)).toBe(false);
+  });
+
   it("leaves other capabilities untouched", async () => {
     const rows = makeAccount();
     rows[2] = makeRow({
@@ -180,6 +207,45 @@ describe("setPersonalCapabilityEnabled", () => {
     await setPersonalCapabilityEnabled(1, "text", false);
 
     expect(providerOf(state.rows, "vision")).toEqual({ active: "google", assigned: "google" });
+  });
+
+  it("disables and re-enables Standard and NAI Image independently without cross-talk", async () => {
+    const rows = [
+      makeRow({
+        provider: "openrouter",
+        diffusion_model_id: 10,
+        enabled_capabilities: ["image"],
+        assigned_capabilities: ["image"],
+      }),
+      makeRow({
+        provider: "novelai",
+        nai_diffusion_model_id: 20,
+        enabled_capabilities: ["image_nai"],
+        assigned_capabilities: ["image_nai"],
+      }),
+    ];
+    const state = stubRepo(rows);
+
+    expect(providerOf(state.rows, "image")).toEqual({ active: "openrouter", assigned: "openrouter" });
+    expect(providerOf(state.rows, "image_nai")).toEqual({ active: "novelai", assigned: "novelai" });
+
+    await setPersonalCapabilityEnabled(1, "image_nai", false);
+    expect(providerOf(state.rows, "image")).toEqual({ active: "openrouter", assigned: "openrouter" });
+    expect(providerOf(state.rows, "image_nai")).toEqual({ active: null, assigned: "novelai" });
+    expect(state.rows.find((r) => r.provider === "novelai")?.nai_diffusion_model_id).toBe(20);
+    expect(state.rows.find((r) => r.provider === "openrouter")?.diffusion_model_id).toBe(10);
+
+    await setPersonalCapabilityEnabled(1, "image", false);
+    expect(providerOf(state.rows, "image")).toEqual({ active: null, assigned: "openrouter" });
+    expect(providerOf(state.rows, "image_nai")).toEqual({ active: null, assigned: "novelai" });
+
+    await setPersonalCapabilityEnabled(1, "image_nai", true);
+    expect(providerOf(state.rows, "image")).toEqual({ active: null, assigned: "openrouter" });
+    expect(providerOf(state.rows, "image_nai")).toEqual({ active: "novelai", assigned: "novelai" });
+
+    await setPersonalCapabilityEnabled(1, "image", true);
+    expect(providerOf(state.rows, "image")).toEqual({ active: "openrouter", assigned: "openrouter" });
+    expect(providerOf(state.rows, "image_nai")).toEqual({ active: "novelai", assigned: "novelai" });
   });
 
   it("reports failure when no row could serve the capability", async () => {
@@ -209,5 +275,29 @@ describe("assignPersonalCapabilityToProvider", () => {
     await assignPersonalCapabilityToProvider(1, "google", "text", (row) => ({ ...row, llm_id: 999 }));
 
     expect(providerOf(state.rows, "text")).toEqual({ active: "google", assigned: "google" });
+  });
+});
+
+describe("setPersonalTextPrimary", () => {
+  it("keeps the user-level chain across a provider switch and prunes only the new primary", async () => {
+    const state = stubRepo(makeAccount());
+    const chain: FallbackModelRef[] = [
+      { type: "llm", id: 200 },
+      { type: "llm", id: 300 },
+      { type: "custom_endpoint", id: 7 },
+    ];
+    spyOn(llmProviderRepo, "loadPersonalFallbackSettings").mockImplementation(async () => ({
+      fallback_model_refs: chain,
+      model_randomizer_enabled: true,
+    }));
+    const chainWrite = spyOn(llmProviderRepo, "updatePersonalFallbackModelRefs").mockImplementation(async () => true);
+
+    expect(await setPersonalTextPrimary(1, "google", 300)).toBe(true);
+
+    expect(providerOf(state.rows, "text")).toEqual({ active: "google", assigned: "google" });
+    expect(chainWrite).toHaveBeenCalledWith(1, [
+      { type: "llm", id: 200 },
+      { type: "custom_endpoint", id: 7 },
+    ]);
   });
 });

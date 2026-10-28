@@ -2,14 +2,16 @@ import { describe, expect, it } from "bun:test";
 import type { TomoriState } from "@/types/db/schema";
 import { dashboardTestChatInternals } from "@/web/dashboard/personaChatService";
 import type { DashboardActor } from "@/web/dashboard/types";
+import { createLlmRow, createPersona } from "../../helpers/fixtures";
 
 function createState(): TomoriState {
-  return {
+  return createPersona({
     persona_id: 9,
     persona_nickname: "Tomori",
-    llm: {
+    llm: createLlmRow({
       has_tools: true,
-    },
+      verbatim_tool_calling: true,
+    }),
     config: {
       humanizer_degree: 3,
       send_message_limit: 4,
@@ -22,9 +24,11 @@ function createState(): TomoriState {
       voice_message_enabled: true,
       user_blocking_enabled: true,
       self_teaching_enabled: true,
-      verbatim_tool_calling_enabled: true,
+      response_drafting_enabled: true,
+      conditioning_interactions_enabled: true,
+      user_info_updates_enabled: true,
     },
-  } as TomoriState;
+  });
 }
 
 describe("dashboard persona test chat isolation", () => {
@@ -34,6 +38,8 @@ describe("dashboard persona test chat isolation", () => {
 
     expect(source.config.tool_use_enabled).toBe(true);
     expect(safe.llm.has_tools).toBe(false);
+    expect(safe.llm.verbatim_tool_calling).toBe(false);
+    expect(source.llm.verbatim_tool_calling).toBe(true);
     expect(safe.config).toMatchObject({
       humanizer_degree: 0,
       send_message_limit: 0,
@@ -46,7 +52,11 @@ describe("dashboard persona test chat isolation", () => {
       voice_message_enabled: false,
       user_blocking_enabled: false,
       self_teaching_enabled: false,
-      verbatim_tool_calling_enabled: false,
+      response_drafting_enabled: false,
+      conditioning_interactions_enabled: false,
+      dice_rolling_enabled: false,
+      danbooru_enabled: false,
+      user_info_updates_enabled: false,
     });
   });
 

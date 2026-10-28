@@ -1,3 +1,10 @@
+import { HTTPClient } from "@openrouter/sdk/lib/http";
+import { fetchWithProviderRequest } from "@/utils/provider/providerRequestHook";
+import { normalizeProviderUsage } from "@/utils/text/tokenEstimate";
+import { findProviderRequestDeniedError } from "@/utils/provider/providerUsage";
+import { readOpenRouterLimitError } from "@/providers/openrouter/openrouterLimit";
+import { callOpenRouterDecisions } from "@/providers/openrouter/openrouterDecisions";
+import type { ProviderDecisionRequest, DecisionResult, SupportsDecisions } from "@/types/provider/featureInterfaces";
 /**
  * OpenRouter provider implementation
  * Implements the LLMProvider interface for OpenRouter's multi-provider API
@@ -19,7 +26,7 @@ import type {
 import type { ZodType } from "zod";
 import { StreamOrchestrator } from "../../utils/discord/streamOrchestrator";
 import { buildStreamContext } from "@/utils/provider/streamContext";
-import { DEFAULT_MAX_OUTPUT_TOKENS, resolveMaxOutputTokens } from "@/utils/provider/maxOutputTokens";
+import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import { OpenrouterStreamAdapter, type OpenrouterStreamConfig } from "./openrouterStreamAdapter";
 import { generateConversationSummaryOpenrouter, generateRoleplaySummaryOpenrouter } from "./compactGenerator";
 import { generatePresetFromPromptOpenrouter } from "./presetGenerator";
@@ -61,18 +68,16 @@ import { getCachedDefaultLLM, isLLMCacheReady } from "../../utils/cache/llmCache
 import {
   getOpenRouterCapabilities,
   getOrFetchOpenRouterCapabilities,
-  getOpenRouterTokenLimits,
   isOpenRouterCapabilityCacheReady,
 } from "../../utils/cache/openrouterCapabilityCache";
 import { configRepository, llmModelRepo } from "@/utils/db/repositories";
-import { getMCPManager } from "../../utils/mcp/mcpManager";
-import { isBraveSearchAvailable } from "../../tools/restAPIs/brave/braveSearchService";
 import { openrouterProviderInfo } from "./providerInfo";
 import { buildRuntimeLogitBiasMapForLlm } from "@/utils/provider/logitBiasResolver";
 import { resolveEffectiveOpenRouterSeesYouTube } from "@/utils/provider/openrouterModelCapabilities";
 import { buildOpenRouterAttributionHeaders } from "@/utils/provider/openrouterAttribution";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
 /**
  * Gets the default OpenRouter model with a robust fallback chain:
@@ -141,21 +146,20 @@ export interface OpenrouterProviderConfig extends ProviderConfig {
   minP?: number; // Minimum probability threshold (0.0=disabled)
 }
 
-/**
- * OpenRouter provider implementation
- */
 export class OpenrouterProvider
   extends BaseLLMProvider
   implements
     LLMProvider,
+    SupportsDecisions,
     SupportsEmbeddings,
     SupportsStructuredOutput,
     SupportsPresetGeneration,
     SupportsConversationCompaction
 {
-  /**
-   * Get provider information and capabilities
-   */
+  async callDecisions(request: ProviderDecisionRequest): Promise<DecisionResult> {
+    return await callOpenRouterDecisions(request);
+  }
+
   getInfo(): ProviderInfo {
     return openrouterProviderInfo;
   }
@@ -297,7 +301,11 @@ export class OpenrouterProvider
     }
 
     try {
-      const openRouter = new OpenRouter({ apiKey: request.apiKey });
+      const openRouter = new OpenRouter({
+        apiKey: request.apiKey,
+        httpClient: new HTTPClient({ fetcher: fetchWithProviderRequest }),
+        debugLogger: { group: () => {}, groupEnd: () => {}, log: () => {} },
+      });
       const response = await openRouter.embeddings.generate(
         {
           model: request.model,
@@ -308,12 +316,19 @@ export class OpenrouterProvider
         },
       );
 
+      const usage = typeof response === "string" ? null : normalizeProviderUsage(response.usage);
+      if (usage) request.onUsage?.(usage);
       return extractOpenRouterEmbeddings(response);
     } catch (error: unknown) {
       // OpenRouter sometimes returns 200 OK with an error body, which trips up the SDK's validation.
       // If this happens, the SDK throws a ResponseValidationError with the raw body in rawValue.
       // biome-ignore lint/suspicious/noExplicitAny: SDK-specific error structure (ResponseValidationError) contains rawValue
       const err = error as any;
+      const limit =
+        typeof err?.statusCode === "number" && typeof err.body === "string" && err.headers instanceof Headers
+          ? readOpenRouterLimitError(err.statusCode, err.headers, err.body)
+          : null;
+      if (limit) throw new Error(`OpenRouter embedding request failed: HTTP ${err.statusCode}`, { cause: limit });
 
       if (err.name === "ResponseValidationError" && err.rawValue?.error) {
         const orError = err.rawValue.error;
@@ -360,15 +375,6 @@ export class OpenrouterProvider
       return undefined;
     }
 
-    const hasBraveApiKey = await isBraveSearchAvailable(request.tomoriState.server_id);
-
-    if (!hasBraveApiKey) {
-      const mcpManager = getMCPManager();
-      if (!mcpManager.isReady()) {
-        await mcpManager.initializeMCPServers();
-      }
-    }
-
     const toolStateForContext: ToolStateForContext = {
       server_id: request.tomoriState.server_id.toString(),
       activePersonaHasElevenlabsVoice: Boolean(
@@ -377,7 +383,10 @@ export class OpenrouterProvider
           request.tomoriState.speech_voice_id?.trim(),
       ),
       activePersonaVoiceDesignPrompt: request.tomoriState.speech_voice_design_prompt?.trim() || null,
-      activePersonaVoiceName: request.tomoriState.speech_voice_name,
+      activePersonaVoiceSampleId: request.tomoriState.speech_voice_sample_id,
+      activePersonaVoiceId: request.tomoriState.speech_voice_id,
+      activePersonaVoiceSourcePriority: request.tomoriState.voice_source_priority,
+
       diffusion_model_id: request.tomoriState.config.diffusion_model_id,
       nai_diffusion_model_id: request.tomoriState.config.nai_diffusion_model_id,
       video_model_id: request.tomoriState.config.video_model_id,
@@ -390,6 +399,7 @@ export class OpenrouterProvider
         supports_structoutput: request.tomoriState.llm.supports_structoutput,
       },
       config: {
+        emoji_usage_enabled: false,
         sticker_usage_enabled: false,
         web_search_enabled: true,
         self_teaching_enabled: false,
@@ -398,7 +408,11 @@ export class OpenrouterProvider
         videogen_enabled: false,
         voice_message_enabled: false,
         user_blocking_enabled: false,
+        user_info_updates_enabled: false,
         thread_creation_enabled: false,
+        conditioning_interactions_enabled: false,
+        dice_rolling_enabled: false,
+        danbooru_enabled: false,
       },
     };
 
@@ -419,13 +433,20 @@ export class OpenrouterProvider
   async generatePreset(request: ProviderPresetGenerationRequest): Promise<PresetGenerationResult> {
     const tools = await this.getPresetGenerationTools(request);
 
-    return await generatePresetFromPromptOpenrouter(request.apiKey, request.params, request.locale, {
-      model: request.tomoriState.llm.llm_codename,
-      temperature: getActiveTemperature(request.tomoriState.config),
-      tools,
-      toolContext: request.toolContext as ToolContext | undefined,
-      maxToolRounds: request.maxToolRounds,
-    });
+    try {
+      return await generatePresetFromPromptOpenrouter(request.apiKey, request.params, request.locale, {
+        model: request.tomoriState.llm.llm_codename,
+        temperature: getActiveTemperature(request.tomoriState.config),
+        tools,
+        toolContext: request.toolContext as ToolContext | undefined,
+        maxToolRounds: request.maxToolRounds,
+        onUsage: request.onUsage,
+      });
+    } catch (error) {
+      const denied = findProviderRequestDeniedError(error, request.toolContext?.usageContext);
+      if (denied) return { error: denied.message, errorType: "MODEL_ERROR", cause: denied };
+      throw error;
+    }
   }
 
   async generateConversationSummary(request: ProviderCompactSummaryRequest): Promise<CompactConversationResult> {
@@ -446,6 +467,9 @@ export class OpenrouterProvider
     streamingContext?: StreamingContext,
   ): Promise<Array<Record<string, unknown>>> {
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -454,7 +478,11 @@ export class OpenrouterProvider
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -467,6 +495,7 @@ export class OpenrouterProvider
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -475,13 +504,18 @@ export class OpenrouterProvider
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("openrouter", toolStateForContext);
 
@@ -498,6 +532,7 @@ export class OpenrouterProvider
         providerLabel: "OpenRouter provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -637,35 +672,9 @@ export class OpenrouterProvider
       log.info("[DB FALLBACK] OpenRouter capability cache not ready - using database flags");
     }
 
-    // Resolve max output tokens from the OpenRouter capability cache.
-    // If the model reports a max_completion_tokens value, use it, but cap it
-    // at OPENROUTER_MAX_OUTPUT_TOKENS (default: 8192) to avoid 402 errors on
+    // OPENROUTER_MAX_OUTPUT_TOKENS (default 8192) caps the default budget to avoid 402 errors on
     // accounts with low daily credit limits.
-    // Shared with the context truncator (see resolveMaxOutputTokens) so the reserved output
-    // budget and the requested max_tokens never drift: `/model parameters` override →
-    // OPENROUTER_MAX_OUTPUT_TOKENS → flat 8192, clamped to the model's reported ceiling.
-    let resolvedMaxOutputTokens: number | undefined;
-    if (tomoriState.llm.llm_codename !== "other-model" && isOpenRouterCapabilityCacheReady()) {
-      const tokenLimits = getOpenRouterTokenLimits(tomoriState.llm.llm_codename);
-      if (tokenLimits?.maxCompletionTokens !== undefined) {
-        resolvedMaxOutputTokens = resolveMaxOutputTokens({
-          configured: tomoriState.config.llm_max_output_tokens,
-          envRaw: process.env.OPENROUTER_MAX_OUTPUT_TOKENS,
-          fallback: DEFAULT_MAX_OUTPUT_TOKENS,
-          providerReportedMax: tokenLimits.maxCompletionTokens,
-        });
-      }
-    }
-    // For custom/unknown models (`other-model`, or a cache miss) we have no reported ceiling to
-    // clamp against, so we normally omit max_tokens and let the model self-manage. But an EXPLICIT
-    // `/model parameters` output-token override is a deliberate user choice, so honor it so the
-    // "lower output tokens" tip shown on 402/400 errors actually reduces the request for these users.
-    if (resolvedMaxOutputTokens === undefined) {
-      const explicitOverride = tomoriState.config.llm_max_output_tokens;
-      if (typeof explicitOverride === "number" && explicitOverride > 0) {
-        resolvedMaxOutputTokens = explicitOverride;
-      }
-    }
+    const resolvedMaxOutputTokens = await resolveRequestMaxOutputTokens(tomoriState);
     const config: OpenrouterProviderConfig = {
       // For other-model, use the user-configured model codename (e.g., "openrouter/free")
       // rather than the placeholder codename "other-model" which OpenRouter rejects
@@ -688,7 +697,10 @@ export class OpenrouterProvider
       config.logitBias = runtimeLogitBias;
     }
 
-    if (effectiveHasTools) config.tools = await this.getTools(tomoriState);
+    // The catalog override above can raise effectiveHasTools above the flag the pipeline
+    // narrowed, which is how the Tool Use master toggle and the deliberate-tool kill switch
+    // both used to leak tools on this provider alone.
+    if (resolveToolsEnabled(tomoriState, effectiveHasTools)) config.tools = await this.getTools(tomoriState);
 
     return config;
   }

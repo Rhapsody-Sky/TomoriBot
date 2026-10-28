@@ -2,7 +2,6 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "ignoreDependencies": ["@oevortex/ddg_search"],
       "entry": [
         "src/db/initializeCli.ts",
         "src/commands/**/*.ts",
@@ -18,6 +17,7 @@
       "ignoreFiles": ["src/db/seed/catalog/personas/prideful/en-US.ts"]
     },
     "apps/docs": {
+      "ignoreDependencies": ["@docs-locales"],
       "entry": ["src/components/FeatureCard.astro", "src/routeData.ts"],
       "project": ["src/**/*.{astro,mdx,ts}"]
     }

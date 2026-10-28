@@ -4,6 +4,8 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import { log } from "@/utils/misc/logger";
+import { localizer } from "@/utils/text/localizer";
+import { USER_IDENTITY_FIELD_MAX_LENGTH, USER_NICKNAME_MAX_LENGTH } from "@/types/personaNaming";
 import {
   OAUTH_STATE_COOKIE,
   SESSION_COOKIE,
@@ -28,7 +30,7 @@ import { DashboardProviderService } from "./providerService";
 import { DashboardPersonaChatService } from "./personaChatService";
 import { DashboardPersonaService } from "./personaService";
 import { getDashboardRuntimeConfig } from "./runtimeConfig";
-import { SETTINGS_CATALOG, isSettingsSectionId, serializeSettingsValues } from "./settingsCatalog";
+import { getSettingsCatalog, isSettingsSectionId, serializeSettingsValues } from "./settingsCatalog";
 import { DashboardSettingsService } from "./settingsService";
 import type {
   DashboardActor,
@@ -105,12 +107,34 @@ function parseNonNegativeInt(value: string | undefined): number | null {
 
 function serializeProfile(actor: DashboardActor) {
   return {
+    copy: {
+      serverFallback: localizer("en-US", "general.dashboard.server_fallback"),
+      serverFallbackHint: localizer("en-US", "general.dashboard.server_fallback_hint"),
+      nudgeOptOut: localizer("en-US", "general.dashboard.nudge_opt_out"),
+      nudgeOptOutHint: localizer("en-US", "general.dashboard.nudge_opt_out_hint"),
+      gender: localizer("en-US", "commands.personal.config.modal_gender_label"),
+      genderHint: localizer("en-US", "commands.personal.config.modal_gender_description"),
+      pronouns: localizer("en-US", "commands.personal.config.modal_pronouns_label"),
+      pronounsHint: localizer("en-US", "commands.personal.config.modal_pronouns_description"),
+      addressingStyle: localizer("en-US", "commands.personal.config.modal_style_label"),
+      addressingStyleHint: localizer("en-US", "commands.personal.config.modal_style_description"),
+      styleDefault: localizer("en-US", "general.dashboard.style_default"),
+      styleMasculine: localizer("en-US", "commands.personal.config.style_masculine"),
+      styleFeminine: localizer("en-US", "commands.personal.config.style_feminine"),
+      styleNeutral: localizer("en-US", "commands.personal.config.style_neutral"),
+    },
+    limits: { nickname: USER_NICKNAME_MAX_LENGTH, identity: USER_IDENTITY_FIELD_MAX_LENGTH },
+    genderIdentity: actor.user.gender_identity ?? null,
+    pronouns: actor.user.pronouns ?? null,
+    addressingStyle: actor.user.addressing_style ?? null,
     nickname: actor.user.user_nickname,
     privacyLevel: actor.user.privacy_level,
     personalDtm: actor.user.personal_dtm ?? "follow",
     personalDeliberateToolMode: actor.user.personal_deliberate_tool_mode ?? "follow",
     timezoneOffset: actor.user.timezone_offset ?? null,
     crossServerShortTermMemory: actor.user.shortterm_cache_crossserver_opt_in ?? false,
+    personalServerFallback: actor.user.personal_server_fallback_enabled,
+    naturalNudgeOptOut: actor.user.natural_nudge_opt_out,
     impersonationPrompt: actor.user.impersonation_prompt ?? null,
     physicalAppearanceTags: actor.user.physical_appearance_tags ?? [],
   };
@@ -345,13 +369,16 @@ export function createDashboardApp(client: Client) {
           mainPersona?.fallback_chain?.map((entry) =>
             entry.kind === "llm"
               ? { type: "model", label: `${entry.model.llm_provider}/${entry.model.llm_codename}` }
-              : { type: "endpoint", label: entry.endpoint.display_name },
+              : { type: "endpoint", label: entry.endpoint.label },
           ) ?? [],
       },
       settings: result.actor.canManage
         ? {
-            catalog: SETTINGS_CATALOG,
-            values: serializeSettingsValues(result.snapshot.config as unknown as Record<string, unknown>),
+            catalog: getSettingsCatalog(),
+            values: serializeSettingsValues({
+              ...result.snapshot.config,
+              ...(await core.loadStmSettings(result.snapshot.serverId)),
+            }),
           }
         : null,
     });

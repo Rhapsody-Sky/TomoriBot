@@ -20,6 +20,18 @@ type PersonaWhitelistStatus = Pick<
   "hasActivePersonaWhitelist" | "restrictedPersonaIds" | "whitelistedPersonaIds"
 >;
 
+export type WhitelistChannelsReadResult =
+  | { status: "fresh"; channels: ChannelWhitelistRow[] }
+  | { status: "unavailable"; channels: [] };
+
+export type WhitelistPersonasReadResult =
+  | { status: "fresh"; personas: ChannelPersonaWhitelistRow[] }
+  | { status: "unavailable"; personas: [] };
+
+export type WhitelistRolesReadResult =
+  | { status: "fresh"; roles: RoleWhitelistRow[] }
+  | { status: "unavailable"; roles: [] };
+
 class WhitelistRepository {
   private normalizeTomoriIds(rows: Array<{ persona_id: number | string | bigint }>): number[] {
     return rows
@@ -194,46 +206,26 @@ class WhitelistRepository {
   }
 
   /**
-   * Add or update a channel in the whitelist with optional cooldown override settings.
-   *
-   * @param cooldownType  - Cooldown type override, or null to inherit global
-   * @param cooldownLength - Cooldown length override in seconds, or null to inherit global
+   * Adds or updates whitelist channels with their cooldown overrides; a null type or length
+   * inherits the server global cooldown.
    */
-  async upsertChannelWhitelist(
+  async upsertChannelWhitelists(
     serverId: number,
-    channelDiscId: string,
-    cooldownType: CooldownType | null,
-    cooldownLength: number | null,
-  ): Promise<ChannelWhitelistRow> {
-    const [result] = await sql`
-      INSERT INTO channel_whitelist (server_id, channel_disc_id, cooldown_type, cooldown_length)
-      VALUES (${serverId}, ${channelDiscId}, ${cooldownType}, ${cooldownLength})
-      ON CONFLICT (server_id, channel_disc_id)
-      DO UPDATE SET
-        cooldown_type = EXCLUDED.cooldown_type,
-        cooldown_length = EXCLUDED.cooldown_length,
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING *
-    `;
-
-    if (!result) throw new Error("Failed to upsert channel whitelist");
-    return result as ChannelWhitelistRow;
-  }
-
-  /**
-   * Returns one channel whitelist row for exact settings comparisons.
-   *
-   */
-  async getChannelWhitelist(serverId: number, channelDiscId: string): Promise<ChannelWhitelistRow | null> {
-    const [result] = await sql`
-      SELECT *
-      FROM channel_whitelist
-      WHERE server_id = ${serverId}
-        AND channel_disc_id = ${channelDiscId}
-      LIMIT 1
-    `;
-
-    return (result as ChannelWhitelistRow | undefined) ?? null;
+    writes: readonly { channelId: string; cooldownType: CooldownType | null; cooldownLength: number | null }[],
+  ): Promise<void> {
+    await sql.transaction(async (tx) => {
+      for (const write of writes) {
+        await tx`
+          INSERT INTO channel_whitelist (server_id, channel_disc_id, cooldown_type, cooldown_length)
+          VALUES (${serverId}, ${write.channelId}, ${write.cooldownType}, ${write.cooldownLength})
+          ON CONFLICT (server_id, channel_disc_id)
+          DO UPDATE SET
+            cooldown_type = EXCLUDED.cooldown_type,
+            cooldown_length = EXCLUDED.cooldown_length,
+            updated_at = CURRENT_TIMESTAMP
+        `;
+      }
+    });
   }
 
   /**
@@ -249,13 +241,25 @@ class WhitelistRepository {
 
   /**
    * Get all whitelisted channels for a server, ordered by creation time.
-   *
    */
   async getAllWhitelistChannels(serverId: number): Promise<ChannelWhitelistRow[]> {
     const result = await sql`
       SELECT * FROM channel_whitelist WHERE server_id = ${serverId} ORDER BY created_at ASC
     `;
     return result as ChannelWhitelistRow[];
+  }
+
+  /**
+   * Get all whitelisted channels for a server with read status provenance.
+   */
+  async getAllWhitelistChannelsResult(serverId: number): Promise<WhitelistChannelsReadResult> {
+    try {
+      const channels = await this.getAllWhitelistChannels(serverId);
+      return { status: "fresh", channels };
+    } catch (error) {
+      log.error(`Error loading whitelist channels for server ${serverId}:`, error);
+      return { status: "unavailable", channels: [] };
+    }
   }
 
   /**
@@ -319,6 +323,19 @@ class WhitelistRepository {
       ORDER BY persona_id ASC, channel_disc_id ASC, created_at ASC
     `;
     return result as ChannelPersonaWhitelistRow[];
+  }
+
+  /**
+   * Get all persona whitelist entries for a server with read status provenance.
+   */
+  async getAllWhitelistPersonasResult(serverId: number): Promise<WhitelistPersonasReadResult> {
+    try {
+      const personas = await this.getAllWhitelistPersonas(serverId);
+      return { status: "fresh", personas };
+    } catch (error) {
+      log.error(`Error loading whitelist personas for server ${serverId}:`, error);
+      return { status: "unavailable", personas: [] };
+    }
   }
 
   /**
@@ -388,6 +405,19 @@ class WhitelistRepository {
       SELECT * FROM role_whitelist WHERE server_id = ${serverId} ORDER BY created_at ASC
     `;
     return result as RoleWhitelistRow[];
+  }
+
+  /**
+   * Get all whitelisted roles for a server with read status provenance.
+   */
+  async getAllWhitelistRolesResult(serverId: number): Promise<WhitelistRolesReadResult> {
+    try {
+      const roles = await this.getAllWhitelistRoles(serverId);
+      return { status: "fresh", roles };
+    } catch (error) {
+      log.error(`Error loading whitelist roles for server ${serverId}:`, error);
+      return { status: "unavailable", roles: [] };
+    }
   }
 
   /**

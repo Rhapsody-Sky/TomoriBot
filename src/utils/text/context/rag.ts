@@ -1,3 +1,4 @@
+import { createProviderUsageRecorder, withProviderUsageContext } from "@/utils/provider/providerUsage";
 import { isRagAvailable } from "@/utils/db/ragAvailability";
 import { llmModelRepo, ragRepository, serverMemoryRepository } from "@/utils/db/repositories";
 import { log } from "@/utils/misc/logger";
@@ -6,17 +7,12 @@ import { memoryGuard } from "@/utils/security/rateLimiter";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import type { TomoriState } from "@/types/db/schema";
 import type { SimplifiedMessageForContext } from "./types";
+import { channelScopeCandidates } from "@/utils/discord/channelScope";
 
 const DOCUMENT_QUERY_MAX_LENGTH = 1000;
 const DOCUMENT_QUERY_MIN_LENGTH = 3;
-const DOCUMENT_MAX_RESULTS = (() => {
-  const parsed = Number.parseInt(process.env.DOCUMENT_MAX_RESULTS || "6", 10);
-  return Number.isFinite(parsed) ? Math.max(1, parsed) : 6;
-})();
-const DOCUMENT_MIN_SIMILARITY = (() => {
-  const parsed = Number.parseFloat(process.env.DOCUMENT_MIN_SIMILARITY || "0.5");
-  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.5;
-})();
+const DOCUMENT_MAX_RESULTS = 6;
+const DOCUMENT_MIN_SIMILARITY = 0.5;
 
 function getLatestUserQuery(messages: SimplifiedMessageForContext[]): string | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -37,10 +33,11 @@ export async function buildServerDocumentContextItem(params: {
   tomoriState: TomoriState | null | undefined;
   simplifiedMessageHistory: SimplifiedMessageForContext[];
   triggererUserId?: number;
-  channelName?: string | null;
+  channelId: string;
+  parentChannelId?: string | null;
 }): Promise<StructuredContextItem | null> {
   try {
-    const { tomoriState, simplifiedMessageHistory, triggererUserId, channelName } = params;
+    const { tomoriState, simplifiedMessageHistory, triggererUserId, channelId, parentChannelId } = params;
     if (!isRagAvailable() || memoryGuard.getStatus() === "critical" || !tomoriState?.server_id) {
       return null;
     }
@@ -70,18 +67,23 @@ export async function buildServerDocumentContextItem(params: {
       return null;
     }
 
-    const channelFilter = tomoriState.config.channel_memory_enabled && channelName ? channelName : null;
+    const channelFilter = tomoriState.config.channel_memory_enabled
+      ? channelScopeCandidates(channelId, parentChannelId)
+      : null;
 
-    const chunks = await ragRepository.retrieveRelevantChunks({
-      serverId: tomoriState.server_id,
-      personaId: tomoriState.persona_id ?? null,
-      query: queryText,
-      embeddingModel,
-      apiKey: creds.apiKey,
-      maxResults: DOCUMENT_MAX_RESULTS,
-      minSimilarity: DOCUMENT_MIN_SIMILARITY,
-      channelName: channelFilter,
-    });
+    const chunks = await withProviderUsageContext(creds.usageContext, async () =>
+      ragRepository.retrieveRelevantChunks({
+        serverId: tomoriState.server_id,
+        personaId: tomoriState.persona_id ?? null,
+        query: queryText,
+        embeddingModel,
+        apiKey: creds.apiKey,
+        onUsage: createProviderUsageRecorder(creds.usageContext, embeddingModel.codename),
+        maxResults: DOCUMENT_MAX_RESULTS,
+        minSimilarity: DOCUMENT_MIN_SIMILARITY,
+        channelIds: channelFilter,
+      }),
+    );
 
     const documentContext = ragRepository.formatChunksForPrompt(chunks);
     if (!documentContext) {
