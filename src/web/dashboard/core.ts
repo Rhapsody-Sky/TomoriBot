@@ -127,6 +127,12 @@ export type DashboardStatsTimeframe = "today" | "week" | "month" | "year" | "all
 
 export interface DashboardServerStats {
   timeframe: DashboardStatsTimeframe;
+  history: {
+    from: string;
+    through: string;
+    days: Array<{ date: string; inputTokens: number; outputTokens: number }>;
+    models: Array<{ date: string; model: string; inputTokens: number; outputTokens: number }> | null;
+  } | null;
   totals: {
     messages: number;
     commands: number;
@@ -492,22 +498,44 @@ export class TomoriDashboardCore {
     await statRepository.flush();
     const from = resolveStatsWindow(timeframe);
     const scope = { serverId: snapshot.serverId, from };
-    const [messages, commands, tokens, estimatedCost, generations, personas, models, tools, topCommands] =
-      await Promise.all([
-        statRepository.getMetricTotal({ metric: "message_sent", ...scope }),
-        statRepository.getMetricTotal({ metric: "command_used", ...scope }),
-        statRepository.getTokenTotals(scope),
-        statRepository.getEstimatedCost(scope),
-        statRepository.getGenerationTotals(scope),
-        statRepository.getServerPersonaMessages({ ...scope, limit: 5 }),
-        statRepository.getModelCostBreakdown({ ...scope, limit: 5 }),
-        statRepository.getMetricKeyBreakdown({ metric: "tool_used", ...scope, limit: 5 }),
-        statRepository.getMetricKeyBreakdown({ metric: "command_used", ...scope, limit: 5 }),
-      ]);
+    const [
+      messages,
+      commands,
+      tokens,
+      estimatedCost,
+      generations,
+      personas,
+      models,
+      tools,
+      topCommands,
+      dailyUsage,
+      dailyModels,
+    ] = await Promise.all([
+      statRepository.getMetricTotal({ metric: "message_sent", ...scope }),
+      statRepository.getMetricTotal({ metric: "command_used", ...scope }),
+      statRepository.getTokenTotals(scope),
+      statRepository.getEstimatedCost(scope),
+      statRepository.getGenerationTotals(scope),
+      statRepository.getServerPersonaMessages({ ...scope, limit: 5 }),
+      statRepository.getModelCostBreakdown({ ...scope, limit: 5 }),
+      statRepository.getMetricKeyBreakdown({ metric: "tool_used", ...scope, limit: 5 }),
+      statRepository.getMetricKeyBreakdown({ metric: "command_used", ...scope, limit: 5 }),
+      statRepository.getServerDailyTokenUsage(scope),
+      statRepository.getServerDailyModelTokenUsage(scope),
+    ]);
     const personaNames = new Map(snapshot.personas.map((persona) => [persona.lineageId, persona.nickname]));
 
     return {
       timeframe,
+      history:
+        dailyUsage === null
+          ? null
+          : {
+              from: from ?? dailyUsage[0]?.date ?? new Date().toISOString().split("T")[0],
+              through: new Date().toISOString().split("T")[0],
+              days: dailyUsage,
+              models: dailyModels,
+            },
       totals: {
         messages,
         commands,

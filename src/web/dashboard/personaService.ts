@@ -16,7 +16,7 @@ import { importAlterPreset } from "@/utils/persona/importAlterPreset";
 import { presetRepository } from "@/utils/db/repositories/PresetRepository";
 import { deletePersonaAvatarFromStorage, uploadPersonaAvatarToStorage } from "@/utils/storage/avatarStorage";
 import { dedupeTriggerWords } from "@/utils/text/triggerWords";
-import type { PresetExportData } from "@/types/preset/presetExport";
+import { PRESET_MAX_ATTRIBUTES, presetExportDataSchema, type PresetExportData } from "@/types/preset/presetExport";
 import type { TomoriDashboardCore } from "./core";
 import { DashboardServiceError } from "./errors";
 import type { DashboardGuildSnapshot } from "./types";
@@ -45,19 +45,19 @@ const attributesSchema = z
       .array(
         z
           .object({
-            text: z.string().trim().min(1).max(limits.maxAttributeLength),
+            text: presetExportDataSchema.shape.attribute_list.element.trim().min(1),
             isPublic: z.boolean().default(false),
           })
           .strict(),
       )
-      .max(limits.maxAttributes),
+      .max(PRESET_MAX_ATTRIBUTES),
   })
   .strict();
 
 const dialogueSchema = z
   .object({
-    input: z.string().trim().min(1).max(limits.maxSampleDialogueLength),
-    output: z.string().trim().min(1).max(limits.maxSampleDialogueLength),
+    input: presetExportDataSchema.shape.sample_dialogues_in.element.trim().min(1),
+    output: presetExportDataSchema.shape.sample_dialogues_out.element.trim().min(1),
   })
   .strict();
 
@@ -188,9 +188,6 @@ export class DashboardPersonaService {
       throw new DashboardServiceError("invalid_attributes", 422, "One or more persona attributes are invalid.");
     }
     const texts = parsed.data.attributes.map((attribute) => attribute.text);
-    if (texts.some((attribute) => !validateAttribute(attribute).isValid)) {
-      throw new DashboardServiceError("invalid_attributes", 422, "One or more persona attributes are invalid.");
-    }
     if (
       !(await this.core.updatePersonaAttributes(
         snapshot,
@@ -206,7 +203,16 @@ export class DashboardPersonaService {
   async addDialogue(snapshot: DashboardGuildSnapshot, personaId: number, value: unknown): Promise<void> {
     const parsed = this.parseDialogue(value);
     const persona = getPersona(snapshot, personaId);
-    if ((persona.sample_dialogues_in?.length ?? 0) >= limits.maxSampleDialogues) {
+    if (
+      !presetExportDataSchema.shape.sample_dialogues_in.safeParse([
+        ...(persona.sample_dialogues_in ?? []),
+        parsed.input,
+      ]).success ||
+      !presetExportDataSchema.shape.sample_dialogues_out.safeParse([
+        ...(persona.sample_dialogues_out ?? []),
+        parsed.output,
+      ]).success
+    ) {
       throw new DashboardServiceError("dialogue_limit", 422, "This persona has reached the sample-dialogue limit.");
     }
     if (!(await this.core.addPersonaSampleDialogue(snapshot, personaId, parsed.input, parsed.output))) {
@@ -304,11 +310,7 @@ export class DashboardPersonaService {
 
   private parseDialogue(value: unknown): { input: string; output: string } {
     const parsed = dialogueSchema.safeParse(value);
-    if (
-      !parsed.success ||
-      !validateSampleDialogue(parsed.data.input).isValid ||
-      !validateSampleDialogue(parsed.data.output).isValid
-    ) {
+    if (!parsed.success) {
       throw new DashboardServiceError("invalid_dialogue", 422, "Both sample-dialogue messages are required.");
     }
     return parsed.data;

@@ -272,6 +272,7 @@
     serverStatsLoading: false,
     serverStatsError: "",
     statsTimeframe: "all_time",
+    statsHistoryModel: null,
     settingsGroup: "conversation",
     loading: false,
   };
@@ -877,60 +878,24 @@
 
   function renderOverview(workspace) {
     const overview = state.overview;
-    const mainPersona = overview.personas[0];
-    const model = overview.modelSummary?.text;
     workspace.innerHTML = `
-      ${pageHeader("Control room", overview.guild.name, "A live view of this TomoriBot installation and your access.")}
-      <section class="metric-strip" aria-label="Server summary">
-        <div><span>Personas</span><strong>${overview.personas.length}</strong></div>
-        <div><span>Text model</span><strong class="metric-text">${escapeHtml(model?.name || "Not configured")}</strong></div>
-        <div><span>Personal memory</span><strong>${overview.memoryPolicy.personalMemoryUseEnabled ? "Active" : "Paused"}</strong></div>
-        <div><span>Access</span><strong>${overview.canManage ? "Manage Server" : "Member"}</strong></div>
-      </section>
-      <div class="overview-grid">
-        <section class="panel overview-primary">
-          <div class="panel-heading"><div><p class="eyebrow">Active identity</p><h2>${escapeHtml(mainPersona?.nickname || "Tomori")}</h2></div>
-            ${personaAvatar(mainPersona, "persona-avatar-large")}
-          </div>
-          <div class="signal-list">
-            <div><span>Trigger words</span><strong>${mainPersona?.triggerWords?.length || 0}</strong></div>
-            <div><span>Context depth</span><strong>${mainPersona?.contextNoteDepth || 0}</strong></div>
-            <div><span>Server teaching</span><strong>${overview.memoryPolicy.serverMemoryTeachingEnabled ? "Members enabled" : "Admins only"}</strong></div>
-            <div><span>Self teaching</span><strong>${overview.memoryPolicy.selfTeachingEnabled ? "Enabled" : "Disabled"}</strong></div>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-heading"><div><p class="eyebrow">Models</p><h2>Generation chain</h2></div></div>
-          <div class="model-line"><span class="status-dot"></span><div><strong>${escapeHtml(model?.name || "Not configured")}</strong><span>${escapeHtml(model?.provider || "Text provider")}</span></div></div>
-          ${
-            overview.modelSummary?.vision
-              ? `<div class="model-line"><span class="status-dot status-dot-cyan"></span><div><strong>${escapeHtml(overview.modelSummary.vision.name)}</strong><span>${escapeHtml(overview.modelSummary.vision.provider)} vision</span></div></div>`
-              : ""
-          }
-          ${
-            (overview.modelSummary?.fallbacks || [])
-              .map(
-                (fallback, index) =>
-                  `<div class="fallback-line"><span>${index + 1}</span><strong>${escapeHtml(fallback.label)}</strong></div>`,
-              )
-              .join("") || `<p class="empty-copy">No fallback chain is active.</p>`
-          }
-        </section>
-      </div>
-      <section class="section-band">
-        <div class="section-heading"><div><p class="eyebrow">Personas</p><h2>Personas</h2></div>
-          <button class="button button-secondary" data-nav="personas">Open persona workspace</button>
+      ${pageHeader(ui("overview_title"), overview.guild.name, ui("overview_hint"))}
+      <section class="section-band overview-personas">
+        <div class="section-heading"><h2>${escapeHtml(ui("overview_personas"))} <span class="overview-count">${overview.personas.length}</span></h2>
+          <button class="button button-secondary" data-nav="personas">${escapeHtml(ui("overview_open_personas"))}</button>
         </div>
         <div class="persona-row">
-          ${overview.personas
-            .map(
-              (persona) => `<article class="persona-tile">
+          ${
+            overview.personas
+              .map(
+                (persona) => `<button type="button" class="persona-tile" data-persona-select="${persona.personaId}">
                 ${personaAvatar(persona)}
-                <div><strong>${escapeHtml(persona.nickname)}</strong><span>${persona.isAlter ? "Alter persona" : "Main persona"}</span></div>
-                <span class="lineage">#${persona.lineageId}</span>
-              </article>`,
-            )
-            .join("")}
+                <div><strong>${escapeHtml(persona.nickname)}</strong><span>${escapeHtml(ui("overview_persona_workspace"))}</span></div>
+                ${navigationIcon("book-open")}
+              </button>`,
+              )
+              .join("") || `<p class="stats-empty">${escapeHtml(ui("overview_no_personas"))}</p>`
+          }
         </div>
       </section>
       ${renderServerStats()}`;
@@ -955,60 +920,222 @@
                   </div>`,
                 )
                 .join("")
-            : `<p class="stats-empty">No activity in this period yet.</p>`
+            : `<p class="stats-empty">${escapeHtml(ui("stats_empty"))}</p>`
         }
       </div>
     </section>`;
   }
 
+  function renderModelUsage(stats) {
+    const { totals } = stats;
+    const totalTokens = totals.inputTokens + totals.outputTokens;
+    const models = [...stats.models];
+    const remainingInput = Math.max(0, totals.inputTokens - models.reduce((sum, model) => sum + model.inputTokens, 0));
+    const remainingOutput = Math.max(
+      0,
+      totals.outputTokens - models.reduce((sum, model) => sum + model.outputTokens, 0),
+    );
+    if (remainingInput + remainingOutput > 0) {
+      models.push({
+        name: ui("stats_other_models"),
+        inputTokens: remainingInput,
+        outputTokens: remainingOutput,
+        cost: Math.max(0, totals.estimatedCost - models.reduce((sum, model) => sum + model.cost, 0)),
+      });
+    }
+    const exactNumber = (value) => new Intl.NumberFormat().format(value);
+    const row = (model, total = false) => {
+      const tokens = model.inputTokens + model.outputTokens;
+      const share = totalTokens > 0 ? Math.min(100, (tokens / totalTokens) * 100) : 0;
+      return `<tr${total ? ' class="model-usage-total"' : ""}>
+        <th scope="row"><strong>${escapeHtml(model.name)}</strong>${total ? "" : `<span class="model-usage-share"><meter class="model-usage-track" min="0" max="100" value="${share}" aria-hidden="true"></meter><small>${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(share)}%</small></span>`}</th>
+        <td data-label="${escapeHtml(ui("stats_input"))}">${exactNumber(model.inputTokens)}</td>
+        <td data-label="${escapeHtml(ui("stats_output"))}">${exactNumber(model.outputTokens)}</td>
+        <td data-label="${escapeHtml(ui("stats_total_tokens"))}">${exactNumber(tokens)}</td>
+        <td data-label="${escapeHtml(ui("stats_cost"))}">${formatUsd(model.cost)}</td>
+      </tr>`;
+    };
+    return `<section class="panel model-usage-section">
+      <div class="section-heading"><div><h3>${escapeHtml(ui("stats_models"))}</h3><p>${escapeHtml(ui("stats_models_hint"))}</p></div></div>
+      ${
+        models.length
+          ? `<table class="model-usage-table"><caption class="sr-only">${escapeHtml(ui("stats_models"))}</caption>
+        <thead><tr><th scope="col">${escapeHtml(ui("stats_model"))}</th><th scope="col">${escapeHtml(ui("stats_input"))}</th><th scope="col">${escapeHtml(ui("stats_output"))}</th><th scope="col">${escapeHtml(ui("stats_total_tokens"))}</th><th scope="col">${escapeHtml(ui("stats_cost"))}</th></tr></thead>
+        <tbody>${models.map((model) => row(model)).join("")}</tbody>
+        <tfoot>${row({ name: ui("stats_server_total"), inputTokens: totals.inputTokens, outputTokens: totals.outputTokens, cost: totals.estimatedCost }, true)}</tfoot>
+      </table>`
+          : `<p class="stats-empty">${escapeHtml(ui("stats_empty"))}</p>`
+      }
+      <p class="stats-footnote">${escapeHtml(ui("stats_tokens_hint"))} ${escapeHtml(ui("stats_cost_hint"))}</p>
+    </section>`;
+  }
+
+  function buildUsageHistory(history) {
+    const start = new Date(`${history.from}T00:00:00Z`);
+    const end = new Date(`${history.through}T00:00:00Z`);
+    const monthly = (end - start) / 86400000 > 61;
+    const totals = new Map();
+    let peakDay = null;
+    for (const day of history.days) {
+      const key = monthly ? day.date.slice(0, 7) : day.date;
+      const bucket = totals.get(key) || { inputTokens: 0, outputTokens: 0 };
+      bucket.inputTokens += day.inputTokens;
+      bucket.outputTokens += day.outputTokens;
+      totals.set(key, bucket);
+      if (!peakDay || day.inputTokens + day.outputTokens > peakDay.inputTokens + peakDay.outputTokens) peakDay = day;
+    }
+    const points = [];
+    for (const cursor = new Date(start); cursor <= end; ) {
+      const date = cursor.toISOString().split("T")[0];
+      const key = monthly ? date.slice(0, 7) : date;
+      const next = new Date(cursor);
+      if (monthly) next.setUTCMonth(next.getUTCMonth() + 1, 1);
+      else next.setUTCDate(next.getUTCDate() + 1);
+      const through = new Date(Math.min(end.getTime(), next.getTime() - 86400000)).toISOString().split("T")[0];
+      points.push({ date, through, ...(totals.get(key) || { inputTokens: 0, outputTokens: 0 }) });
+      cursor.setTime(next.getTime());
+    }
+    return { monthly, points, peakDay };
+  }
+
+  function historyDate(date) {
+    return new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    }).format(new Date(`${date}T00:00:00Z`));
+  }
+
+  function historyPointLabel(point) {
+    return point.date === point.through
+      ? historyDate(point.date)
+      : `${historyDate(point.date)} / ${historyDate(point.through)}`;
+  }
+
+  function historyPointValues(point) {
+    const number = (value) => new Intl.NumberFormat().format(value);
+    return `<strong>${escapeHtml(historyPointLabel(point))}</strong><span>${escapeHtml(ui("stats_input"))}: <b>${number(point.inputTokens)}</b></span><span>${escapeHtml(ui("stats_output"))}: <b>${number(point.outputTokens)}</b></span><span>${escapeHtml(ui("stats_total_tokens"))}: <b>${number(point.inputTokens + point.outputTokens)}</b></span>`;
+  }
+
+  function renderUsageHistory(stats) {
+    if (!stats.history)
+      return `<section class="panel usage-history-panel"><h3>${escapeHtml(ui("stats_history"))}</h3><p class="stats-footnote">${escapeHtml(ui("stats_history_error"))}</p><button class="button button-quiet" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></section>`;
+    const models = [...new Set((stats.history.models || []).map((entry) => entry.model))].sort();
+    if (!models.includes(state.statsHistoryModel)) state.statsHistoryModel = null;
+    const history =
+      state.statsHistoryModel === null
+        ? stats.history
+        : { ...stats.history, days: stats.history.models.filter((entry) => entry.model === state.statsHistoryModel) };
+    const { points, monthly, peakDay } = buildUsageHistory(history);
+    const maximum = Math.max(1, ...points.map((point) => point.inputTokens + point.outputTokens));
+    const peakIndex = points.findIndex((point) => point.inputTokens + point.outputTokens === maximum);
+    const selectedIndex = Math.max(0, peakIndex);
+    const step = 960 / points.length;
+    const barWidth = Math.min(46, step * 0.7);
+    const number = (value) => new Intl.NumberFormat().format(value);
+    return `<section class="panel usage-history-panel">
+      <div class="panel-heading"><div><p class="eyebrow">${escapeHtml(state.statsHistoryModel ?? ui("stats_server_total"))}</p><h3>${escapeHtml(ui("stats_history"))}</h3><p>${escapeHtml(ui(state.statsHistoryModel === null ? (monthly ? "stats_history_monthly" : "stats_history_daily") : monthly ? "stats_history_selected_monthly" : "stats_history_selected_daily"))}</p></div>
+        ${peakDay && peakIndex >= 0 ? `<div class="history-peak"><span>${escapeHtml(ui("stats_history_peak"))}</span><strong>${escapeHtml(historyDate(peakDay.date))}</strong><span>${number(peakDay.inputTokens + peakDay.outputTokens)} ${escapeHtml(ui("stats_history_tokens"))}</span></div>` : ""}
+      </div>
+      ${stats.history.models === null ? `<p class="stats-footnote">${escapeHtml(ui("stats_history_filter_error"))}</p>` : `<label class="field history-model-filter"><span>${escapeHtml(ui("stats_history_model_filter"))}</span><select data-history-model><option value="">${escapeHtml(ui("stats_server_total"))}</option>${models.map((model) => `<option value="${escapeHtml(`model:${model}`)}" ${state.statsHistoryModel === model ? "selected" : ""}>${escapeHtml(model || "(unknown)")}</option>`).join("")}</select></label>`}
+      <div class="history-legend"><span><i class="history-input-key" aria-hidden="true"></i>${escapeHtml(ui("stats_input"))}</span><span><i class="history-output-key" aria-hidden="true"></i>${escapeHtml(ui("stats_output"))}</span></div>
+      ${
+        peakIndex < 0
+          ? `<p class="stats-empty">${escapeHtml(ui("stats_empty"))}</p>`
+          : `
+      <div class="usage-history-plot">
+        <div class="history-y-axis" aria-hidden="true"><span>${formatStatNumber(maximum)}</span><span>${formatStatNumber(maximum / 2)}</span><span>0</span></div>
+        <svg class="usage-history-chart" viewBox="0 0 960 240" preserveAspectRatio="none" role="group" aria-label="${escapeHtml(ui("stats_history"))}">
+          <path class="history-gridline" d="M0 8H960 M0 120H960 M0 232H960" />
+          ${points
+            .map((point, index) => {
+              const inputHeight = (point.inputTokens / maximum) * 224;
+              const outputHeight = (point.outputTokens / maximum) * 224;
+              const x = step * index + (step - barWidth) / 2;
+              const label = `${historyPointLabel(point)}. ${ui("stats_input")}: ${number(point.inputTokens)}. ${ui("stats_output")}: ${number(point.outputTokens)}. ${ui("stats_total_tokens")}: ${number(point.inputTokens + point.outputTokens)}.`;
+              return `<g tabindex="0" role="button" data-history-index="${index}" aria-pressed="${index === selectedIndex}" aria-label="${escapeHtml(label)}"><title>${escapeHtml(label)}</title>
+              <rect class="history-hit-area" x="${step * index}" y="0" width="${step}" height="240" />
+              <rect class="history-input" x="${x}" y="${232 - inputHeight}" width="${barWidth}" height="${inputHeight}" />
+              <rect class="history-output" x="${x}" y="${232 - inputHeight - outputHeight}" width="${barWidth}" height="${outputHeight}" />
+            </g>`;
+            })
+            .join("")}
+        </svg>
+      </div>
+      <div class="history-x-axis" aria-hidden="true"><span>${escapeHtml(historyDate(stats.history.from))}</span><span>${escapeHtml(historyDate(stats.history.through))}</span></div>
+      <div class="history-readout" role="status" aria-live="polite">${historyPointValues(points[selectedIndex])}</div>
+      <details class="history-values"><summary>${escapeHtml(ui("stats_history_values"))}</summary>
+        <table class="model-usage-table"><caption class="sr-only">${escapeHtml(ui("stats_history_values"))}</caption><thead><tr><th scope="col">${escapeHtml(ui("stats_history_period"))}</th><th scope="col">${escapeHtml(ui("stats_input"))}</th><th scope="col">${escapeHtml(ui("stats_output"))}</th><th scope="col">${escapeHtml(ui("stats_total_tokens"))}</th></tr></thead><tbody>${points.map((point) => `<tr><th scope="row">${escapeHtml(historyPointLabel(point))}</th><td data-label="${escapeHtml(ui("stats_input"))}">${number(point.inputTokens)}</td><td data-label="${escapeHtml(ui("stats_output"))}">${number(point.outputTokens)}</td><td data-label="${escapeHtml(ui("stats_total_tokens"))}">${number(point.inputTokens + point.outputTokens)}</td></tr>`).join("")}</tbody></table>
+      </details>`
+      }
+      <p class="stats-footnote">${escapeHtml(ui("stats_history_hint"))}</p>
+    </section>`;
+  }
+
+  function selectHistoryPoint(target) {
+    const history = state.serverStats?.history;
+    if (!history) return;
+    const filtered =
+      state.statsHistoryModel === null
+        ? history
+        : { ...history, days: history.models.filter((entry) => entry.model === state.statsHistoryModel) };
+    const point = buildUsageHistory(filtered).points[Number(target.dataset.historyIndex)];
+    const panel = target.closest(".usage-history-panel");
+    if (!point || !panel) return;
+    panel.querySelector(".history-readout").innerHTML = historyPointValues(point);
+    panel.querySelectorAll("[data-history-index]").forEach((bar) => {
+      bar.setAttribute("aria-pressed", String(bar === target));
+    });
+  }
+
   function renderServerStats() {
     const timeframeOptions = [
-      ["today", "Today"],
-      ["week", "7 days"],
-      ["month", "30 days"],
-      ["year", "Year"],
-      ["all_time", "All time"],
+      ["today", ui("stats_today")],
+      ["week", ui("stats_week")],
+      ["month", ui("stats_month")],
+      ["year", ui("stats_year")],
+      ["all_time", ui("stats_all_time")],
     ];
-    const timeframeControls = `<div class="stats-timeframes" role="group" aria-label="Statistics timeframe">
+    const timeframeControls = `<div class="stats-timeframes" role="group" aria-label="${escapeHtml(ui("stats_timeframe"))}">
       ${timeframeOptions
         .map(
           ([value, label]) =>
-            `<button type="button" data-stats-timeframe="${value}" class="${state.statsTimeframe === value ? "is-active" : ""}" aria-pressed="${state.statsTimeframe === value}">${label}</button>`,
+            `<button type="button" data-stats-timeframe="${value}" class="${state.statsTimeframe === value ? "is-active" : ""}" aria-pressed="${state.statsTimeframe === value}">${escapeHtml(label)}</button>`,
         )
         .join("")}
     </div>`;
 
-    let content = `<div class="stats-loading" role="status"><span></span><strong>Loading server activity...</strong></div>`;
+    let content = `<div class="stats-loading" role="status"><span></span><strong>${escapeHtml(ui("stats_loading"))}</strong></div>`;
     if (state.serverStatsError) {
-      content = `<div class="stats-error"><strong>Statistics are unavailable right now.</strong><span>${escapeHtml(state.serverStatsError)}</span><button class="button button-quiet" type="button" data-stats-retry>Try again</button></div>`;
+      content = `<div class="stats-error"><strong>${escapeHtml(ui("stats_error"))}</strong><span>${escapeHtml(state.serverStatsError)}</span><button class="button button-quiet" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></div>`;
     } else if (state.serverStats) {
       const { totals } = state.serverStats;
       content = `
+        ${state.serverStatsLoading ? `<p class="stats-footnote" role="status">${escapeHtml(ui("stats_loading"))} ${escapeHtml(ui("stats_showing"))} ${escapeHtml(timeframeOptions.find(([value]) => value === state.serverStats.timeframe)?.[1] || "")}</p>` : ""}
         <div class="stats-summary-grid">
-          <div><span>Persona replies</span><strong>${formatStatNumber(totals.messages)}</strong></div>
-          <div><span>Commands used</span><strong>${formatStatNumber(totals.commands)}</strong></div>
-          <div><span>Input tokens</span><strong>${formatStatNumber(totals.inputTokens)}</strong></div>
-          <div><span>Output tokens</span><strong>${formatStatNumber(totals.outputTokens)}</strong></div>
-          <div><span>Images</span><strong>${formatStatNumber(totals.imageGenerations)}</strong></div>
-          <div><span>Videos</span><strong>${formatStatNumber(totals.videoGenerations)}</strong></div>
-          <div class="stats-cost"><span>Estimated model cost</span><strong>${formatUsd(totals.estimatedCost)}</strong><small>${formatStatNumber(totals.textGenerations)} text generations</small></div>
+          <div><span>${escapeHtml(ui("stats_replies"))}</span><strong>${formatStatNumber(totals.messages)}</strong><small>${escapeHtml(ui("stats_replies_hint"))}</small></div>
+          <div><span>${escapeHtml(ui("stats_generations"))}</span><strong>${formatStatNumber(totals.textGenerations)}</strong><small>${escapeHtml(ui("stats_generations_hint"))}</small></div>
+          <div><span>${escapeHtml(ui("stats_total_tokens"))}</span><strong>${formatStatNumber(totals.inputTokens + totals.outputTokens)}</strong><small>${escapeHtml(ui("stats_server_total"))}</small></div>
+          <div class="stats-cost"><span>${escapeHtml(ui("stats_cost"))}</span><strong>${formatUsd(totals.estimatedCost)}</strong><small>${escapeHtml(ui("stats_server_total"))}</small></div>
+        </div>
+        ${renderUsageHistory(state.serverStats)}
+        ${renderModelUsage(state.serverStats)}
+        <div class="stats-secondary-totals">
+          <span>${escapeHtml(ui("stats_commands"))} <strong>${formatStatNumber(totals.commands)}</strong></span>
+          <span>${escapeHtml(ui("stats_images"))} <strong>${formatStatNumber(totals.imageGenerations)}</strong></span>
+          <span>${escapeHtml(ui("stats_videos"))} <strong>${formatStatNumber(totals.videoGenerations)}</strong></span>
         </div>
         <div class="stats-ranking-grid">
-          ${renderStatsRanking("Popular personas", "Conversation", state.serverStats.personas, (entry) => `${formatStatNumber(entry.count)} replies`)}
-          ${renderStatsRanking(
-            "Most used models",
-            "Generation",
-            state.serverStats.models,
-            (entry) => `${formatStatNumber(entry.inputTokens + entry.outputTokens)} tokens`,
-          )}
-          ${renderStatsRanking("Top tools", "Capabilities", state.serverStats.tools, (entry) => `${formatStatNumber(entry.count)} uses`)}
-          ${renderStatsRanking("Top commands", "Discord", state.serverStats.topCommands, (entry) => `${formatStatNumber(entry.count)} uses`)}
+          ${renderStatsRanking(ui("stats_personas"), ui("stats_top_five"), state.serverStats.personas, (entry) => `${formatStatNumber(entry.count)} ${ui("stats_reply_unit")}`)}
+          ${renderStatsRanking(ui("stats_tools"), ui("stats_top_five"), state.serverStats.tools, (entry) => `${formatStatNumber(entry.count)} ${ui("stats_use_unit")}`)}
+          ${renderStatsRanking(ui("stats_commands"), ui("stats_top_five"), state.serverStats.topCommands, (entry) => `${formatStatNumber(entry.count)} ${ui("stats_use_unit")}`)}
         </div>`;
     }
 
     return `<section class="section-band server-stats-section" aria-busy="${state.serverStatsLoading}">
       <div class="section-heading stats-section-heading">
-        <div><p class="eyebrow">Server statistics</p><h2>Activity at a glance</h2><p>Usage collected by Tomori's existing statistics system.</p></div>
+        <div><p class="eyebrow">${escapeHtml(ui("stats_server_total"))}</p><h2>${escapeHtml(ui("stats_title"))}</h2><p>${escapeHtml(ui("stats_scope_hint"))}</p></div>
         ${timeframeControls}
       </div>
       ${content}
@@ -1019,10 +1146,15 @@
     if (state.view !== "overview") return;
     const current = document.querySelector(".server-stats-section");
     if (!current) return;
+    const focusedTimeframe = current.contains(document.activeElement)
+      ? document.activeElement.dataset.statsTimeframe
+      : null;
     const template = document.createElement("template");
     template.innerHTML = renderServerStats();
     const next = template.content.firstElementChild;
     if (next) current.replaceWith(next);
+    if (focusedTimeframe)
+      next?.querySelector(`[data-stats-timeframe="${focusedTimeframe}"]`)?.focus({ preventScroll: true });
   }
 
   async function loadServerStats() {
@@ -1256,7 +1388,7 @@
                 ? attributes
                     .map(
                       (attribute) => `<div class="attribute-editor-row">
-                        <textarea name="attributeText" rows="2" maxlength="2000" data-auto-grow required>${escapeHtml(attribute.text)}</textarea>
+                        <textarea name="attributeText" rows="2" data-auto-grow required>${escapeHtml(attribute.text)}</textarea>
                         <label class="inline-check"><input name="attributePublic" type="checkbox"${attribute.isPublic ? " checked" : ""}><span>Public</span></label>
                         <button class="button button-quiet button-small" type="button" data-attribute-remove aria-label="Remove attribute">Remove</button>
                       </div>`,
@@ -2205,7 +2337,7 @@
     const row = document.createElement("div");
     row.className = "attribute-editor-row";
     row.innerHTML = `
-      <textarea name="attributeText" rows="2" maxlength="2000" data-auto-grow required></textarea>
+      <textarea name="attributeText" rows="2" data-auto-grow required></textarea>
       <label class="inline-check"><input name="attributePublic" type="checkbox"><span>Public</span></label>
       <button class="button button-quiet button-small" type="button" data-attribute-remove aria-label="Remove attribute">Remove</button>`;
     list.append(row);
@@ -2281,6 +2413,12 @@
   });
 
   document.addEventListener("keydown", (event) => {
+    const historyPoint = event.target.closest?.("[data-history-index]");
+    if (historyPoint && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      selectHistoryPoint(historyPoint);
+      return;
+    }
     if (event.key !== "Enter" || !event.ctrlKey) return;
     const input = event.target instanceof Element ? event.target.closest("#persona-test-input") : null;
     if (!input || input.disabled || state.personaTestChatBusy) return;
@@ -2292,6 +2430,16 @@
     captureDraft(event.target.closest(draftForms));
     const textarea = event.target.closest?.("textarea[data-auto-grow]");
     if (textarea) resizeAutoGrowTextarea(textarea);
+  });
+
+  document.addEventListener("focusin", (event) => {
+    const point = event.target.closest?.("[data-history-index]");
+    if (point) selectHistoryPoint(point);
+  });
+
+  document.addEventListener("pointerover", (event) => {
+    const point = event.target.closest?.("[data-history-index]");
+    if (point && !point.contains(event.relatedTarget)) selectHistoryPoint(point);
   });
 
   document.addEventListener("click", async (event) => {
@@ -2426,6 +2574,11 @@
       }
       return;
     }
+    const historyPoint = event.target.closest("[data-history-index]");
+    if (historyPoint) {
+      selectHistoryPoint(historyPoint);
+      return;
+    }
     if (event.target.closest("[data-stats-retry]")) {
       state.serverStatsError = "";
       loadServerStats();
@@ -2505,6 +2658,7 @@
     }
     const personaSelect = event.target.closest("[data-persona-select]");
     if (personaSelect) {
+      state.view = "personas";
       state.personaId = Number(personaSelect.dataset.personaSelect);
       state.memoryData = null;
       renderView();
@@ -2574,6 +2728,15 @@
   });
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-history-model]")) {
+      state.statsHistoryModel = event.target.value ? event.target.value.slice(6) : null;
+      const panel = event.target.closest(".usage-history-panel");
+      if (panel && state.serverStats) {
+        panel.outerHTML = renderUsageHistory(state.serverStats);
+        document.querySelector("[data-history-model]")?.focus({ preventScroll: true });
+      }
+      return;
+    }
     if (event.target.matches("[data-sprite-archive]")) {
       const file = event.target.files?.[0];
       if (!file) return;

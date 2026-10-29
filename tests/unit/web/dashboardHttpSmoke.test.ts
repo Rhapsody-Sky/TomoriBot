@@ -1,11 +1,15 @@
 import { afterEach, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHmac } from "node:crypto";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import type { Client } from "discord.js";
 import { createDashboardApp } from "@/web/dashboard/server";
 import { TomoriDashboardCore } from "@/web/dashboard/core";
 import { DashboardSessionStore, SESSION_COOKIE } from "@/web/dashboard/auth";
 import { initializeLocalizer } from "@/utils/text/localizer";
 import { createServerConfig, createUserRow } from "../../helpers/fixtures";
+import { localizedCopy } from "../../helpers/localeCases";
+import type { DashboardServerStats } from "@/web/dashboard/core";
 
 const fakeClient = {
   application: { id: "123456789012345678" },
@@ -134,7 +138,6 @@ describe("dashboard HTTP shell", () => {
     expect(source).not.toContain('id="guild-switcher"');
     expect(source).toContain("data-stats-timeframe");
     expect(source).toContain("/stats?timeframe=");
-    expect(source).toContain("<h2>Personas</h2>");
     expect(css).toContain(".server-picker-grid");
     expect(css).toContain("@keyframes server-choice-enter");
     expect(css).toContain(".stats-summary-grid");
@@ -160,6 +163,127 @@ describe("dashboard HTTP shell", () => {
         message: "Sign in required.",
       },
     });
+  });
+
+  it("fills daily gaps and groups long periods without losing tokens or the highest-usage day", async () => {
+    const source = await Bun.file("src/web/dashboard/assets/app.js").text();
+    const ast = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    let declaration = "";
+    const walk = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === "buildUsageHistory") declaration = node.getText(ast);
+      ts.forEachChild(node, walk);
+    };
+    walk(ast);
+    type Day = { date: string; inputTokens: number; outputTokens: number };
+    const build = runInNewContext(`${declaration}\nbuildUsageHistory`) as (
+      history: NonNullable<DashboardServerStats["history"]>,
+    ) => {
+      monthly: boolean;
+      points: Array<Day & { through: string }>;
+      peakDay: Day | null;
+    };
+    const days = [
+      { date: "2024-02-28", inputTokens: 10, outputTokens: 2 },
+      { date: "2024-03-01", inputTokens: 30, outputTokens: 4 },
+    ];
+    const daily = build({ from: "2024-02-28", through: "2024-03-01", days, models: null });
+    expect(daily.monthly).toBe(false);
+    expect(daily.points.map((point) => [point.date, point.inputTokens + point.outputTokens])).toEqual([
+      ["2024-02-28", 12],
+      ["2024-02-29", 0],
+      ["2024-03-01", 34],
+    ]);
+    expect(daily.peakDay).toEqual(days[1]);
+    const monthly = build({ from: "2023-12-30", through: "2024-03-01", days, models: null });
+    expect(monthly.monthly).toBe(true);
+    expect(monthly.points.map((point) => [point.date, point.through, point.inputTokens + point.outputTokens])).toEqual([
+      ["2023-12-30", "2023-12-31", 0],
+      ["2024-01-01", "2024-01-31", 0],
+      ["2024-02-01", "2024-02-29", 12],
+      ["2024-03-01", "2024-03-01", 34],
+    ]);
+    expect(monthly.peakDay).toEqual(days[1]);
+    expect(build({ from: "2024-03-01", through: "2024-03-01", days: [], models: null }).points).toEqual([
+      { date: "2024-03-01", through: "2024-03-01", inputTokens: 0, outputTokens: 0 },
+    ]);
+  });
+
+  it("keeps model token totals separate from server totals and accounts for models beyond the top five", async () => {
+    await initializeLocalizer();
+    const source = await Bun.file("src/web/dashboard/assets/app.js").text();
+    const ast = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const declarations: string[] = [];
+    const walk = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === "renderModelUsage")
+        declarations.push(node.getText(ast));
+      if (ts.isVariableDeclaration(node) && ["escapeHtml", "formatUsd"].includes(node.name.getText(ast))) {
+        declarations.push(`const ${node.getText(ast)};`);
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(ast);
+    const render = runInNewContext(`${declarations.join("\n")}\nrenderModelUsage`, {
+      Intl,
+      ui: (key: string) => localizedCopy("en-US", `general.dashboard.interface_${key}`),
+    }) as (stats: DashboardServerStats) => string;
+    const stats: DashboardServerStats = {
+      timeframe: "all_time",
+      history: null,
+      totals: {
+        messages: 10,
+        commands: 2,
+        inputTokens: 1000,
+        outputTokens: 100,
+        estimatedCost: 0.1,
+        textGenerations: 12,
+        imageGenerations: 0,
+        videoGenerations: 0,
+      },
+      models: [
+        { name: "sample/model-a", inputTokens: 200, outputTokens: 20, cost: 0.02 },
+        { name: "sample/model-b", inputTokens: 150, outputTokens: 15, cost: 0.015 },
+        { name: "sample/model-c", inputTokens: 140, outputTokens: 14, cost: 0.014 },
+        { name: "sample/model-d", inputTokens: 110, outputTokens: 11, cost: 0.011 },
+        { name: "sample/model-e", inputTokens: 100, outputTokens: 10, cost: 0.01 },
+      ],
+      personas: [],
+      tools: [],
+      topCommands: [],
+    };
+    const html = render(stats);
+    const rows: string[][] = [];
+    let row: string[];
+    await new HTMLRewriter()
+      .on("tr", {
+        element() {
+          row = [];
+          rows.push(row);
+        },
+      })
+      .on("th,td", {
+        text(chunk) {
+          if (chunk.text.trim()) row.push(chunk.text.trim());
+        },
+      })
+      .transform(new Response(html))
+      .text();
+    expect(rows[1]).toContain("200");
+    expect(rows[1]).toContain("20");
+    expect(rows[1]).toContain("220");
+    expect(rows[1]).not.toContain(new Intl.NumberFormat().format(1100));
+    expect(rows[6]).toContain(localizedCopy("en-US", "general.dashboard.interface_stats_other_models"));
+    expect(rows[6]).toContain("330");
+    expect(rows[7]).toContain(new Intl.NumberFormat().format(1100));
+    expect(html).toContain('value="20"');
+    expect(html).not.toContain('style="');
+    const complete = render({ ...stats, totals: { ...stats.totals, inputTokens: 700, outputTokens: 70 } });
+    expect(complete).not.toContain(localizedCopy("en-US", "general.dashboard.interface_stats_other_models"));
+    const empty = render({ ...stats, models: [], totals: { ...stats.totals, inputTokens: 0, outputTokens: 0 } });
+    expect(empty).not.toContain("<table");
+    expect(empty).not.toContain("NaN");
+    expect(
+      render({ ...stats, models: [{ ...stats.models[0], name: '<img src=x onerror="alert(1)">' }] }),
+    ).not.toContain("<img");
   });
 });
 

@@ -1127,6 +1127,59 @@ class StatRepository implements IRepository<null> {
     return { inputTokens, outputTokens };
   }
 
+  async getServerDailyTokenUsage(
+    args: { serverId: number } & StatWindow,
+  ): Promise<Array<{ date: string; inputTokens: number; outputTokens: number }> | null> {
+    try {
+      const rows = await sql<{ date: string; input_tokens: number | string; output_tokens: number | string }[]>`
+        SELECT bucket::text AS date,
+          SUM(CASE WHEN metric = 'tokens_in' THEN count ELSE 0 END) AS input_tokens,
+          SUM(CASE WHEN metric = 'tokens_out' THEN count ELSE 0 END) AS output_tokens
+        FROM stat_counters
+        WHERE server_id = ${args.serverId}
+          AND metric IN ('tokens_in', 'tokens_out')
+          AND bucket >= ${windowFloor(args.from)}::date
+        GROUP BY bucket
+        ORDER BY bucket
+      `;
+      return rows.map((row) => ({
+        date: row.date,
+        inputTokens: Number(row.input_tokens),
+        outputTokens: Number(row.output_tokens),
+      }));
+    } catch (error) {
+      log.error("StatRepository.getServerDailyTokenUsage: failed", error);
+      return null;
+    }
+  }
+
+  async getServerDailyModelTokenUsage(
+    args: { serverId: number } & StatWindow,
+  ): Promise<Array<{ date: string; model: string; inputTokens: number; outputTokens: number }> | null> {
+    try {
+      const rows = await sql<
+        { date: string; model: string; input_tokens: number | string; output_tokens: number | string }[]
+      >`
+        SELECT bucket::text AS date, metric_key AS model,
+          SUM(CASE WHEN metric = 'tokens_in' THEN count ELSE 0 END) AS input_tokens,
+          SUM(CASE WHEN metric = 'tokens_out' THEN count ELSE 0 END) AS output_tokens
+        FROM stat_counters
+        WHERE server_id = ${args.serverId} AND metric IN ('tokens_in', 'tokens_out')
+          AND bucket >= ${windowFloor(args.from)}::date
+        GROUP BY bucket, metric_key ORDER BY bucket, metric_key
+      `;
+      return rows.map((row) => ({
+        date: row.date,
+        model: row.model,
+        inputTokens: Number(row.input_tokens),
+        outputTokens: Number(row.output_tokens),
+      }));
+    } catch (error) {
+      log.error("StatRepository.getServerDailyModelTokenUsage: failed", error);
+      return null;
+    }
+  }
+
   /**
    * Per-persona token and estimated-cost totals, ranked by total tokens (highest
    * first). With a `userId` this is the Personal Wrapped per-user "Favorite

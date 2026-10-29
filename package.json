@@ -82,6 +82,7 @@
     "gifuct-js": "^2.1.2",
     "google-translate-api-x": "^10.7.2",
     "gpt-tokenizer": "^3.4.0",
+    "hono": "^4.13.13",
     "jszip": "^3.10.1",
     "matrix-appservice-bridge": "^11.2.0",
     "music-metadata": "^11.16.1",

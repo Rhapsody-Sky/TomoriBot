@@ -6,6 +6,7 @@ import { DashboardPersonaService } from "@/web/dashboard/personaService";
 import { type DashboardSettingsCore, DashboardSettingsService } from "@/web/dashboard/settingsService";
 import type { DashboardGuildSnapshot } from "@/web/dashboard/types";
 import { createLlmRow, createPersona, createServerConfig, createUserRow } from "../../helpers/fixtures";
+import { PRESET_MAX_ATTRIBUTES, PRESET_MAX_STRING_LENGTH, presetExportDataSchema } from "@/types/preset/presetExport";
 
 function createSnapshot(isAlter = true): DashboardGuildSnapshot {
   return {
@@ -209,6 +210,94 @@ describe("dashboard personal and memory settings", () => {
 });
 
 describe("dashboard persona mutations", () => {
+  it("saves all attributes and edits every dialogue of a larger imported persona", async () => {
+    const { core, service } = createService();
+    const snapshot = createSnapshot();
+    const persona = snapshot.rawPersonas[0];
+    if (!persona) throw new Error("Missing test persona");
+    const attributes = Array.from({ length: 24 }, (_, index) => ({
+      text: index === 0 ? "a".repeat(PRESET_MAX_STRING_LENGTH) : `Character fact ${index}`,
+      isPublic: index % 2 === 0,
+    }));
+    persona.attribute_list = attributes.map(({ text }) => text);
+    persona.sample_dialogues_in = Array.from({ length: 16 }, (_, index) => `Question ${index}`);
+    persona.sample_dialogues_out = Array.from({ length: 16 }, (_, index) => `Answer ${index}`);
+
+    await service.replaceAttributes(snapshot, 9, { attributes });
+    expect(core.updatePersonaAttributes).toHaveBeenCalledWith(
+      snapshot,
+      9,
+      attributes.map(({ text }) => text),
+      attributes.map(({ isPublic }) => isPublic),
+    );
+    for (let index = 0; index < persona.sample_dialogues_in.length; index++) {
+      const input = persona.sample_dialogues_in[index];
+      const output = "r".repeat(PRESET_MAX_STRING_LENGTH);
+      await service.updateDialogue(snapshot, 9, index, { input, output });
+      expect(core.updatePersonaSampleDialogue).toHaveBeenLastCalledWith(snapshot, 9, index, input, output);
+    }
+    await service.addDialogue(snapshot, 9, { input: "Another question", output: "Another answer" });
+    expect(core.addPersonaSampleDialogue).toHaveBeenCalledWith(snapshot, 9, "Another question", "Another answer");
+  });
+
+  it("retains preset import bounds and rejects invalid or foreign persona edits before writes", async () => {
+    const { core, service } = createService();
+    const snapshot = createSnapshot();
+    for (const attributes of [
+      Array.from({ length: PRESET_MAX_ATTRIBUTES + 1 }, () => ({ text: "Fact", isPublic: false })),
+      [{ text: "x".repeat(PRESET_MAX_STRING_LENGTH + 1), isPublic: false }],
+      [{ text: " ", isPublic: false }],
+      [{ text: "Fact", isPublic: false, personaId: 10 }],
+    ]) {
+      await expect(service.replaceAttributes(snapshot, 9, { attributes })).rejects.toMatchObject({ status: 422 });
+    }
+    await expect(
+      service.updateDialogue(snapshot, 10, 0, { input: "Question", output: "Answer" }),
+    ).rejects.toMatchObject({ status: 404 });
+    for (const patch of [
+      { input: "x".repeat(PRESET_MAX_STRING_LENGTH + 1), output: "Answer" },
+      { input: "Question", output: "x".repeat(PRESET_MAX_STRING_LENGTH + 1) },
+      { input: "Question", output: " " },
+    ]) {
+      await expect(service.addDialogue(snapshot, 9, patch)).rejects.toMatchObject({ status: 422 });
+    }
+    expect(core.updatePersonaAttributes).not.toHaveBeenCalled();
+    expect(core.addPersonaSampleDialogue).not.toHaveBeenCalled();
+    expect(core.updatePersonaSampleDialogue).not.toHaveBeenCalled();
+  });
+
+  it("accepts the preset attribute boundary and enforces the shared dialogue count boundary", async () => {
+    const { core, service } = createService();
+    const snapshot = createSnapshot();
+    await service.replaceAttributes(snapshot, 9, {
+      attributes: Array.from({ length: PRESET_MAX_ATTRIBUTES }, () => ({ text: "Fact", isPublic: false })),
+    });
+    expect(core.updatePersonaAttributes).toHaveBeenCalledTimes(1);
+    const persona = snapshot.rawPersonas[0];
+    if (!persona) throw new Error("Missing test persona");
+    const inputs: string[] = [];
+    while (presetExportDataSchema.shape.sample_dialogues_in.safeParse([...inputs, "Question"]).success) {
+      if (inputs.length >= 1000) throw new Error("Missing bounded preset dialogue schema");
+      inputs.push("Question");
+    }
+    persona.sample_dialogues_in = inputs.slice(1);
+    persona.sample_dialogues_out = inputs.slice(1).map(() => "Answer");
+    await service.addDialogue(snapshot, 9, { input: "Question", output: "Answer" });
+    expect(core.addPersonaSampleDialogue).toHaveBeenCalledTimes(1);
+    persona.sample_dialogues_in = inputs;
+    persona.sample_dialogues_out = inputs.map(() => "Answer");
+    await expect(service.addDialogue(snapshot, 9, { input: "Question", output: "Answer" })).rejects.toMatchObject({
+      code: "dialogue_limit",
+      status: 422,
+    });
+    expect(core.addPersonaSampleDialogue).toHaveBeenCalledTimes(1);
+    await service.updateDialogue(snapshot, 9, inputs.length - 1, {
+      input: "Updated question",
+      output: "Updated answer",
+    });
+    expect(core.updatePersonaSampleDialogue).toHaveBeenCalledTimes(1);
+  });
+
   it("stores attribute visibility through the repository adapter", async () => {
     const { core, service } = createService();
     const snapshot = createSnapshot();

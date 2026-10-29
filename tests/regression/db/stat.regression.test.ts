@@ -665,6 +665,37 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("StatRepository — regression", () => {
     expect(streak.lastActiveDate).toBe(dayOffset(0));
   });
 
+  it("reads daily token history across users and models without mixing servers, metrics or dates", async () => {
+    const [other] = await testSql<{ server_id: number }[]>`
+      INSERT INTO servers (server_disc_id) VALUES (${REUNION_OTHER_SERVER_DISC_ID}) RETURNING server_id
+    `;
+    await testSql`
+      INSERT INTO stat_counters (server_id, user_id, persona_lineage_id, metric, metric_key, bucket, count)
+      VALUES
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_in', 'model-a', ${dayOffset(2)}::date, 100),
+        (${refs.serverId}, ${altUserId}, ${lineageB}, 'tokens_in', 'model-b', ${dayOffset(2)}::date, 200),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_out', 'model-a', ${dayOffset(2)}::date, 30),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_out', 'model-a', ${dayOffset(0)}::date, 20),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_in', 'model-a', ${dayOffset(3)}::date, 999),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'model_used', 'model-a', ${dayOffset(0)}::date, 999),
+        (${other.server_id}, ${refs.userId}, ${lineageA}, 'tokens_in', 'model-a', ${dayOffset(0)}::date, 999)
+    `;
+    expect(await statRepository.getServerDailyTokenUsage({ serverId: refs.serverId, from: dayOffset(2) })).toEqual([
+      { date: dayOffset(2), inputTokens: 300, outputTokens: 30 },
+      { date: dayOffset(0), inputTokens: 0, outputTokens: 20 },
+    ]);
+    const history = await statRepository.getServerDailyTokenUsage({ serverId: refs.serverId });
+    const modelHistory = await statRepository.getServerDailyModelTokenUsage({
+      serverId: refs.serverId,
+      from: dayOffset(2),
+    });
+    expect(modelHistory).not.toBeNull();
+    expect(modelHistory?.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0)).toBe(350);
+    expect(new Set(modelHistory?.map((row) => row.model)).size).toBe(2);
+    expect(history?.reduce((sum, day) => sum + day.inputTokens + day.outputTokens, 0)).toBe(1349);
+    expect(await statRepository.getServerDailyTokenUsage({ serverId: refs.serverId, from: dayOffset(-1) })).toEqual([]);
+  });
+
   it("getGenerationTotals reads canonical stat_counters telemetry with user scope", async () => {
     statRepository.recordStat({
       serverId: refs.serverId,

@@ -52,6 +52,19 @@ comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
 
 ## Settings Navigation
 
+Overview lists every installed persona with a link to its workspace. Statistics
+stay scoped to the selected server and period. Model usage separates input and
+output tokens, shows each model's share of the server total, and groups models
+outside the top five as Other models. Costs use the repository's catalog-price
+estimate, with missing prices counted as zero. They are not provider invoices.
+The usage chart reads daily token totals through `StatRepository`, filling days
+without counters with zero. Periods longer than 62 days are displayed as monthly
+totals; the highest-usage day remains visible separately. The model filter uses
+the token counters' model keys and applies only to the chart. UTC day buckets cannot
+provide an hourly breakdown. Hovering, focusing or selecting a bar shows its
+values, which are also available in an expandable table. Changing the period
+refreshes only the statistics section.
+
 My settings groups profile and appearance, privacy and memory, and personal
 conversation preferences into separately saved panels. Personal provider
 fallback belongs to My providers; server BYOK policy belongs to Server providers.
@@ -60,6 +73,12 @@ the signed-in member. Administrative persona settings remain permission-gated.
 Persona settings and Sprites share the same test-chat history. Sending or
 resetting the chat leaves the editor inputs intact. Save sprite descriptions
 before testing them; the model uses the saved configuration.
+
+Attribute and sample-dialogue editing uses the existing preset import limits in
+`src/types/preset/presetExport.ts`. This keeps imported personas editable even
+when their content exceeds the smaller manual-entry limits used by Discord.
+These limits are defined in code and are not server settings. Writes still use
+the persona repository and invalidate the server's persona cache after success.
 
 Server settings groups conversation, models and sampling, channels and automation,
 memory, tools and media, and notices and diagnostics. Memory contains learning
