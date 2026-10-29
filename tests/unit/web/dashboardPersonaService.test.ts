@@ -339,6 +339,26 @@ describe("dashboard persona mutations", () => {
 });
 
 describe("dashboard persona identity rules", () => {
+  it("accepts names and trigger data supported by persona imports", async () => {
+    const core = {
+      hasPersonaNicknameConflict: mock(async () => false),
+      updatePersonaIdentity: mock(async () => true),
+      updatePersonaPrompt: mock(async () => true),
+    };
+    const service = new DashboardSettingsService(core as unknown as DashboardSettingsCore);
+    const snapshot = createSnapshot();
+    await service.updatePersona(snapshot, 9, "identity", { nickname: "A" });
+    await service.updatePersona(snapshot, 9, "identity", { nickname: "a".repeat(100) });
+    const triggerWords = Array.from({ length: 100 }, (_, index) => `${index}${"x".repeat(4998)}`);
+    await service.updatePersona(snapshot, 9, "prompt", { triggerWords, personaPrompt: null });
+    expect(core.updatePersonaPrompt).toHaveBeenLastCalledWith(snapshot, 9, { triggerWords, personaPrompt: null });
+    await expect(service.updatePersona(snapshot, 9, "identity", { nickname: "a".repeat(101) })).rejects.toMatchObject({
+      code: "invalid_persona",
+    });
+    await expect(
+      service.updatePersona(snapshot, 9, "prompt", { triggerWords: ["x".repeat(5001)] }),
+    ).rejects.toMatchObject({ code: "invalid_persona" });
+  });
   it("blocks a nickname already used on the server", async () => {
     const core = {
       hasPersonaNicknameConflict: mock(async () => true),

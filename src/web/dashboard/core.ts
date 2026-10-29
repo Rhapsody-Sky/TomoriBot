@@ -28,6 +28,7 @@ import type {
 import {
   configRepository,
   llmModelRepo,
+  llmOverrideRepo,
   llmProviderRepo,
   personalMemoryRepository,
   personaRepository,
@@ -39,13 +40,16 @@ import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { invalidateUserCache } from "@/utils/cache/userCache";
 import { loadStoredPersonaAvatarBuffer } from "@/utils/storage/avatarStorage";
 import { registerCustomEndpoint, validateCustomEndpointReachability } from "@/utils/provider/customEndpointService";
-import { isCustomProvider } from "@/utils/provider/customProviderUtils";
+import { isCustomProvider, parseCustomProvider } from "@/utils/provider/customProviderUtils";
+import { getFallbackModelRefKey, getPrimaryFallbackRefKeys } from "@/utils/provider/fallbackModelIdentity";
 import { providerPanelOperations, removeScopedRegistration } from "@/utils/provider/providerPanelOperations";
 import { DashboardServiceError } from "./errors";
 import { shortTermMemoryRepository } from "@/utils/db/repositories/ShortTermMemoryRepository";
 import { serverStmConfigSchema } from "@/types/db/schema";
 import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
 import { personalConfigOperations } from "@/utils/discord/interactions/personalConfigOperations";
+import { configPersonaOperations } from "@/utils/discord/interactions/configPersonaOperations";
+import { loadAvailableModelsForCapability } from "@/utils/discord/interactions/personalConfigLoaders";
 import {
   type OpenRouterModelCapability,
   type RegisteredOpenRouterModelEntry,
@@ -56,18 +60,25 @@ import { ProviderFactory } from "@/utils/provider/providerFactory";
 import { getAllProviderChoices, getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import {
   assignPersonalCapabilityToProvider,
+  getActivePersonalProviderForCapability,
+  getStoredPersonalProviderForCapability,
   hasConfiguredPersonalModel,
+  setPersonalTextPrimary,
   withCapabilityEnabled,
 } from "@/utils/provider/personalProviderHelpers";
 import {
   buildSavedProviderConfigFromExistingOrDefaults,
   buildUserSavedProviderConfigFromExistingOrDefaults,
+  loadUserSavedProvidersForCapability,
+  loadSavedProvidersForCapability,
 } from "@/utils/provider/savedProviderConfig";
 import {
   configModelOperations,
   loadConfigModelChoices,
   loadConfigModelProviders,
+  resolveNaiPresetTarget,
 } from "@/utils/discord/interactions/configModelOperations";
+import { activateServerTextModelFromSavedConfig } from "@/utils/provider/providerActivation";
 import { encryptApiKey } from "@/utils/security/crypto";
 import type { SettingsSectionId } from "./settingsCatalog";
 import type { DashboardGuildSnapshot, DashboardPersona } from "./types";
@@ -111,6 +122,26 @@ export type DashboardProviderScope =
   | { kind: "personal"; snapshot: DashboardGuildSnapshot; userId: number; userDiscordId: string };
 
 export type DashboardServerModelKind = "text" | "vision" | "embedding" | "image" | "imageNai" | "video";
+export type DashboardPersonalModelKind =
+  | "text"
+  | "vision"
+  | "embedding"
+  | "image"
+  | "image_nai"
+  | "video"
+  | "speech_design"
+  | "speech_clone";
+
+const PERSONAL_MODEL_KINDS: DashboardPersonalModelKind[] = [
+  "text",
+  "vision",
+  "embedding",
+  "image",
+  "image_nai",
+  "video",
+  "speech_design",
+  "speech_clone",
+];
 
 export interface DashboardServerModelOption {
   id: number;
@@ -157,6 +188,21 @@ function resolveStatsWindow(timeframe: DashboardStatsTimeframe): string | undefi
   if (timeframe === "month") floor.setUTCDate(floor.getUTCDate() - 29);
   if (timeframe === "year") floor.setUTCFullYear(floor.getUTCFullYear() - 1);
   return floor.toISOString().split("T")[0];
+}
+
+function serializeProviderParameters(row: SavedProviderConfigRow | UserSavedProviderConfigRow) {
+  return {
+    provider: row.provider,
+    displayName: getProviderDisplayName(row.provider),
+    temperature: row.llm_temperature ?? null,
+    top_p: row.llm_top_p ?? null,
+    top_k: row.llm_top_k ?? null,
+    frequency_penalty: row.llm_frequency_penalty ?? null,
+    presence_penalty: row.llm_presence_penalty ?? null,
+    min_p: row.llm_min_p ?? null,
+    max_output_tokens: row.llm_max_output_tokens ?? null,
+    thinking_level: row.thinking_level,
+  };
 }
 
 export class TomoriDashboardCore {
@@ -237,9 +283,22 @@ export class TomoriDashboardCore {
       baseConfig: snapshot.config,
       existingConfig: existing,
     });
-    return llmProviderRepo.upsertSavedProviderConfig(snapshot.serverId, config, {
+    const saved = await llmProviderRepo.upsertSavedProviderConfig(snapshot.serverId, config, {
       serverDiscId: snapshot.serverDiscordId,
     });
+    if (!saved) return false;
+    const state = await personaRepository.loadState(snapshot.serverDiscordId);
+    if (!state) return false;
+    if (state.llm.llm_provider.toLowerCase() !== provider.toLowerCase()) return true;
+    return (
+      (
+        await activateServerTextModelFromSavedConfig({
+          serverDiscId: snapshot.serverDiscordId,
+          tomoriState: state,
+          savedConfig: config,
+        })
+      ).status === "activated"
+    );
   }
 
   async savePersonalProviderCredential(
@@ -277,7 +336,14 @@ export class TomoriDashboardCore {
     if (!row || (enabled && !hasConfiguredPersonalModel(row, capability))) return false;
 
     const saved = enabled
-      ? await assignPersonalCapabilityToProvider(userId, provider, capability, (current) => current)
+      ? capability === "text" && row.llm_id
+        ? await setPersonalTextPrimary(
+            userId,
+            provider,
+            row.llm_id,
+            await llmProviderRepo.loadCustomEndpointsForUser(userId),
+          )
+        : await assignPersonalCapabilityToProvider(userId, provider, capability, (current) => current)
       : await llmProviderRepo.upsertUserSavedProviderConfig(userId, withCapabilityEnabled(row, capability, false));
     if (saved) invalidateUserCache(userDiscordId);
     return saved;
@@ -426,6 +492,176 @@ export class TomoriDashboardCore {
     return configRepository.setFallbackModelRefs(snapshot.serverId, refs, snapshot.serverDiscordId);
   }
 
+  async loadPersonalFallbackWorkspace(userId: number) {
+    const [eligible, providers, endpoints, settings] = await Promise.all([
+      loadUserSavedProvidersForCapability(userId, "text"),
+      llmProviderRepo.loadUserSavedProviderConfigs(userId),
+      llmProviderRepo.loadCustomEndpointsForUser(userId),
+      llmProviderRepo.loadPersonalFallbackSettings(userId),
+    ]);
+    const primaryId = (
+      getActivePersonalProviderForCapability(providers, "text") ??
+      getStoredPersonalProviderForCapability(providers, "text")
+    )?.llm_id;
+    const primaryKeys = getPrimaryFallbackRefKeys(primaryId, endpoints);
+    const options: Array<{ ref: FallbackModelRef; label: string }> = [];
+    for (const { provider } of eligible) {
+      const custom = parseCustomProvider(provider);
+      if (custom) {
+        for (const endpoint of endpoints) {
+          if (
+            endpoint.connection_id !== custom.connectionId ||
+            endpoint.capability !== "text" ||
+            !endpoint.custom_endpoint_id
+          )
+            continue;
+          options.push({
+            ref: { type: "custom_endpoint", id: endpoint.custom_endpoint_id },
+            label: `${endpoint.label} / ${endpoint.model_name || endpoint.label}`,
+          });
+        }
+      } else {
+        const models = await llmModelRepo.loadAvailableModelsForProvider(provider, false, {
+          kind: "personal",
+          ownerId: userId,
+        });
+        for (const model of models ?? []) {
+          if (!model.llm_id || model.llm_codename === "other-model") continue;
+          options.push({
+            ref: { type: "llm", id: model.llm_id },
+            label: `${getProviderDisplayName(provider)} / ${model.llm_codename}`,
+          });
+        }
+      }
+    }
+    return {
+      fallbackOptions: options.filter((option) => !primaryKeys.has(getFallbackModelRefKey(option.ref))),
+      fallbackRefs: settings.fallback_model_refs,
+      randomizerEnabled: settings.model_randomizer_enabled,
+    };
+  }
+
+  async loadPersonalModelWorkspace(userId: number) {
+    const rows = await llmProviderRepo.loadUserSavedProviderConfigs(userId);
+    const entries = await Promise.all(
+      PERSONAL_MODEL_KINDS.map(async (capability) => {
+        const eligible = await loadUserSavedProvidersForCapability(
+          userId,
+          capability === "image_nai" ? "image" : capability,
+        );
+        const options = (
+          await Promise.all(
+            eligible.map(async ({ provider }) =>
+              (
+                await loadAvailableModelsForCapability(userId, provider, capability)
+              ).map((model) => ({
+                id: model.id,
+                provider,
+                label: `${getProviderDisplayName(provider)} / ${model.name}`,
+              })),
+            ),
+          )
+        )
+          .flat()
+          .sort((a, b) => a.label.localeCompare(b.label));
+        const row =
+          getActivePersonalProviderForCapability(rows, capability) ??
+          getStoredPersonalProviderForCapability(rows, capability);
+        const id = !row
+          ? null
+          : capability === "text"
+            ? row.llm_id
+            : capability === "vision"
+              ? row.vision_llm_id
+              : capability === "embedding"
+                ? row.embedding_model_id
+                : capability === "image"
+                  ? row.diffusion_model_id
+                  : capability === "image_nai"
+                    ? row.nai_diffusion_model_id
+                    : capability === "video"
+                      ? row.video_model_id
+                      : capability === "speech_design"
+                        ? row.speech_design_model_id
+                        : row.speech_clone_model_id;
+        return [
+          capability,
+          {
+            options,
+            selected: row && id != null ? { id, provider: row.provider } : null,
+            enabled: Boolean(getActivePersonalProviderForCapability(rows, capability)),
+          },
+        ] as const;
+      }),
+    );
+    return Object.fromEntries(entries) as Record<
+      DashboardPersonalModelKind,
+      {
+        options: DashboardServerModelOption[];
+        selected: { id: number; provider: string } | null;
+        enabled: boolean;
+      }
+    >;
+  }
+
+  async setPersonalPrimaryModel(
+    userId: number,
+    userDiscordId: string,
+    capability: DashboardPersonalModelKind,
+    provider: string,
+    modelId: number,
+  ): Promise<boolean> {
+    const result = await personalConfigOperations.setCapabilityModel({
+      userId,
+      userDiscId: userDiscordId,
+      capability,
+      provider,
+      modelId,
+    });
+    if (result.status === "success") invalidateUserCache(userDiscordId);
+    return result.status === "success" || result.status === "no-changes";
+  }
+
+  async loadPersonalProviderParameters(userId: number) {
+    return (await loadUserSavedProvidersForCapability(userId, "text")).map(serializeProviderParameters);
+  }
+
+  async loadServerProviderParameters(serverId: number) {
+    return (await loadSavedProvidersForCapability(serverId, "text")).map(serializeProviderParameters);
+  }
+
+  async setServerProviderParameters(
+    snapshot: DashboardGuildSnapshot,
+    provider: string,
+    patch: Parameters<typeof configModelOperations.setProviderParameters>[0]["patch"],
+  ) {
+    const tomoriState = await personaRepository.loadState(snapshot.serverDiscordId);
+    if (!tomoriState) return { status: "not-found" as const };
+    return configModelOperations.setProviderParameters({
+      tomoriState,
+      serverDiscId: snapshot.serverDiscordId,
+      provider,
+      patch,
+    });
+  }
+
+  async setPersonalProviderParameters(
+    userId: number,
+    userDiscordId: string,
+    provider: string,
+    patch: Parameters<typeof personalConfigOperations.setParameters>[0]["patch"],
+  ) {
+    const result = await personalConfigOperations.setParameters({ userId, userDiscId: userDiscordId, provider, patch });
+    if (result.status === "success") invalidateUserCache(userDiscordId);
+    return result;
+  }
+
+  async setPersonalFallbacks(userId: number, userDiscordId: string, refs: FallbackModelRef[]): Promise<boolean> {
+    const saved = await llmProviderRepo.updatePersonalFallbackModelRefs(userId, refs);
+    if (saved) invalidateUserCache(userDiscordId);
+    return saved;
+  }
+
   async loadServerModelWorkspace(snapshot: DashboardGuildSnapshot): Promise<DashboardServerModelWorkspace> {
     const options: DashboardServerModelWorkspace["options"] = {
       text: [],
@@ -460,6 +696,49 @@ export class TomoriDashboardCore {
         video: snapshot.config.video_model_id ?? null,
       },
     };
+  }
+
+  async loadPersonaTextModelWorkspace(snapshot: DashboardGuildSnapshot, personaId: number) {
+    if (!this.hasPersona(snapshot, personaId)) return null;
+    const providers = await loadSavedProvidersForCapability(snapshot.serverId, "text");
+    const options = (
+      await Promise.all(
+        providers.map(async ({ provider }) =>
+          (
+            (await llmModelRepo.loadAvailableModelsForProvider(provider, false, {
+              kind: "server",
+              ownerId: snapshot.serverId,
+            })) ?? []
+          )
+            .filter((model) => model.llm_id != null && model.llm_codename !== "other-model")
+            .map((model) => ({
+              id: model.llm_id as number,
+              provider,
+              label: `${getProviderDisplayName(provider)} / ${model.llm_codename}`,
+            })),
+        ),
+      )
+    )
+      .flat()
+      .sort((a, b) => a.label.localeCompare(b.label));
+    const overrides = await llmOverrideRepo.loadPersonaLlmOverridesForServer(snapshot.serverId);
+    return { options, selected: overrides.find((override) => override.persona_id === personaId)?.llm_id ?? null };
+  }
+
+  async setPersonaTextModelOverride(
+    snapshot: DashboardGuildSnapshot,
+    personaId: number,
+    modelId: number | null,
+  ): Promise<boolean> {
+    const workspace = await this.loadPersonaTextModelWorkspace(snapshot, personaId);
+    if (!workspace || (modelId !== null && !workspace.options.some((option) => option.id === modelId))) return false;
+    const result = await configPersonaOperations.setTextModelOverride({
+      scope: "persona",
+      personaId,
+      llmId: modelId,
+      serverDiscId: snapshot.serverDiscordId,
+    });
+    return result.status === "success";
   }
 
   async setServerPrimaryModel(
@@ -769,7 +1048,62 @@ export class TomoriDashboardCore {
     sectionId: SettingsSectionId,
     patch: Record<string, unknown>,
   ): Promise<AssembledServerConfig | null> {
-    const updated = await this.writeSettingsSection(snapshot.serverId, sectionId, patch);
+    const remaining = { ...patch };
+    if (sectionId === "sampling" || sectionId === "modelBehavior") {
+      const keys = {
+        llm_temperature: "temperature",
+        thinking_level: "thinking_level",
+        llm_top_p: "top_p",
+        llm_top_k: "top_k",
+        llm_frequency_penalty: "frequency_penalty",
+        llm_presence_penalty: "presence_penalty",
+        llm_min_p: "min_p",
+        llm_max_output_tokens: "max_output_tokens",
+      } as const;
+      const parameters: Record<string, unknown> = {};
+      for (const [key, parameter] of Object.entries(keys)) {
+        if (key in remaining) {
+          parameters[parameter] = remaining[key];
+          delete remaining[key];
+        }
+      }
+      if (Object.keys(parameters).length) {
+        const state = await personaRepository.loadState(snapshot.serverDiscordId);
+        if (!state) return null;
+        const result = await configModelOperations.setProviderParameters({
+          tomoriState: state,
+          serverDiscId: snapshot.serverDiscordId,
+          provider: state.llm.llm_provider,
+          patch: parameters,
+        });
+        if (result.status !== "success" && result.status !== "no-changes") return null;
+      }
+    }
+    if (sectionId === "novelai" && "nai_preset_name" in remaining) {
+      const state = await personaRepository.loadState(snapshot.serverDiscordId);
+      if (!state) return null;
+      if (remaining.nai_preset_name === state.config.nai_preset_name) {
+        delete remaining.nai_preset_name;
+      } else if (typeof remaining.nai_preset_name === "string") {
+        const target = resolveNaiPresetTarget(state);
+        if (!target) return null;
+        const preset = (await configRepository.loadNaiPresets(target)).find(
+          (entry) => entry.preset_name === remaining.nai_preset_name,
+        );
+        if (!preset) return null;
+        const result = await configModelOperations.applyNaiPreset({
+          tomoriState: state,
+          serverDiscId: snapshot.serverDiscordId,
+          preset,
+        });
+        if (result.status !== "success") return null;
+        delete remaining.nai_preset_name;
+      }
+    }
+    const sectionPatch = sectionId === "sampling" || sectionId === "modelBehavior" ? patch : remaining;
+    const updated =
+      Object.keys(sectionPatch).length === 0 ||
+      (await this.writeSettingsSection(snapshot.serverId, sectionId, sectionPatch));
     if (!updated) return null;
 
     invalidateTomoriStateCache(snapshot.serverDiscordId);

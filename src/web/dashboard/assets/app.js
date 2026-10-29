@@ -268,6 +268,7 @@
     personaTestChatBusy: false,
     avatarRevision: 0,
     providerData: { personal: null, server: null },
+    providerConnection: { personal: null, server: null },
     serverStats: null,
     serverStatsLoading: false,
     serverStatsError: "",
@@ -646,7 +647,7 @@
           <label class="field"><span>Tags</span><input name="tags" type="text" placeholder="character, preference"></label>
           <input name="memoryId" type="hidden">
           <div class="dialog-actions">
-            <button value="cancel" class="button button-quiet">Cancel</button>
+            <button type="button" class="button button-quiet" data-dialog-close="memory-dialog">Cancel</button>
             <button value="save" class="button button-primary">Save changes</button>
           </div>
         </form>
@@ -1313,15 +1314,28 @@
     loadMemories();
   }
 
+  let memoryRequestId = 0;
+
   async function loadMemories() {
     const list = document.querySelector("#memory-list");
     if (!list) return;
+    const requestId = ++memoryRequestId;
+    const { guildId, memoryKind, lineageId } = state;
+    const isCurrent = () =>
+      requestId === memoryRequestId &&
+      state.guildId === guildId &&
+      state.memoryKind === memoryKind &&
+      state.lineageId === lineageId &&
+      document.querySelector("#memory-list") === list;
     list.innerHTML = `<div class="loading-block">Loading memories...</div>`;
     try {
-      const path = `/guilds/${state.guildId}/memories/${state.memoryKind}?lineageId=${state.lineageId}`;
-      state.memoryData = await api(path);
+      const path = `/guilds/${guildId}/memories/${memoryKind}?lineageId=${lineageId}`;
+      const data = await api(path);
+      if (!isCurrent()) return;
+      state.memoryData = data;
       renderMemoryList();
     } catch (error) {
+      if (!isCurrent()) return;
       list.innerHTML = `<div class="empty-state"><strong>Memories could not be loaded.</strong><span>${escapeHtml(error.message)}</span></div>`;
     }
   }
@@ -1370,9 +1384,10 @@
     const dialogues = persona.sampleDialogues || [];
     return `<div class="persona-studio">
       <div class="persona-editor-stack">
+        ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}"><p role="status">${escapeHtml(ui("persona_model_loading"))}</p></div>` : ""}
         <form class="panel persona-settings-panel" data-persona-id="${persona.personaId}" data-persona-section="identity">
           ${formHeader("Identity", "Display identity", "The name used by this persona in conversation.")}
-          <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="2" maxlength="32" required></label>
+          <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
         </form>
 
         <form class="panel persona-settings-panel" data-persona-id="${persona.personaId}" data-persona-section="prompt">
@@ -1452,13 +1467,12 @@
 
   function renderPersonaTestChat(persona) {
     const chat = state.personaTestChats[persona.personaId] || [];
-    const model = state.overview.modelSummary?.text;
     return `<aside class="panel persona-test-panel" data-persona-id="${persona.personaId}">
         <div class="persona-test-heading">
           <div>${personaAvatar(persona)}<span><p class="eyebrow">Private preview</p><h2>Test ${escapeHtml(persona.nickname)}</h2></span></div>
           <button class="button button-quiet button-small" type="button" data-test-chat-reset="${persona.personaId}"${chat.length ? "" : " disabled"}>Reset</button>
         </div>
-        <div class="test-chat-model"><span>${escapeHtml(model?.name || "Configured text model")}</span><small>No Discord messages or memory writes</small></div>
+        <div class="test-chat-model"><span>${escapeHtml(ui("persona_test_configured_model"))}</span><small>No Discord messages or memory writes</small></div>
         <div class="test-chat-messages" aria-live="polite">
           ${
             chat.length
@@ -1653,6 +1667,60 @@
       loadSprites(persona.personaId);
     } else {
       resizeAutoGrowTextareas(workspace);
+      if (state.personaPanel === "settings" && state.overview.canManage) loadPersonaTextModel(persona.personaId);
+    }
+  }
+
+  let personaModelLoadVersion = 0;
+
+  async function loadPersonaTextModel(personaId) {
+    const version = ++personaModelLoadVersion;
+    const guildId = state.guildId;
+    const target = document.querySelector("#persona-text-model");
+    if (!target) return;
+    const current = () =>
+      version === personaModelLoadVersion &&
+      guildId === state.guildId &&
+      personaId === state.personaId &&
+      state.view === "personas" &&
+      state.personaPanel === "settings" &&
+      document.querySelector("#persona-text-model") === target;
+    try {
+      const data = await api(`/guilds/${guildId}/personas/${personaId}/text-model`);
+      if (!current()) return;
+      const available = data.options.some((option) => option.id === data.selected);
+      const unavailable =
+        data.selected !== null && !available
+          ? `<option value="${data.selected}" selected disabled>${escapeHtml(ui("persona_model_unavailable"))}</option>`
+          : "";
+      const options = data.options
+        .map(
+          (option) =>
+            `<option value="${option.id}"${option.id === data.selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`,
+        )
+        .join("");
+      target.innerHTML = `<form class="panel persona-settings-panel" data-persona-text-model="${personaId}">
+        <div class="panel-heading"><div><h2>${escapeHtml(ui("persona_model_title"))}</h2><p>${escapeHtml(ui("persona_model_hint"))}</p></div><button class="button button-secondary button-small" type="submit">${escapeHtml(ui("persona_model_save"))}</button></div>
+        <label class="field"><span>${escapeHtml(ui("persona_model_label"))}</span><select name="modelId"><option value=""${data.selected === null ? " selected" : ""}>${escapeHtml(ui("persona_model_inherit"))}</option>${unavailable}${options}</select></label>
+      </form>`;
+    } catch {
+      if (current()) target.innerHTML = `<p role="alert">${escapeHtml(ui("persona_model_failed"))}</p>`;
+    }
+  }
+
+  async function savePersonaTextModel(form) {
+    const personaId = Number(form.dataset.personaTextModel);
+    const guildId = state.guildId;
+    const value = form.elements.modelId.value;
+    await withBusyForm(form, async () => {
+      await api(`/guilds/${guildId}/personas/${personaId}/text-model`, {
+        method: "PUT",
+        body: JSON.stringify({ modelId: value ? Number(value) : null }),
+      });
+    });
+    toast(ui("persona_model_saved"));
+    if (guildId === state.guildId && personaId === state.personaId && state.personaPanel === "settings") {
+      await loadPersonaTextModel(personaId);
     }
   }
 
@@ -1826,7 +1894,10 @@
     ["vision", "Vision"],
     ["embedding", "Embeddings"],
     ["image", "Images"],
+    ["image_nai", "NovelAI images"],
     ["video", "Video"],
+    ["speech_design", "model_speech_design"],
+    ["speech_clone", "model_speech_clone"],
   ];
 
   function providerChoiceOptions(data) {
@@ -1849,7 +1920,7 @@
                   const configured = provider.configuredCapabilities?.[capability];
                   return `<label class="capability-toggle${configured ? "" : " is-unavailable"}">
                     <input type="checkbox" data-provider-capability="${capability}" data-provider="${escapeHtml(provider.provider)}"${enabled.has(capability) ? " checked" : ""}${configured ? "" : " disabled"}>
-                    <span>${label}</span>
+                    <span>${escapeHtml(capability.startsWith("speech_") ? ui(label) : label)}</span>
                   </label>`;
                 })
                 .join("")}</div>`
@@ -1875,11 +1946,12 @@
     }
     return data.endpoints
       .map(
-        (endpoint) => `<article class="provider-row endpoint-row">
+        (endpoint, index) => `<article class="provider-row endpoint-row">
           <div class="provider-row-heading">
             <div><span class="provider-scope">${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}</span><strong>${escapeHtml(endpoint.displayName)}</strong><small>${escapeHtml(endpoint.endpointUrl)}</small></div>
-            <button class="button button-danger button-small" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>
+            ${index === 0 ? `<button class="button button-danger button-small" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>` : ""}
           </div>
+          ${endpoint.modelName ? `<p>${escapeHtml(endpoint.modelName)}</p>` : ""}
           <div class="endpoint-flags">
             ${endpoint.requiresAuth ? "<span>Auth</span>" : ""}
             ${endpoint.hasTools ? "<span>Tools</span>" : ""}
@@ -1893,7 +1965,7 @@
 
   function renderOpenRouterRows(data, scope) {
     if (!data.openRouterModels?.length) {
-      return `<div class="empty-state compact-empty"><strong>No additional scoped registrations.</strong><p>Built-in OpenRouter models come from Tomori's catalog and appear in selectors once an OpenRouter provider profile is configured.</p></div>`;
+      return `<div class="empty-state compact-empty"><strong>${escapeHtml(ui("connection_no_models"))}</strong></div>`;
     }
     return data.openRouterModels
       .map(
@@ -1942,23 +2014,215 @@
     </form>`;
   }
 
-  function renderFallbacks(data) {
-    const options = (data.fallbackOptions || [])
-      .map((option) => `<option value="${option.ref.type}:${option.ref.id}">${escapeHtml(option.label)}</option>`)
-      .join("");
-    return `<form class="panel provider-panel" id="fallback-form">
-      <div class="panel-heading"><div><p class="eyebrow">Failover</p><h2>Fallback chain</h2><p>Ordered text models used when the primary model fails.</p></div></div>
+  function renderPersonalModels(data) {
+    if (!data.models) return "";
+    return `<section class="panel provider-panel server-model-panel">
+      <div class="panel-heading"><div><h2>${escapeHtml(ui("personal_models"))}</h2><p>${escapeHtml(ui("personal_models_hint"))}</p></div></div>
+      <div class="form-grid server-model-grid">
+        ${["text", "vision", "embedding", "image", "image_nai", "video", "speech_design", "speech_clone"]
+          .map((capability) => {
+            const model = data.models[capability];
+            const selected = model.selected;
+            const hasSelected =
+              selected &&
+              model.options.some((option) => option.id === selected.id && option.provider === selected.provider);
+            const status = !selected
+              ? "personal_model_unassigned"
+              : model.enabled
+                ? "personal_model_enabled"
+                : "personal_model_disabled";
+            const placeholder = selected && !hasSelected ? "personal_model_unavailable" : "personal_model_choose";
+            const options = model.options
+              .map((option) => {
+                const value = JSON.stringify({ provider: option.provider, modelId: option.id });
+                return `<option value="${escapeHtml(value)}"${selected && option.id === selected.id && option.provider === selected.provider ? " selected" : ""}>${escapeHtml(option.label)}</option>`;
+              })
+              .join("");
+            return `<form data-personal-model="${capability}">
+              <label class="field">${fieldLabel(ui(`model_${capability}`), ui(status))}<select name="model" required><option value="" disabled${hasSelected ? "" : " selected"}>${escapeHtml(ui(placeholder))}</option>${options}</select></label>
+              <div class="form-actions"><button class="button button-primary button-small" type="submit"${model.options.length ? "" : " disabled"}>${escapeHtml(ui("personal_model_save"))}</button></div>
+            </form>`;
+          })
+          .join("")}
+      </div>
+    </section>`;
+  }
+
+  async function savePersonalModel(form) {
+    const selected = JSON.parse(form.elements.model.value);
+    await withBusyForm(form, async () => {
+      await api(`/guilds/${state.guildId}/providers/personal/model`, {
+        method: "PATCH",
+        body: JSON.stringify({ capability: form.dataset.personalModel, ...selected }),
+      });
+    });
+    toast(ui("personal_model_saved"));
+    await refreshProviders("personal");
+  }
+
+  const personalParameterFields = [
+    ["temperature", 0, 2, "any"],
+    ["top_p", 0, 1, "any"],
+    ["top_k", 0, 256, 1],
+    ["frequency_penalty", -2, 2, "any"],
+    ["presence_penalty", -2, 2, "any"],
+    ["min_p", 0, 1, "any"],
+    ["max_output_tokens", 1, 131072, 1],
+  ];
+
+  function renderPersonalParameters(data, scope = "personal") {
+    const parameters = data.parameters || [];
+    return `<section class="panel provider-panel">
+      <div class="panel-heading"><div><h2>${escapeHtml(ui(`${scope}_parameters`))}</h2><p>${escapeHtml(ui(`${scope}_parameters_hint`))}</p></div></div>
+      ${
+        parameters.length
+          ? parameters
+              .map(
+                (
+                  provider,
+                ) => `<form data-personal-parameters="${escapeHtml(provider.provider)}" data-provider-scope="${scope}">
+        <h3>${escapeHtml(provider.displayName)}</h3>
+        <div class="form-grid">
+          ${personalParameterFields.map(([key, min, max, step]) => `<label class="field"><span>${escapeHtml(ui(`parameter_${key}`))}</span><input type="number" name="${key}" min="${min}" max="${max}" step="${step}" value="${provider[key] ?? ""}" placeholder="${escapeHtml(ui("parameter_unset"))}"></label>`).join("")}
+          <label class="field"><span>${escapeHtml(ui("parameter_thinking_level"))}</span><select name="thinking_level">
+            <option value="" disabled${provider.thinking_level == null ? " selected" : ""}>${escapeHtml(ui("parameter_unset"))}</option>
+            ${["auto", "none", "minimal", "low", "medium", "high"].map((value) => `<option value="${value}"${provider.thinking_level === value ? " selected" : ""}>${escapeHtml(ui(`thinking_${value}`))}</option>`).join("")}
+          </select></label>
+        </div>
+        <div class="form-actions"><button class="button button-primary button-small" type="submit">${escapeHtml(ui("personal_parameters_save"))}</button></div>
+      </form>`,
+              )
+              .join("")
+          : `<div class="empty-state compact-empty"><strong>${escapeHtml(ui("personal_parameters_empty"))}</strong></div>`
+      }
+    </section>`;
+  }
+
+  async function savePersonalParameters(form) {
+    const scope = form.dataset.providerScope;
+    const patch = Object.fromEntries(
+      personalParameterFields.map(([key]) => {
+        const value = form.elements[key].value;
+        return [key, value === "" ? null : Number(value)];
+      }),
+    );
+    if (form.elements.thinking_level.value) patch.thinking_level = form.elements.thinking_level.value;
+    await withBusyForm(form, async () => {
+      await api(`/guilds/${state.guildId}/providers/${scope}/parameters`, {
+        method: "PATCH",
+        body: JSON.stringify({ provider: form.dataset.personalParameters, patch }),
+      });
+    });
+    toast(ui(`${scope}_parameters_saved`));
+    await refreshProviders(scope);
+  }
+
+  function renderFallbacks(data, scope) {
+    return `<form class="panel provider-panel" id="fallback-form" data-provider-scope="${scope}">
+      <div class="panel-heading"><div><p class="eyebrow">Failover</p><h2>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks" : "server_fallbacks"))}</h2><p>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks_hint" : "server_fallbacks_hint"))}</p>${data.randomizerEnabled ? `<p>${escapeHtml(ui("fallback_randomizer_hint"))}</p>` : ""}</div></div>
       <div class="fallback-editor">
         ${[0, 1, 2, 3, 4]
           .map((index) => {
             const selected = data.fallbackRefs?.[index];
             const value = selected ? `${selected.type}:${selected.id}` : "";
-            return `<label class="field">${fieldLabel(`Fallback ${index + 1}`, index === 0 ? "First alternative tried when the primary text model fails." : `Used only if fallback ${index} also fails.`)}<select name="fallback-${index}"><option value="">None</option>${options.replace(`value="${value}"`, `value="${value}" selected`)}</select></label>`;
+            const options = (data.fallbackOptions || [])
+              .map((option) => {
+                const key = `${option.ref.type}:${option.ref.id}`;
+                return `<option value="${key}"${key === value ? " selected" : ""}>${escapeHtml(option.label)}</option>`;
+              })
+              .join("");
+            const unavailable =
+              value && !(data.fallbackOptions || []).some((option) => `${option.ref.type}:${option.ref.id}` === value)
+                ? `<option value="${value}" selected>${escapeHtml(ui("fallback_unavailable"))} (${escapeHtml(value)})</option>`
+                : "";
+            return `<label class="field">${fieldLabel(`Fallback ${index + 1}`, index === 0 ? "First alternative tried when the primary text model fails." : `Used only if fallback ${index} also fails.`)}<select name="fallback-${index}"><option value="">None</option>${unavailable}${options}</select></label>`;
           })
           .join("")}
       </div>
       <div class="form-actions"><button class="button button-primary" type="submit">Save chain</button></div>
     </form>`;
+  }
+
+  function providerConnections(data) {
+    const endpoints = data.endpoints || [];
+    const providers = (data.providers || []).filter(
+      (provider) => !endpoints.some((endpoint) => endpoint.provider === provider.provider),
+    );
+    const endpointGroups = new Map();
+    for (const endpoint of endpoints) {
+      const group = endpointGroups.get(endpoint.provider) || [];
+      group.push(endpoint);
+      endpointGroups.set(endpoint.provider, group);
+    }
+    return [
+      ...providers.map((provider) => ({
+        key: `provider:${provider.provider}`,
+        provider,
+        endpoint: null,
+        name: provider.displayName,
+      })),
+      ...Array.from(endpointGroups, ([name, group]) => ({
+        key: `endpoint:${name}`,
+        endpoint: group[0],
+        endpoints: group,
+        provider: (data.providers || []).find((provider) => provider.provider === name),
+        name: group[0].displayName,
+      })),
+    ];
+  }
+
+  function selectProviderConnection(data, scope) {
+    const connections = providerConnections(data);
+    const connection =
+      connections.find((entry) => entry.key === state.providerConnection[scope]) || connections[0] || null;
+    state.providerConnection[scope] = connection?.key || null;
+    return { connections, connection };
+  }
+
+  function renderConnectionModels(data, scope, provider) {
+    if (!provider || provider.startsWith("custom:")) return "";
+    const kinds =
+      scope === "personal"
+        ? ["text", "vision", "embedding", "image", "image_nai", "video", "speech_design", "speech_clone"]
+        : ["text", "vision", "embedding", "image", "imageNai", "video"];
+    const groups = kinds
+      .map((kind) => {
+        const options = scope === "personal" ? data.models?.[kind]?.options : data.models?.options?.[kind];
+        const models = (options || []).filter((option) => option.provider === provider);
+        if (!models.length) return "";
+        const key = kind === "imageNai" ? "image_nai" : kind;
+        return `<div class="connection-model-group"><strong>${escapeHtml(ui(`model_${key}`))}</strong><ul>${models.map((model) => `<li>${escapeHtml(model.label)}</li>`).join("")}</ul></div>`;
+      })
+      .join("");
+    return `<section class="panel provider-panel"><div class="panel-heading"><div><h2>${escapeHtml(ui("connection_available_models"))}</h2></div></div>${groups || `<p>${escapeHtml(ui("connection_no_available_models"))}</p>`}</section>`;
+  }
+
+  function renderConnectionDetail(data, scope, connection) {
+    if (!connection)
+      return `<div class="empty-state compact-empty"><strong>${escapeHtml(ui("connection_empty"))}</strong><span>${escapeHtml(ui("connection_select"))}</span></div>`;
+    const provider = connection.provider;
+    const endpoint = connection.endpoint;
+    const providerName = provider?.provider || endpoint?.provider;
+    const parameters = (data.parameters || []).filter((entry) => entry.provider === providerName);
+    return `<div class="provider-layout connection-detail">
+      ${provider ? `<section class="panel provider-panel"><div class="panel-heading"><div><h2>${escapeHtml(ui("connection_credentials"))}</h2></div>${!endpoint && !provider.provider.startsWith("custom:") ? `<button class="button button-secondary button-small" type="button" data-provider-open="${escapeHtml(provider.provider)}">${escapeHtml(ui("connection_replace_key"))}</button>` : ""}</div>${renderProviderRows({ providers: [provider] }, scope)}</section>` : ""}
+      ${endpoint ? `<section class="panel provider-panel"><div class="panel-heading"><div><h2>${escapeHtml(ui("connection_endpoint"))}</h2></div></div>${renderEndpointRows({ endpoints: connection.endpoints }, scope)}</section>` : ""}
+      ${renderConnectionModels(data, scope, providerName)}
+      ${
+        providerName?.toLowerCase() === "openrouter"
+          ? `<section class="panel provider-panel">
+        <div class="panel-heading"><div><h2>${escapeHtml(ui("connection_models"))}</h2></div></div>
+        <div class="provider-list">${renderOpenRouterRows(data, scope)}</div>
+        <form id="openrouter-form" data-provider-scope="${scope}">
+          <div class="form-grid"><label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option></select></label>
+          <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label></div>
+          <div class="form-actions"><button class="button button-primary" type="submit">${escapeHtml(ui("connection_register_model"))}</button></div>
+        </form>
+      </section>`
+          : ""
+      }
+      ${parameters.length ? renderPersonalParameters({ parameters }, scope) : ""}
+    </div>`;
   }
 
   function renderProviders(workspace, scope) {
@@ -1969,6 +2233,7 @@
       loadProviderWorkspace(scope);
       return;
     }
+    const { connections, connection } = selectProviderConnection(data, scope);
 
     workspace.innerHTML = `
       ${pageHeader(
@@ -1981,23 +2246,24 @@
           : "Server-owned credentials, endpoints, registrations, and failover.",
         refreshButton("provider", ui("refresh_providers"), scope),
       )}
-      ${personal ? renderProfilePanel("fallback") : renderSettingsPanel({ section: "byok" }) + renderServerModels(data)}
-      <div class="provider-layout">
-        <form class="panel provider-panel" id="provider-credential-form" data-provider-scope="${scope}">
-          <div class="panel-heading"><div><p class="eyebrow">Credentials</p><h2>Add or replace a key</h2></div></div>
-          <div class="form-grid">
-            <label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}</select></label>
-            <label class="field">${fieldLabel("API key", "Stored encrypted. Existing secret values are never returned to the browser.")}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label>
-          </div>
+      <section class="provider-group" aria-labelledby="provider-access-title">
+        <div class="connection-heading"><h2 class="provider-group-title" id="provider-access-title">${escapeHtml(ui("connections"))}</h2><div class="toolbar-actions"><button class="button button-secondary" type="button" data-provider-open aria-haspopup="dialog">${escapeHtml(ui("add_provider"))}</button><button class="button button-secondary" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button></div></div>
+        <nav class="connection-list" aria-label="${escapeHtml(ui("connections"))}">${connections.map((entry) => `<button class="connection-item${entry.key === connection?.key ? " is-active" : ""}" type="button" title="${escapeHtml(entry.name)}" data-connection-select="${escapeHtml(entry.key)}" data-provider-scope="${scope}" aria-pressed="${entry.key === connection?.key}"><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(ui(entry.endpoint ? "connection_endpoint" : "connection_provider"))}</small></button>`).join("")}</nav>
+        ${renderConnectionDetail(data, scope, connection)}
+      </section>
+      <section class="provider-group" aria-labelledby="provider-routing-title"><h2 class="provider-group-title" id="provider-routing-title">${escapeHtml(ui("model_routing"))}</h2><div class="provider-layout">${personal ? renderPersonalModels(data) : renderServerModels(data)}${personal ? "" : renderSettingsPanel({ section: "byok" })}</div></section>
+      <section class="provider-group" aria-labelledby="provider-fallbacks-title"><h2 class="provider-group-title" id="provider-fallbacks-title">${escapeHtml(ui("connection_fallbacks"))}</h2><div class="provider-layout">${renderFallbacks(data, scope)}${personal ? renderProfilePanel("fallback") : ""}</div></section>
+      <dialog id="provider-dialog" class="dialog" aria-labelledby="provider-dialog-title">
+        <form class="dialog-surface" id="provider-credential-form" data-provider-scope="${scope}">
+          <div class="panel-heading"><div><h2 id="provider-dialog-title">${escapeHtml(ui("add_provider"))}</h2></div></div>
+          <div class="form-grid"><label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}</select></label><label class="field">${fieldLabel("API key", "Stored encrypted. Existing secret values are never returned to the browser.")}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label></div>
           <label class="switch-row"><span><strong>Validate before saving</strong><small>Tests the credential with its provider before replacing the stored key.</small></span><input name="validateApiKey" type="checkbox" checked><i></i></label>
-          <div class="form-actions"><button class="button button-primary" type="submit">Store encrypted key</button></div>
+          <div class="form-actions"><button class="button button-quiet" type="button" data-dialog-close="provider-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button button-primary" type="submit">Store encrypted key</button></div>
         </form>
-        <section class="panel provider-panel">
-          <div class="panel-heading"><div><p class="eyebrow">Saved</p><h2>${personal ? "My provider profiles" : "Server provider profiles"}</h2></div></div>
-          <div class="provider-list">${renderProviderRows(data, scope)}</div>
-        </section>
-        <form class="panel provider-panel" id="endpoint-form" data-provider-scope="${scope}">
-          <div class="panel-heading"><div><p class="eyebrow">Custom</p><h2>Register endpoint</h2></div></div>
+      </dialog>
+      <dialog id="endpoint-dialog" class="dialog dialog-wide" aria-labelledby="endpoint-dialog-title">
+        <form class="dialog-surface" id="endpoint-form" data-provider-scope="${scope}">
+          <div class="panel-heading"><div><p class="eyebrow">Custom</p><h2 id="endpoint-dialog-title">${escapeHtml(ui("endpoint_register_new"))}</h2></div></div>
           <div class="form-grid">
             <label class="field">${fieldLabel("Internal label", "Stable letters, numbers, underscores, or dashes used to identify this endpoint.")}<input name="label" pattern="[A-Za-z0-9_-]+" maxlength="48" required></label>
             <label class="field field-wide">${fieldLabel("Endpoint URL", "Base URL Tomori connects to. It is tested before registration.")}<input name="endpointUrl" type="url" required></label>
@@ -2030,39 +2296,31 @@
               .join("")}
             </div>
           </fieldset>
-          <div class="form-actions"><button class="button button-primary" type="submit">Test and register</button></div>
+          <div class="form-actions"><button class="button button-quiet" type="button" data-dialog-close="endpoint-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button button-primary" type="submit">Test and register</button></div>
         </form>
-        <section class="panel provider-panel">
-          <div class="panel-heading"><div><p class="eyebrow">Endpoints</p><h2>Registered connections</h2></div></div>
-          <div class="provider-list">${renderEndpointRows(data, scope)}</div>
-        </section>
-        <form class="panel provider-panel" id="openrouter-form" data-provider-scope="${scope}">
-          <div class="panel-heading"><div><p class="eyebrow">OpenRouter</p><h2>Scoped model registration</h2></div></div>
-          <div class="form-grid">
-            <label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option></select></label>
-            <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label>
-          </div>
-          <div class="form-actions"><button class="button button-primary" type="submit">Register model</button></div>
-        </form>
-        <section class="panel provider-panel">
-          <div class="panel-heading"><div><p class="eyebrow">Registry</p><h2>Additional scoped registrations</h2><p>Custom OpenRouter catalog entries registered only for this ${personal ? "user" : "server"}.</p></div></div>
-          <div class="provider-list">${renderOpenRouterRows(data, scope)}</div>
-        </section>
-      </div>
-      ${personal ? "" : renderFallbacks(data)}`;
+      </dialog>`;
   }
 
+  const providerLoadVersion = { personal: 0, server: 0 };
+
   async function loadProviderWorkspace(scope, notify = false) {
+    const version = ++providerLoadVersion[scope];
+    const guildId = state.guildId;
+    const current = () => version === providerLoadVersion[scope] && guildId === state.guildId;
     try {
-      state.providerData[scope] = await api(`/guilds/${state.guildId}/providers/${scope}`);
+      const data = await api(`/guilds/${guildId}/providers/${scope}`);
+      if (!current()) return false;
+      state.providerData[scope] = data;
       const expectedView = scope === "personal" ? "personal-providers" : "server-providers";
       if (state.view === expectedView) renderView();
       if (notify) toast("Providers refreshed");
       return true;
     } catch (error) {
+      if (!current()) return false;
       toast(error.message, "error");
       const workspace = document.querySelector("#workspace");
-      if (workspace)
+      const expectedView = scope === "personal" ? "personal-providers" : "server-providers";
+      if (workspace && state.view === expectedView)
         workspace.innerHTML = `<div class="empty-state"><strong>${escapeHtml(error.message)}</strong></div>`;
       return false;
     }
@@ -2102,6 +2360,7 @@
     state.overview = null;
     state.memoryData = null;
     state.providerData = { personal: null, server: null };
+    state.providerConnection = { personal: null, server: null };
     state.serverStats = null;
     state.serverStatsLoading = false;
     state.serverStatsError = "";
@@ -2155,9 +2414,12 @@
   }
 
   async function refreshProviders(scope, message) {
+    const guildId = state.guildId;
     state.providerData[scope] = null;
     if (scope === "server") {
-      state.overview = await api(`/guilds/${state.guildId}/overview`);
+      const overview = await api(`/guilds/${guildId}/overview`);
+      if (guildId !== state.guildId) return;
+      state.overview = overview;
     }
     const loaded = await loadProviderWorkspace(scope);
     if (loaded && message) toast(message);
@@ -2277,14 +2539,11 @@
         body: JSON.stringify({
           kind: state.memoryKind,
           lineageId: state.lineageId,
-          memories: memoriesPayload.map((entry) =>
-            typeof entry === "string"
-              ? { content: entry, tags: [] }
-              : { content: entry.content, tags: entry.tags || [] },
-          ),
+          memories: memoriesPayload.map((entry) => (typeof entry === "string" ? { content: entry, tags: [] } : entry)),
         }),
       });
-      toast(`Imported ${result.inserted}; skipped ${result.skipped}`, result.inserted ? "success" : "warning");
+      const summary = `Imported ${result.inserted}; duplicates ${result.skipped}; invalid ${result.invalid}; failed ${result.failed}`;
+      toast(summary, result.failed ? "error" : result.invalid || !result.inserted ? "warning" : "success");
       await loadMemories();
     } catch (error) {
       toast(error.message, "error");
@@ -2600,6 +2859,24 @@
     const dialogClose = event.target.closest("[data-dialog-close]");
     if (dialogClose) {
       document.querySelector(`#${dialogClose.dataset.dialogClose}`)?.close();
+      return;
+    }
+    const connectionSelect = event.target.closest("[data-connection-select]");
+    if (connectionSelect) {
+      state.providerConnection[connectionSelect.dataset.providerScope] = connectionSelect.dataset.connectionSelect;
+      renderView();
+      return;
+    }
+    const providerOpen = event.target.closest("[data-provider-open]");
+    if (providerOpen) {
+      const form = document.querySelector("#provider-credential-form");
+      form.reset();
+      if (providerOpen.dataset.providerOpen) form.elements.provider.value = providerOpen.dataset.providerOpen;
+      document.querySelector("#provider-dialog")?.showModal();
+      return;
+    }
+    if (event.target.closest("[data-endpoint-open]")) {
+      document.querySelector("#endpoint-dialog")?.showModal();
       return;
     }
     if (event.target.closest("[data-persona-create-open]")) {
@@ -2969,6 +3246,7 @@
       event.preventDefault();
       const form = event.target;
       const scope = form.dataset.providerScope;
+      const provider = form.elements.provider.value;
       try {
         await withBusyForm(form, async () => {
           await api(`/guilds/${state.guildId}/providers/${scope}/credentials`, {
@@ -2981,6 +3259,8 @@
           });
         });
         form.reset();
+        document.querySelector("#provider-dialog")?.close();
+        state.providerConnection[scope] = `provider:${provider}`;
         toast("Provider key stored");
         await refreshProviders(scope);
       } catch (error) {
@@ -3015,10 +3295,11 @@
           });
         });
         form.reset();
+        document.querySelector("#endpoint-dialog")?.close();
         toast("Endpoint tested and registered");
         await refreshProviders(scope);
       } catch (error) {
-        toast(error.message, "error");
+        showFormError(form, error);
       }
       return;
     }
@@ -3047,6 +3328,36 @@
               : "OpenRouter model registered";
         toast(message);
         await refreshProviders(scope);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
+    }
+
+    if (event.target.matches("[data-persona-text-model]")) {
+      event.preventDefault();
+      try {
+        await savePersonaTextModel(event.target);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
+    }
+
+    if (event.target.matches("[data-personal-parameters]")) {
+      event.preventDefault();
+      try {
+        await savePersonalParameters(event.target);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
+    }
+
+    if (event.target.matches("[data-personal-model]")) {
+      event.preventDefault();
+      try {
+        await savePersonalModel(event.target);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -3085,6 +3396,7 @@
     if (event.target.id === "fallback-form") {
       event.preventDefault();
       const form = event.target;
+      const scope = form.dataset.providerScope;
       const refs = [0, 1, 2, 3, 4].flatMap((index) => {
         const value = form.elements[`fallback-${index}`].value;
         if (!value) return [];
@@ -3093,13 +3405,13 @@
       });
       try {
         await withBusyForm(form, async () => {
-          await api(`/guilds/${state.guildId}/providers/server/fallbacks`, {
+          await api(`/guilds/${state.guildId}/providers/${scope}/fallbacks`, {
             method: "PATCH",
             body: JSON.stringify({ refs }),
           });
         });
-        toast("Fallback chain saved");
-        await refreshProviders("server");
+        toast(ui("fallback_saved"));
+        await refreshProviders(scope);
       } catch (error) {
         toast(error.message, "error");
       }

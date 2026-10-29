@@ -9,6 +9,8 @@ import { selectApiKey } from "@/utils/security/keyRotation";
 import { decryptApiKey } from "@/utils/security/crypto";
 import { resolveEffectiveUserNaming } from "@/utils/text/userNaming";
 import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
+import { llmProviderRepo } from "@/utils/db/repositories";
+import { withSavedProviderConfig } from "@/utils/provider/savedProviderConfig";
 import type { TomoriState } from "@/types/db/schema";
 import type { StreamingContext } from "@/types/tool/interfaces";
 import type { PendingResponsePresentation } from "@/types/stream/pendingResponse";
@@ -22,12 +24,10 @@ const testChatSchema = z
     personaId: z.number().int().positive(),
     messages: z
       .array(
-        z
-          .object({
-            role: z.enum(["user", "assistant"]),
-            content: z.string().trim().min(1).max(4_000),
-          })
-          .strict(),
+        z.discriminatedUnion("role", [
+          z.object({ role: z.literal("user"), content: z.string().trim().min(1).max(4_000) }).strict(),
+          z.object({ role: z.literal("assistant"), content: z.string().trim().min(1).max(1_048_576) }).strict(),
+        ]),
       )
       .min(1)
       .max(24),
@@ -134,15 +134,25 @@ function createCollectorChannel(guild: Guild, channelId: string, chunks: string[
   return channel as unknown as BaseGuildTextChannel;
 }
 
-async function resolveApiKey(state: TomoriState): Promise<string> {
+async function resolveApiKey(state: TomoriState, credentialSource: "personal" | "server"): Promise<string> {
   const provider = await getProviderForTomori(state);
-  const selected = await selectApiKey(state);
+  const selected = credentialSource === "server" ? await selectApiKey(state) : null;
   if (selected) return selected.apiKey;
   if (state.config.api_key) {
     return decryptApiKey(state.config.api_key, state.config.key_version || 1);
   }
   if (!provider.getInfo().requiresApiKey) return "";
   throw new DashboardServiceError("provider_key_missing", 422, "No usable text-provider credential is configured.");
+}
+
+async function resolveTestChatModel(state: TomoriState, personalTextActive: boolean): Promise<TomoriState> {
+  if (personalTextActive || !state.persona_llm) return state;
+  const selected = { ...state, llm: state.persona_llm };
+  if (state.persona_llm.llm_provider.toLowerCase() === state.llm.llm_provider.toLowerCase()) return selected;
+  const saved = await llmProviderRepo.loadSavedProviderConfig(state.server_id, state.persona_llm.llm_provider);
+  if (!saved?.api_key)
+    throw new DashboardServiceError("provider_key_missing", 422, "No usable text-provider credential is configured.");
+  return withSavedProviderConfig(selected, saved);
 }
 
 export class DashboardPersonaChatService {
@@ -166,7 +176,9 @@ export class DashboardPersonaChatService {
     const timeout = setTimeout(() => controller.abort(), 120_000);
     try {
       const personalOverlay = await applyPersonalProviderSelectionsToTomoriState(basePersona, actor.user.user_id);
-      const persona = safeTestState(personalOverlay.tomoriState);
+      const persona = safeTestState(
+        await resolveTestChatModel(personalOverlay.tomoriState, Boolean(personalOverlay.activeConfigs.text)),
+      );
       const personalized = persona.config.personal_memories_enabled !== false;
       const preferences = personalized
         ? await userNamingRepository.loadPreferences([
@@ -228,7 +240,7 @@ export class DashboardPersonaChatService {
       });
 
       const provider = await getProviderForTomori(persona);
-      const apiKey = await resolveApiKey(persona);
+      const apiKey = await resolveApiKey(persona, personalOverlay.activeConfigs.text ? "personal" : "server");
       const providerConfig = await provider.createConfig(persona, apiKey);
       providerConfig.tools = undefined;
       const chunks: string[] = [];
@@ -295,7 +307,10 @@ export class DashboardPersonaChatService {
 }
 
 export const dashboardTestChatInternals = {
+  resolveTestChatModel,
   buildPresentation,
   buildHistory,
   safeTestState,
+  resolveApiKey,
+  testChatSchema,
 };

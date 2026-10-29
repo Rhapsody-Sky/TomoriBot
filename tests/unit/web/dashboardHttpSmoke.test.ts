@@ -10,6 +10,9 @@ import { initializeLocalizer } from "@/utils/text/localizer";
 import { createServerConfig, createUserRow } from "../../helpers/fixtures";
 import { localizedCopy } from "../../helpers/localeCases";
 import type { DashboardServerStats } from "@/web/dashboard/core";
+import { type PersonalMemoryRow, PrivacyLevel } from "@/types/db/schema";
+import { log } from "@/utils/misc/logger";
+import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 
 const fakeClient = {
   application: { id: "123456789012345678" },
@@ -129,7 +132,6 @@ describe("dashboard HTTP shell", () => {
     expect(source).not.toContain("settings-category-heading");
     expect(source).toContain('id="server-models-form"');
     expect(source).toContain("already_available");
-    expect(source).toContain("Built-in OpenRouter models come from Tomori's catalog");
     expect(source).not.toContain("selectedOptions");
     expect(source).not.toContain(" multiple ");
     expect(source).toContain("data-server-picker-open");
@@ -291,7 +293,11 @@ describe("dashboard memory and naming authorization", () => {
   beforeAll(() => initializeLocalizer());
   afterEach(() => mock.restore());
 
-  function setup(canManage = false) {
+  function setup(
+    canManage = false,
+    configOverrides: Parameters<typeof createServerConfig>[0] = {},
+    privacyLevel = PrivacyLevel.MINIMAL,
+  ) {
     const { app, config } = createDashboardApp(fakeClient);
     const session = new DashboardSessionStore().create(
       { id: "987654321098765432", username: "Mirri" },
@@ -304,12 +310,12 @@ describe("dashboard memory and naming authorization", () => {
     };
     spyOn(DashboardSessionStore.prototype, "get").mockImplementation((id) => (id === session.id ? session : null));
     spyOn(TomoriDashboardCore.prototype, "ensureUser").mockResolvedValue(
-      createUserRow({ user_id: 7, user_disc_id: session.user.id }),
+      createUserRow({ user_id: 7, user_disc_id: session.user.id, privacy_level: privacyLevel }),
     );
     spyOn(TomoriDashboardCore.prototype, "loadGuildSnapshot").mockResolvedValue({
       serverId: 42,
       serverDiscordId: "123456789012345678",
-      config: createServerConfig(),
+      config: createServerConfig(configOverrides),
       rawPersonas: [],
       personas: [
         {
@@ -340,6 +346,246 @@ describe("dashboard memory and naming authorization", () => {
     };
     return { app, headers, session, namingWrite, categoryWrite };
   }
+
+  it("reports duplicate, invalid and failed import entries without hiding partial writes or exposing errors", async () => {
+    const { app, headers } = setup();
+    const rows: PersonalMemoryRow[] = [
+      { personal_memory_id: 1, user_id: 7, persona_lineage_id: 77, content: "Existing fact", tags: [] },
+    ];
+    const list = spyOn(TomoriDashboardCore.prototype, "listPersonalMemories").mockImplementation(async () => rows);
+    const internalError = new Error("Private database connection details");
+    const write = spyOn(TomoriDashboardCore.prototype, "addPersonalMemory").mockImplementation(
+      async (_userId, lineageId, content, tags) => {
+        if (content === "Database failure") throw internalError;
+        if (content === "Limit reached") return null;
+        const row = { personal_memory_id: 2, user_id: 7, persona_lineage_id: lineageId, content, tags };
+        rows.push(row);
+        return row;
+      },
+    );
+    const errorLog = spyOn(log, "error").mockResolvedValue();
+    spyOn(log, "warn").mockImplementation(() => {});
+    spyOn(log, "metric").mockImplementation(() => {});
+    const response = await app.request("/settings/api/guilds/123456789012345678/memories/import", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        kind: "personal",
+        lineageId: 77,
+        memories: [
+          { content: "New fact", tags: ["profile"] },
+          { content: " existing FACT " },
+          null,
+          { content: "x".repeat(getMemoryLimits().maxMemoryLength + 1) },
+          { content: "Bad tags", tags: ["x".repeat(33)] },
+          { content: "Database failure" },
+          { content: "Limit reached" },
+          { content: "NEW FACT" },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload).toEqual({
+      inserted: 1,
+      skipped: 2,
+      invalid: 3,
+      failed: 2,
+      issues: [
+        { index: 1, code: "duplicate_memory" },
+        { index: 2, code: "invalid_memory" },
+        { index: 3, code: "invalid_memory" },
+        { index: 4, code: "invalid_memory" },
+        { index: 5, code: "import_failed" },
+        { index: 6, code: "memory_limit_or_write_failed" },
+        { index: 7, code: "duplicate_memory" },
+      ],
+    });
+    expect(JSON.stringify(payload)).not.toContain(internalError.message);
+    expect(write).toHaveBeenCalledTimes(3);
+    expect(list).toHaveBeenCalledWith(7, 77);
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    expect(errorLog.mock.calls[0]?.[1]).toBe(internalError);
+    expect(rows).toHaveLength(2);
+  });
+
+  for (const scenario of [
+    { name: "foreign personal scope", kind: "personal", lineageId: 999, code: "lineage_forbidden" },
+    { name: "global server scope", kind: "server", lineageId: 0, code: "lineage_forbidden" },
+    { name: "privacy opt-out", kind: "personal", lineageId: 77, code: "privacy_opt_out" },
+    { name: "disabled member teaching", kind: "server", lineageId: 77, code: "server_teaching_disabled" },
+    { name: "blacklisted member", kind: "server", lineageId: 77, code: "user_blacklisted" },
+  ]) {
+    it(`rejects imports for ${scenario.name} before validating entries or writing`, async () => {
+      const { app, headers } = setup(
+        false,
+        { server_memteaching_enabled: scenario.code !== "server_teaching_disabled" },
+        scenario.code === "privacy_opt_out" ? PrivacyLevel.FULL : PrivacyLevel.MINIMAL,
+      );
+      spyOn(TomoriDashboardCore.prototype, "isUserBlacklisted").mockResolvedValue(scenario.code === "user_blacklisted");
+      const personalList = spyOn(TomoriDashboardCore.prototype, "listPersonalMemories").mockResolvedValue([]);
+      const serverList = spyOn(TomoriDashboardCore.prototype, "listServerMemoryContents").mockResolvedValue([]);
+      const personalWrite = spyOn(TomoriDashboardCore.prototype, "addPersonalMemory").mockResolvedValue(null);
+      const serverWrite = spyOn(TomoriDashboardCore.prototype, "addServerMemory").mockResolvedValue(null);
+      const response = await app.request("/settings/api/guilds/123456789012345678/memories/import", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ kind: scenario.kind, lineageId: scenario.lineageId, memories: [null] }),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ error: { code: scenario.code } });
+      expect(personalList).not.toHaveBeenCalled();
+      expect(serverList).not.toHaveBeenCalled();
+      expect(personalWrite).not.toHaveBeenCalled();
+      expect(serverWrite).not.toHaveBeenCalled();
+    });
+  }
+
+  it("rejects malformed import envelopes without reading or writing memories", async () => {
+    const { app, headers } = setup();
+    const list = spyOn(TomoriDashboardCore.prototype, "listPersonalMemories").mockResolvedValue([]);
+    const write = spyOn(TomoriDashboardCore.prototype, "addPersonalMemory").mockResolvedValue(null);
+    for (const body of [
+      { kind: "unknown", lineageId: 77, memories: [] },
+      { kind: "personal", lineageId: 1.5, memories: [] },
+      { kind: "personal", lineageId: 77, memories: Array.from({ length: 501 }, () => ({ content: "Fact" })) },
+    ]) {
+      const response = await app.request("/settings/api/guilds/123456789012345678/memories/import", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_import" } });
+    }
+    expect(list).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("restricts persona model overrides to administrators with CSRF", async () => {
+    const member = setup();
+    const path = "/settings/api/guilds/123456789012345678/personas/9/text-model";
+    expect((await member.app.request(path, { method: "GET", headers: member.headers })).status).toBe(403);
+    expect(
+      (
+        await member.app.request(path, {
+          method: "PUT",
+          headers: member.headers,
+          body: JSON.stringify({ modelId: 11 }),
+        })
+      ).status,
+    ).toBe(403);
+    const admin = setup(true);
+    const read = spyOn(TomoriDashboardCore.prototype, "loadPersonaTextModelWorkspace").mockResolvedValue({
+      options: [{ id: 11, provider: "openrouter", label: "Model" }],
+      selected: null,
+    });
+    const write = spyOn(TomoriDashboardCore.prototype, "setPersonaTextModelOverride").mockResolvedValue(true);
+    expect((await admin.app.request(path, { method: "GET", headers: admin.headers })).status).toBe(200);
+    const request = (body: unknown, csrf = admin.session.csrfToken) =>
+      admin.app.request(path, {
+        method: "PUT",
+        headers: { ...admin.headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify(body),
+      });
+    expect((await request({ modelId: null })).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(expect.anything(), 9, null);
+    expect((await request({ modelId: 11 }, "invalid")).status).toBe(403);
+    expect((await request({ modelId: 11, personaId: 10 })).status).toBe(422);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires administrator permission and CSRF for provider-specific server parameters", async () => {
+    const path = "/settings/api/guilds/123456789012345678/providers/server/parameters";
+    const member = setup();
+    const body = { provider: "openrouter", patch: { temperature: 0.5 } };
+    expect(
+      (await member.app.request(path, { method: "PATCH", headers: member.headers, body: JSON.stringify(body) })).status,
+    ).toBe(403);
+    const admin = setup(true);
+    const write = spyOn(TomoriDashboardCore.prototype, "setServerProviderParameters").mockResolvedValue({
+      status: "success",
+    });
+    const request = (value: unknown, csrf = admin.session.csrfToken) =>
+      admin.app.request(path, {
+        method: "PATCH",
+        headers: { ...admin.headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify(value),
+      });
+    expect((await request(body)).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(expect.anything(), "openrouter", body.patch);
+    expect((await request(body, "invalid")).status).toBe(403);
+    expect((await request({ ...body, serverId: 99 })).status).toBe(422);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("scopes personal parameter edits to the authenticated member and requires CSRF and membership", async () => {
+    const { app, headers, session } = setup();
+    const write = spyOn(TomoriDashboardCore.prototype, "setPersonalProviderParameters").mockResolvedValue({
+      status: "success",
+    });
+    const request = (body: unknown, csrf = session.csrfToken) =>
+      app.request("/settings/api/guilds/123456789012345678/providers/personal/parameters", {
+        method: "PATCH",
+        headers: { ...headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify(body),
+      });
+    const body = { provider: "openrouter", patch: { temperature: 0.5 } };
+    expect((await request(body)).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(7, session.user.id, "openrouter", body.patch);
+    expect((await request(body, "invalid")).status).toBe(403);
+    expect((await request({ ...body, userId: 99 })).status).toBe(422);
+    session.guildCache = { fetchedAt: Date.now(), guilds: [] };
+    expect((await request(body)).status).toBe(403);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("scopes personal model selection to the authenticated member and requires CSRF and membership", async () => {
+    const { app, headers, session } = setup();
+    const write = spyOn(TomoriDashboardCore.prototype, "setPersonalPrimaryModel").mockResolvedValue(true);
+    const request = (body: unknown, csrf = session.csrfToken) =>
+      app.request("/settings/api/guilds/123456789012345678/providers/personal/model", {
+        method: "PATCH",
+        headers: { ...headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify(body),
+      });
+    const body = { capability: "text", provider: "openrouter", modelId: 11 };
+    expect((await request(body)).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(7, session.user.id, "text", "openrouter", 11);
+    expect((await request(body, "invalid")).status).toBe(403);
+    expect((await request({ ...body, userId: 99 })).status).toBe(422);
+    session.guildCache = { fetchedAt: Date.now(), guilds: [] };
+    expect((await request(body)).status).toBe(403);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows only the member's personal fallback chain and requires CSRF and guild membership", async () => {
+    const { app, headers, session } = setup();
+    const refs = [{ type: "llm" as const, id: 12 }];
+    spyOn(TomoriDashboardCore.prototype, "loadPersonalFallbackWorkspace").mockResolvedValue({
+      fallbackOptions: [{ ref: refs[0], label: "Backup" }],
+      fallbackRefs: [],
+      randomizerEnabled: false,
+    });
+    const write = spyOn(TomoriDashboardCore.prototype, "setPersonalFallbacks").mockResolvedValue(true);
+    const request = (scope: string, body: unknown, csrf = session.csrfToken) =>
+      app.request(`/settings/api/guilds/123456789012345678/providers/${scope}/fallbacks`, {
+        method: "PATCH",
+        headers: { ...headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify(body),
+      });
+    const response = await request("personal", { refs });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ refs });
+    expect(write).toHaveBeenCalledWith(7, session.user.id, refs);
+    expect((await request("server", { refs })).status).toBe(403);
+    expect((await request("personal", { refs }, "invalid")).status).toBe(403);
+    expect((await request("personal", { refs, userId: 99 })).status).toBe(422);
+    session.guildCache = { fetchedAt: Date.now(), guilds: [] };
+    expect((await request("personal", { refs })).status).toBe(403);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
 
   it("allows a member's own naming preferences but denies server category writes", async () => {
     const { app, headers, namingWrite, categoryWrite } = setup();

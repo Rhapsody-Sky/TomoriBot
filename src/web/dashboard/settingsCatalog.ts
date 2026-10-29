@@ -5,6 +5,7 @@ import { responseReviewerPromptSchema, responseReviewItemsSchema, utcOffsetSchem
 import { ASSISTANT_PREFILL_MAX_LENGTH } from "@/utils/chat/assistantPrefill";
 import { localizer } from "@/utils/text/localizer";
 import { MAX_MESSAGES_PER_CHANNEL } from "@/utils/cache/shortTermMemoryCache";
+import { NAI_IMAGE_NOISE_SCHEDULES, NAI_IMAGE_SAMPLERS } from "@/utils/image/naiImageParams";
 
 export const SETTINGS_SECTION_IDS = [
   "modelBehavior",
@@ -227,10 +228,10 @@ const novelaiSchema = z
     nai_preset_name: nullableText(120),
     image_default_positive_tags: tagsSchema.optional(),
     image_default_negative_tags: tagsSchema.optional(),
-    nai_sampler: nullableText(80),
+    nai_sampler: z.enum(NAI_IMAGE_SAMPLERS).nullable().optional(),
     nai_steps: z.number().int().min(1).max(50).nullable().optional(),
-    nai_scale: z.number().min(0).max(20).nullable().optional(),
-    nai_noise_schedule: nullableText(80),
+    nai_scale: z.number().min(0).max(10).nullable().optional(),
+    nai_noise_schedule: z.enum(NAI_IMAGE_NOISE_SCHEDULES).nullable().optional(),
     nai_cfg_rescale: z.number().min(0).max(1).nullable().optional(),
   })
   .strict();
@@ -289,7 +290,7 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   match_limit: "Maximum number of personas whose trigger words may match a single incoming message.",
   cascade_limit: "Maximum additional persona responses that may be triggered after the first match.",
   timezone_offset: "Server-wide UTC offset used when Tomori reasons about local dates and times.",
-  self_debug_enabled: "Lets Tomori include diagnostic details when her own response generation fails.",
+  self_debug_enabled: "Includes Tomori's diagnostic embeds in the model context.",
   model_randomizer_enabled: "Allows eligible configured models to be selected with additional variation.",
   system_prompt: "Server-wide instructions added to every persona. Leave empty to use the normal default.",
   context_note: "Persistent server context inserted into the prompt at the configured depth.",
@@ -339,14 +340,14 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   tool_notice_hidden_keys: "Checked notices stay hidden while their underlying tools continue to work.",
   memory_tagging_enabled: "Classifies memories with tags to improve filtering and relevant-memory retrieval.",
   channel_memory_enabled: "Associates eligible long-term memories with the channel where they were taught.",
-  rp_channel_ids: "Selected channels suppress normal roleplay behavior and persona-trigger handling.",
+  rp_channel_ids: "Selected roleplay channels disable tools, emojis, and stickers.",
   private_channel_ids: "Selected channels keep short-term conversation context isolated from other channels.",
   crosschannel_blocklist_ids: "Context from selected channels is never shared into another channel.",
   stm_privacy_bypass: "Allows server context rules to bypass members' normal short-term-memory privacy boundary.",
   thought_log_channel_disc_id: "Optional channel where Tomori posts configured thought and reasoning logs.",
   autoch_disc_ids: "Channels where Tomori may join conversations automatically without a direct trigger.",
   autoch_threshold: "Minimum activity threshold used before an automatic response becomes eligible.",
-  autoch_threshold_max: "Upper autochat threshold. Set to zero when no maximum is desired.",
+  autoch_threshold_max: "Upper autochat threshold. Zero uses the minimum as a fixed threshold.",
   voice_transcript_chat_mode: "Adds voice-message transcripts to normal chat context.",
   chatterbox_turbo_enabled: "Uses faster Chatterbox generation, trading some quality for speed.",
   chatterbox_cfg_weight: "Controls how strongly Chatterbox follows voice and text conditioning.",
@@ -365,7 +366,7 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   welcome_prompt: "Instructions for welcome messages. Leave empty to use the normal behavior.",
   uncensor_injection_enabled: "Adds an optional prompt workaround for overly strict provider filters.",
   uncensor_unicode_space_enabled: "Uses Unicode spacing to reduce false-positive text filtering.",
-  uncensor_sanitize_enabled: "Cleans provider filter artifacts from output before it is sent.",
+  uncensor_sanitize_enabled: "Sanitizes input to reduce provider content filtering.",
 });
 
 const toggle = (key: string, label: string, hint?: string): SettingsFieldDefinition => ({
@@ -654,10 +655,25 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
       { key: "nai_preset_name", label: "Preset name", type: "text", nullable: true },
       { key: "image_default_positive_tags", label: "Positive tags", type: "tags" },
       { key: "image_default_negative_tags", label: "Negative tags", type: "tags" },
-      { key: "nai_sampler", label: "Sampler", type: "text", nullable: true },
+      {
+        key: "nai_sampler",
+        label: "Sampler",
+        type: "select",
+        nullable: true,
+        options: [{ value: "", label: "Default" }, ...NAI_IMAGE_SAMPLERS.map((value) => ({ value, label: value }))],
+      },
       number("nai_steps", "Steps", 1, 50, { nullable: true }),
-      number("nai_scale", "Prompt guidance", 0, 20, { step: 0.1, nullable: true }),
-      { key: "nai_noise_schedule", label: "Noise schedule", type: "text", nullable: true },
+      number("nai_scale", "Prompt guidance", 0, 10, { step: 0.1, nullable: true }),
+      {
+        key: "nai_noise_schedule",
+        label: "Noise schedule",
+        type: "select",
+        nullable: true,
+        options: [
+          { value: "", label: "Default" },
+          ...NAI_IMAGE_NOISE_SCHEDULES.map((value) => ({ value, label: value })),
+        ],
+      },
       number("nai_cfg_rescale", "CFG rescale", 0, 1, { step: 0.05, nullable: true }),
     ],
   },
@@ -687,7 +703,7 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
     fields: [
       toggle("uncensor_injection_enabled", "Prompt injection workaround"),
       toggle("uncensor_unicode_space_enabled", "Unicode spacing workaround"),
-      toggle("uncensor_sanitize_enabled", "Sanitize filtered output"),
+      toggle("uncensor_sanitize_enabled", "Sanitize input"),
     ],
   },
 ];

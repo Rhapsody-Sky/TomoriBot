@@ -59,14 +59,7 @@ const memoryImportSchema = z
   .object({
     kind: z.enum(["personal", "server"]),
     lineageId: z.number().int().nonnegative(),
-    memories: z
-      .array(
-        z.object({
-          content: z.string().trim().min(1),
-          tags: z.array(z.string().trim().min(1).max(32)).max(5).optional().default([]),
-        }),
-      )
-      .max(500),
+    memories: z.array(z.unknown()).max(500),
   })
   .strict();
 
@@ -461,6 +454,82 @@ export function createDashboardApp(client: Client) {
           "navigation_switch",
           "navigation_close",
           "endpoint_features",
+          "provider_access",
+          "provider_models",
+          "connections",
+          "add_provider",
+          "connection_empty",
+          "connection_select",
+          "connection_provider",
+          "connection_endpoint",
+          "connection_credentials",
+          "connection_replace_key",
+          "connection_models",
+          "connection_register_model",
+          "connection_no_models",
+          "connection_available_models",
+          "connection_no_available_models",
+          "model_routing",
+          "connection_fallbacks",
+          "personal_models",
+          "personal_models_hint",
+          "personal_model_unassigned",
+          "personal_model_enabled",
+          "personal_model_disabled",
+          "personal_model_unavailable",
+          "personal_model_choose",
+          "personal_model_save",
+          "personal_model_saved",
+          "model_text",
+          "model_vision",
+          "model_embedding",
+          "model_image",
+          "model_image_nai",
+          "model_video",
+          "persona_model_title",
+          "persona_model_hint",
+          "persona_model_label",
+          "persona_model_inherit",
+          "persona_model_unavailable",
+          "persona_model_loading",
+          "persona_model_failed",
+          "persona_model_save",
+          "persona_model_saved",
+          "persona_test_configured_model",
+          "model_speech_design",
+          "model_speech_clone",
+          "personal_parameters",
+          "personal_parameters_hint",
+          "personal_parameters_empty",
+          "personal_parameters_save",
+          "personal_parameters_saved",
+          "server_parameters",
+          "server_parameters_hint",
+          "server_parameters_saved",
+          "parameter_temperature",
+          "parameter_top_p",
+          "parameter_top_k",
+          "parameter_frequency_penalty",
+          "parameter_presence_penalty",
+          "parameter_min_p",
+          "parameter_max_output_tokens",
+          "parameter_thinking_level",
+          "parameter_unset",
+          "thinking_auto",
+          "thinking_none",
+          "thinking_minimal",
+          "thinking_low",
+          "thinking_medium",
+          "thinking_high",
+          "endpoint_register_new",
+          "endpoint_cancel",
+          "personal_fallbacks",
+          "personal_fallbacks_hint",
+          "server_fallbacks",
+          "server_fallbacks_hint",
+          "fallback_randomizer_hint",
+          "fallback_unavailable",
+          "fallback_saved",
           "endpoint_features_hint",
           "endpoint_tools",
           "endpoint_tools_hint",
@@ -771,26 +840,54 @@ export function createDashboardApp(client: Client) {
       return jsonError(context, new DashboardServiceError("invalid_import", 422, "Invalid memory import file."));
     }
 
+    try {
+      await memories.assertCanAdd(result.actor, result.snapshot, parsed.data.lineageId, parsed.data.kind);
+    } catch (error) {
+      if (!(error instanceof DashboardServiceError)) {
+        await log.error("Dashboard memory import authorization failed", error, undefined, { persist: false });
+      }
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Memory import failed.");
+    }
+
     let inserted = 0;
     let skipped = 0;
-    for (const entry of parsed.data.memories) {
+    let invalid = 0;
+    let failed = 0;
+    const issues: Array<{ index: number; code: string }> = [];
+    for (const [index, entry] of parsed.data.memories.entries()) {
       try {
-        const input = memories.parseMutation({
-          lineageId: parsed.data.lineageId,
-          content: entry.content,
-          tags: entry.tags,
-        });
+        const input = memories.parseMutation(
+          typeof entry === "object" && entry !== null && !Array.isArray(entry)
+            ? { ...entry, lineageId: parsed.data.lineageId }
+            : null,
+        );
         if (parsed.data.kind === "server") {
           await memories.addServer(result.actor, result.snapshot, input);
         } else {
           await memories.addPersonal(result.actor, result.snapshot, input);
         }
         inserted++;
-      } catch {
-        skipped++;
+      } catch (error) {
+        if (error instanceof DashboardServiceError && error.code === "duplicate_memory") {
+          skipped++;
+          issues.push({ index, code: "duplicate_memory" });
+        } else if (error instanceof DashboardServiceError && error.code === "invalid_memory") {
+          invalid++;
+          issues.push({ index, code: "invalid_memory" });
+        } else {
+          failed++;
+          const code = error instanceof DashboardServiceError ? error.code : "import_failed";
+          issues.push({ index, code });
+          if (error instanceof DashboardServiceError && error.status < 500) {
+            log.metric("dashboard_memory_import_refused", { code });
+            log.warn("Dashboard memory import entry refused", { code, index });
+          } else {
+            await log.error("Dashboard memory import entry failed", error, undefined, { persist: false });
+          }
+        }
       }
     }
-    return context.json({ inserted, skipped });
+    return context.json({ inserted, skipped, invalid, failed, issues });
   });
 
   app.get(`${BASE_PATH}/api/guilds/:guildId/providers/personal`, async (context) => {
@@ -830,6 +927,45 @@ export function createDashboardApp(client: Client) {
       return context.json({ saved: true });
     } catch (error) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Provider save failed.");
+    }
+  });
+
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/providers/server/parameters`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    try {
+      await providers.setServerParameters(result.snapshot, await context.req.json().catch(() => null));
+      return context.json({ saved: true });
+    } catch (error) {
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Server parameters update failed.");
+    }
+  });
+
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/providers/personal/parameters`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    try {
+      await providers.setPersonalParameters(result.actor, await context.req.json().catch(() => null));
+      return context.json({ saved: true });
+    } catch (error) {
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Personal parameters update failed.");
+    }
+  });
+
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/providers/personal/model`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    try {
+      await providers.setPersonalModel(result.actor, await context.req.json().catch(() => null));
+      return context.json({ saved: true });
+    } catch (error) {
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Personal model update failed.");
     }
   });
 
@@ -974,6 +1110,19 @@ export function createDashboardApp(client: Client) {
     if (csrfError) return csrfError;
     try {
       const refs = await providers.setFallbacks(result.snapshot, await context.req.json().catch(() => null));
+      return context.json({ refs });
+    } catch (error) {
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Fallback update failed.");
+    }
+  });
+
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/providers/personal/fallbacks`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, false);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    try {
+      const refs = await providers.setPersonalFallbacks(result.actor, await context.req.json().catch(() => null));
       return context.json({ refs });
     } catch (error) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Fallback update failed.");
@@ -1181,6 +1330,33 @@ export function createDashboardApp(client: Client) {
     if (!key) return context.notFound();
     context.header("Content-Type", "image/png");
     return context.body(new Uint8Array(await sprites.image(snapshot, personaId, key)));
+  });
+
+  app.get(`${BASE_PATH}/api/guilds/:guildId/personas/:personaId/text-model`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId) return jsonError(context, new DashboardServiceError("invalid_persona", 422, "Invalid persona."));
+    try {
+      return context.json(await providers.loadPersonaTextModel(result.snapshot, personaId));
+    } catch (error) {
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Persona model load failed.");
+    }
+  });
+
+  app.put(`${BASE_PATH}/api/guilds/:guildId/personas/:personaId/text-model`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId) return jsonError(context, new DashboardServiceError("invalid_persona", 422, "Invalid persona."));
+    try {
+      await providers.setPersonaTextModel(result.snapshot, personaId, await context.req.json().catch(() => null));
+      return context.json({ saved: true });
+    } catch (error) {
+      return jsonError(context, error instanceof DashboardServiceError ? error : "Persona model update failed.");
+    }
   });
 
   app.put(`${BASE_PATH}/api/guilds/:guildId/personas/:personaId/attributes`, async (context) => {

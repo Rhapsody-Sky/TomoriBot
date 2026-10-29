@@ -3941,11 +3941,94 @@ body[data-theme="light"] .button-primary {
   margin-block-start: 16px;
 }
 
+.provider-group + .provider-group {
+  margin-block-start: 24px;
+}
+
+.provider-group-title {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: var(--ink);
+}
+
+.connection-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connection-heading .provider-group-title {
+  margin: 0;
+}
+
+.connection-list {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 16px 0;
+}
+
+.connection-item {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  max-width: 240px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.connection-item strong {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-item small {
+  color: var(--ink-soft);
+}
+
+.connection-item.is-active {
+  border-color: var(--line-teal);
+  background: var(--primary-soft);
+}
+
+.provider-layout > .form-panel {
+  max-width: none;
+}
+
+:where(.provider-layout) .fallback-editor,
+:where(.provider-layout) .server-model-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 600px) {
+  :where(.provider-layout) .fallback-editor,
+  :where(.provider-layout) .server-model-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.workspace > .form-panel[data-profile-section="fallback"],
+.workspace > .memory-workspace,
+.profile-settings > .form-panel {
+  max-width: none;
+}
+
 .persona-appearance-grid {
   gap: 18px;
 }
 
 .persona-avatar-showcase {
+  top: 0;
   background: linear-gradient(145deg, var(--paper), var(--primary-soft));
 }
 

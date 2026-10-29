@@ -73,15 +73,26 @@ export class DashboardMemoryService {
     };
   }
 
-  async addPersonal(actor: DashboardActor, snapshot: DashboardGuildSnapshot, input: MemoryMutationInput) {
-    this.assertLineage(snapshot, input.lineageId, true);
-    if (actor.user.privacy_level === PrivacyLevel.FULL) {
+  async assertCanAdd(
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    lineageId: number,
+    kind: "personal" | "server",
+  ): Promise<void> {
+    this.assertLineage(snapshot, lineageId, kind === "personal");
+    if (kind === "server") {
+      await this.assertCanTeachServerMemory(actor, snapshot);
+    } else if (actor.user.privacy_level === PrivacyLevel.FULL) {
       throw new DashboardServiceError(
         "privacy_opt_out",
         403,
         "Personal memory creation is disabled by your privacy setting.",
       );
     }
+  }
+
+  async addPersonal(actor: DashboardActor, snapshot: DashboardGuildSnapshot, input: MemoryMutationInput) {
+    await this.assertCanAdd(actor, snapshot, input.lineageId, "personal");
 
     const existing = await this.core.listPersonalMemories(actor.user.user_id, input.lineageId);
     if (
@@ -167,8 +178,7 @@ export class DashboardMemoryService {
   }
 
   async addServer(actor: DashboardActor, snapshot: DashboardGuildSnapshot, input: MemoryMutationInput) {
-    this.assertLineage(snapshot, input.lineageId, false);
-    await this.assertCanTeachServerMemory(actor, snapshot);
+    await this.assertCanAdd(actor, snapshot, input.lineageId, "server");
 
     const existingContents = await this.core.listServerMemoryContents(snapshot.serverId, input.lineageId);
     if (hasDuplicate(existingContents, input.content)) {

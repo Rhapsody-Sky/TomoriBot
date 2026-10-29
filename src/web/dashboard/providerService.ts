@@ -5,6 +5,7 @@ import type {
   PersonalProviderCapability,
 } from "@/types/db/schema";
 import { z } from "zod";
+import { buildCustomProviderName } from "@/utils/provider/customProviderUtils";
 import type {
   DashboardCustomEndpointInput,
   DashboardProviderScope,
@@ -15,8 +16,38 @@ import { DashboardServiceError } from "./errors";
 import type { DashboardActor, DashboardGuildSnapshot } from "./types";
 
 const providerNameSchema = z.string().trim().toLowerCase().min(1).max(120);
-const capabilitySchema = z.enum(["text", "embedding", "image", "video", "vision"]);
+const capabilitySchema = z.enum([
+  "text",
+  "embedding",
+  "image",
+  "image_nai",
+  "video",
+  "vision",
+  "speech_design",
+  "speech_clone",
+]);
 const openRouterCapabilitySchema = z.enum(["text", "embedding", "image", "video", "decision"]);
+const personalModelSchema = z
+  .object({ capability: capabilitySchema, provider: providerNameSchema, modelId: z.number().int().positive() })
+  .strict();
+const personalParametersSchema = z
+  .object({
+    provider: providerNameSchema,
+    patch: z
+      .object({
+        temperature: z.number().min(0).max(2).nullable().optional(),
+        top_p: z.number().min(0).max(1).nullable().optional(),
+        top_k: z.number().int().min(0).max(256).nullable().optional(),
+        frequency_penalty: z.number().min(-2).max(2).nullable().optional(),
+        presence_penalty: z.number().min(-2).max(2).nullable().optional(),
+        min_p: z.number().min(0).max(1).nullable().optional(),
+        max_output_tokens: z.number().int().min(1).max(131072).nullable().optional(),
+        thinking_level: z.enum(["auto", "none", "minimal", "low", "medium", "high"]).optional(),
+      })
+      .strict()
+      .refine((patch) => Object.keys(patch).length > 0),
+  })
+  .strict();
 
 const providerCredentialSchema = z
   .object({
@@ -108,6 +139,8 @@ function serializeProvider(
     diffusion_model_id: number | null;
     nai_diffusion_model_id: number | null;
     video_model_id?: number | null;
+    speech_design_model_id?: number | null;
+    speech_clone_model_id?: number | null;
   },
   displayName: string,
 ) {
@@ -120,13 +153,17 @@ function serializeProvider(
       text: row.llm_id !== null,
       vision: row.vision_llm_id !== null && row.vision_llm_id !== undefined,
       embedding: row.embedding_model_id !== null,
-      image: row.diffusion_model_id !== null || row.nai_diffusion_model_id !== null,
+      image: row.diffusion_model_id !== null,
+      image_nai: row.nai_diffusion_model_id !== null,
       video: row.video_model_id !== null && row.video_model_id !== undefined,
+      speech_design: row.speech_design_model_id != null,
+      speech_clone: row.speech_clone_model_id != null,
     },
   };
 }
 
 function serializeEndpoint(row: {
+  connection_id: number;
   custom_endpoint_id?: number;
   label: string;
   capability: CustomEndpointCapability;
@@ -143,6 +180,7 @@ function serializeEndpoint(row: {
 }) {
   return {
     id: row.custom_endpoint_id ?? 0,
+    provider: buildCustomProviderName(row.connection_id),
     label: row.label,
     capability: row.capability,
     apiStyle: row.api_style,
@@ -180,18 +218,31 @@ export type DashboardProviderCore = Pick<
   | "removeDashboardOpenRouterModel"
   | "loadServerFallbackOptions"
   | "setServerFallbacks"
+  | "loadPersonalFallbackWorkspace"
+  | "loadPersonalModelWorkspace"
+  | "setPersonalPrimaryModel"
+  | "loadPersonalProviderParameters"
+  | "setPersonalProviderParameters"
+  | "loadServerProviderParameters"
+  | "setServerProviderParameters"
+  | "setPersonalFallbacks"
   | "loadServerModelWorkspace"
   | "setServerPrimaryModel"
+  | "loadPersonaTextModelWorkspace"
+  | "setPersonaTextModelOverride"
 >;
 
 export class DashboardProviderService {
   constructor(private readonly core: DashboardProviderCore) {}
 
   async loadPersonalWorkspace(actor: DashboardActor, snapshot: DashboardGuildSnapshot) {
-    const [providers, endpoints, openRouterModels] = await Promise.all([
+    const [providers, endpoints, openRouterModels, fallbacks, models, parameters] = await Promise.all([
       this.core.loadPersonalProviderConfigs(actor.user.user_id),
       this.core.loadPersonalCustomEndpoints(actor.user.user_id),
       this.core.loadPersonalOpenRouterModels(actor.user.user_id),
+      this.core.loadPersonalFallbackWorkspace(actor.user.user_id),
+      this.core.loadPersonalModelWorkspace(actor.user.user_id),
+      this.core.loadPersonalProviderParameters(actor.user.user_id),
     ]);
     return {
       choices: this.core.getProviderChoices(),
@@ -199,16 +250,20 @@ export class DashboardProviderService {
       endpoints: endpoints.map(serializeEndpoint),
       openRouterModels,
       byokRequired: snapshot.config.user_byok_mode === true,
+      models,
+      parameters,
+      ...fallbacks,
     };
   }
 
   async loadServerWorkspace(snapshot: DashboardGuildSnapshot) {
-    const [providers, endpoints, openRouterModels, fallbackOptions, models] = await Promise.all([
+    const [providers, endpoints, openRouterModels, fallbackOptions, models, parameters] = await Promise.all([
       this.core.loadServerProviderConfigs(snapshot.serverId),
       this.core.loadServerCustomEndpoints(snapshot.serverId),
       this.core.loadServerOpenRouterModels(snapshot.serverId),
       this.core.loadServerFallbackOptions(snapshot),
       this.core.loadServerModelWorkspace(snapshot),
+      this.core.loadServerProviderParameters(snapshot.serverId),
     ]);
     return {
       choices: this.core.getProviderChoices(),
@@ -219,7 +274,27 @@ export class DashboardProviderService {
       fallbackRefs: snapshot.config.fallback_model_refs ?? [],
       primaryModelId: snapshot.config.llm_id,
       models,
+      parameters,
     };
+  }
+
+  async loadPersonaTextModel(snapshot: DashboardGuildSnapshot, personaId: number) {
+    const workspace = await this.core.loadPersonaTextModelWorkspace(snapshot, personaId);
+    if (!workspace) throw new DashboardServiceError("persona_not_found", 404, "The persona was not found.");
+    return workspace;
+  }
+
+  async setPersonaTextModel(snapshot: DashboardGuildSnapshot, personaId: number, value: unknown): Promise<void> {
+    const parsed = z.object({ modelId: z.number().int().positive().nullable() }).strict().safeParse(value);
+    if (!parsed.success)
+      throw new DashboardServiceError("invalid_persona_model", 422, "The persona model selection is invalid.");
+    if (!(await this.core.setPersonaTextModelOverride(snapshot, personaId, parsed.data.modelId))) {
+      throw new DashboardServiceError(
+        "persona_model_unavailable",
+        422,
+        "The persona or selected model is unavailable.",
+      );
+    }
   }
 
   async saveCredential(
@@ -276,6 +351,50 @@ export class DashboardProviderService {
         "This provider has no configured model for that capability.",
       );
     }
+  }
+
+  async setPersonalModel(actor: DashboardActor, value: unknown): Promise<void> {
+    const parsed = personalModelSchema.safeParse(value);
+    if (!parsed.success)
+      throw new DashboardServiceError("invalid_personal_model", 422, "The personal model selection is invalid.");
+    const { capability, provider, modelId } = parsed.data;
+    if (
+      !(await this.core.setPersonalPrimaryModel(actor.user.user_id, actor.discordId, capability, provider, modelId))
+    ) {
+      throw new DashboardServiceError("personal_model_unavailable", 422, "The selected personal model is unavailable.");
+    }
+  }
+
+  async setPersonalParameters(actor: DashboardActor, value: unknown): Promise<void> {
+    const parsed = personalParametersSchema.safeParse(value);
+    if (!parsed.success)
+      throw new DashboardServiceError("invalid_personal_parameters", 422, "The personal model parameters are invalid.");
+    const result = await this.core.setPersonalProviderParameters(
+      actor.user.user_id,
+      actor.discordId,
+      parsed.data.provider,
+      parsed.data.patch,
+    );
+    if (result.status !== "success" && result.status !== "no-changes") {
+      throw new DashboardServiceError(
+        "personal_parameters_unavailable",
+        422,
+        "The personal model parameters could not be saved.",
+      );
+    }
+  }
+
+  async setServerParameters(snapshot: DashboardGuildSnapshot, value: unknown): Promise<void> {
+    const parsed = personalParametersSchema.safeParse(value);
+    if (!parsed.success)
+      throw new DashboardServiceError("invalid_server_parameters", 422, "The server model parameters are invalid.");
+    const result = await this.core.setServerProviderParameters(snapshot, parsed.data.provider, parsed.data.patch);
+    if (result.status !== "success" && result.status !== "no-changes")
+      throw new DashboardServiceError(
+        "server_parameters_unavailable",
+        422,
+        "The server model parameters could not be saved.",
+      );
   }
 
   async removePersonalProvider(actor: DashboardActor, provider: string): Promise<void> {
@@ -392,6 +511,27 @@ export class DashboardProviderService {
       throw new DashboardServiceError("fallback_save_failed", 500, "The fallback chain was not saved.");
     }
     return refs;
+  }
+
+  async setPersonalFallbacks(actor: DashboardActor, value: unknown): Promise<FallbackModelRef[]> {
+    const parsed = fallbackSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new DashboardServiceError("invalid_fallbacks", 422, "The fallback chain is invalid.");
+    }
+    const { fallbackOptions } = await this.core.loadPersonalFallbackWorkspace(actor.user.user_id);
+    const allowed = new Set(fallbackOptions.map((option) => `${option.ref.type}:${option.ref.id}`));
+    const seen = new Set<string>();
+    for (const ref of parsed.data.refs) {
+      const key = `${ref.type}:${ref.id}`;
+      if (!allowed.has(key) || seen.has(key)) {
+        throw new DashboardServiceError("invalid_fallbacks", 422, "The fallback chain contains an invalid model.");
+      }
+      seen.add(key);
+    }
+    if (!(await this.core.setPersonalFallbacks(actor.user.user_id, actor.discordId, parsed.data.refs))) {
+      throw new DashboardServiceError("fallback_save_failed", 500, "The fallback chain was not saved.");
+    }
+    return parsed.data.refs;
   }
 
   async setServerModels(snapshot: DashboardGuildSnapshot, value: unknown) {

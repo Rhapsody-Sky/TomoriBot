@@ -29,7 +29,7 @@ const createPersonaSchema = z
   .object({
     nickname: z.string().trim().min(1).max(100),
     description: z.string().trim().min(1).max(limits.maxAttributeLength),
-    triggerWords: z.array(z.string().trim().min(1).max(100)).max(limits.maxTriggerWords),
+    triggerWords: presetExportDataSchema.shape.trigger_words,
     personaPrompt: z.string().trim().max(8_000).nullable().default(null),
     sampleInput: z.string().trim().max(limits.maxSampleDialogueLength).nullable().default(null),
     sampleOutput: z.string().trim().max(limits.maxSampleDialogueLength).nullable().default(null),

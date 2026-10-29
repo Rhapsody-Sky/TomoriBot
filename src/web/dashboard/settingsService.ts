@@ -6,6 +6,7 @@ import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { normalizeTriggerWord } from "@/utils/text/triggerWords";
 import { slugifyLabel } from "@/utils/text/slugifyLabel";
 import { PERSONA_NAMING_VALUE_MAX_LENGTH } from "@/types/personaNaming";
+import { presetExportDataSchema } from "@/types/preset/presetExport";
 import { localizer } from "@/utils/text/localizer";
 import type {
   PersonaAppearancePatch,
@@ -68,12 +69,10 @@ const stmCategoriesSchema = z
   })
   .strict()
   .refine(({ categories }) => new Set(categories.map(({ label }) => slugifyLabel(label))).size === categories.length);
-const personaIdentitySchema = z.object({ nickname: z.string().trim().min(2).max(32) }).strict();
+const personaIdentitySchema = z.object({ nickname: presetExportDataSchema.shape.tomori_nickname.trim() }).strict();
 const personaPromptSchema = z
   .object({
-    triggerWords: z
-      .array(z.string().trim().min(2).max(personaLimits.maxMemoryLength))
-      .max(personaLimits.maxTriggerWords),
+    triggerWords: presetExportDataSchema.shape.trigger_words,
     personaPrompt: z
       .preprocess(
         (value) => (typeof value === "string" && value.trim().length === 0 ? null : value),

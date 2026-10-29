@@ -1,5 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { TomoriState } from "@/types/db/schema";
+import * as keyRotation from "@/utils/security/keyRotation";
+import * as crypto from "@/utils/security/crypto";
+import * as providerFactory from "@/utils/provider/providerFactory";
+import { llmProviderRepo } from "@/utils/db/repositories";
+import { savedProviderConfigSchema } from "@/types/db/schema";
 import { dashboardTestChatInternals } from "@/web/dashboard/personaChatService";
 import type { DashboardActor, DashboardGuildSnapshot } from "@/web/dashboard/types";
 import { createLlmRow, createPersona, createServerConfig } from "../../helpers/fixtures";
@@ -32,6 +37,64 @@ function createState(): TomoriState {
 }
 
 describe("dashboard persona test chat isolation", () => {
+  afterEach(() => mock.restore());
+
+  it("uses persona model and its server credential only without an active personal text route", async () => {
+    const state = createState();
+    state.persona_llm = createLlmRow({ llm_id: 22, llm_provider: "openrouter", llm_codename: "persona-model" });
+    const saved = savedProviderConfigSchema.parse({
+      server_id: state.server_id,
+      provider: "openrouter",
+      api_key: Buffer.from("persona-key"),
+      llm_id: 22,
+      diffusion_model_id: null,
+      embedding_model_id: null,
+      nai_diffusion_model_id: null,
+      nai_preset_name: null,
+    });
+    const load = spyOn(llmProviderRepo, "loadSavedProviderConfig").mockResolvedValue(saved);
+    const personal = await dashboardTestChatInternals.resolveTestChatModel(state, true);
+    expect(personal).toBe(state);
+    expect(load).not.toHaveBeenCalled();
+    const server = await dashboardTestChatInternals.resolveTestChatModel(state, false);
+    expect(server.llm.llm_id).toBe(22);
+    expect(server.config.api_key).toEqual(saved.api_key);
+    expect(load).toHaveBeenCalledWith(state.server_id, "openrouter");
+    load.mockResolvedValue(null);
+    await expect(dashboardTestChatInternals.resolveTestChatModel(state, false)).rejects.toMatchObject({
+      code: "provider_key_missing",
+    });
+  });
+
+  it("uses the personal credential without consulting server rotation", async () => {
+    const state = createState();
+    state.config.api_key = Buffer.from("encrypted-personal-key");
+    const rotation = spyOn(keyRotation, "selectApiKey").mockResolvedValue({
+      apiKey: "server-key",
+      rotationKeyId: 1,
+      isMainKey: false,
+    });
+    spyOn(crypto, "decryptApiKey").mockResolvedValue("personal-key");
+    spyOn(providerFactory, "getProviderForTomori").mockResolvedValue({
+      getInfo: () => ({ requiresApiKey: true }),
+    } as Awaited<ReturnType<typeof providerFactory.getProviderForTomori>>);
+
+    expect(await dashboardTestChatInternals.resolveApiKey(state, "personal")).toBe("personal-key");
+    expect(rotation).not.toHaveBeenCalled();
+    expect(await dashboardTestChatInternals.resolveApiKey(state, "server")).toBe("server-key");
+    expect(rotation).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts long assistant history while keeping user and history limits", () => {
+    const parse = (messages: Array<{ role: "user" | "assistant"; content: string }>) =>
+      dashboardTestChatInternals.testChatSchema.safeParse({ personaId: 9, messages }).success;
+    const user = { role: "user" as const, content: "hello" };
+    expect(parse([{ role: "assistant", content: "a".repeat(10_000) }, user])).toBe(true);
+    expect(parse([{ role: "user", content: "a".repeat(4_001) }])).toBe(false);
+    expect(parse([{ role: "assistant", content: "a".repeat(1_048_577) }, user])).toBe(false);
+    expect(parse(Array.from({ length: 25 }, () => user))).toBe(false);
+  });
+
   it("groups resolved sprite runs and scopes preview images to server personas", () => {
     const snapshot: DashboardGuildSnapshot = {
       serverId: 1,

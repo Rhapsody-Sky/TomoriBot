@@ -212,6 +212,26 @@ describe("dashboard settings catalog", () => {
     expect(parseSettingsPatch("sampling", { llm_top_k: 257 })).toBeNull();
   });
 
+  it("validates NovelAI image choices and guidance against the supported parameters", () => {
+    expect(
+      parseSettingsPatch("novelai", { nai_sampler: "k_euler", nai_noise_schedule: "karras", nai_scale: 10 }),
+    ).toEqual({
+      nai_sampler: "k_euler",
+      nai_noise_schedule: "karras",
+      nai_scale: 10,
+    });
+    expect(parseSettingsPatch("novelai", { nai_sampler: "unknown" })).toBeNull();
+    expect(parseSettingsPatch("novelai", { nai_noise_schedule: "unknown" })).toBeNull();
+    expect(parseSettingsPatch("novelai", { nai_scale: 10.1 })).toBeNull();
+    expect(parseSettingsPatch("novelai", { nai_sampler: null, nai_noise_schedule: null })).toEqual({
+      nai_sampler: null,
+      nai_noise_schedule: null,
+    });
+    const fields = getSettingsCatalog().find((section) => section.id === "novelai")?.fields;
+    expect(fields?.find((field) => field.key === "nai_sampler")?.type).toBe("select");
+    expect(fields?.find((field) => field.key === "nai_noise_schedule")?.type).toBe("select");
+  });
+
   it("serializes only fields that are represented in the public catalog", () => {
     const serialized = serializeSettingsValues({
       llm_temperature: 0.5,
