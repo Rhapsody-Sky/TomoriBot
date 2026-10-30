@@ -947,7 +947,6 @@ export class TomoriDashboardCore {
     lineageId: number,
     taughtByUserId: number,
     content: string,
-    tags: string[],
   ): Promise<ServerMemoryRow | null> {
     return serverMemoryRepository.add(
       snapshot.serverId,
@@ -955,7 +954,6 @@ export class TomoriDashboardCore {
       lineageId,
       taughtByUserId,
       content,
-      tags,
       snapshot.serverDiscordId,
     );
   }
@@ -965,7 +963,6 @@ export class TomoriDashboardCore {
     memoryId: number,
     lineageId: number,
     content: string,
-    tags: string[],
     taughtByUserId?: number,
   ): Promise<ServerMemoryRow | null> {
     const updated = await serverMemoryRepository.updateScoped(
@@ -973,7 +970,6 @@ export class TomoriDashboardCore {
       snapshot.serverId,
       lineageId,
       content,
-      tags,
       taughtByUserId,
     );
     if (updated) invalidateTomoriStateCache(snapshot.serverDiscordId);

@@ -1,8 +1,23 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
+import { log } from "@/utils/misc/logger";
 import { OAuthAuthorizationError, parseOAuthAuthorizationResponse } from "@/utils/oauth/authorizationResponse";
+import {
+  clearOAuthCallbackFlowsForTests,
+  dispatchOAuthCallback,
+  registerOAuthCallbackFlow,
+} from "@/utils/oauth/callbackRoute";
 import { fetchOAuthJson, type OAuthFetch } from "@/utils/oauth/oauthFetch";
 import { OAuthRefreshCoordinator, type OAuthTokenStore } from "@/utils/oauth/refreshCoordinator";
+import { createSignedOAuthState, validateSignedOAuthState } from "@/utils/oauth/state";
+import { getOAuthPublicBaseUrl } from "@/utils/oauth/settings";
 import { OAuthTokenError, requestOAuthToken } from "@/utils/oauth/tokenEndpoint";
+import { initializeLocalizer } from "@/utils/text/localizer";
+import { useEnvSandbox } from "../../helpers/env";
+import { localizedCopy } from "../../helpers/localeCases";
+
+beforeAll(initializeLocalizer);
+afterEach(clearOAuthCallbackFlowsForTests);
+useEnvSandbox(["TOMORI_PUBLIC_BASE_URL"]);
 
 const token = { access_token: "access-one", refresh_token: "refresh-two", token_type: "Bearer", expires_in: 3600 };
 const requestOptions = {
@@ -13,6 +28,99 @@ const requestOptions = {
 };
 
 describe("shared OAuth boundaries", () => {
+  it("binds signed state to its flow and rejects tampering and expiry", () => {
+    const created = createSignedOAuthState({
+      flow: "patreon",
+      subject: "user-one",
+      signerSecret: "secret",
+      ttlSeconds: 60,
+    });
+    expect(validateSignedOAuthState(created.state, "secret", new Date(), "patreon").valid).toBe(true);
+    expect(validateSignedOAuthState(created.state, "secret", new Date(), "other").valid).toBe(false);
+    expect(validateSignedOAuthState(`${created.state}x`, "secret").valid).toBe(false);
+    expect(validateSignedOAuthState(created.state, "secret", new Date(Date.now() + 61_000)).valid).toBe(false);
+  });
+
+  it("dispatches only a registered and correctly signed flow", async () => {
+    const handler = mock(async () => ({ statusCode: 200, contentType: "text/plain", body: "" }));
+    registerOAuthCallbackFlow("patreon", { signerSecret: "secret", handle: handler });
+    const signed = createSignedOAuthState({
+      flow: "patreon",
+      subject: "user-one",
+      signerSecret: "secret",
+      ttlSeconds: 60,
+    });
+    const url = new URL("https://bot.example/oauth/callback");
+    url.searchParams.set("state", signed.state);
+    expect((await dispatchOAuthCallback(url)).statusCode).toBe(200);
+    url.searchParams.set("state", `${signed.state}x`);
+    expect((await dispatchOAuthCallback(url)).statusCode).toBe(400);
+    const unknown = createSignedOAuthState({
+      flow: "other",
+      subject: "user-one",
+      signerSecret: "secret",
+      ttlSeconds: 60,
+    });
+    url.searchParams.set("state", unknown.state);
+    expect((await dispatchOAuthCallback(url)).body).toBe(localizedCopy("en-US", "general.oauth.invalid_callback"));
+    const expired = createSignedOAuthState({
+      flow: "patreon",
+      subject: "user-one",
+      signerSecret: "secret",
+      ttlSeconds: 1,
+      now: new Date(Date.now() - 2000),
+    });
+    url.searchParams.set("state", expired.state);
+    expect((await dispatchOAuthCallback(url)).statusCode).toBe(400);
+    clearOAuthCallbackFlowsForTests();
+    url.searchParams.set("state", signed.state);
+    expect((await dispatchOAuthCallback(url)).statusCode).toBe(400);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports callback handler failures as service errors without logging secrets or retrying database logging", async () => {
+    const error = Object.assign(new Error("private-refresh-token"), {
+      name: "PostgresError",
+      code: "08006",
+      query: "private-sql-parameters",
+    });
+    registerOAuthCallbackFlow("patreon", {
+      signerSecret: "secret",
+      handle: async () => {
+        throw error;
+      },
+    });
+    const signed = createSignedOAuthState({
+      flow: "patreon",
+      subject: "user-one",
+      signerSecret: "secret",
+      ttlSeconds: 60,
+    });
+    const url = new URL("https://bot.example/oauth/callback");
+    url.searchParams.set("state", signed.state);
+    const report = spyOn(log, "error").mockResolvedValue(undefined);
+    try {
+      const response = await dispatchOAuthCallback(url);
+      expect(response.statusCode).toBe(500);
+      expect(response.body).toBe(localizedCopy("en-US", "general.oauth.server_error"));
+      expect(report).toHaveBeenCalledTimes(1);
+      expect(report.mock.calls[0]?.[1]).toBeUndefined();
+      expect(report.mock.calls[0]?.[2]).toEqual({
+        metadata: { flow: "patreon", exceptionClass: "PostgresError", sqlState: "08006" },
+      });
+      expect(report.mock.calls[0]?.[3]).toEqual({ persist: false });
+      const logged = JSON.stringify(report.mock.calls);
+      expect(logged).not.toContain("private-refresh-token");
+      expect(logged).not.toContain("private-sql-parameters");
+      expect(logged).not.toContain(signed.state);
+      url.searchParams.set("state", "malformed");
+      expect((await dispatchOAuthCallback(url)).statusCode).toBe(400);
+      expect(report).toHaveBeenCalledTimes(1);
+    } finally {
+      report.mockRestore();
+    }
+  });
+
   it("form-encodes Basic client credentials before joining them", async () => {
     const fetchImpl = mock<OAuthFetch>(async (_url, init) => {
       const header = new Headers(init?.headers).get("Authorization");
@@ -56,6 +164,27 @@ describe("shared OAuth boundaries", () => {
     }
   });
 
+  it("accepts only HTTPS public origins or loopback HTTP origins with a port", () => {
+    delete process.env.TOMORI_PUBLIC_BASE_URL;
+    expect(getOAuthPublicBaseUrl()).toBeUndefined();
+    expect(getOAuthPublicBaseUrl(" ")).toBeUndefined();
+    expect(getOAuthPublicBaseUrl("https://bot.example/")).toBe("https://bot.example");
+    expect(getOAuthPublicBaseUrl("http://127.0.0.1:8080")).toBe("http://127.0.0.1:8080");
+    expect(getOAuthPublicBaseUrl("http://localhost:3000/")).toBe("http://localhost:3000");
+    for (const url of [
+      "http://bot.example",
+      "http://bot.example:8080",
+      "http://localhost",
+      "http://localhost:3000/path",
+      "https://user:pass@bot.example",
+      "https://bot.example/path",
+      "https://bot.example/?q=1",
+      "not a url",
+    ]) {
+      expect(() => getOAuthPublicBaseUrl(url)).toThrow();
+    }
+  });
+
   it("refuses unapproved origins before sending credentials and bounds responses", async () => {
     const fetchImpl = mock<OAuthFetch>(async () => new Response("x".repeat(128 * 1024 + 1)));
     await expect(
@@ -84,6 +213,15 @@ describe("shared OAuth boundaries", () => {
     });
     expect(result.expires_in).toBe(expiresIn);
     expect(result.refresh_token).toBe(token.refresh_token);
+  });
+
+  it("accepts a token without expires_in only for a caller that opts in", async () => {
+    const { expires_in: _omitted, ...withoutLifetime } = token;
+    const fetchImpl = async () => Response.json(withoutLifetime);
+    await expect(requestOAuthToken({ ...requestOptions, fetchImpl })).rejects.toBeInstanceOf(OAuthTokenError);
+    const result = await requestOAuthToken({ ...requestOptions, fetchImpl, optionalExpiresIn: true });
+    expect(result.expires_in).toBeUndefined();
+    expect(result.access_token).toBe(token.access_token);
   });
 
   it("validates token shape, refuses redirects, and never includes upstream secrets in failures", async () => {

@@ -179,6 +179,8 @@ export class DashboardMemoryService {
 
   async addServer(actor: DashboardActor, snapshot: DashboardGuildSnapshot, input: MemoryMutationInput) {
     await this.assertCanAdd(actor, snapshot, input.lineageId, "server");
+    if (input.tags.length)
+      throw new DashboardServiceError("invalid_memory", 422, "Server memory tags are not supported.");
 
     const existingContents = await this.core.listServerMemoryContents(snapshot.serverId, input.lineageId);
     if (hasDuplicate(existingContents, input.content)) {
@@ -194,7 +196,6 @@ export class DashboardMemoryService {
       input.lineageId,
       actor.user.user_id,
       input.content,
-      input.tags,
     );
     if (!created) {
       throw new DashboardServiceError("memory_limit_or_write_failed", 409, "The memory could not be saved.");
@@ -210,6 +211,8 @@ export class DashboardMemoryService {
   ) {
     this.assertLineage(snapshot, input.lineageId, false);
     await this.assertCanTeachServerMemory(actor, snapshot);
+    if (input.tags.length)
+      throw new DashboardServiceError("invalid_memory", 422, "Server memory tags are not supported.");
 
     const visibleRows = await this.core.listServerMemories(
       snapshot.serverId,
@@ -236,7 +239,6 @@ export class DashboardMemoryService {
       memoryId,
       input.lineageId,
       input.content,
-      input.tags,
       actor.canManage ? undefined : actor.user.user_id,
     );
     if (!updated) throw new DashboardServiceError("memory_not_found", 404, "Server memory not found.");

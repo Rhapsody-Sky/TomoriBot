@@ -31,6 +31,7 @@ import {
 import { channelLocks, queueScenePersonaJobsAtFront, setActiveChannelTurnState } from "@/utils/chat/channelQueue";
 import { hasDirectChatSignal, shouldSurfaceChatUserErrors } from "@/utils/chat/errorVisibility";
 import { readNaturalNudgeGate, recordNaturalNudgeDirectChat } from "@/modules/natural-nudges/runtime/configCache";
+import { NUDGE_MENTION_CASCADE_LIMIT } from "@/modules/natural-nudges/runtime/tuning";
 import { getMatchLimit, queueAdditionalPersonaTurns } from "@/utils/chat/personaQueue";
 import { shouldBotReply } from "@/utils/chat/replyDecision";
 import { buildSceneTextQuotaTriggerKey, buildSceneTurnDirective } from "@/utils/chat/sceneTurn";
@@ -54,6 +55,7 @@ import {
   claimCredentialRefusalNotice,
   hasTextQuotaBeenRefused,
   markTextQuotaRefused,
+  releaseTextQuotaForTrigger,
 } from "@/utils/chat/textQuotaState";
 import type { ChatIncoming, ChatTurn, ChatTurnPlan, LockedChatTurn } from "@/utils/chat/types";
 import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
@@ -252,7 +254,7 @@ export async function planChatTurns(lockedTurn: LockedChatTurn): Promise<ChatTur
     })
   ) {
     incoming.isDirectChat = true;
-    await recordNaturalNudgeDirectChat(tomoriState.server_id);
+    void recordNaturalNudgeDirectChat(tomoriState.server_id);
   }
 
   const personaPolicies = new Map<TomoriState, NonNullable<Awaited<ReturnType<typeof resolveTextCredentialPolicy>>>>();
@@ -282,9 +284,15 @@ export async function planChatTurns(lockedTurn: LockedChatTurn): Promise<ChatTur
     personaQuotas.set(persona, quota);
   }
   personasToRespond = personasToRespond.filter((persona) => personaPolicies.has(persona));
-  if (personasToRespond.length === 0) return { lockedTurn, turns: [] };
+  if (personasToRespond.length === 0) {
+    await releaseTextQuotaForTrigger(refusalNoticeKey);
+    return { lockedTurn, turns: [] };
+  }
   const textQuota = personaQuotas.get(personasToRespond[0]);
-  if (!textQuota) return { lockedTurn, turns: [] };
+  if (!textQuota) {
+    await releaseTextQuotaForTrigger(refusalNoticeKey);
+    return { lockedTurn, turns: [] };
+  }
   const guardSource: "server" | "personal" = personasToRespond.some((persona) => {
     const policy = personaPolicies.get(persona);
     return policy?.source === "server";
@@ -301,6 +309,7 @@ export async function planChatTurns(lockedTurn: LockedChatTurn): Promise<ChatTur
       shouldSurfaceUserErrors,
     ))
   ) {
+    await releaseTextQuotaForTrigger(refusalNoticeKey);
     return { lockedTurn, turns: [] };
   }
 
@@ -408,6 +417,7 @@ export async function planChatTurns(lockedTurn: LockedChatTurn): Promise<ChatTur
   });
   if (!naming) {
     log.warn(`Dropping Ping User turn for message ${message.id}: its target's user row could not be read.`);
+    await releaseTextQuotaForTrigger(refusalNoticeKey);
     return { lockedTurn, turns: [] };
   }
   const { displayName, row: namingRow } = naming;
@@ -561,10 +571,12 @@ async function loadOrRegisterTriggerUser(
   if (existing) return existing;
 
   const locale = manualTriggerInvoker?.locale ?? guild?.preferredLocale ?? "en-US";
+  // A persona webhook message is credited to the bot, so the persona's webhook name must not name the bot's row.
+  const author = userDiscId === message.client.user?.id ? message.client.user : message.author;
   const displayName = resolvePreferredDiscordDisplayName({
     memberDisplayName: manualTriggerInvoker?.member?.displayName ?? message.member?.displayName,
-    user: manualTriggerInvoker ? { username: manualTriggerInvoker.username } : message.author,
-    fallback: manualTriggerInvoker?.username ?? message.author.username,
+    user: manualTriggerInvoker ? { username: manualTriggerInvoker.username } : author,
+    fallback: manualTriggerInvoker?.username ?? author.username,
   });
   const registered = await userRepository.register(userDiscId, displayName, locale);
   if (!registered) {
@@ -954,6 +966,7 @@ async function enforceTurnGuards(
   const cascadeLimit = Math.min(
     Math.max(tomoriState.config.cascade_limit ?? DEFAULT_CASCADE_LIMIT, 0),
     MAX_CASCADE_LIMIT,
+    incoming.naturalNudge && !incoming.sceneTurn ? NUDGE_MENTION_CASCADE_LIMIT : MAX_CASCADE_LIMIT,
   );
   const triggerState = getSelfReplyChainState(channel.id);
   if (

@@ -15,6 +15,11 @@ export default {
     execution: {
       unavailable: `Công cụ \`{tool}\` không khả dụng theo cài đặt hiện tại, khả năng của model hoặc quyền hạn của bot.`,
     },
+    sprite_selection: {
+      unavailable: "Không thể chọn sprite cho persona hoặc lượt này. Hãy bỏ qua tham số sprite.",
+      invalid:
+        "Hãy chọn một nhãn sprite từ các sprite khả dụng hiện tại của bạn, hoặc dùng chuỗi trống cho diện mạo cơ bản.",
+    },
     generate_voice_message: {
       persona_missing: `Persona này không còn khả dụng.`,
       stale: `Model giọng nói, thông tin xác thực hoặc giọng của persona đã thay đổi trong lượt này. Hãy bắt đầu lượt mới trước khi tạo tin nhắn thoại.`,
@@ -26,6 +31,7 @@ export default {
       quota_resets_in_hours: `Hạn mức sẽ đặt lại sau {hours} giờ.`,
       quota_resets_in_days: `Hạn mức sẽ đặt lại sau {days} ngày.`,
       quota_remaining: `Bạn còn {remaining} ảnh cho hôm nay.`,
+      quota_unavailable: `Mình không thể kiểm tra hạn ngạch tạo hình ảnh của máy chủ này lúc này. Vui lòng thử lại sau giây lát.`,
     },
     generate_video: {
       disabled: `Tính năng tạo video bị tắt trên máy chủ này.`,
@@ -35,6 +41,7 @@ export default {
       quota_resets_in_hours: `Hạn mức sẽ đặt lại sau {hours} giờ.`,
       quota_resets_in_days: `Hạn mức sẽ đặt lại sau {days} ngày.`,
       quota_remaining: `Bạn còn {remaining} video cho hôm nay.`,
+      quota_unavailable: `Mình không thể kiểm tra hạn ngạch tạo video của máy chủ này lúc này. Vui lòng thử lại sau giây lát.`,
       file_too_large: `Video được tạo ({size_mb} MB) vượt quá giới hạn kích thước tệp 25 MB của Discord.`,
       reference_unsupported: `Model OpenRouter đã chọn \`{model}\` không thể dùng ảnh làm khung hình đầu tiên chính xác. Hãy xóa ảnh tham chiếu hoặc chọn model video tương thích.`,
       loop_unsupported: `Model OpenRouter đã chọn \`{model}\` không thể dùng khung hình cuối để lặp video. Hãy tắt lặp lại hoặc chọn model video tương thích.`,
@@ -157,7 +164,7 @@ export default {
     document: {
       reading_title: `📄 Đang đọc nội dung tệp...`,
       reading_description: `Đang đọc văn bản bên trong \`{filename}\``,
-      truncated_title: `⚠️ Tệp đã bị cắt ngắn`,
+      truncated_title: `Tệp đã bị cắt ngắn`,
       truncated_description: `\`{filename}\` quá dài và đã được cắt ngắn còn {limit} ký tự (gốc: {original} ký tự). Phản hồi có thể không đầy đủ, vì vậy hãy cân nhắc chia tệp thành các phần nhỏ hơn và gửi lần lượt.`,
     },
     image: {
@@ -174,6 +181,7 @@ export default {
       notice_character_prompt_line: `**Nhân vật {index}:** {prompt}`,
       notice_image_tags_tip_line: `Mẹo: Dùng lệnh \`image-tags\` để nhân vật nhất quán hơn.`,
       notice_avatar_reference_line: `Tham chiếu avatar: {name}.`,
+      notice_character_reference_line: `Ảnh tham chiếu nhân vật: {name}.`,
       notice_reference_count_line: `Sử dụng {count} ảnh tham chiếu.`,
       generated_after_seconds_line: `Được tạo sau {seconds} giây`,
       referenced_identities_line: `Đã tham chiếu: {names}`,

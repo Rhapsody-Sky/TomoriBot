@@ -15,6 +15,11 @@ export default {
     execution: {
       unavailable: `A ferramenta \`{tool}\` não está disponível nas configurações atuais, nas capacidades do modelo ou nas permissões do bot.`,
     },
+    sprite_selection: {
+      unavailable: "A seleção de sprite não está disponível para esta persona ou turno. Omita o parâmetro sprite.",
+      invalid:
+        "Escolha um rótulo de sprite entre os seus sprites disponíveis atuais ou use uma string vazia para a sua aparência base.",
+    },
     generate_voice_message: {
       persona_missing: `A persona não está mais disponível.`,
       stale: `O modelo de fala, as credenciais ou a voz da persona mudaram durante este turno. Inicie um novo turno antes de gerar uma mensagem de voz.`,
@@ -26,6 +31,7 @@ export default {
       quota_resets_in_hours: `A cota será reiniciada em {hours} hora(s).`,
       quota_resets_in_days: `A cota será reiniciada em {days} dia(s).`,
       quota_remaining: `Você tem {remaining} imagem(ns) restante(s) para hoje.`,
+      quota_unavailable: `Não foi possível verificar a cota de geração de imagens deste servidor no momento. Tente novamente em instantes.`,
     },
     generate_video: {
       disabled: `A geração de vídeos está desativada para este servidor.`,
@@ -35,6 +41,7 @@ export default {
       quota_resets_in_hours: `A cota será reiniciada em {hours} hora(s).`,
       quota_resets_in_days: `A cota será reiniciada em {days} dia(s).`,
       quota_remaining: `Você tem {remaining} vídeo(s) restante(s) para hoje.`,
+      quota_unavailable: `Não foi possível verificar a cota de geração de vídeos deste servidor no momento. Tente novamente em instantes.`,
       file_too_large: `O vídeo gerado ({size_mb} MB) excede o limite de tamanho de arquivo de 25 MB do Discord.`,
       reference_unsupported: `O modelo OpenRouter selecionado \`{model}\` não pode usar uma imagem como o primeiro quadro exato. Remova a imagem de referência ou escolha um modelo de vídeo compatível.`,
       loop_unsupported: `O modelo OpenRouter selecionado \`{model}\` não pode usar o último quadro para criar um loop de vídeo. Desative o loop ou escolha um modelo de vídeo compatível.`,
@@ -157,7 +164,7 @@ export default {
     document: {
       reading_title: `📄 Lendo o conteúdo do arquivo...`,
       reading_description: `Lendo o texto dentro de \`{filename}\``,
-      truncated_title: `⚠️ Arquivo truncado`,
+      truncated_title: `Arquivo truncado`,
       truncated_description: `\`{filename}\` era longo demais e foi truncado para {limit} caracteres (original: {original} caracteres). A resposta pode estar incompleta, considere dividir o arquivo em partes menores e enviá-las uma de cada vez.`,
     },
     image: {
@@ -174,6 +181,7 @@ export default {
       notice_character_prompt_line: `**Personagem {index}:** {prompt}`,
       notice_image_tags_tip_line: `Dica: Use os comandos \`image-tags\` para personagens mais consistentes.`,
       notice_avatar_reference_line: `Referência de avatar: {name}.`,
+      notice_character_reference_line: `Referência de personagem: {name}.`,
       notice_reference_count_line: `Usando {count} imagem(ns) de referência.`,
       generated_after_seconds_line: `Gerado após {seconds} segundos`,
       referenced_identities_line: `Referenciado: {names}`,

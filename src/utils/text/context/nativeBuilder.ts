@@ -1,11 +1,12 @@
 import { personaRepository } from "@/utils/db/repositories";
 import { log } from "@/utils/misc/logger";
 import { hasExplicitLongTermMemoryIntent } from "@/utils/memory/explicitLongTermMemoryIntent";
+import { buildLorebookContextItems } from "@/modules/lorebooks/runtime/contextItems";
 import { buildUncensorInjectionText } from "@/utils/text/uncensor";
 import { createToolPromptMacroResolver, resolvePromptCapabilityValues } from "@/utils/tools/toolPromptMacros";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import { appendDialogueHistoryContext, DOCUMENT_HINT_TEMPLATE } from "./dialogueHistory";
-import { convertMentions as convertMentionsBase } from "./mentionNormalizer";
+import { convertMentions as convertMentionsBase, type MentionMemo } from "./mentionNormalizer";
 import { buildServerMemoryContextItem, buildShortTermMemoryContext } from "./memories";
 import { buildParticipantContextItem } from "./participants";
 import { buildPersonaUserBlocksContextItem } from "./personaUserBlocks";
@@ -88,6 +89,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     messageIdMap,
   } = params;
 
+  const mentionMemo: MentionMemo = new Map();
   const convertMentions: MentionConverter = (
     text,
     mentionClient,
@@ -111,6 +113,8 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
         userFormatted: triggererFormattedName,
         userTerm: triggererAddressTerm,
       },
+      mentionMemo,
+      preparedParticipantContext.requestScope,
     );
 
   const contextItems: StructuredContextItem[] = [];
@@ -135,6 +139,19 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     sanitizeEnabled: tomoriConfig.uncensor_sanitize_enabled,
   };
   const tomoriState = snapshot?.tomoriState ?? (await personaRepository.loadState(guildId));
+  // Retrieval makes an embedding round trip plus a database query, so it starts here and is awaited at
+  // its insertion point to overlap the rest of assembly; the catch only stops a rejection becoming an
+  // unhandled rejection if assembly exits before that point.
+  const documentItemPromise = buildServerDocumentContextItem({
+    tomoriState,
+    simplifiedMessageHistory,
+    triggererUserId,
+    channelId,
+    parentChannelId,
+  }).catch((error: unknown) => {
+    log.warn("Failed to add server document context", error);
+    return null;
+  });
   const toolPromptMacroResolver = createToolPromptMacroResolver({
     provider: tomoriState?.llm?.llm_provider,
     capabilities: resolvePromptCapabilityValues(tomoriConfig),
@@ -236,7 +253,6 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       isDMChannel,
       botName,
       personalMemoriesEnabled: tomoriConfig.personal_memories_enabled,
-      conversationCorpus,
       channelId,
       parentChannelId,
       channelMemoryEnabled: tomoriConfig.channel_memory_enabled,
@@ -316,6 +332,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       preloadedReferencedUserRows: preparedParticipantContext.referencedUserRows,
       referencedUserIds: preparedParticipantContext.referencedUserIds,
       profileEnricherRegistry: preparedParticipantContext.profileEnricherRegistry,
+      requestScope: preparedParticipantContext.requestScope,
       toolPromptMacroResolver,
       conversationCorpus,
       snapshot,
@@ -372,17 +389,28 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
   // before server documents) to stay inside the prompt-cache-friendly prefix.
   await appendOptionalItem(
     contextItems,
-    buildVerbatimToolDefinitionsContextItem({ tomoriState, userId: triggererUserId }),
-  );
-  await appendOptionalItem(
-    contextItems,
-    buildServerDocumentContextItem({
+    buildVerbatimToolDefinitionsContextItem({
       tomoriState,
-      simplifiedMessageHistory,
-      triggererUserId,
+      userId: triggererUserId,
+      contextItems,
+      isUserImpersonation,
+    }),
+  );
+  await appendOptionalItem(contextItems, documentItemPromise);
+  // Activated lore changes from turn to turn, so it stays after documents and outside the cache-stable prefix.
+  contextItems.push(
+    ...(await buildLorebookContextItems({
+      tomoriState,
+      recentMessages: simplifiedMessageHistory.map((message) => message.content ?? ""),
       channelId,
       parentChannelId,
-    }),
+      channelScopeEnabled: tomoriConfig.channel_memory_enabled,
+      client,
+      guildId,
+      botName,
+      personalMemoriesEnabled: tomoriConfig.personal_memories_enabled,
+      convertMentions,
+    })),
   );
   await appendConditioningContext({
     contextItems,

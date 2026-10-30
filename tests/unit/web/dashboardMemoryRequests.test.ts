@@ -16,6 +16,26 @@ async function dashboardFunction(name: string): Promise<string> {
 }
 
 describe("dashboard memory requests", () => {
+  it("offers personal tags and transfer while disabling server memory transfer", async () => {
+    const source = await dashboardFunction("renderMemoryCollection");
+    const render = runInNewContext(`(${source})`, {
+      state: { overview: { canManage: true, memoryPolicy: {}, profile: { privacyLevel: 0 } } },
+      ui: (key: string) => key,
+      escapeHtml: (value: string) => value,
+      refreshButton: () => "",
+      fieldLabel: (label: string) => label,
+    }) as (input: unknown) => string;
+    const persona = { nickname: "Juno" };
+    const personal = render({ personal: true, persona });
+    const server = render({ personal: false, persona });
+    expect(personal).toContain('name="tags"');
+    expect(personal).toContain('data-memory-export type="button">');
+    expect(server).not.toContain('name="tags"');
+    expect(server).toContain('data-memory-export type="button" disabled');
+    expect(server).toContain('data-memory-import type="button" disabled');
+    expect(server).toContain("memory_server_transfer_unavailable");
+  });
+
   it("ignores stale responses and failures across scopes and repeated refreshes", async () => {
     const loadSource = await dashboardFunction("loadMemories");
 

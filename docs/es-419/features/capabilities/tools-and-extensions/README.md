@@ -105,7 +105,7 @@ El modelo ve una única herramienta `web_search(query, category)` unificada. Det
 
 Brave → SearXNG → DuckDuckGo
 
-- **Brave** se ejecuta primero cuando se configura una clave Brave API (configúrela con `/providers`); Agrega búsqueda de imágenes, videos y noticias. ⚠️ Establece un límite de uso de $5 en el panel de Brave para evitar cargos sorpresa.
+- **Brave** se ejecuta primero cuando se configura una clave Brave API (configúrela con `/providers`); Agrega búsqueda de imágenes, videos y noticias. 🟡 Establece un límite de uso de $5 en el panel de Brave para evitar cargos sorpresa.
 - DuckDuckGo es la opción predeterminada cuando no se ha configurado ninguna clave. Solo cubre búsquedas de texto. Cuando DuckDuckGo aplica un límite de velocidad al bot o muestra una verificación antibot, la búsqueda falla y TomoriBot publica un aviso sugiriendo Brave.
 - SearXNG y Crawl4AI son servidores autohospedados opcionales que agregan más categorías y búsquedas de páginas renderizadas por el navegador; consulte [Autohospedaje](/es-419/self-hosting/).
 
@@ -124,14 +124,6 @@ Usa un endpoint HTTPS directo de un proveedor que admita MCP Streamable HTTP o S
 1. Obtén el endpoint MCP y sus requisitos de autenticación del proveedor.
 2. Abre `/config` > Plugins > Servidores MCP y elige `+ Agregar MCP`.
 3. Pega el endpoint en `URL`, ingresa su token Bearer en `Token de autenticación` si es necesario y elige el `Tipo de servidor` requerido. **Uso general** está seleccionado por defecto. Elige `Corrector de prosa` para un corrector que quieras como comprobador de reglas en la Revisión de respuestas: Tomori nunca llama a sus herramientas ella misma y aparece bajo `Comprobaciones de reglas` en la página de Revisión de respuestas.
-
-### Añadir un servidor Smithery
-
-Los servidores alojados en Smithery tienen direcciones que terminan en `.run.tools`. Pega esa dirección en `URL` y tu clave de API de Smithery en `Token de autenticación`. TomoriBot envía la clave únicamente a la API de Smithery en `api.smithery.ai`, nunca a la dirección del servidor en sí. Smithery luego pasa cada llamada a herramientas al servidor, por lo que Smithery ve cada solicitud y resultado de herramienta. Los registros guardados antes de que este soporte volviera a estar disponible funcionan nuevamente sin cambios.
-
-TomoriBot mantiene una conexión de Smithery por dirección de servidor en el primer espacio de nombres de tu cuenta de Smithery (Smithery crea un espacio de nombres si no tienes ninguno) y la reutiliza, por lo que agregar, probar y reconectar no acumulan conexiones. TomoriBot nunca elimina conexiones. Las versiones anteriores de TomoriBot creaban una nueva conexión en cada reconexión, por lo que tu cuenta puede tener muchas conexiones sin usar para el mismo servidor; puedes eliminarlas desde tu panel de Smithery.
-
-Algunos servidores te piden iniciar sesión en el servicio que envuelven. Si intentas agregar uno, fallará con un mensaje de que se requiere autorización, y TomoriBot nunca muestra el enlace de inicio de sesión en Discord. Abre tu panel de Smithery, completa el inicio de sesión para la conexión cuyo nombre comienza con `tomoribot-` y vuelve a agregar el servidor. La conexión y la obtención de la lista de herramientas deben completarse en un plazo de 15 segundos.
 
 Desactivar un registro seleccionado para búsqueda o lectura de URL restablece la selección integrada de TomoriBot; dejarlo activado impide un cambio automático. Los nombres de herramientas guardados describen el último descubrimiento, por lo que no garantizan que la conexión aún funcione.
 

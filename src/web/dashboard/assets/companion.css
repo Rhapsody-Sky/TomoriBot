@@ -3951,6 +3951,10 @@ body[data-theme="light"] .button-primary {
   color: var(--ink);
 }
 
+[data-memory-tags][hidden] {
+  display: none;
+}
+
 .connection-heading {
   display: flex;
   flex-wrap: wrap;

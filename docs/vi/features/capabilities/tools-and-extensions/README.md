@@ -105,7 +105,7 @@ Model nhìn thấy một công cụ `web_search(query, category)` thống nhất
 
 Brave → SearXNG → DuckDuckGo
 
-- **Brave** chạy đầu tiên khi khóa Brave API được định cấu hình (đặt nó bằng `/providers`); nó thêm tìm kiếm hình ảnh, video và tin tức. ⚠️ Đặt giới hạn sử dụng $5 trong bảng điều khiển Brave để tránh bị tính phí bất ngờ.
+- **Brave** chạy đầu tiên khi khóa Brave API được định cấu hình (đặt nó bằng `/providers`); nó thêm tìm kiếm hình ảnh, video và tin tức. 🟡 Đặt giới hạn sử dụng $5 trong bảng điều khiển Brave để tránh bị tính phí bất ngờ.
 - DuckDuckGo là mặc định khi chưa đặt key. Công cụ này chỉ hỗ trợ tìm kiếm văn bản. Khi DuckDuckGo giới hạn tần suất bot hoặc hiển thị kiểm tra bot, quá trình tìm kiếm sẽ thất bại và bot sẽ đăng thông báo gợi ý dùng Brave.
 - SearXNG và Crawl4AI là các máy chủ self-hosting tùy chọn bổ sung thêm nhiều danh mục và tìm nạp trang do trình duyệt hiển thị; xem [Tự lưu trữ](/vi/self-hosting/).
 
@@ -124,14 +124,6 @@ Sử dụng endpoint HTTPS trực tiếp của nhà cung cấp hỗ trợ MCP St
 1. Lấy endpoint MCP và các yêu cầu xác thực từ nhà cung cấp.
 2. Mở `/config` > Plugins > MCP server và chọn `+ Thêm MCP`.
 3. Dán endpoint vào `URL`, nhập token Bearer vào `Token xác thực` nếu được yêu cầu, và chọn `Loại máy chủ` bắt buộc. **Mục đích chung** được chọn theo mặc định. Chọn `Trình kiểm tra văn phong` cho linter mà bạn muốn dùng làm công cụ kiểm tra quy tắc cho Duyệt phản hồi: Tomori không bao giờ tự mình gọi các công cụ của máy chủ này, và nó xuất hiện dưới mục `Kiểm tra quy tắc` trong trang Duyệt phản hồi.
-
-### Thêm máy chủ Smithery
-
-Các máy chủ được lưu trữ trên Smithery có địa chỉ kết thúc bằng `.run.tools`. Dán địa chỉ đó vào `URL` và khóa API Smithery của bạn vào `Token xác thực`. TomoriBot chỉ gửi khóa đến API của Smithery tại `api.smithery.ai`, không bao giờ gửi đến chính địa chỉ máy chủ. Sau đó, Smithery sẽ chuyển từng lệnh gọi công cụ đến máy chủ, vì vậy Smithery có thể thấy mọi yêu cầu và kết quả công cụ. Các đăng ký đã lưu trước khi tính năng hỗ trợ này quay lại sẽ hoạt động bình thường mà không cần thay đổi gì.
-
-TomoriBot duy trì một kết nối Smithery cho mỗi địa chỉ máy chủ trong không gian tên đầu tiên của tài khoản Smithery của bạn (Smithery sẽ tạo một không gian tên nếu bạn chưa có) và tái sử dụng nó, do đó việc thêm, thử nghiệm và kết nối lại sẽ không làm tích lũy kết nối. TomoriBot không bao giờ xóa kết nối. Các phiên bản TomoriBot trước đây đã tạo một kết nối mới mỗi khi kết nối lại, vì vậy tài khoản của bạn có thể chứa nhiều kết nối không sử dụng cho cùng một máy chủ; bạn có thể xóa chúng khỏi trang quản trị Smithery của mình.
-
-Một số máy chủ yêu cầu bạn đăng nhập bằng dịch vụ mà chúng bao bọc. Thao tác thêm máy chủ đó sẽ thất bại với thông báo cần ủy quyền, và TomoriBot không bao giờ hiển thị liên kết đăng nhập trong Discord. Hãy mở trang quản trị Smithery của bạn, hoàn tất đăng nhập cho kết nối có tên bắt đầu bằng `tomoribot-`, sau đó thêm lại máy chủ. Việc kết nối và liệt kê công cụ phải hoàn tất trong vòng 15 giây.
 
 Việc tắt đăng ký đã chọn cho tìm kiếm hoặc đọc URL sẽ khôi phục lựa chọn tích hợp sẵn của TomoriBot; giữ cho đăng ký này bật sẽ ngăn việc chuyển đổi tự động. Tên công cụ đã lưu chỉ mô tả kết quả lần khám phá gần nhất, vì vậy chúng không chứng minh rằng kết nối vẫn đang hoạt động.
 

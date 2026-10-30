@@ -19,7 +19,7 @@ Every shared server member can:
 - manage global personal memories (lineage `0`) from the personal workspace;
 - open a persona workspace that groups their private persona memories with the
   server memories they taught for that same lineage;
-- import and export the currently selected memory scope;
+- import and export personal memory scopes;
 - store encrypted personal provider credentials, choose active capabilities,
   and manage personal custom endpoints and scoped OpenRouter models.
 
@@ -120,6 +120,13 @@ The two memory tables intentionally have different rules:
 
 Repository writes include exact owner, server, and lineage guards. The
 dashboard never relies only on a row ID supplied by the browser.
+
+Server memories no longer accept keyword tags. Upstream migrations move tagged
+server memories into lorebooks; personal memory tags are unchanged. Lorebook
+management remains available through `/memories` in Discord. The dashboard does
+not list or edit lorebook entries. Server-memory import and export are disabled
+in the dashboard because its transfer format does not preserve channel scopes
+and unresolved legacy channel restrictions. Use Discord for those transfers.
 
 Short-term-memory settings are server configuration, not access to members'
 private memory rows. Disabling automatic STM updates stops the update tool and

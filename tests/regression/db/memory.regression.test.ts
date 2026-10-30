@@ -114,6 +114,8 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Memory — regression", () => {
       refs.personaLineageId,
       altUserId,
       "scoped server memory",
+      undefined,
+      ["123456789012345678"],
     );
     const memoryId = memory?.server_memory_id;
     expect(memoryId).toBeNumber();
@@ -124,19 +126,20 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Memory — regression", () => {
       refs.serverId,
       refs.personaLineageId,
       "must not be written",
-      [],
       refs.userId,
     );
     expect(wrongTeacher).toBeNull();
 
+    await testSql`UPDATE server_memories SET tags = ARRAY['legacy']::TEXT[] WHERE server_memory_id = ${memoryId}`;
     const adminUpdate = await serverMemoryRepository.updateScoped(
       memoryId,
       refs.serverId,
       refs.personaLineageId,
       "admin-scoped update",
-      ["verified"],
     );
     expect(adminUpdate?.content).toBe("admin-scoped update");
+    expect(adminUpdate?.channel_disc_ids).toEqual(["123456789012345678"]);
+    expect(adminUpdate?.tags).toEqual(["legacy"]);
 
     expect(await serverMemoryRepository.removeScoped(memoryId, refs.serverId, refs.personaLineageId + 1)).toBe(false);
     expect(await serverMemoryRepository.removeScoped(memoryId, refs.serverId, refs.personaLineageId, altUserId)).toBe(

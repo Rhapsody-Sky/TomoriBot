@@ -105,7 +105,7 @@ Do not promise to save long-term memories.
 
 Brave → SearXNG → DuckDuckGo
 
-- 当配置了Brave API密钥（使用`/providers`设置）时，**Brave** 首先运行； 它增加了图像、视频和新闻搜索。⚠️ 在Brave仪表板中设置5美元的使用限额，以避免意外收费。
+- 当配置了Brave API密钥（使用`/providers`设置）时，**Brave** 首先运行； 它增加了图像、视频和新闻搜索。🟡 在Brave仪表板中设置5美元的使用限额，以避免意外收费。
 - DuckDuckGo 是未设置密钥时的默认引擎。它仅涵盖文本搜索。当 DuckDuckGo 对 bot 施加速度限制或显示人机验证时，搜索将失败，她会发布通知建议使用 Brave。
 - SearXNG和Crawl4AI是可选的自部署服务器，可添加更多类别和浏览器呈现的页面获取； 请参阅[自部署](/zh-CN/self-hosting/)。
 
@@ -124,14 +124,6 @@ Brave → SearXNG → DuckDuckGo
 1. 向提供方获取 MCP 端点及其认证要求。
 2. 打开 `/config` > 插件 > MCP 服务器，选择 `+ 添加 MCP`。
 3. 将端点粘贴到 `URL`，如果需要则在 `认证令牌` 中输入其 Bearer 令牌，并选择所需的 `服务器类型`。默认已选中 **通用型**。若想要作为回复起草审核的规则检查器，请选择 `文本校对器`：Tomori 本身绝不会调用其工具，它会显示在回复起草页面的 `规则检查` 下。
-
-### 添加 Smithery 服务器
-
-托管在 Smithery 上的服务器，地址以 `.run.tools` 结尾。将该地址粘贴到 `URL`，并将你的 Smithery API 密钥粘贴到 `认证令牌`。TomoriBot 只会将密钥发送到 Smithery 位于 `api.smithery.ai` 的 API，绝不会发送到服务器地址本身。随后 Smithery 会将每次工具调用转发给该服务器，因此 Smithery 能看到所有工具请求和结果。在此支持恢复之前保存的注册信息，无需修改即可再次正常工作。
-
-TomoriBot 会在你 Smithery 账号的第一个命名空间中（如果你没有命名空间，Smithery 会自动创建一个），为每个服务器地址保留一个 Smithery 连接并复用它，因此添加、测试和重新连接都不会堆积重复连接。TomoriBot 绝不会删除连接。早期版本的 TomoriBot 每次重新连接都会建立新连接，因此你的账号可能针对同一台服务器留有多个未使用的连接；你可以从 Smithery 控制面板中将它们移除。
-
-部分服务器会要求你登录其所包装的服务。添加这类服务器时会失败并提示需要授权，且 TomoriBot 绝不会在 Discord 中显示登录链接。打开你的 Smithery 控制面板，为名称以 `tomoribot-` 开头的连接完成登录，然后再次添加该服务器。连接和列出工具必须在 15 秒内完成。
 
 禁用已选用于搜索或 URL 抓取的注册项会恢复 TomoriBot 的内置选择；保持其启用则可防止自动切换。保存的工具名仅反映上次发现的内容，因此不能证明连接目前依然有效。
 

@@ -1,5 +1,9 @@
 export default {
   general: {
+    oauth: {
+      invalid_callback: `此登录链接无效或已过期。请从TomoriBot重新发起登录。`,
+      server_error: `由于服务错误，TomoriBot无法完成登录。请稍后重试。`,
+    },
     language_name: `简体中文`,
     yes: `是`,
     confirm: `确认`,
@@ -156,8 +160,10 @@ export default {
     reminder_set_description: `我会在 \`{reminder_time}\` 提醒 {user_nickname}：「**{reminder_purpose}**」`,
     reminder_set_footer: `从现在起 {time_remaining} 后会发送提醒。用 \`/scheduled-task remove\` 删除提醒。`,
     reminder_set_footer_recurring: `首次提醒在 {time_remaining} 后。每 {repetition_interval_hours} 小时重复一次。用 \`/scheduled-task remove\` 删除提醒。`,
+    reminder_set_footer_recurring_months: `首次提醒在 {time_remaining} 后。每 {repetition_interval_months} 个月在同一天重复一次。用 \`/scheduled-task remove\` 删除提醒。`,
     recurring_task_set_title: `🔁 {persona_nickname} 设置了一个周期任务`,
     recurring_task_set_description: `我会从 \`{reminder_time}\` 开始执行「**{reminder_purpose}**」，之后每 {repetition_interval_hours} 小时重复一次。`,
+    recurring_task_set_description_months: `我会从 \`{reminder_time}\` 开始执行「**{reminder_purpose}**」，之后每 {repetition_interval_months} 个月在同一天重复一次。`,
     recurring_task_set_footer: `你可以用 \`/scheduled-task remove\` 删除提醒。`,
     task_set_title: `✅ {persona_nickname} 设置了一个定时任务`,
     task_set_description: `我会在 \`{reminder_time}\` 执行「**{reminder_purpose}**」`,
@@ -172,6 +178,7 @@ export default {
     task_deleted_footer: `这个定时任务不会再执行了。`,
     task_update_repeat_none: `一次性`,
     task_update_repeat_hours: `每 {repetition_interval_hours} 小时`,
+    task_update_repeat_months: `每 {repetition_interval_months} 个月`,
     expand_task_button: `查看完整提醒`,
     expand_task_title: `完整提醒内容`,
     reminder_triggered_title: `🟡 提醒已触发（发送失败）`,

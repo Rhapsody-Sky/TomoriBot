@@ -1,7 +1,9 @@
 import { describe, expect, it, mock } from "bun:test";
 import { assembleToolsForContext } from "@/tools/assembly";
 import { InteractWithRecentMessageTool } from "@/tools/functionCalls/interactWithRecentMessageTool";
-import { getAvailableToolsForContext } from "@/tools/availability";
+import { applyStreamContextAvailability, getAvailableToolsForContext } from "@/tools/availability";
+import { ConditioningInteractionTool } from "@/tools/functionCalls/conditioningInteractionTool";
+import { createPersona } from "../../helpers/fixtures";
 import {
   DanbooruGetPostTool,
   DanbooruSearchPostsTool,
@@ -96,6 +98,40 @@ function createStaticTool(): Tool {
     isAvailableFor: () => true,
   };
 }
+
+it("exposes optional sprite selection only for the active persona's advertised roster", () => {
+  const persona = createPersona({ persona_id: 7 });
+  const voice = buildVoiceMessageToolVariant(new GenerateVoiceMessageTool(), "plain");
+  const interaction = new ConditioningInteractionTool();
+  const unrelated = createStaticTool();
+  for (const scenario of [
+    { personaSprites: undefined, enabled: false },
+    { personaSprites: { personaId: 7, spriteKeys: [] }, enabled: false },
+    { personaSprites: { personaId: 8, spriteKeys: ["joy"] }, enabled: false },
+    { personaSprites: { personaId: 7, spriteKeys: ["joy"] }, enabled: true },
+    { personaSprites: { personaId: 7, spriteKeys: ["joy"] }, impersonating: true, enabled: false },
+  ]) {
+    const tools = applyStreamContextAvailability({
+      providerLabel: "fixture",
+      provider: "google",
+      builtInTools: [voice, interaction, unrelated],
+      tomoriState: persona,
+      streamContext: {
+        disableYouTubeProcessing: false,
+        personaSprites: scenario.personaSprites,
+        deliveryMode: scenario.impersonating ? "user_impersonation" : "persona",
+      },
+    });
+    for (const tool of tools.slice(0, 2)) {
+      expect(Boolean(tool.parameters.properties.sprite)).toBe(scenario.enabled);
+      expect(tool.parameters.required).not.toContain("sprite");
+      expect(tool.parameters.properties.sprite?.enum).toBeUndefined();
+    }
+    expect(tools[2].parameters.properties.sprite).toBeUndefined();
+  }
+  expect(voice.parameters.properties.sprite).toBeUndefined();
+  expect(interaction.parameters.properties.sprite).toBeUndefined();
+});
 
 function getEnum(tool: Tool, parameterName: string): string[] {
   const parameter = tool.parameters.properties[parameterName];
@@ -203,14 +239,14 @@ describe("tool schema assembly", () => {
 
     const tool = buildGenerateImageToolVariant(new GenerateImageTool(), capabilities);
 
-    expect(getPropertyNames(tool as Tool)).toContain("media_id");
-    expect(getPropertyNames(tool as Tool)).toContain("target_identity");
+    expect(getPropertyNames(tool as Tool)).toContain("references");
+    expect(getPropertyNames(tool as Tool)).not.toContain("media_id");
     expect(getPropertyNames(tool as Tool)).not.toContain("mask_prompt");
     expect(getPropertyNames(tool as Tool)).not.toContain("outpaint");
-    // media_id/denoise/prompt guidance should mention img2img only; no inpaint/outpaint
+    // denoise/prompt guidance should mention img2img only; no inpaint/outpaint
     const properties = (tool as Tool).parameters.properties;
-    expect(properties.media_id.description).toBe("Reference media ID such as media_1. Use for img2img.");
     expect(properties.denoise.description).toBe("Img2img strength from 0 to 1. Lower preserves more.");
+    expect(properties.prompt.description).toContain("references");
     expect(properties.prompt.description).not.toContain("inpaint");
     expect(properties.prompt.description).not.toContain("outpaint");
   });
@@ -236,9 +272,7 @@ describe("tool schema assembly", () => {
     const properties = (tool as Tool).parameters.properties;
     expect(properties.prompt.description).toContain("For inpaint");
     expect(properties.prompt.description).toContain("For outpaint");
-    expect(properties.media_id.description).toBe(
-      "Reference media ID such as media_1. Use for img2img, inpaint, or outpaint.",
-    );
+    expect(properties.media_id.description).toContain("inpaint or outpaint");
     expect(properties.denoise.description).toBe("Img2img/inpaint strength from 0 to 1. Lower preserves more.");
   });
 

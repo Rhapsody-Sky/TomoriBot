@@ -90,6 +90,22 @@ const serverInput: MemoryMutationInput = {
 };
 
 describe("dashboard memory ownership", () => {
+  it("rejects server keyword tags rather than silently saving inactive tags", async () => {
+    const core = createCore();
+    const service = new DashboardMemoryService(core as unknown as DashboardMemoryCore);
+    const tagged = { ...serverInput, tags: ["keyword"] };
+    await expect(service.addServer(createActor(true), createSnapshot(), tagged)).rejects.toMatchObject({
+      code: "invalid_memory",
+      status: 422,
+    });
+    await expect(service.updateServer(createActor(true), createSnapshot(), 2, tagged)).rejects.toMatchObject({
+      code: "invalid_memory",
+      status: 422,
+    });
+    expect(core.addServerMemory).not.toHaveBeenCalled();
+    expect(core.updateServerMemory).not.toHaveBeenCalled();
+  });
+
   it("loads only the member's own taught server memories", async () => {
     const core = createCore();
     const service = new DashboardMemoryService(core as unknown as DashboardMemoryCore);

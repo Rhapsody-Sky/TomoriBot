@@ -40,6 +40,7 @@ import {
   recordChatProviderContext,
   runWithChatDiagnosticStage,
 } from "@/utils/chat/diagnosticTimeline";
+import { recordChatTurnFlags } from "@/utils/chat/turnLatency";
 import { applyAssistantPrefill } from "@/utils/chat/assistantPrefill";
 import type { ChatResponseSink, ChatTurnContext, GenerationTurnResult } from "@/utils/chat/types";
 import {
@@ -123,6 +124,7 @@ async function runGenerationAttempts(
     context.streamingContext.deliveryState ??= { unconfirmed: false };
     context.responseReview = createResponseReviewState(context);
     context.streamingContext.holdResponseText = Boolean(context.responseReview);
+    recordChatTurnFlags({ drafting: context.streamingContext.holdResponseText });
     const plan = await buildGenerationPlan(context);
     const attempts = plan.attempts;
     const failures: FallbackNoticeAttempt[] = [];
@@ -152,6 +154,7 @@ async function runGenerationAttempts(
       context.tomoriState = attempt.tomoriState;
       const attemptContextItems = await prepareProviderContextItems({
         contextItems: baseContextItems,
+        isUserImpersonation: context.isUserImpersonation,
         userId: context.streamingContext.triggererUserId,
         tomoriState: attempt.tomoriState,
         deliberateToolAllowedNames: context.streamingContext.deliberateToolAllowedNames,
@@ -965,6 +968,7 @@ function extractErrorDetail(streamResult: StreamResult | undefined): string {
 async function prepareProviderContextItems(args: {
   userId?: number;
   contextItems: StructuredContextItem[];
+  isUserImpersonation: boolean;
   tomoriState: TomoriState;
   deliberateToolAllowedNames: string[] | undefined;
 }): Promise<StructuredContextItem[]> {
@@ -987,6 +991,8 @@ async function prepareProviderContextItems(args: {
       const toolItem = await buildVerbatimToolDefinitionsContextItem({
         tomoriState: args.tomoriState,
         userId: args.userId,
+        contextItems,
+        isUserImpersonation: args.isUserImpersonation,
       });
       if (toolItem) {
         contextItems = injectVerbatimToolDefinitionsItem(contextItems, toolItem);

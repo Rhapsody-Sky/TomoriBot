@@ -644,7 +644,7 @@
           <p class="dialog-kicker">Edit memory</p>
           <h2>Update this memory</h2>
           <label class="field"><span>Memory</span><textarea name="content" rows="6" required></textarea></label>
-          <label class="field"><span>Tags</span><input name="tags" type="text" placeholder="character, preference"></label>
+          <label class="field" data-memory-tags><span>Tags</span><input name="tags" type="text" placeholder="character, preference"></label>
           <input name="memoryId" type="hidden">
           <div class="dialog-actions">
             <button type="button" class="button button-quiet" data-dialog-close="memory-dialog">Cancel</button>
@@ -1286,18 +1286,19 @@
         <div><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>
         <div class="toolbar-actions">
           ${refreshButton("memory", ui("refresh_memories"))}
-          <button class="button button-quiet" data-memory-export type="button">Export</button>
-          <button class="button button-quiet" data-memory-import type="button">Import</button>
+          <button class="button button-quiet" data-memory-export type="button"${personal ? "" : " disabled"}>Export</button>
+          <button class="button button-quiet" data-memory-import type="button"${personal ? "" : " disabled"}>Import</button>
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
         </div>
       </section>
+      ${personal ? "" : `<p class="memory-policy-note">${escapeHtml(ui("memory_server_transfer_unavailable"))}</p>`}
       ${
         serverWritesDisabled || personalCreationDisabled
           ? `<div class="memory-policy-note"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><span>Existing entries remain visible according to your access.</span></div>`
           : `<form class="memory-compose panel" id="memory-compose-form">
               <label class="field">${fieldLabel("New memory", "Write one concise fact. Its visibility follows the memory scope shown above.")}<textarea name="content" rows="3" required placeholder="A concise fact Tomori should remember"></textarea></label>
               <div class="compose-row">
-                <label class="field">${fieldLabel("Tags", "Optional comma-separated labels that help classify and retrieve this memory.")}<input name="tags" placeholder="preference, character"></label>
+                ${personal ? `<label class="field">${fieldLabel("Tags", ui("memory_personal_tags_hint"))}<input name="tags" placeholder="preference, character"></label>` : ""}
                 <button class="button button-primary" type="submit">Add memory</button>
               </div>
             </form>`
@@ -1359,7 +1360,7 @@
           <div class="memory-body">
             <p>${escapeHtml(memory.content)}</p>
             <div class="memory-meta">
-              ${(memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
+              ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : ""}
               ${memory.updatedAt || memory.createdAt ? `<time>${escapeHtml(formatDate(memory.updatedAt || memory.createdAt))}</time>` : ""}
               ${state.memoryKind === "server" && state.overview.canManage && memory.taughtByUserId ? `<small>Teacher #${memory.taughtByUserId}</small>` : ""}
             </div>
@@ -2507,6 +2508,7 @@
     const form = dialog.querySelector("#memory-edit-form");
     form.elements.content.value = memory.content;
     form.elements.tags.value = (memory.tags || []).join(", ");
+    form.querySelector("[data-memory-tags]").hidden = state.memoryKind !== "personal";
     form.elements.memoryId.value = memory.id;
     dialog.showModal();
   }
@@ -3451,7 +3453,7 @@
           body: JSON.stringify({
             lineageId: state.lineageId,
             content: form.elements.content.value,
-            tags: parseTags(form.elements.tags.value).slice(0, 5),
+            tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
           }),
         });
         form.reset();
@@ -3473,7 +3475,7 @@
           body: JSON.stringify({
             lineageId: state.lineageId,
             content: form.elements.content.value,
-            tags: parseTags(form.elements.tags.value).slice(0, 5),
+            tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
           }),
         });
         document.querySelector("#memory-dialog").close();

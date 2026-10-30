@@ -47,7 +47,11 @@ describe("dashboard connections", () => {
 
   it("ignores stale provider workspace responses after a guild switch or newer refresh", async () => {
     const source = await dashboardFunction("loadProviderWorkspace");
-    const state = { guildId: "1", view: "personal-providers", providerData: { personal: null as unknown, server: null } };
+    const state = {
+      guildId: "1",
+      view: "personal-providers",
+      providerData: { personal: null as unknown, server: null },
+    };
     const pending: ((value: unknown) => void)[] = [];
     const load = runInNewContext(
       `const providerLoadVersion = {personal: 0, server: 0}; ${source}; loadProviderWorkspace`,

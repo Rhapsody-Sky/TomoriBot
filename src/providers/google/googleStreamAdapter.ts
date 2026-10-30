@@ -13,6 +13,7 @@
  * - Convert Google chunks to normalized ProcessedChunk format
  */
 
+import { mapWithConcurrency } from "@/utils/async/bounded";
 import {
   BlockedReason,
   type Content,
@@ -56,6 +57,8 @@ import type {
 } from "../../types/stream/interfaces";
 import { extractGifKeyframes } from "../../utils/media/gifProcessor";
 import { fetchAndOptimizeImage } from "../../utils/image/imageProcessor";
+
+const REQUEST_DIAGNOSTIC_TAIL_TURNS = 5;
 
 const VIDEO_CONTEXT_MAX_INLINE_MB = Math.max(
   1,
@@ -324,6 +327,30 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
 
     if (!context.holdResponseText) this.logSanitizedRequest(requestConfig, finalContents);
 
+    const startedAt = Date.now();
+    const lastParts = finalContents.at(-1)?.parts ?? [];
+    context.requestDiagnostics = {
+      model: config.model,
+      contextItemCount: context.contextItems.length,
+      contentsCount: finalContents.length,
+      tailRoles: finalContents
+        .slice(-REQUEST_DIAGNOSTIC_TAIL_TURNS)
+        .map((content) => (content.role === "user" ? "user" : content.role === "model" ? "model" : "unknown")),
+      lastTurn: {
+        textParts: lastParts.filter((part) => part.text !== undefined).length,
+        inlineDataParts: lastParts.filter((part) => part.inlineData !== undefined).length,
+        fileDataParts: lastParts.filter((part) => part.fileData !== undefined).length,
+        functionCallParts: lastParts.filter((part) => part.functionCall !== undefined).length,
+        functionResponseParts: lastParts.filter((part) => part.functionResponse !== undefined).length,
+      },
+      functionHistoryCount: context.functionInteractionHistory?.length ?? 0,
+      currentTurnModelPartCount: context.currentTurnModelParts.length,
+      prefillPresent: Boolean(context.outputPrefill),
+      manuallyTriggered: config.isManuallyTriggered ?? false,
+      toolCount: config.tools?.length ?? 0,
+      chunksReceived: 0,
+      elapsedMs: 0,
+    };
     try {
       const stream = await genAI.models.generateContentStream({
         model: config.model,
@@ -333,6 +360,8 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
 
       // Yield each chunk; bail out immediately if the external abort signal fired.
       for await (const chunkResponse of stream) {
+        context.requestDiagnostics.chunksReceived++;
+        context.requestDiagnostics.elapsedMs = Date.now() - startedAt;
         if (context.abortSignal?.aborted) {
           log.warn(`Google stream aborting for channel ${context.channel.id}: external abort signal received.`);
           return;
@@ -398,6 +427,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
         }
       }
     } catch (error) {
+      context.requestDiagnostics.elapsedMs = Date.now() - startedAt;
       if (this.speakerGuardEnabled && this.speakerGuardPendingTail.length > 0) {
         const tailText = this.consumeSpeakerGuardPendingTail();
         if (tailText) {
@@ -998,8 +1028,8 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
       if (isSystemInstructionContextItem(item)) {
         if (itemTextContent) systemInstructionParts.push(itemTextContent);
       } else if (item.role === "user" || item.role === "model") {
-        const geminiParts: Part[] = [];
-        for (const part of item.parts) {
+        const partsByInput = await mapWithConcurrency(item.parts, 4, async (part) => {
+          const geminiParts: Part[] = [];
           if (part.type === "text") {
             geminiParts.push({ text: part.text });
           } else if (part.type === "image" && !seesImages) {
@@ -1016,9 +1046,7 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
                 if (process.env.RUN_ENV === "production") {
                   geminiParts.push({ text: buildGifUrlPlaceholder(part.uri) });
 
-                  log.info(
-                    `GoogleStreamAdapter: GIF detected in production mode, replaced with placeholder: ${part.uri}`,
-                  );
+                  log.info(`GoogleStreamAdapter: GIF detected in production mode, replaced with placeholder`);
                 } else {
                   geminiParts.push({
                     text: buildGifToolHint({
@@ -1048,14 +1076,14 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
                 try {
                   const optimized = await fetchAndOptimizeImage(fallback, part.mimeType);
                   geminiParts.push({ inlineData: { mimeType: optimized.mimeType, data: optimized.data } });
-                  log.info(`GoogleStreamAdapter: Image loaded via fallback CDN URL ${fallback}`);
+                  log.info(`GoogleStreamAdapter: Image loaded via fallback CDN`);
                 } catch (fallbackErr) {
-                  log.warn(`GoogleStreamAdapter: Image processing error (proxy + CDN both failed) ${part.uri}`, {
+                  log.warn(`GoogleStreamAdapter: Image processing error (proxy + CDN both failed)`, {
                     error: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
                   });
                 }
               } else {
-                log.warn(`GoogleStreamAdapter: Image processing error ${part.uri}`, {
+                log.warn(`GoogleStreamAdapter: Image processing error`, {
                   error: imgErr instanceof Error ? imgErr.message : String(imgErr),
                 });
               }
@@ -1175,7 +1203,9 @@ export class GoogleStreamAdapter extends BaseStreamAdapter {
               });
             }
           }
-        }
+          return geminiParts;
+        });
+        const geminiParts = partsByInput.flat();
 
         if (geminiParts.length > 0) {
           dialogueContents.push({ role: item.role, parts: geminiParts });

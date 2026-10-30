@@ -409,6 +409,27 @@ describe("dashboard memory and naming authorization", () => {
     expect(rows).toHaveLength(2);
   });
 
+  it("refuses server memory transfers without reading or writing scoped memories", async () => {
+    const { app, headers } = setup(true);
+    const list = spyOn(TomoriDashboardCore.prototype, "listServerMemories").mockResolvedValue([]);
+    const write = spyOn(TomoriDashboardCore.prototype, "addServerMemory").mockResolvedValue(null);
+    const exportResponse = await app.request(
+      "/settings/api/guilds/123456789012345678/memories/export?kind=server&lineageId=77",
+      { headers },
+    );
+    const importResponse = await app.request("/settings/api/guilds/123456789012345678/memories/import", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "server", lineageId: 77, memories: [{ content: "Fact", tags: ["legacy"] }] }),
+    });
+    for (const response of [exportResponse, importResponse]) {
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: "server_memory_transfer_unavailable" } });
+    }
+    expect(list).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   for (const scenario of [
     { name: "foreign personal scope", kind: "personal", lineageId: 999, code: "lineage_forbidden" },
     { name: "global server scope", kind: "server", lineageId: 0, code: "lineage_forbidden" },

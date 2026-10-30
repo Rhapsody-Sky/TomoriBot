@@ -454,6 +454,8 @@ export function createDashboardApp(client: Client) {
           "navigation_switch",
           "navigation_close",
           "endpoint_features",
+          "memory_server_transfer_unavailable",
+          "memory_personal_tags_hint",
           "provider_access",
           "provider_models",
           "connections",
@@ -812,11 +814,18 @@ export function createDashboardApp(client: Client) {
     if (lineageId === null) {
       return jsonError(context, new DashboardServiceError("invalid_lineage", 422, "Invalid memory scope."));
     }
+    if (kind === "server") {
+      return jsonError(
+        context,
+        new DashboardServiceError(
+          "server_memory_transfer_unavailable",
+          409,
+          "Server memory transfer is unavailable in the dashboard. Use Discord instead.",
+        ),
+      );
+    }
     try {
-      const payload =
-        kind === "server"
-          ? await memories.listServer(result.actor, result.snapshot, lineageId)
-          : await memories.listPersonal(result.actor, result.snapshot, lineageId);
+      const payload = await memories.listPersonal(result.actor, result.snapshot, lineageId);
       return context.json({
         format: "tomoribot-dashboard-memory-v2",
         exportedAt: new Date().toISOString(),
@@ -839,7 +848,6 @@ export function createDashboardApp(client: Client) {
     if (!parsed.success) {
       return jsonError(context, new DashboardServiceError("invalid_import", 422, "Invalid memory import file."));
     }
-
     try {
       await memories.assertCanAdd(result.actor, result.snapshot, parsed.data.lineageId, parsed.data.kind);
     } catch (error) {
@@ -847,6 +855,16 @@ export function createDashboardApp(client: Client) {
         await log.error("Dashboard memory import authorization failed", error, undefined, { persist: false });
       }
       return jsonError(context, error instanceof DashboardServiceError ? error : "Memory import failed.");
+    }
+    if (parsed.data.kind === "server") {
+      return jsonError(
+        context,
+        new DashboardServiceError(
+          "server_memory_transfer_unavailable",
+          409,
+          "Server memory transfer is unavailable in the dashboard. Use Discord instead.",
+        ),
+      );
     }
 
     let inserted = 0;
@@ -861,11 +879,7 @@ export function createDashboardApp(client: Client) {
             ? { ...entry, lineageId: parsed.data.lineageId }
             : null,
         );
-        if (parsed.data.kind === "server") {
-          await memories.addServer(result.actor, result.snapshot, input);
-        } else {
-          await memories.addPersonal(result.actor, result.snapshot, input);
-        }
+        await memories.addPersonal(result.actor, result.snapshot, input);
         inserted++;
       } catch (error) {
         if (error instanceof DashboardServiceError && error.code === "duplicate_memory") {

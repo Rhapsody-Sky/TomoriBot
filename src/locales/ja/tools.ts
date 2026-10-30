@@ -15,6 +15,12 @@ export default {
     execution: {
       unavailable: `ツール \`{tool}\` は、現在の設定、モデルの機能、またはBotの権限では利用できません。`,
     },
+    sprite_selection: {
+      unavailable:
+        "このペルソナまたはこのターンではスプライト選択を利用できません。spriteパラメーターを省略してください。",
+      invalid:
+        "現在利用可能なスプライトからスプライトのラベルを選択するか、基本の外見には空の文字列を使用してください。",
+    },
     generate_voice_message: {
       persona_missing: `このペルソナはもう利用できません。`,
       stale: `このターンの間に音声モデル、認証情報、またはペルソナの声が変更されました。ボイスメッセージを生成する前に新しいターンを始めてください。`,
@@ -26,6 +32,7 @@ export default {
       quota_resets_in_hours: `クォータは {hours} 時間後にリセットされます。`,
       quota_resets_in_days: `クォータは {days} 日後にリセットされます。`,
       quota_remaining: `本日はあと {remaining} 枚の画像を生成できます。`,
+      quota_unavailable: `このサーバーの画像生成クォータを現在確認できませんでした。しばらくしてからもう一度お試しください。`,
     },
     generate_video: {
       disabled: `このサーバーでは動画生成が無効になっています。`,
@@ -35,6 +42,7 @@ export default {
       quota_resets_in_hours: `クォータは {hours} 時間後にリセットされます。`,
       quota_resets_in_days: `クォータは {days} 日後にリセットされます。`,
       quota_remaining: `本日はあと {remaining} 本の動画を生成できます。`,
+      quota_unavailable: `このサーバーの動画生成クォータを現在確認できませんでした。しばらくしてからもう一度お試しください。`,
       file_too_large: `生成された動画（{size_mb} MB）がDiscordの25 MBファイルサイズ制限を超えています。`,
       reference_unsupported: `選択したOpenRouterモデル \`{model}\` は、画像を正確な最初のフレームとして使用できません。参照画像を外すか、対応する動画モデルを選択してください。`,
       loop_unsupported: `選択したOpenRouterモデル \`{model}\` は、ループ動画の最後のフレーム指定に対応していません。ループを無効にするか、対応する動画モデルを選択してください。`,
@@ -157,7 +165,7 @@ export default {
     document: {
       reading_title: `📄 ドキュメントを読み取り中...`,
       reading_description: `\`{filename}\` の内容を読み取っています`,
-      truncated_title: `⚠️ ファイルが省略されました`,
+      truncated_title: `ファイルが省略されました`,
       truncated_description: `\`{filename}\` が長すぎるため、{limit}文字に省略されました（元のサイズ：{original}文字）。応答が不完全な場合があります。ファイルを小さく分割して、一つずつ送ることをお勧めします。`,
     },
     image: {
@@ -174,6 +182,7 @@ export default {
       notice_character_prompt_line: `**キャラクター {index}:** {prompt}`,
       notice_image_tags_tip_line: `ヒント: \`image-tags\` コマンドでPhysical Appearanceタグを保存すると、キャラクターの一貫性が上がります。`,
       notice_avatar_reference_line: `アバター参照: {name}。`,
+      notice_character_reference_line: `キャラクターリファレンス: {name}。`,
       notice_reference_count_line: `参照画像を {count} 枚使用しています。`,
       generated_after_seconds_line: `{seconds}秒で生成しました。`,
       referenced_identities_line: `参照: {names}`,
