@@ -1,6 +1,6 @@
 import type { SQL } from "bun";
 import { personaSections } from "./personas";
-import { jsonb, str, textArray } from "./sql";
+import { bool, jsonb, str, textArray } from "./sql";
 import { PRESET_NATURAL_NUDGE_DEFAULTS, type PresetNaturalNudgeDefaults } from "./personas/naturalNudges";
 import type { PersonaInput } from "./types";
 import { personaNamingConfigSchema, validatePersonaNamingAuthoring } from "@/types/personaNaming";
@@ -10,10 +10,10 @@ import {
   personaAuthoredIdleNudgesSchema,
 } from "@/modules/natural-nudges/db/types";
 
-const OFFICIAL_LINEAGE_IDS = new Set<number>([4, 256, 716, 1770, 3585, 50, 666]); // 1337 (Zaya) pending
+const OFFICIAL_LINEAGE_IDS = new Set<number>([4, 256, 716, 1770, 3585, 50, 666, 1337]);
 
 const PERSONA_COLUMNS =
-  "persona_preset_name, persona_preset_desc, preset_attribute_list, preset_sample_dialogues_in, preset_sample_dialogues_out, preset_language, preset_avatar_path, preset_trigger_words, preset_lineage_id, preset_naming_config, is_nsfw, natural_nudge_interests, natural_nudge_talkativeness, natural_nudge_idle_nudges";
+  "persona_preset_name, persona_preset_desc, preset_attribute_list, preset_attribute_public_flags, preset_sample_dialogues_in, preset_sample_dialogues_out, preset_language, preset_avatar_path, preset_trigger_words, preset_lineage_id, preset_naming_config, is_nsfw, natural_nudge_interests, natural_nudge_talkativeness, natural_nudge_idle_nudges";
 
 // Upsert identity is the stable (lineage, language) pair, NOT persona_preset_name.
 // The name is a mutable, human-facing catalog label, so keying on it would turn a
@@ -27,6 +27,7 @@ const PERSONA_ON_CONFLICT = `ON CONFLICT (preset_lineage_id, preset_language) WH
   persona_preset_name = EXCLUDED.persona_preset_name,
   persona_preset_desc = EXCLUDED.persona_preset_desc,
   preset_attribute_list = EXCLUDED.preset_attribute_list,
+  preset_attribute_public_flags = EXCLUDED.preset_attribute_public_flags,
   preset_sample_dialogues_in = EXCLUDED.preset_sample_dialogues_in,
   preset_sample_dialogues_out = EXCLUDED.preset_sample_dialogues_out,
   preset_avatar_path = EXCLUDED.preset_avatar_path,
@@ -37,26 +38,6 @@ const PERSONA_ON_CONFLICT = `ON CONFLICT (preset_lineage_id, preset_language) WH
   natural_nudge_talkativeness = EXCLUDED.natural_nudge_talkativeness,
   natural_nudge_idle_nudges = EXCLUDED.natural_nudge_idle_nudges,
   updated_at = CURRENT_TIMESTAMP`;
-
-const OFFICIAL_ATTRIBUTE_FLAGS_UPDATE = `WITH official_attribute_flags AS (
-  SELECT
-    pp.persona_preset_id,
-    ARRAY(
-      SELECT (attr.ord = 1)
-      FROM unnest(COALESCE(pp.preset_attribute_list, ARRAY[]::TEXT[]))
-        WITH ORDINALITY AS attr(attribute_text, ord)
-      ORDER BY attr.ord
-    )::BOOLEAN[] AS public_flags
-  FROM persona_presets pp
-  WHERE pp.preset_lineage_id IN (${[...OFFICIAL_LINEAGE_IDS].join(", ")})
-)
-UPDATE persona_presets pp
-SET
-  preset_attribute_public_flags = official_attribute_flags.public_flags,
-  updated_at = CURRENT_TIMESTAMP
-FROM official_attribute_flags
-WHERE pp.persona_preset_id = official_attribute_flags.persona_preset_id
-  AND pp.preset_attribute_public_flags IS DISTINCT FROM official_attribute_flags.public_flags`;
 
 function naturalNudgeDefaults(preset: PersonaInput): PresetNaturalNudgeDefaults {
   const defaults = PRESET_NATURAL_NUDGE_DEFAULTS[preset.lineageId];
@@ -69,10 +50,15 @@ function rowsOf(): PersonaInput[] {
 }
 
 function renderPersonaTuple(preset: PersonaInput): string {
+  const publicFlags =
+    preset.attributePublicFlags ??
+    preset.attributes.map((_, index) => OFFICIAL_LINEAGE_IDS.has(preset.lineageId) && index === 0);
+
   return [
     str(preset.name),
     str(preset.desc),
     textArray(preset.attributes),
+    `ARRAY[${publicFlags.map(bool).join(", ")}]::BOOLEAN[]`,
     textArray(preset.sampleDialoguesIn),
     textArray(preset.sampleDialoguesOut),
     str(preset.language),
@@ -110,6 +96,12 @@ export function validatePersonas(): string[] {
       );
     }
     seenLineageLanguages.add(lineageLanguageKey);
+
+    if (preset.attributePublicFlags && preset.attributePublicFlags.length !== preset.attributes.length) {
+      errors.push(
+        `persona_presets/${preset.name}: attributePublicFlags length ${preset.attributePublicFlags.length} does not match attributes length ${preset.attributes.length}`,
+      );
+    }
 
     if (preset.sampleDialoguesIn.length !== preset.sampleDialoguesOut.length) {
       errors.push(
@@ -181,7 +173,6 @@ WHERE persona_presets.persona_preset_name = seed.name
   return [
     backfillStatement,
     `INSERT INTO persona_presets (${PERSONA_COLUMNS})\nVALUES\n${values}\n${PERSONA_ON_CONFLICT}`,
-    OFFICIAL_ATTRIBUTE_FLAGS_UPDATE,
   ];
 }
 

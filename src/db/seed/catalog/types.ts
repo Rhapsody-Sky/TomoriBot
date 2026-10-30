@@ -130,6 +130,10 @@ export interface PersonaInput {
   name: string;
   desc: string;
   attributes: string[];
+  /** Public visibility per attribute. Must match attributes in length and order.
+   * Omit to keep the official first-attribute-public default; other lineages default to private.
+   */
+  attributePublicFlags?: boolean[];
   sampleDialoguesIn: string[];
   sampleDialoguesOut: string[];
   language: string;

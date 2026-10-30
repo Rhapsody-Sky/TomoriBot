@@ -678,6 +678,336 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     }
   });
 
+  it("replaceCharacterFromCard overwrites character data while preserving persona identity", async () => {
+    const targetName = `_rt_replace_target_${Date.now()}`;
+    const serverMemoryContent = `_rt_replace_server_memory_${Date.now()}`;
+    const personalMemoryContent = `_rt_replace_personal_memory_${Date.now()}`;
+    let targetPersonaId: number | null = null;
+
+    const [targetRow] = await testSql<Array<{ persona_id: number; persona_lineage_id: number | string }>>`
+      INSERT INTO personas (
+        server_id,
+        persona_nickname,
+        attribute_list,
+        sample_dialogues_in,
+        sample_dialogues_out,
+        webhook_avatar_url,
+        is_alter
+      )
+      VALUES (
+        ${refs.serverId},
+        ${targetName},
+        ARRAY['_rt_replace_target_attribute']::TEXT[],
+        ARRAY['_rt_replace_target_input']::TEXT[],
+        ARRAY['_rt_replace_target_output']::TEXT[],
+        '_rt_preserved_avatar',
+        true
+      )
+      RETURNING persona_id, persona_lineage_id
+    `;
+    targetPersonaId = targetRow.persona_id;
+    const targetLineageId = Number(targetRow.persona_lineage_id);
+
+    await testSql`
+      INSERT INTO persona_configs (
+        persona_id, trigger_words, persona_prompt,
+        reward_conditioning_enabled, punish_conditioning_enabled, humanizer_degree
+      )
+      VALUES (
+        ${targetPersonaId}, ARRAY['_rt_old_trigger']::TEXT[], '_rt_old_prompt',
+        false, false, 3
+      )
+    `;
+    await testSql`
+      INSERT INTO server_memories (server_id, persona_id, persona_lineage_id, user_id, content)
+      VALUES (${refs.serverId}, ${targetPersonaId}, ${targetLineageId}, ${refs.userId}, ${serverMemoryContent})
+    `;
+    await testSql`
+      INSERT INTO personal_memories (user_id, persona_lineage_id, content)
+      VALUES (${refs.userId}, ${targetLineageId}, ${personalMemoryContent})
+    `;
+    await testSql`
+      INSERT INTO persona_context_note_configs (persona_id, context_note, context_note_depth)
+      VALUES (${targetPersonaId}, '_rt_preserved_context', 7)
+    `;
+    await testSql`
+      INSERT INTO persona_sprites (persona_id, sprite_name, sprite_key, avatar_url)
+      VALUES (${targetPersonaId}, 'Old Sprite', 'old-sprite', '_rt_old_sprite_url')
+    `;
+
+    try {
+      const result = await personaRepository.replaceCharacterFromCard({
+        personaId: targetPersonaId,
+        serverId: refs.serverId,
+        card: {
+          tomori_nickname: "_rt_replacement_character",
+          attribute_list: ["_rt_replacement_private", "_rt_replacement_public"],
+          attribute_public_flags: [false, true],
+          sample_dialogues_in: ["_rt_replacement_input"],
+          sample_dialogues_out: ["_rt_replacement_output"],
+          trigger_words: ["_rt_replacement_trigger"],
+          persona_prompt: "_rt_replacement_prompt",
+          persona_lineage_id: 999_999,
+          physical_appearance_tags: ["_rt_replacement_tag"],
+          char_ref_url: "_rt_replacement_reference",
+          nai_attg_author: "_rt_replacement_author",
+          nai_attg_title: "_rt_replacement_title",
+          nai_attg_tags: "_rt_replacement_tags",
+          nai_attg_genre: "_rt_replacement_genre",
+          nai_attg_stars: 4,
+        },
+      });
+      expect(result).toEqual({
+        personaId: targetPersonaId,
+        personaLineageId: targetLineageId,
+        wasMain: false,
+        previousAvatarUrl: "_rt_preserved_avatar",
+      });
+
+      const [sourceAfter] = await testSql<Array<{ is_alter: boolean }>>`
+        SELECT is_alter FROM personas WHERE persona_id = ${refs.personaId}
+      `;
+      const [targetAfter] = await testSql<
+        Array<{
+          is_alter: boolean;
+          persona_lineage_id: number | string;
+          attribute_list: string[];
+          webhook_avatar_url: string | null;
+          persona_prompt: string | null;
+          trigger_words: string[];
+          reward_conditioning_enabled: boolean;
+          punish_conditioning_enabled: boolean;
+          humanizer_degree: number | null;
+        }>
+      >`
+        SELECT
+          p.is_alter,
+          p.persona_lineage_id,
+          p.attribute_list,
+          p.webhook_avatar_url,
+          pc.persona_prompt,
+          pc.trigger_words,
+          pc.reward_conditioning_enabled,
+          pc.punish_conditioning_enabled,
+          pc.humanizer_degree
+        FROM personas p
+        JOIN persona_configs pc ON pc.persona_id = p.persona_id
+        WHERE p.persona_id = ${targetPersonaId}
+      `;
+      expect(sourceAfter.is_alter).toBe(false);
+      expect(targetAfter.is_alter).toBe(true);
+      expect(Number(targetAfter.persona_lineage_id)).toBe(targetLineageId);
+      expect(targetAfter.attribute_list).toEqual(["_rt_replacement_private", "_rt_replacement_public"]);
+      expect(targetAfter.webhook_avatar_url).toBe("_rt_preserved_avatar");
+      expect(targetAfter.persona_prompt).toBe("_rt_replacement_prompt");
+      expect(targetAfter.trigger_words).toEqual(["_rt_replacement_trigger"]);
+      expect(targetAfter.reward_conditioning_enabled).toBe(false);
+      expect(targetAfter.punish_conditioning_enabled).toBe(false);
+      expect(targetAfter.humanizer_degree).toBe(3);
+
+      const attributes = await testSql<Array<{ attribute_text: string; is_public: boolean }>>`
+        SELECT attribute_text, is_public
+        FROM persona_attributes
+        WHERE persona_id = ${targetPersonaId}
+        ORDER BY attribute_order
+      `;
+      expect(attributes).toEqual([
+        { attribute_text: "_rt_replacement_private", is_public: false },
+        { attribute_text: "_rt_replacement_public", is_public: true },
+      ]);
+
+      const [operationalConfig] = await testSql<Array<{ context_note: string; context_note_depth: number }>>`
+        SELECT context_note, context_note_depth
+        FROM persona_context_note_configs
+        WHERE persona_id = ${targetPersonaId}
+      `;
+      expect(operationalConfig).toEqual({ context_note: "_rt_preserved_context", context_note_depth: 7 });
+
+      const [spriteCount] = await testSql<Array<{ count: number | string }>>`
+        SELECT COUNT(*)::INT AS count FROM persona_sprites WHERE persona_id = ${targetPersonaId}
+      `;
+      expect(Number(spriteCount.count)).toBe(0);
+
+      const [characterConfigs] = await testSql<
+        Array<{
+          physical_appearance_tags: string[];
+          char_ref_url: string | null;
+          nai_attg_author: string | null;
+          nai_attg_title: string | null;
+          nai_attg_tags: string | null;
+          nai_attg_genre: string | null;
+          nai_attg_stars: number | null;
+        }>
+      >`
+        SELECT
+          pic.physical_appearance_tags,
+          pic.char_ref_url,
+          ptc.nai_attg_author,
+          ptc.nai_attg_title,
+          ptc.nai_attg_tags,
+          ptc.nai_attg_genre,
+          ptc.nai_attg_stars
+        FROM persona_imagegen_configs pic
+        JOIN persona_textgen_configs ptc ON ptc.persona_id = pic.persona_id
+        WHERE pic.persona_id = ${targetPersonaId}
+      `;
+      expect(characterConfigs).toEqual({
+        physical_appearance_tags: ["_rt_replacement_tag"],
+        char_ref_url: "_rt_replacement_reference",
+        nai_attg_author: "_rt_replacement_author",
+        nai_attg_title: "_rt_replacement_title",
+        nai_attg_tags: "_rt_replacement_tags",
+        nai_attg_genre: "_rt_replacement_genre",
+        nai_attg_stars: 4,
+      });
+
+      const [serverMemory] = await testSql<Array<{ persona_id: number; persona_lineage_id: number | string }>>`
+        SELECT persona_id, persona_lineage_id
+        FROM server_memories
+        WHERE content = ${serverMemoryContent}
+      `;
+      expect(serverMemory.persona_id).toBe(targetPersonaId);
+      expect(Number(serverMemory.persona_lineage_id)).toBe(targetLineageId);
+
+      const [personalMemory] = await testSql<Array<{ persona_lineage_id: number | string }>>`
+        SELECT persona_lineage_id
+        FROM personal_memories
+        WHERE content = ${personalMemoryContent}
+      `;
+      expect(Number(personalMemory.persona_lineage_id)).toBe(targetLineageId);
+    } finally {
+      await testSql`DELETE FROM server_memories WHERE content = ${serverMemoryContent}`;
+      await testSql`DELETE FROM personal_memories WHERE content = ${personalMemoryContent}`;
+      if (targetPersonaId !== null) {
+        await testSql`DELETE FROM personas WHERE persona_id = ${targetPersonaId}`;
+      }
+    }
+  });
+
+  it("replaceCharacterFromCard leaves direct assignments attached to the same persona", async () => {
+    const suffix = Date.now();
+    const sourceName = `_rt_replace_assignment_source_${suffix}`;
+    const targetName = `_rt_replace_assignment_control_${suffix}`;
+    const channelDiscId = `_rt_replace_channel_${suffix}`;
+    const blockedUserDiscId = `_rt_replace_user_${suffix}`;
+    const serverMemoryContent = `_rt_replace_assignment_memory_${suffix}`;
+    let sourcePersonaId: number | null = null;
+    let targetPersonaId: number | null = null;
+
+    const createdRows = await testSql<
+      Array<{ persona_id: number; persona_lineage_id: number | string; persona_nickname: string }>
+    >`
+      INSERT INTO personas (server_id, persona_nickname, is_alter)
+      VALUES
+        (${refs.serverId}, ${sourceName}, true),
+        (${refs.serverId}, ${targetName}, true)
+      RETURNING persona_id, persona_lineage_id, persona_nickname
+    `;
+    const sourceRow = createdRows.find((row) => row.persona_nickname === sourceName);
+    const targetRow = createdRows.find((row) => row.persona_nickname === targetName);
+    expect(sourceRow).toBeDefined();
+    expect(targetRow).toBeDefined();
+    if (!sourceRow || !targetRow) return;
+
+    sourcePersonaId = sourceRow.persona_id;
+    targetPersonaId = targetRow.persona_id;
+
+    await testSql`
+      INSERT INTO server_memories (server_id, persona_id, persona_lineage_id, user_id, content)
+      VALUES (
+        ${refs.serverId},
+        ${sourcePersonaId},
+        ${Number(sourceRow.persona_lineage_id)},
+        ${refs.userId},
+        ${serverMemoryContent}
+      )
+    `;
+    await testSql`
+      INSERT INTO channel_persona_whitelist (server_id, channel_disc_id, persona_id)
+      VALUES (${refs.serverId}, ${channelDiscId}, ${sourcePersonaId})
+    `;
+    await testSql`
+      INSERT INTO persona_user_blocks (
+        server_id, persona_id, user_disc_id, block_type, reason, expires_at
+      )
+      VALUES (
+        ${refs.serverId},
+        ${sourcePersonaId},
+        ${blockedUserDiscId},
+        'block',
+        'replacement regression test',
+        NOW() + INTERVAL '1 day'
+      )
+    `;
+
+    try {
+      const result = await personaRepository.replaceCharacterFromCard({
+        personaId: sourcePersonaId,
+        serverId: refs.serverId,
+        card: {
+          tomori_nickname: "_rt_replaced_source_character",
+          attribute_list: [],
+          sample_dialogues_in: [],
+          sample_dialogues_out: [],
+          trigger_words: ["_rt_replaced_source_trigger"],
+          persona_prompt: "_rt_replaced_source_prompt",
+        },
+      });
+      expect(result).toEqual({
+        personaId: sourcePersonaId,
+        personaLineageId: Number(sourceRow.persona_lineage_id),
+        wasMain: false,
+        previousAvatarUrl: null,
+      });
+
+      const [sourceAfter] = await testSql<
+        Array<{ persona_nickname: string; persona_lineage_id: number | string; is_alter: boolean }>
+      >`
+        SELECT persona_nickname, persona_lineage_id, is_alter
+        FROM personas
+        WHERE persona_id = ${sourcePersonaId}
+      `;
+      expect(sourceAfter.persona_nickname).toBe("_rt_replaced_source_character");
+      expect(Number(sourceAfter.persona_lineage_id)).toBe(Number(sourceRow.persona_lineage_id));
+      expect(sourceAfter.is_alter).toBe(true);
+
+      const [targetAfter] = await testSql<Array<{ persona_lineage_id: number | string }>>`
+        SELECT persona_lineage_id FROM personas WHERE persona_id = ${targetPersonaId}
+      `;
+      expect(Number(targetAfter.persona_lineage_id)).toBe(Number(targetRow.persona_lineage_id));
+
+      const [serverMemory] = await testSql<Array<{ persona_id: number; persona_lineage_id: number | string }>>`
+        SELECT persona_id, persona_lineage_id
+        FROM server_memories
+        WHERE content = ${serverMemoryContent}
+      `;
+      expect(serverMemory.persona_id).toBe(sourcePersonaId);
+      expect(Number(serverMemory.persona_lineage_id)).toBe(Number(sourceRow.persona_lineage_id));
+
+      const [whitelistEntry] = await testSql<Array<{ persona_id: number }>>`
+        SELECT persona_id
+        FROM channel_persona_whitelist
+        WHERE server_id = ${refs.serverId} AND channel_disc_id = ${channelDiscId}
+      `;
+      expect(whitelistEntry.persona_id).toBe(sourcePersonaId);
+
+      const [blockEntry] = await testSql<Array<{ persona_id: number }>>`
+        SELECT persona_id
+        FROM persona_user_blocks
+        WHERE server_id = ${refs.serverId} AND user_disc_id = ${blockedUserDiscId}
+      `;
+      expect(blockEntry.persona_id).toBe(sourcePersonaId);
+    } finally {
+      await testSql`DELETE FROM server_memories WHERE content = ${serverMemoryContent}`;
+      if (sourcePersonaId !== null) {
+        await testSql`DELETE FROM personas WHERE persona_id = ${sourcePersonaId}`;
+      }
+      if (targetPersonaId !== null) {
+        await testSql`DELETE FROM personas WHERE persona_id = ${targetPersonaId}`;
+      }
+    }
+  });
+
   it("addSampleDialoguePair appends TEXT[] dialogue arrays", async () => {
     await testSql`
       UPDATE personas
@@ -777,9 +1107,10 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         personaId: refs.personaId,
         nickname: "_rt_pointer_persona",
         preset,
-        personaLineageId: presetLineageId,
+        personaLineageId: refs.personaLineageId,
       });
       expect(applied?.is_pointer).toBe(true);
+      expect(Number(applied?.persona_lineage_id)).toBe(refs.personaLineageId);
 
       await testSql`
         UPDATE persona_presets
@@ -810,7 +1141,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         WHERE persona_id = ${refs.personaId}
       `;
       expect(forkedRow.is_pointer).toBe(false);
-      expect(Number(forkedRow.persona_lineage_id)).toBe(presetLineageId);
+      expect(Number(forkedRow.persona_lineage_id)).toBe(refs.personaLineageId);
 
       await testSql`
         UPDATE persona_presets

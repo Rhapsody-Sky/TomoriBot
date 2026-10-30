@@ -18,8 +18,9 @@ covered in [Adding a Locale](/contributing/localization/new-locale/).
      variant lists the base-language or `en-US` variant instead.
    - `name`, `desc`, `attributes`, paired `sampleDialoguesIn` / `sampleDialoguesOut`, `language`,
      `avatarPath`, `triggerWords`.
-   - Do not author `preset_attribute_public_flags`. `personaSeed.ts` derives it: the first attribute
-     is public and the rest are private.
+   - Optional `attributePublicFlags` controls visibility with one boolean per `attributes` entry,
+     in the same order. If omitted, official lineages keep the first attribute public and the
+     rest private; other lineages default to all-private. The seeder rejects mismatched lengths.
    - Add the lineage to `OFFICIAL_LINEAGE_IDS` in `personaSeed.ts` and to the naming snapshot in
      `tests/unit/db/personaNamingCatalog.test.ts`.
    - Optional `isNsfw: true` hides the preset from `/persona default` and `/setup`; the

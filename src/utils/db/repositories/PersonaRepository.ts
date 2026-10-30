@@ -36,6 +36,7 @@ import type { PersonaAutochRuntimeStateRow } from "@/types/db/schema";
 import { EMPTY_PERSONA_NAMING_CONFIG, type PersonaNamingConfig } from "@/types/personaNaming";
 import type { SqlParameterArray } from "@/types/db/sqlOperations";
 import { DatabaseUnavailableError } from "@/types/errors";
+import type { PresetExportData } from "@/types/preset/presetExport";
 import { getCachedLLM } from "@/utils/cache/llmCache";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCacheStore";
 import { invalidatePersonaAppearance } from "@/utils/cache/personaAppearanceCacheStore";
@@ -109,6 +110,13 @@ type PersonaConfigBundle = {
   imagegen_configs: PersonaImagegenConfigsRow | null;
   textgen_configs: PersonaTextgenConfigsRow | null;
 };
+
+interface PersonaCharacterReplacementResult {
+  personaId: number;
+  personaLineageId: number;
+  wasMain: boolean;
+  previousAvatarUrl: string | null;
+}
 
 /**
  * Export shape for PersonaRepository.
@@ -1178,6 +1186,148 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     } catch (e) {
       log.error(`Error swapping personas ${mainPersonaId} and ${alterPersonaId}:`, e);
       return "failed";
+    }
+  }
+
+  /**
+   * Replaces a persona's materialized character definition from an imported card.
+   * Identity and operational state are deliberately untouched: persona id, memory
+   * lineage, main/alter role, reminders, memories, assignments, and runtime state
+   * continue to belong to the same row.
+   */
+  async replaceCharacterFromCard(params: {
+    personaId: number;
+    serverId: number;
+    card: PresetExportData;
+    avatarUrl?: string | null;
+  }): Promise<PersonaCharacterReplacementResult | null> {
+    try {
+      return await sql.transaction(async (tx) => {
+        const [source] = await tx<
+          Array<{
+            persona_id: number;
+            persona_lineage_id: number | string;
+            is_alter: boolean;
+            webhook_avatar_url: string | null;
+          }>
+        >`
+          SELECT persona_id, persona_lineage_id, is_alter, webhook_avatar_url
+          FROM personas
+          WHERE persona_id = ${params.personaId}
+            AND server_id = ${params.serverId}
+          FOR UPDATE
+        `;
+        if (!source) {
+          throw new Error("Persona replacement source was not found on the requested server.");
+        }
+
+        const personaLineageId = Number(source.persona_lineage_id);
+        if (!Number.isSafeInteger(personaLineageId) || personaLineageId <= 0) {
+          throw new Error(`Persona replacement source ${params.personaId} has an invalid lineage id.`);
+        }
+
+        await tx`
+          UPDATE personas
+          SET
+            persona_nickname = ${params.card.tomori_nickname},
+            attribute_list = ${sql.array(params.card.attribute_list, "TEXT")},
+            sample_dialogues_in = ${sql.array(params.card.sample_dialogues_in, "TEXT")},
+            sample_dialogues_out = ${sql.array(params.card.sample_dialogues_out, "TEXT")},
+            webhook_avatar_url = CASE
+              WHEN ${params.avatarUrl !== undefined} THEN ${params.avatarUrl ?? null}
+              ELSE webhook_avatar_url
+            END,
+            is_pointer = false,
+            preset_lineage_id = NULL,
+            preset_language = NULL,
+            applied_avatar_hash = NULL,
+            updated_at = NOW()
+          WHERE persona_id = ${params.personaId}
+        `;
+
+        await tx`DELETE FROM persona_attributes WHERE persona_id = ${params.personaId}`;
+        const publicFlags = normalizeAttributePublicFlags(
+          params.card.attribute_list,
+          params.card.attribute_public_flags,
+        );
+        for (let index = 0; index < params.card.attribute_list.length; index++) {
+          await tx`
+            INSERT INTO persona_attributes (
+              persona_id, attribute_order, attribute_text, is_public
+            )
+            VALUES (
+              ${params.personaId},
+              ${index + 1},
+              ${params.card.attribute_list[index]},
+              ${publicFlags[index]}
+            )
+          `;
+        }
+
+        // Only card-owned fields are replaced. Operational overrides such as the
+        // persona LLM, humanizer, conditioning toggles, voice, and context note remain.
+        await tx`
+          INSERT INTO persona_configs (persona_id, trigger_words, persona_prompt)
+          VALUES (
+            ${params.personaId},
+            ${sql.array(params.card.trigger_words, "TEXT")},
+            ${params.card.persona_prompt ?? null}
+          )
+          ON CONFLICT (persona_id) DO UPDATE SET
+            trigger_words = EXCLUDED.trigger_words,
+            persona_prompt = EXCLUDED.persona_prompt,
+            updated_at = NOW()
+        `;
+        await tx`
+          INSERT INTO persona_imagegen_configs (
+            persona_id, physical_appearance_tags, char_ref_url
+          )
+          VALUES (
+            ${params.personaId},
+            ${sql.array(params.card.physical_appearance_tags ?? [], "TEXT")},
+            ${params.card.char_ref_url ?? null}
+          )
+          ON CONFLICT (persona_id) DO UPDATE SET
+            physical_appearance_tags = EXCLUDED.physical_appearance_tags,
+            char_ref_url = EXCLUDED.char_ref_url,
+            updated_at = NOW()
+        `;
+        await tx`
+          INSERT INTO persona_textgen_configs (
+            persona_id, nai_attg_author, nai_attg_title, nai_attg_tags,
+            nai_attg_genre, nai_attg_stars
+          )
+          VALUES (
+            ${params.personaId},
+            ${params.card.nai_attg_author ?? null},
+            ${params.card.nai_attg_title ?? null},
+            ${params.card.nai_attg_tags ?? null},
+            ${params.card.nai_attg_genre ?? null},
+            ${params.card.nai_attg_stars ?? null}
+          )
+          ON CONFLICT (persona_id) DO UPDATE SET
+            nai_attg_author = EXCLUDED.nai_attg_author,
+            nai_attg_title = EXCLUDED.nai_attg_title,
+            nai_attg_tags = EXCLUDED.nai_attg_tags,
+            nai_attg_genre = EXCLUDED.nai_attg_genre,
+            nai_attg_stars = EXCLUDED.nai_attg_stars,
+            updated_at = NOW()
+        `;
+
+        // Persona cards do not contain sprite archives. Remove the previous
+        // character's rows so stale expressions are never shown as the new one.
+        await tx`DELETE FROM persona_sprites WHERE persona_id = ${params.personaId}`;
+
+        return {
+          personaId: source.persona_id,
+          personaLineageId,
+          wasMain: !source.is_alter,
+          previousAvatarUrl: source.webhook_avatar_url,
+        };
+      });
+    } catch (error) {
+      log.error(`Error replacing character data for persona ${params.personaId}:`, error);
+      return null;
     }
   }
 
