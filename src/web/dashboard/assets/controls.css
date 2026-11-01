@@ -1,0 +1,59 @@
+.field select.control-native-select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.select-trigger .select-value {
+  min-width: 0;
+}
+.select-trigger .glyph,
+.select-option .glyph {
+  flex: none;
+}
+.select-option[hidden] {
+  display: none;
+}
+.select-option span {
+  overflow-wrap: anywhere;
+}
+.select-option[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.select-options {
+  max-width: calc(100vw - 24px);
+}
+.scrub {
+  min-width: 0;
+}
+.field .scrub input {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+}
+.dropzone.is-disabled {
+  opacity: 0.5;
+}
+.dropzone.is-disabled input {
+  cursor: default;
+}
+.select-trigger[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.control-validation {
+  color: var(--danger);
+  font-size: var(--hint-size);
+}
+
+.tab-selection span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}

@@ -31,6 +31,7 @@ import {
 import { type DashboardStatsTimeframe, TomoriDashboardCore } from "./core";
 import { DashboardServiceError } from "./errors";
 import { DashboardMemoryService } from "./memoryService";
+import { DashboardLorebookService } from "./lorebookService";
 import { DashboardProviderService } from "./providerService";
 import { DashboardPersonaChatService } from "./personaChatService";
 import { DashboardPersonaService } from "./personaService";
@@ -49,7 +50,14 @@ import { renderDashboardHtml } from "./ui";
 
 const BASE_PATH = "/settings";
 const DISCORD_API_BASE = "https://discord.com/api/v10";
-const DASHBOARD_STATS_TIMEFRAMES = new Set<DashboardStatsTimeframe>(["today", "week", "month", "year", "all_time"]);
+const DASHBOARD_STATS_TIMEFRAMES = new Set<DashboardStatsTimeframe>([
+  "today",
+  "week",
+  "month",
+  "year",
+  "all_time",
+  "custom",
+]);
 
 type DashboardEnv = {
   Variables: { spriteContext: { snapshot: DashboardGuildSnapshot; personaId: number; actorDiscordId: string } };
@@ -64,6 +72,10 @@ const memoryImportSchema = z
   .strict();
 
 const dashboardAssets = {
+  "ui-kit.css": { path: "src/web/dashboard/assets/ui-kit.css", contentType: "text/css; charset=utf-8" },
+  "dashboard.css": { path: "src/web/dashboard/assets/dashboard.css", contentType: "text/css; charset=utf-8" },
+  "controls.css": { path: "src/web/dashboard/assets/controls.css", contentType: "text/css; charset=utf-8" },
+  "controls.js": { path: "src/web/dashboard/assets/controls.js", contentType: "application/javascript; charset=utf-8" },
   "app.css": { path: "src/web/dashboard/assets/app.css", contentType: "text/css; charset=utf-8" },
   "companion.css": { path: "src/web/dashboard/assets/companion.css", contentType: "text/css; charset=utf-8" },
   "app.js": { path: "src/web/dashboard/assets/app.js", contentType: "application/javascript; charset=utf-8" },
@@ -90,6 +102,32 @@ function jsonError(context: Context, error: DashboardServiceError | string, stat
     return context.json({ error: { code: error.code, message: error.message } }, error.status);
   }
   return context.json({ error: { code: "internal_error", message: error } }, status as 500);
+}
+
+function lorebookError(context: Context, error: unknown) {
+  const failure =
+    error instanceof DashboardServiceError
+      ? error
+      : new DashboardServiceError("lorebook_failed", 500, "Lorebook operation failed.");
+  const key =
+    failure.code === "lorebook_too_large"
+      ? "general.dashboard.lorebook_error_too_large"
+      : failure.code === "lorebook_limit"
+        ? "general.dashboard.lorebook_error_limit"
+        : failure.code === "lorebook_exists"
+          ? "general.dashboard.lorebook_error_exists"
+          : failure.code === "lorebook_missing"
+            ? "general.dashboard.lorebook_error_missing"
+            : failure.code === "lorebook_unavailable"
+              ? "general.dashboard.lorebook_error_unavailable"
+              : failure.code === "invalid_lorebook_channel"
+                ? "general.dashboard.lorebook_error_channel"
+                : failure.status === 403
+                  ? "general.dashboard.lorebook_error_forbidden"
+                  : failure.status === 422
+                    ? "general.dashboard.lorebook_error_invalid"
+                    : "general.dashboard.lorebook_error_failed";
+  return jsonError(context, new DashboardServiceError(failure.code, failure.status, localizer("en-US", key)));
 }
 
 function parsePositiveInt(value: string | undefined): number | null {
@@ -244,6 +282,7 @@ export function createDashboardApp(client: Client) {
   const sessions = new DashboardSessionStore();
   const core = new TomoriDashboardCore();
   const memories = new DashboardMemoryService(core);
+  const lorebooks = new DashboardLorebookService();
   const providers = new DashboardProviderService(core);
   const personas = new DashboardPersonaService(core, client);
   const sprites = new DashboardSpriteService();
@@ -275,7 +314,11 @@ export function createDashboardApp(client: Client) {
     context.header("Content-Type", asset.contentType);
     context.header(
       "Cache-Control",
-      assetName === "app.js" ||
+      assetName === "controls.js" ||
+        assetName === "ui-kit.css" ||
+        assetName === "dashboard.css" ||
+        assetName === "controls.css" ||
+        assetName === "app.js" ||
         assetName === "app.css" ||
         assetName === "companion.css" ||
         assetName === "navigation-icons.svg"
@@ -364,6 +407,129 @@ export function createDashboardApp(client: Client) {
       interfaceCopy: Object.fromEntries(
         [
           "overview_title",
+          "lorebooks",
+          "lorebook_library_hint",
+          "lorebook_selected",
+          "lorebook_choose",
+          "lorebook_entry_count",
+          "lorebook_entry_enabled",
+          "lorebook_edit_entry",
+          "lorebook_view_entry",
+          "lorebook_delete_entry",
+          "lorebook_entry_settings",
+          "lorebook_when_used",
+          "lorebook_additional_rules",
+          "lorebook_matching_hint",
+          "lorebook_constant_hint",
+          "lorebook_constant_no_keys",
+          "lorebook_rules_hint",
+          "lorebook_rules_always",
+          "lorebook_usage_disabled",
+          "lorebook_usage_zero",
+          "lorebook_usage_always",
+          "lorebook_usage_keys",
+          "lorebook_usage_any",
+          "lorebook_usage_not_all",
+          "lorebook_usage_none",
+          "lorebook_usage_all",
+          "lorebook_usage_chance",
+          "lorebook_scope_server",
+          "lorebook_scope_persona",
+          "lorebook_settings_hint",
+          "lorebook_collection_enabled_hint",
+          "lorebook_collection_paused",
+          "lorebook_save_name",
+          "lorebook_save_channels",
+          "lorebook_delete_title",
+          "lorebook_create_hint",
+          "lorebook_new_entry_hint",
+          "lorebook_title_hint",
+          "lorebook_content_hint",
+          "lorebook_new_keys_hint",
+          "lorebook_empty_hint",
+          "lorebook_no_books",
+          "lorebook_no_books_hint",
+          "lorebook_no_results",
+          "lorebook_search_hint",
+          "lorebook_transfer",
+          "lorebook_export_heading",
+          "lorebook_import_heading",
+          "lorebook_transfer_hint",
+          "lorebook_import_mode_hint",
+          "lorebook_placement_hint",
+          "lorebook_disabled",
+          "lorebook_secondary_hint",
+          "lorebook_scan_hint",
+          "lorebook_chance_hint",
+          "lorebook_order_hint",
+          "lorebook_logic_hint",
+          "lorebook_regex_hint",
+          "lorebook_receipt_inserted",
+          "lorebook_receipt_skipped",
+          "lorebook_receipt_unsupported",
+          "lorebook_receipt_ignored",
+          "lorebook_receipt_collapsed",
+          "lorebook_import_invalid",
+          "lorebook_serverwide",
+          "lorebook_eyebrow",
+          "lorebook_page_hint",
+          "fallback_primary",
+          "lorebook_persona",
+          "lorebook_loading",
+          "lorebook_failed",
+          "lorebook_empty",
+          "lorebook_search",
+          "lorebook_entries",
+          "lorebook_settings",
+          "lorebook_settings_title",
+          "lorebook_import_mode",
+          "lorebook_new_entry",
+          "lorebook_edit",
+          "lorebook_delete",
+          "lorebook_save",
+          "lorebook_cancel",
+          "lorebook_close",
+          "lorebook_title",
+          "lorebook_content",
+          "lorebook_keys",
+          "lorebook_keys_hint",
+          "lorebook_secondary",
+          "lorebook_logic",
+          "lorebook_scan",
+          "lorebook_chance",
+          "lorebook_order",
+          "lorebook_placement",
+          "lorebook_before",
+          "lorebook_after",
+          "lorebook_enabled",
+          "lorebook_constant",
+          "lorebook_channels",
+          "lorebook_channels_hint",
+          "lorebook_channels_dependency",
+          "lorebook_channel_settings_link",
+          "lorebook_new_book",
+          "lorebook_book_name",
+          "lorebook_rename",
+          "lorebook_delete_book",
+          "lorebook_delete_book_confirm",
+          "lorebook_delete_entry_confirm",
+          "lorebook_import",
+          "lorebook_import_new",
+          "lorebook_export",
+          "lorebook_export_hint",
+          "lorebook_append",
+          "lorebook_replace",
+          "lorebook_replace_confirm",
+          "lorebook_import_receipt",
+          "lorebook_saved",
+          "lorebook_deleted",
+          "lorebook_logic_any",
+          "lorebook_logic_not_all",
+          "lorebook_logic_not_any",
+          "lorebook_logic_all",
+          "lorebook_import_too_large",
+          "lorebook_missing_channels",
+          "lorebook_pending_channels",
           "overview_hint",
           "overview_personas",
           "overview_open_personas",
@@ -387,11 +553,15 @@ export function createDashboardApp(client: Client) {
           "stats_scope_hint",
           "stats_models",
           "stats_models_hint",
+          "stats_model_share",
+          "stats_server_activity",
+          "stats_server_activity_hint",
           "stats_model",
           "stats_input",
           "stats_output",
           "stats_total_tokens",
           "stats_cost",
+          "stats_cost_unavailable",
           "stats_other_models",
           "stats_tokens_hint",
           "stats_cost_hint",
@@ -414,6 +584,18 @@ export function createDashboardApp(client: Client) {
           "stats_month",
           "stats_year",
           "stats_all_time",
+          "stats_custom",
+          "stats_from",
+          "stats_through",
+          "stats_apply_range",
+          "stats_edit_range",
+          "stats_range_hint",
+          "stats_range_invalid",
+          "stats_most_active_persona",
+          "primary_models",
+          "connection_actions",
+          "lorebook_collection_actions",
+          "lorebook_book_actions",
           "stats_loading",
           "stats_error",
           "stats_retry",
@@ -424,6 +606,53 @@ export function createDashboardApp(client: Client) {
           "refresh_memories",
           "refresh_providers",
           "appearance_saved",
+          "design_title",
+          "design_hint",
+          "design_light",
+          "design_dark",
+          "design_glass",
+          "design_palette",
+          "design_color_mode",
+          "design_colorful",
+          "design_reduced",
+          "design_angle",
+          "design_angle_hint",
+          "design_spread",
+          "design_intensity",
+          "design_motion",
+          "design_motion_full",
+          "design_motion_subtle",
+          "design_motion_off",
+          "design_reset",
+          "control_adjust",
+          "control_drop_file",
+          "control_choose_file",
+          "control_file_invalid",
+          "control_file_ready",
+          "control_choose_section",
+          "control_close_dialog",
+          "control_sections",
+          "control_hold_delete",
+          "control_keep_holding",
+          "control_hold_confirmed",
+          "persona_add_attribute",
+          "persona_add_dialogue",
+          "persona_attribute",
+          "persona_attribute_public",
+          "persona_dialogue_user",
+          "persona_cancel",
+          "persona_save",
+          "persona_edit",
+          "persona_delete_entry",
+          "persona_choose",
+          "persona_search",
+          "persona_delete_attribute_detail",
+          "persona_saved",
+          "lorebook_back_entries",
+          "lorebook_select_entry",
+          "lorebook_edit_book",
+          "lorebook_title_required",
+          "lorebook_title_duplicate",
           "appearance_session_only",
           "sprites",
           "sprites_hint",
@@ -459,6 +688,10 @@ export function createDashboardApp(client: Client) {
           "provider_access",
           "provider_models",
           "connections",
+          "connection_models_hint",
+          "connection_credentials_hint",
+          "connection_available_models_hint",
+          "connections_hint",
           "add_provider",
           "connection_empty",
           "connection_select",
@@ -532,6 +765,23 @@ export function createDashboardApp(client: Client) {
           "fallback_randomizer_hint",
           "fallback_unavailable",
           "fallback_saved",
+          "switch_server",
+          "server",
+          "account",
+          "log_out",
+          "sprite_actions",
+          "persona_delete_title",
+          "persona_delete_description",
+          "lorebook_partial_save",
+          "fallback_chain_save_failed",
+          "fallback_server_save_failed",
+          "fallback_chain_saved",
+          "fallback_server_saved",
+          "connection_registered_models",
+          "connection_remove_registration",
+          "connection_remove_registration_title",
+          "connection_remove_registration_hint",
+          "connection_registration_removed",
           "endpoint_features_hint",
           "endpoint_tools",
           "endpoint_tools_hint",
@@ -662,9 +912,26 @@ export function createDashboardApp(client: Client) {
         new DashboardServiceError("invalid_timeframe", 422, "Choose a valid statistics timeframe."),
       );
     }
+    let range: { from: string; through: string } | undefined;
+    if (requested === "custom") {
+      const from = context.req.query("from") ?? "";
+      const through = context.req.query("through") ?? "";
+      const validDay = (day: string) => {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day.startsWith("0000-")) return false;
+        const parsed = new Date(`${day}T00:00:00.000Z`);
+        return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day;
+      };
+      if (!validDay(from) || !validDay(through) || from > through || through > new Date().toISOString().slice(0, 10)) {
+        return jsonError(
+          context,
+          new DashboardServiceError("invalid_stats_range", 400, "Choose a valid statistics range."),
+        );
+      }
+      range = { from, through };
+    }
     try {
       return context.json({
-        stats: await core.loadServerStats(result.snapshot, requested as DashboardStatsTimeframe),
+        stats: await core.loadServerStats(result.snapshot, requested as DashboardStatsTimeframe, range),
       });
     } catch (error) {
       await log.error("Dashboard failed to load server statistics", error);
@@ -903,6 +1170,166 @@ export function createDashboardApp(client: Client) {
     }
     return context.json({ inserted, skipped, invalid, failed, issues });
   });
+
+  const lorebookRoot = `${BASE_PATH}/api/guilds/:guildId/lorebooks`;
+  app.use(
+    `${lorebookRoot}/import`,
+    bodyLimit({
+      maxSize: 2 * 1024 * 1024,
+      onError: (context) =>
+        lorebookError(context, new DashboardServiceError("lorebook_too_large", 413, "Lorebook import is too large.")),
+    }),
+  );
+
+  app.get(lorebookRoot, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    const raw = context.req.query("lineageId");
+    const book = context.req.query("bookId");
+    if (!raw || !/^\d+$/.test(raw) || (book !== undefined && !/^[1-9]\d*$/.test(book)))
+      return lorebookError(context, new DashboardServiceError("invalid_lorebook", 422, "Invalid lorebook scope."));
+    try {
+      return context.json(
+        await lorebooks.list(result.snapshot, Number(raw), book === undefined ? undefined : Number(book)),
+      );
+    } catch (error) {
+      if (!(error instanceof DashboardServiceError))
+        await log.error("Dashboard lorebook load failed", error, undefined, { persist: false });
+      return lorebookError(context, error);
+    }
+  });
+
+  app.get(`${lorebookRoot}/export`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    const raw = context.req.query("lineageId");
+    const book = context.req.query("bookId");
+    if (!raw || !/^\d+$/.test(raw) || (book !== undefined && !/^[1-9]\d*$/.test(book)))
+      return lorebookError(context, new DashboardServiceError("invalid_lorebook", 422, "Invalid lorebook scope."));
+    try {
+      return context.json(
+        await lorebooks.export(result.snapshot, Number(raw), book === undefined ? undefined : Number(book)),
+      );
+    } catch (error) {
+      if (!(error instanceof DashboardServiceError))
+        await log.error("Dashboard lorebook export failed", error, undefined, { persist: false });
+      return lorebookError(context, error);
+    }
+  });
+
+  app.on(
+    ["POST", "PATCH", "DELETE"],
+    [
+      `${lorebookRoot}/books`,
+      `${lorebookRoot}/books/:bookId`,
+      `${lorebookRoot}/entries`,
+      `${lorebookRoot}/entries/:entryId`,
+      `${lorebookRoot}/entries/:entryId/activation`,
+      `${lorebookRoot}/entries/:entryId/flags`,
+      `${lorebookRoot}/entries/:entryId/content`,
+      `${lorebookRoot}/entries/:entryId/keys`,
+      `${lorebookRoot}/entries/:entryId/channels`,
+      `${lorebookRoot}/import`,
+    ],
+    async (context) => {
+      const result = await requireGuildContext(context, client, core, sessions, config, true);
+      if (result instanceof Response) return result;
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+      const path = context.req.path;
+      const method = context.req.method;
+      const rawBook = context.req.param("bookId");
+      const rawEntry = context.req.param("entryId");
+      if ((rawBook && !/^[1-9]\d*$/.test(rawBook)) || (rawEntry && !/^[1-9]\d*$/.test(rawEntry)))
+        return lorebookError(context, new DashboardServiceError("invalid_lorebook", 422, "Invalid lorebook request."));
+      const allowed = new Set(client.guilds.cache.get(result.guild.id)?.channels.cache.keys() ?? []);
+      try {
+        if (path.endsWith("/import") && method === "POST")
+          return context.json(
+            await lorebooks.transfer(
+              result.actor,
+              result.snapshot,
+              await context.req.json().catch(() => null),
+              allowed,
+            ),
+          );
+        if (path.endsWith("/books") && method === "POST")
+          return context.json(
+            await lorebooks.book(
+              result.actor,
+              result.snapshot,
+              null,
+              "create",
+              await context.req.json().catch(() => null),
+              allowed,
+            ),
+          );
+        if (rawBook && (method === "PATCH" || method === "DELETE"))
+          return context.json(
+            await lorebooks.book(
+              result.actor,
+              result.snapshot,
+              Number(rawBook),
+              method === "PATCH" ? "edit" : "delete",
+              method === "PATCH" ? await context.req.json().catch(() => null) : null,
+              allowed,
+            ),
+          );
+        if (path.endsWith("/entries") && method === "POST")
+          return context.json(
+            await lorebooks.entry(
+              result.actor,
+              result.snapshot,
+              null,
+              "add",
+              await context.req.json().catch(() => null),
+              allowed,
+            ),
+          );
+        if (
+          rawEntry &&
+          (method === "PATCH" ||
+            (method === "DELETE" &&
+              !path.endsWith("/activation") &&
+              !path.endsWith("/flags") &&
+              !path.endsWith("/content") &&
+              !path.endsWith("/keys") &&
+              !path.endsWith("/channels")))
+        ) {
+          const raw = context.req.query("lineageId");
+          const book = context.req.query("bookId");
+          const payload =
+            method === "DELETE"
+              ? raw && /^\d+$/.test(raw) && (!book || /^[1-9]\d*$/.test(book))
+                ? { lineageId: Number(raw), ...(book ? { bookId: Number(book) } : {}) }
+                : null
+              : await context.req.json().catch(() => null);
+          const action =
+            method === "DELETE"
+              ? "delete"
+              : path.endsWith("/activation")
+                ? "activation"
+                : path.endsWith("/flags")
+                  ? "flags"
+                  : path.endsWith("/content")
+                    ? "content"
+                    : path.endsWith("/keys")
+                      ? "keys"
+                      : path.endsWith("/channels")
+                        ? "channels"
+                        : "edit";
+          return context.json(
+            await lorebooks.entry(result.actor, result.snapshot, Number(rawEntry), action, payload, allowed),
+          );
+        }
+        return context.notFound();
+      } catch (error) {
+        if (!(error instanceof DashboardServiceError))
+          await log.error("Dashboard lorebook update failed", error, undefined, { persist: false });
+        return lorebookError(context, error);
+      }
+    },
+  );
 
   app.get(`${BASE_PATH}/api/guilds/:guildId/providers/personal`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config);

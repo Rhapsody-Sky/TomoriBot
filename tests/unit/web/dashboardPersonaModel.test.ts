@@ -41,6 +41,7 @@ describe("dashboard persona text model", () => {
     const load = runInNewContext(`let personaModelLoadVersion = 0; ${source}; loadPersonaTextModel`, {
       state,
       document: { querySelector: () => target },
+      enhanceDashboard: () => {},
       api: () => new Promise((resolve) => pending.push(resolve)),
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,

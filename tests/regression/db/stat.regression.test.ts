@@ -703,6 +703,28 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("StatRepository — regression", () => {
       { date: dayOffset(2), inputTokens: 300, outputTokens: 30 },
       { date: dayOffset(0), inputTokens: 0, outputTokens: 20 },
     ]);
+    const range = { serverId: refs.serverId, from: dayOffset(2), through: dayOffset(2) };
+    expect(await statRepository.getMetricTotal({ ...range, metric: "tokens_in" })).toBe(300);
+    expect((await statRepository.getTokenTotals(range)).outputTokens).toBe(30);
+    expect(
+      (await statRepository.getMetricKeyBreakdown({ ...range, metric: "tokens_in" })).reduce(
+        (sum, row) => sum + row.count,
+        0,
+      ),
+    ).toBe(300);
+    expect(
+      (await statRepository.getModelCostBreakdown(range)).reduce(
+        (sum, row) => sum + row.inputTokens + row.outputTokens,
+        0,
+      ),
+    ).toBe(330);
+    expect((await statRepository.getServerDailyTokenUsage(range))?.length).toBe(1);
+    expect(
+      (await statRepository.getServerDailyModelTokenUsage(range))?.reduce(
+        (sum, row) => sum + row.inputTokens + row.outputTokens,
+        0,
+      ),
+    ).toBe(330);
     const history = await statRepository.getServerDailyTokenUsage({ serverId: refs.serverId });
     const modelHistory = await statRepository.getServerDailyModelTokenUsage({
       serverId: refs.serverId,

@@ -19,6 +19,7 @@ Every shared server member can:
 - manage global personal memories (lineage `0`) from the personal workspace;
 - open a persona workspace that groups their private persona memories with the
   server memories they taught for that same lineage;
+- read serverwide lorebook collections and the selected persona's lorebook entries;
 - import and export personal memory scopes;
 - store encrypted personal provider credentials, choose active capabilities,
   and manage personal custom endpoints and scoped OpenRouter models.
@@ -26,6 +27,8 @@ Every shared server member can:
 Members with Manage Server or Administrator can additionally:
 
 - view and manage all server memories;
+- manage lorebook collections, entries, activation settings, and channel scopes,
+  and import or export SillyTavern JSON;
 - create and import alter personas, change or remove their avatars, and delete
   alter personas;
 - edit persona identity, trigger words, prompt, attributes and visibility,
@@ -52,24 +55,63 @@ comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
 
 ## Settings Navigation
 
-Overview lists every installed persona with a link to its workspace. Statistics
+The dashboard uses the shared UI kit in `assets/ui-kit.css`. Application layout
+adapters live in `assets/dashboard.css`; `assets/controls.js` and
+`assets/controls.css` connect kit controls to native form fields. The legacy
+`app.css` and `companion.css` are not loaded. The control enhancer runs after rendering a workspace or
+replacing an asynchronous section. It preserves native field names and values
+for the existing form handlers; it does not observe the whole document.
+Appearance preferences stay in browser storage, including separate light and
+dark lighting values. They never change server settings.
+
+Persona attributes, sample dialogues and sprites have separate read and edit
+states. Cancel discards the entry draft; Save uses the existing persona API.
+Lorebooks use a book list, entry list and selected-entry editor. Content,
+matching rules and activation settings retain their individual save operations.
+
+Overview summarizes the persona count and the most active persona for the selected
+period. A searchable picker opens individual persona workspaces. Statistics
 stay scoped to the selected server and period. Model usage separates input and
-output tokens, shows each model's share of the server total, and groups models
-outside the top five as Other models. Costs use the repository's catalog-price
-estimate, with missing prices counted as zero. They are not provider invoices.
+output tokens and groups models outside the top five as Other models when all
+models are selected. The model filter applies to token totals, chart, shares and
+exact-value tables. Server activity counts remain serverwide and are labelled
+separately. Costs use the repository's catalog-price estimate, with missing
+prices counted as zero. A selected model outside the top five has no available
+cost estimate. Costs are not provider invoices.
 The usage chart reads daily token totals through `StatRepository`, filling days
 without counters with zero. Periods longer than 62 days are displayed as monthly
 totals; the highest-usage day remains visible separately. The model filter uses
-the token counters' model keys and applies only to the chart. UTC day buckets cannot
+the token counters' model keys. UTC day buckets cannot
 provide an hourly breakdown. Hovering, focusing or selecting a bar shows its
 values, which are also available in an expandable table. Changing the period
-refreshes only the statistics section.
+refreshes only the statistics section. Custom ranges include both selected UTC
+dates and apply the same bounds to totals, rankings, costs and token history.
+Editing or cancelling a range leaves the active period unchanged until Apply.
 
 My settings groups profile and appearance, privacy and memory, and personal
 conversation preferences into separately saved panels. Personal provider
 fallback belongs to My providers; server BYOK policy belongs to Server providers.
+Both provider pages use Connections, Model routing, and Fallbacks tabs, with the
+same mobile category menu as Server settings. Each scope keeps its selected tab.
+Personal model choices share one save action. Only changed choices are sent to
+the existing per-capability operation, which enables those capabilities. If a
+request fails, retrying skips choices already saved by that action.
 Persona-specific naming stays under Personas > My preferences and affects only
 the signed-in member. Administrative persona settings remain permission-gated.
+Lorebooks opens serverwide collections; Personas > Lorebook opens the selected
+persona lineage. Members can read both scopes, but only server managers can write.
+The collection list shows each book and its entry count beside the selected
+book's entries. Collection settings have their own dialog. Entry dialogs separate
+content, matching words, and additional rules; no editing forms appear in the
+browsing list. Creation and import also use dialogs. Closing an entry dialog
+retains its draft, and successful saves return focus to its launch button.
+Content-only edits preserve activation settings, including Always on. Keyword
+edits use the shared Discord operation, which enables Always on for an empty list.
+Narrow screens place the collection list above the entries. Compact tab menus
+and the mobile navigation drawer move the existing navigation elements rather
+than maintaining a second set of links.
+Channel-scope help links open the Memory settings group and focus Channel-scoped
+memory on the selected server.
 Persona settings and Sprites share the same test-chat history. Sending or
 resetting the chat leaves the editor inputs intact. Save sprite descriptions
 before testing them; the model uses the saved configuration.
@@ -122,11 +164,17 @@ Repository writes include exact owner, server, and lineage guards. The
 dashboard never relies only on a row ID supplied by the browser.
 
 Server memories no longer accept keyword tags. Upstream migrations move tagged
-server memories into lorebooks; personal memory tags are unchanged. Lorebook
-management remains available through `/memories` in Discord. The dashboard does
-not list or edit lorebook entries. Server-memory import and export are disabled
-in the dashboard because its transfer format does not preserve channel scopes
+server memories into lorebooks; personal memory tags are unchanged. Server-memory
+import and export are disabled in the dashboard because its transfer format does not preserve channel scopes
 and unresolved legacy channel restrictions. Use Discord for those transfers.
+
+Lorebook entry edits use the shared Discord operations. Collection writes use the
+owning lorebook repository, with server, persona, book, and channel checks at the
+dashboard boundary. Content edits preserve imported placement and unchanged legacy
+channel restrictions. Imports use the shared converter and atomic repository
+append or replacement, and return conversion warnings. SillyTavern exports carry
+entry content and activation settings, not Discord channel restrictions or book
+settings; they are not full server backups.
 
 Short-term-memory settings are server configuration, not access to members'
 private memory rows. Disabling automatic STM updates stops the update tool and
@@ -189,7 +237,7 @@ The integration is isolated under `src/web`:
   Browser uploads pass bounded `File` objects; Discord attachments retain their
   safe-download path. ZIP import reports created, replaced and failed entries;
   export reports unreadable images that were skipped.
-- `assets/app.js` and `assets/app.css` contain the dependency-free browser UI.
+- `assets/app.js` renders the dependency-free browser UI using the shared kit.
 
 There is no dashboard raw-SQL exemption. `bun run audit-sql` must continue to
 report no SQL below `src/web`.

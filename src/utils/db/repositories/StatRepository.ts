@@ -93,9 +93,9 @@ function windowFloor(from?: Date | string): string {
   return from;
 }
 
-/** Optional time window: rows with `bucket >= from` (omit for all-time). */
 interface StatWindow {
   from?: Date | string;
+  through?: Date | string;
 }
 
 /** One persona's message share for a user, ordered by count desc. */
@@ -830,6 +830,7 @@ class StatRepository implements IRepository<null> {
           AND (${args.serverId ?? null}::int IS NULL OR sc.server_id = ${args.serverId ?? null})
           AND (${args.lineageId ?? null}::bigint IS NULL OR sc.persona_lineage_id = ${args.lineageId ?? null})
           AND sc.bucket >= ${from}::date
+          AND sc.bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
       `;
       return Number(row?.cost ?? 0);
     } catch (error) {
@@ -1026,6 +1027,7 @@ class StatRepository implements IRepository<null> {
           AND (${args.serverId ?? null}::int IS NULL OR server_id = ${args.serverId ?? null})
           AND (${args.lineageId ?? null}::bigint IS NULL OR persona_lineage_id = ${args.lineageId ?? null})
           AND bucket >= ${from}::date
+          AND bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
         GROUP BY metric_key
         ORDER BY total DESC
         LIMIT ${limit}
@@ -1056,6 +1058,7 @@ class StatRepository implements IRepository<null> {
           AND (${args.serverId ?? null}::int IS NULL OR server_id = ${args.serverId ?? null})
           AND (${args.lineageId ?? null}::bigint IS NULL OR persona_lineage_id = ${args.lineageId ?? null})
           AND bucket >= ${from}::date
+          AND bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
       `;
       return Number(row?.total ?? 0);
     } catch (error) {
@@ -1139,6 +1142,7 @@ class StatRepository implements IRepository<null> {
         WHERE server_id = ${args.serverId}
           AND metric IN ('tokens_in', 'tokens_out')
           AND bucket >= ${windowFloor(args.from)}::date
+          AND bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
         GROUP BY bucket
         ORDER BY bucket
       `;
@@ -1166,6 +1170,7 @@ class StatRepository implements IRepository<null> {
         FROM stat_counters
         WHERE server_id = ${args.serverId} AND metric IN ('tokens_in', 'tokens_out')
           AND bucket >= ${windowFloor(args.from)}::date
+          AND bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
         GROUP BY bucket, metric_key ORDER BY bucket, metric_key
       `;
       return rows.map((row) => ({
@@ -1430,6 +1435,7 @@ class StatRepository implements IRepository<null> {
         WHERE metric = 'message_sent'
           AND server_id = ${args.serverId}
           AND bucket >= ${from}::date
+          AND bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
         GROUP BY persona_lineage_id
         ORDER BY total DESC
         LIMIT ${limit}
@@ -1674,6 +1680,7 @@ class StatRepository implements IRepository<null> {
           AND (${args.serverId ?? null}::int IS NULL OR sc.server_id = ${args.serverId ?? null})
           AND (${args.lineageId ?? null}::bigint IS NULL OR sc.persona_lineage_id = ${args.lineageId ?? null})
           AND sc.bucket >= ${from}::date
+          AND sc.bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
         GROUP BY sc.metric_key
         ORDER BY (
           COALESCE(SUM(CASE WHEN sc.metric = 'tokens_in'  THEN sc.count ELSE 0 END), 0)

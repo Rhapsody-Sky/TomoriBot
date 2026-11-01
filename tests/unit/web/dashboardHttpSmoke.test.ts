@@ -5,6 +5,8 @@ import ts from "typescript";
 import type { Client } from "discord.js";
 import { createDashboardApp } from "@/web/dashboard/server";
 import { TomoriDashboardCore } from "@/web/dashboard/core";
+import { DashboardLorebookService } from "@/web/dashboard/lorebookService";
+import { DashboardServiceError } from "@/web/dashboard/errors";
 import { DashboardSessionStore, SESSION_COOKIE } from "@/web/dashboard/auth";
 import { initializeLocalizer } from "@/utils/text/localizer";
 import { createServerConfig, createUserRow } from "../../helpers/fixtures";
@@ -32,7 +34,9 @@ describe("dashboard HTTP shell", () => {
     expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(html).toContain("TomoriBot Control Room");
     expect(html).toContain("/settings/assets/tomori_companion_logo.svg");
-    expect(html).toContain("/settings/assets/companion.css");
+    expect(html).toContain("/settings/assets/ui-kit.css");
+    expect(html).not.toContain("/settings/assets/companion.css");
+    expect(html).not.toContain("/settings/assets/app.css");
     expect(html).toContain("/settings/assets/app.js");
   });
 
@@ -67,8 +71,6 @@ describe("dashboard HTTP shell", () => {
   it("ships the persona workspace and checkbox-based multi selections", async () => {
     const response = await app.request("/settings/assets/app.js");
     const source = await response.text();
-    const css = await (await app.request("/settings/assets/app.css")).text();
-    const companionCss = await (await app.request("/settings/assets/companion.css")).text();
 
     expect(source).toContain('data-persona-panel="personal"');
     expect(source).toContain('data-persona-panel="server"');
@@ -81,31 +83,11 @@ describe("dashboard HTTP shell", () => {
     expect(source).not.toContain("Core identity, behavior, speaking style, and boundaries");
     expect(source).toContain("data-persona-create-open");
     expect(source).toContain("data-persona-import-open");
-    expect(source).toContain("data-persona-attributes");
+    expect(source).toContain("data-persona-entry-form");
     expect(source).toContain('id="persona-test-chat-form"');
     expect(source).toContain("event.ctrlKey");
     expect(source).toContain("input.form?.requestSubmit()");
-    expect(css).toContain(".test-chat-compose .button");
-    expect(css).toContain("justify-self: end");
-    expect(css).toContain(".persona-test-panel {\n  position: sticky;\n  top: 0;");
-    expect(css).toContain("height: calc(100dvh - 94px)");
-    expect(css).toContain(".test-chat-messages");
-    expect(css).toContain(".test-chat-assistant");
-    expect(css).toContain("background: var(--primary-soft)");
-    expect(css).toContain(".test-chat-compose textarea");
-    expect(css).toContain("field-sizing: content");
-    expect(css).toContain(".persona-appearance-grid");
-    expect(css).toContain(".avatar-editor-showcase .persona-appearance-avatar");
-    expect(css).toContain("height: clamp(180px, 20vw, 260px)");
-    expect(css).toContain(".memory-item:hover");
-    expect(css).toContain("background: var(--surface-raised)");
-    expect(css).toContain("background: var(--surface-solid)");
-    expect(companionCss).toContain(".switch-row input:checked + i::after");
-    expect(companionCss).toContain("transform: translateX(21px)");
-    expect(source).toContain('class="switch-row"><span><strong>');
     expect(source).toContain('role="switch"');
-    expect(source).toContain('"notice-switches"');
-    expect(companionCss).toContain(".nav-stack {\n  gap: 3px;\n  overflow-x: hidden;\n  overflow-y: auto;");
     expect(source).toContain("data-avatar-fallback");
     expect(source).toContain("'s memories about you");
     expect(source).toContain("Private facts about you that are only available to this persona when you are around.");
@@ -121,8 +103,7 @@ describe("dashboard HTTP shell", () => {
     expect(source).toContain("updateServerStatsSection()");
     expect(source).toContain(`aria-busy="\${state.serverStatsLoading}"`);
     expect(source).toContain("fieldLabel(field.label, field.hint)");
-    expect(source).toContain("field-hint");
-    expect(source).toContain('class="check-option"');
+    expect(source).toContain('class="choice"');
     expect(source).toContain('label: "Models & sampling"');
     expect(source).toContain('title: "Context"');
     expect(source).toContain('title: "Triggers & cooldowns"');
@@ -138,11 +119,8 @@ describe("dashboard HTTP shell", () => {
     expect(source).toContain('id="server-picker-dialog"');
     expect(source).toContain("data-guild-select");
     expect(source).not.toContain('id="guild-switcher"');
-    expect(source).toContain("data-stats-timeframe");
-    expect(source).toContain("/stats?timeframe=");
-    expect(css).toContain(".server-picker-grid");
-    expect(css).toContain("@keyframes server-choice-enter");
-    expect(css).toContain(".stats-summary-grid");
+    expect(source).toContain("data-history-timeframe");
+    expect(source).toContain("/stats?");
   });
 
   it("rejects unauthenticated API access", async () => {
@@ -216,7 +194,7 @@ describe("dashboard HTTP shell", () => {
     const ast = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const declarations: string[] = [];
     const walk = (node: ts.Node) => {
-      if (ts.isFunctionDeclaration(node) && node.name?.text === "renderModelUsage")
+      if (ts.isFunctionDeclaration(node) && ["renderModelUsage", "statsModelUsage"].includes(node.name?.text ?? ""))
         declarations.push(node.getText(ast));
       if (ts.isVariableDeclaration(node) && ["escapeHtml", "formatUsd"].includes(node.name.getText(ast))) {
         declarations.push(`const ${node.getText(ast)};`);
@@ -227,7 +205,7 @@ describe("dashboard HTTP shell", () => {
     const render = runInNewContext(`${declarations.join("\n")}\nrenderModelUsage`, {
       Intl,
       ui: (key: string) => localizedCopy("en-US", `general.dashboard.interface_${key}`),
-    }) as (stats: DashboardServerStats) => string;
+    }) as (stats: DashboardServerStats, selectedModel?: string | null) => string;
     const stats: DashboardServerStats = {
       timeframe: "all_time",
       history: null,
@@ -276,7 +254,28 @@ describe("dashboard HTTP shell", () => {
     expect(rows[6]).toContain(localizedCopy("en-US", "general.dashboard.interface_stats_other_models"));
     expect(rows[6]).toContain("330");
     expect(rows[7]).toContain(new Intl.NumberFormat().format(1100));
-    expect(html).toContain('value="20"');
+    expect(html).toContain('data-share-value="20"');
+    const shareCells: string[] = [];
+    let modelNameShares = 0;
+    await new HTMLRewriter()
+      .on("tbody td.model-share-cell .share-track span", {
+        element(element) {
+          shareCells.push(element.getAttribute("data-share-value") ?? "");
+        },
+      })
+      .on("tbody th .share-track, meter", {
+        element() {
+          modelNameShares += 1;
+        },
+      })
+      .transform(new Response(html))
+      .text();
+    const expectedShares = [20, 15, 14, 11, 10, 30];
+    expect(shareCells).toHaveLength(expectedShares.length);
+    shareCells.forEach((share, index) => {
+      expect(Number(share)).toBeCloseTo(expectedShares[index]);
+    });
+    expect(modelNameShares).toBe(0);
     expect(html).not.toContain('style="');
     const complete = render({ ...stats, totals: { ...stats.totals, inputTokens: 700, outputTokens: 70 } });
     expect(complete).not.toContain(localizedCopy("en-US", "general.dashboard.interface_stats_other_models"));
@@ -286,6 +285,35 @@ describe("dashboard HTTP shell", () => {
     expect(
       render({ ...stats, models: [{ ...stats.models[0], name: '<img src=x onerror="alert(1)">' }] }),
     ).not.toContain("<img");
+    const filteredStats: DashboardServerStats = {
+      ...stats,
+      history: {
+        from: "2024-03-01",
+        through: "2024-03-02",
+        days: [],
+        models: [
+          { date: "2024-03-01", model: "sample/model-f", inputTokens: 20, outputTokens: 4 },
+          { date: "2024-03-02", model: "sample/model-f", inputTokens: 30, outputTokens: 6 },
+          { date: "2024-03-01", model: "sample/model-a", inputTokens: 200, outputTokens: 20 },
+        ],
+      },
+    };
+    const filtered = render(filteredStats, "sample/model-f");
+    expect(filtered).toContain("sample/model-f");
+    expect(filtered).not.toContain("sample/model-a");
+    expect(filtered).toContain('data-share-value="100"');
+    const filteredCells: string[] = [];
+    await new HTMLRewriter()
+      .on("tbody td:not(.model-share-cell)", {
+        text(chunk) {
+          if (chunk.text.trim()) filteredCells.push(chunk.text.trim());
+        },
+      })
+      .transform(new Response(filtered))
+      .text();
+    expect(filteredCells).toEqual(["50", "10", "60", "-"]);
+    expect(filtered).toContain(localizedCopy("en-US", "general.dashboard.interface_stats_cost_unavailable"));
+    expect(filtered).not.toContain('style="');
   });
 });
 
@@ -346,6 +374,25 @@ describe("dashboard memory and naming authorization", () => {
     };
     return { app, headers, session, namingWrite, categoryWrite };
   }
+
+  it("validates custom statistics dates and forwards the inclusive range", async () => {
+    const { app, headers } = setup();
+    const load = spyOn(TomoriDashboardCore.prototype, "loadServerStats").mockResolvedValue({} as DashboardServerStats);
+    const base = "/settings/api/guilds/123456789012345678/stats?timeframe=custom";
+    for (const query of [
+      "",
+      "&from=2024-02-30&through=2024-03-01",
+      "&from=2024-03-01&through=2024-02-29",
+      "&from=2024-01-01&through=9999-01-01",
+      "&from=2024-1-01&through=2024-02-01",
+    ]) {
+      expect((await app.request(base + query, { headers })).status).toBe(400);
+    }
+    expect(load).not.toHaveBeenCalled();
+    const response = await app.request(`${base}&from=2024-02-29&through=2024-03-01`, { headers });
+    expect(response.status).toBe(200);
+    expect(load).toHaveBeenCalledWith(expect.anything(), "custom", { from: "2024-02-29", through: "2024-03-01" });
+  });
 
   it("reports duplicate, invalid and failed import entries without hiding partial writes or exposing errors", async () => {
     const { app, headers } = setup();
@@ -481,6 +528,91 @@ describe("dashboard memory and naming authorization", () => {
     }
     expect(list).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
+  });
+
+  it("allows lorebook reads and restricts writes to administrators with CSRF", async () => {
+    const path = "/settings/api/guilds/123456789012345678/lorebooks";
+    const member = setup();
+    const list = spyOn(DashboardLorebookService.prototype, "list").mockResolvedValue({ books: [], entries: [] });
+    const write = spyOn(DashboardLorebookService.prototype, "book").mockResolvedValue({ status: "success", bookId: 2 });
+    expect((await member.app.request(`${path}?lineageId=0`, { headers: member.headers })).status).toBe(200);
+    expect(
+      (
+        await member.app.request(`${path}/books`, {
+          method: "POST",
+          headers: member.headers,
+          body: JSON.stringify({ name: "World" }),
+        })
+      ).status,
+    ).toBe(403);
+    const admin = setup(true);
+    const request = (csrf: string) =>
+      admin.app.request(`${path}/books`, {
+        method: "POST",
+        headers: { ...admin.headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify({ name: "World" }),
+      });
+    expect((await request("invalid")).status).toBe(403);
+    expect((await request(admin.session.csrfToken)).status).toBe(200);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes lorebook content edits only for administrators with CSRF", async () => {
+    const path = "/settings/api/guilds/123456789012345678/lorebooks/entries/5/content";
+    const body = { lineageId: 0, bookId: 2, title: "Place", content: "Details" };
+    const member = setup();
+    const write = spyOn(DashboardLorebookService.prototype, "entry").mockResolvedValue({ status: "success" });
+    expect(
+      (await member.app.request(path, { method: "PATCH", headers: member.headers, body: JSON.stringify(body) })).status,
+    ).toBe(403);
+    const admin = setup(true);
+    const request = (csrf: string) =>
+      admin.app.request(path, {
+        method: "PATCH",
+        headers: { ...admin.headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify(body),
+      });
+    expect((await request("invalid")).status).toBe(403);
+    expect((await request(admin.session.csrfToken)).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(expect.anything(), expect.anything(), 5, "content", body, expect.any(Set));
+    const keys = { lineageId: 0, bookId: 2, keys: [] };
+    expect(
+      (
+        await admin.app.request(path.replace(/content$/, "keys"), {
+          method: "PATCH",
+          headers: admin.headers,
+          body: JSON.stringify(keys),
+        })
+      ).status,
+    ).toBe(200);
+    expect(write).toHaveBeenCalledWith(expect.anything(), expect.anything(), 5, "keys", keys, expect.any(Set));
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it("localizes lorebook failures without exposing internal error text", async () => {
+    const { app, headers } = setup(true);
+    const list = spyOn(DashboardLorebookService.prototype, "list");
+    for (const [code, status, suffix] of [
+      ["lorebook_too_large", 413, "too_large"],
+      ["lorebook_limit", 422, "limit"],
+      ["lorebook_exists", 422, "exists"],
+      ["lorebook_missing", 404, "missing"],
+      ["lorebook_unavailable", 503, "unavailable"],
+      ["invalid_lorebook_channel", 422, "channel"],
+      ["forbidden", 403, "forbidden"],
+      ["invalid_lorebook", 422, "invalid"],
+      ["lorebook_failed", 500, "failed"],
+    ] as const) {
+      list.mockRejectedValueOnce(new DashboardServiceError(code, status, "Internal detail"));
+      const response = await app.request("/settings/api/guilds/123456789012345678/lorebooks?lineageId=0", {
+        headers,
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({
+        error: { code, message: localizedCopy("en-US", `general.dashboard.lorebook_error_${suffix}`) },
+      });
+    }
   });
 
   it("restricts persona model overrides to administrators with CSRF", async () => {

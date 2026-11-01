@@ -8,10 +8,11 @@ export function renderDashboardHtml(): string {
     <meta name="theme-color" content="#16131c">
     <title>TomoriBot Control Room</title>
     <link rel="icon" href="/settings/assets/tomori_companion_logo.svg">
-    <link rel="stylesheet" href="/settings/assets/app.css">
-    <link rel="stylesheet" href="/settings/assets/companion.css">
+    <link rel="stylesheet" href="/settings/assets/ui-kit.css?v=3">
+    <link rel="stylesheet" href="/settings/assets/dashboard.css?v=3">
+    <link rel="stylesheet" href="/settings/assets/controls.css?v=3">
   </head>
-  <body data-palette="tomori" data-theme="dark" data-motion="subtle" data-halftone="on">
+  <body data-palette="tomori" data-theme="dark" data-motion="full" data-surface="glass" data-color-mode="colorful" data-halftone="on">
     <div class="bg-field" aria-hidden="true">
       <div class="bg-halftone"></div>
       <div class="bg-halftone warm"></div>
@@ -29,10 +30,11 @@ export function renderDashboardHtml(): string {
     <div id="app" class="app-shell">
       <div class="boot-screen">
         <img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="boot-logo">
-        <div class="boot-line"></div>
+        <div class="loading"></div>
       </div>
     </div>
-    <div id="toast-region" class="toast-region"></div>
+    <div id="toast-region" class="toasts" role="status"></div>
+    <script src="/settings/assets/controls.js" defer></script>
     <script src="/settings/assets/app.js" defer></script>
   </body>
 </html>`;

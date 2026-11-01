@@ -154,7 +154,7 @@ export interface DashboardServerModelWorkspace {
   selected: Record<DashboardServerModelKind, number | null>;
 }
 
-export type DashboardStatsTimeframe = "today" | "week" | "month" | "year" | "all_time";
+export type DashboardStatsTimeframe = "today" | "week" | "month" | "year" | "all_time" | "custom";
 
 export interface DashboardServerStats {
   timeframe: DashboardStatsTimeframe;
@@ -773,10 +773,12 @@ export class TomoriDashboardCore {
   async loadServerStats(
     snapshot: DashboardGuildSnapshot,
     timeframe: DashboardStatsTimeframe,
+    range?: { from: string; through: string },
   ): Promise<DashboardServerStats> {
     await statRepository.flush();
-    const from = resolveStatsWindow(timeframe);
-    const scope = { serverId: snapshot.serverId, from };
+    const from = range?.from ?? resolveStatsWindow(timeframe);
+    const through = range?.through;
+    const scope = { serverId: snapshot.serverId, from, through };
     const [
       messages,
       commands,
@@ -811,7 +813,7 @@ export class TomoriDashboardCore {
           ? null
           : {
               from: from ?? dailyUsage[0]?.date ?? new Date().toISOString().split("T")[0],
-              through: new Date().toISOString().split("T")[0],
+              through: through ?? new Date().toISOString().split("T")[0],
               days: dailyUsage,
               models: dailyModels,
             },
