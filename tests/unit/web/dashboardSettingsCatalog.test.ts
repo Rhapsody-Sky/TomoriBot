@@ -28,6 +28,10 @@ describe("dashboard settings catalog", () => {
         const groups = runInNewContext(`(${node.initializer.getText(ast)})`) as { panels: Panel[] }[];
         panels.push(...groups.flatMap((group) => group.panels));
       }
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "channelSettingsFields" && node.initializer) {
+        const fields = runInNewContext(`(${node.initializer.getText(ast)})`) as [string, string][];
+        panels.push(...fields.map(([section, key]) => ({ section, fields: [key] })));
+      }
       if (
         ts.isCallExpression(node) &&
         node.expression.getText(ast) === "renderSettingsPanel" &&

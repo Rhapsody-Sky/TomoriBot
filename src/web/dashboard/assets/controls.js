@@ -89,11 +89,26 @@
     value.className = "select-value";
     trigger.append(value, glyph("chevron"));
     const list = document.createElement("div");
-    list.id = id;
     list.className = "select-options";
     list.setAttribute("popover", "auto");
-    list.setAttribute("role", "listbox");
-    list.setAttribute("aria-labelledby", label.id);
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "select-search";
+    search.placeholder = copy.control_search_options;
+    search.setAttribute("aria-label", copy.control_search_options);
+    search.setAttribute("role", "combobox");
+    search.setAttribute("aria-autocomplete", "list");
+    search.setAttribute("aria-controls", id);
+    const rows = document.createElement("div");
+    rows.id = id;
+    rows.setAttribute("role", "listbox");
+    rows.setAttribute("aria-labelledby", label.id);
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.setAttribute("role", "status");
+    empty.textContent = copy.control_no_matches;
+    empty.hidden = true;
+    list.append(search, rows, empty);
     const error = document.createElement("span");
     error.className = "control-validation error";
     error.id = `${id}-error`;
@@ -110,7 +125,7 @@
 
     function optionDisabled(index) {
       const option = select.options[index];
-      return !option || option.disabled || option.hidden || option.parentElement?.disabled;
+      return !option || option.disabled || option.hidden || options[index]?.hidden || option.parentElement?.disabled;
     }
 
     function sync() {
@@ -130,8 +145,19 @@
     }
 
     function buildOptions() {
-      list.replaceChildren();
+      rows.replaceChildren();
+      let previousGroup;
+      search.hidden = !select.hasAttribute("data-searchable") && select.options.length < 8;
       options = [...select.options].map((option, index) => {
+        const group = option.parentElement.tagName === "OPTGROUP" ? option.parentElement : null;
+        if (group && group !== previousGroup) {
+          const heading = document.createElement("div");
+          heading.className = "select-group-heading";
+          heading.textContent = group.label;
+          heading.setAttribute("role", "presentation");
+          rows.append(heading);
+        }
+        previousGroup = group;
         const row = document.createElement("div");
         row.className = "select-option";
         row.id = `${id}-${index}`;
@@ -140,14 +166,44 @@
         const text = document.createElement("span");
         text.textContent = option.textContent;
         row.append(text, glyph("check"));
-        list.append(row);
+        rows.append(row);
         row.addEventListener("pointerdown", (event) => event.preventDefault());
         row.addEventListener("pointermove", () => highlight(index));
         row.addEventListener("click", () => commit(index));
         return row;
       });
       sync();
+      filterOptions();
     }
+
+    function filterOptions() {
+      const terms = search.value.toLowerCase().trim().split(/\s+/);
+      options.forEach((row, index) => {
+        row.hidden =
+          select.options[index].hidden ||
+          !terms.every((term) =>
+            `${row.textContent} ${select.options[index].parentElement.label || ""}`.toLowerCase().includes(term),
+          );
+      });
+      rows.querySelectorAll(".select-group-heading").forEach((heading) => {
+        let row = heading.nextElementSibling;
+        let visible = false;
+        while (row?.classList.contains("select-option")) {
+          visible ||= !row.hidden;
+          row = row.nextElementSibling;
+        }
+        heading.hidden = !visible;
+      });
+      empty.hidden = options.some((row) => !row.hidden);
+      active = -1;
+      search.removeAttribute("aria-activedescendant");
+      trigger.removeAttribute("aria-activedescendant");
+      highlight(options.findIndex((_, index) => !optionDisabled(index)));
+    }
+    search.addEventListener("input", filterOptions);
+    search.addEventListener("keydown", (event) => {
+      if (["ArrowDown", "ArrowUp", "Enter", "Escape", "Tab"].includes(event.key)) handleKey(event);
+    });
 
     function highlight(index) {
       if (optionDisabled(index)) return;
@@ -156,24 +212,29 @@
         row.dataset.active = String(rowIndex === active);
       });
       trigger.setAttribute("aria-activedescendant", options[active].id);
-      options[active].scrollIntoView({ block: "nearest" });
+      search.setAttribute("aria-activedescendant", options[active].id);
+      if (list.matches(":popover-open")) options[active].scrollIntoView({ block: "nearest" });
     }
 
     function open() {
       if (select.matches(":disabled") || list.matches(":popover-open")) return;
+      search.value = "";
       buildOptions();
       list.style.width = `${Math.min(trigger.getBoundingClientRect().width, innerWidth - 24)}px`;
       list.showPopover();
       placePopover(list, trigger);
       trigger.setAttribute("aria-expanded", "true");
+      search.setAttribute("aria-expanded", "true");
       active = select.selectedIndex;
       highlight(optionDisabled(active) ? [...select.options].findIndex((_, index) => !optionDisabled(index)) : active);
+      if (!search.hidden) search.focus();
     }
 
     function close() {
       if (list.matches(":popover-open")) list.hidePopover();
       trigger.setAttribute("aria-expanded", "false");
       trigger.removeAttribute("aria-activedescendant");
+      search.setAttribute("aria-expanded", "false");
     }
 
     function commit(index) {
@@ -190,7 +251,7 @@
     }
 
     trigger.addEventListener("click", () => (list.matches(":popover-open") ? close() : open()));
-    trigger.addEventListener("keydown", (event) => {
+    function handleKey(event) {
       if (select.matches(":disabled")) return;
       const opened = list.matches(":popover-open");
       if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
@@ -214,9 +275,12 @@
           event.preventDefault();
           event.stopPropagation();
           close();
+          trigger.focus();
         }
-      } else if (event.key === "Tab") close();
-      else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      } else if (event.key === "Tab") {
+        close();
+        trigger.focus();
+      } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
         event.preventDefault();
         query = Date.now() - lastKey > 700 ? event.key : query + event.key;
         lastKey = Date.now();
@@ -228,9 +292,11 @@
           highlight(index);
         }
       }
-    });
+    }
+    trigger.addEventListener("keydown", handleKey);
     list.addEventListener("toggle", (event) => {
       trigger.setAttribute("aria-expanded", String(event.newState === "open"));
+      search.setAttribute("aria-expanded", String(event.newState === "open"));
       if (event.newState === "closed") trigger.removeAttribute("aria-activedescendant");
     });
     select.addEventListener("input", sync);

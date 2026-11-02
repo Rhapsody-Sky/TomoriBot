@@ -375,6 +375,61 @@ describe("dashboard memory and naming authorization", () => {
     return { app, headers, session, namingWrite, categoryWrite };
   }
 
+  it("requires guild management and CSRF for channel settings", async () => {
+    const member = setup(false);
+    expect(
+      (
+        await member.app.request("/settings/api/guilds/123456789012345678/channel-settings", {
+          headers: member.headers,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await member.app.request("/settings/api/guilds/123456789012345678/channel-settings", {
+          method: "PATCH",
+          headers: member.headers,
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+    mock.restore();
+    const admin = setup(true);
+    expect(
+      (
+        await admin.app.request("/settings/api/guilds/123456789012345678/channel-settings", {
+          method: "PATCH",
+          headers: { ...admin.headers, "X-CSRF-Token": "invalid" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+  });
+
+  it("keeps instance administrators separate from guild permissions", async () => {
+    const previous = process.env.WEB_SETTINGS_GLOBAL_ADMIN_IDS;
+    try {
+      for (const [ids, canManage, expected] of [
+        ["", true, false],
+        ["123456789012345678, 987654321098765432", false, true],
+        ["987654321098765432x", true, false],
+      ] as const) {
+        process.env.WEB_SETTINGS_GLOBAL_ADMIN_IDS = ids;
+        const { app, headers } = setup(canManage);
+        const response = await app.request("/settings/api/session", { headers });
+        expect(response.status).toBe(200);
+        const payload = await response.json();
+        expect(payload.user.isGlobalAdmin).toBe(expected);
+        expect(payload.guilds[0].canManage).toBe(canManage);
+        expect(payload.globalAdminIds).toBeUndefined();
+        mock.restore();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.WEB_SETTINGS_GLOBAL_ADMIN_IDS;
+      else process.env.WEB_SETTINGS_GLOBAL_ADMIN_IDS = previous;
+    }
+  });
+
   it("validates custom statistics dates and forwards the inclusive range", async () => {
     const { app, headers } = setup();
     const load = spyOn(TomoriDashboardCore.prototype, "loadServerStats").mockResolvedValue({} as DashboardServerStats);

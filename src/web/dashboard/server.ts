@@ -39,6 +39,7 @@ import { DashboardSpriteService, SPRITE_UPLOAD_MAX_BYTES } from "./spriteService
 import { getDashboardRuntimeConfig } from "./runtimeConfig";
 import { getSettingsCatalog, isSettingsSectionId, serializeSettingsValues } from "./settingsCatalog";
 import { DashboardSettingsService } from "./settingsService";
+import { DashboardChannelService } from "./channelService";
 import type {
   DashboardActor,
   DashboardGuildSnapshot,
@@ -190,11 +191,17 @@ function serializeChannels(channels: Iterable<GuildBasedChannel>) {
       id: channel.id,
       name: channel.name,
       type: channel.type,
+      parentId: channel.parentId,
       parentName: channel.parent?.name ?? null,
+      parentPosition: channel.parent?.position ?? -1,
+      position: "position" in channel ? channel.position : 0,
     }))
     .sort(
       (left, right) =>
-        (left.parentName ?? "").localeCompare(right.parentName ?? "") || left.name.localeCompare(right.name),
+        left.parentPosition - right.parentPosition ||
+        (left.parentId ?? "").localeCompare(right.parentId ?? "") ||
+        left.position - right.position ||
+        left.id.localeCompare(right.id),
     );
 }
 
@@ -288,6 +295,7 @@ export function createDashboardApp(client: Client) {
   const sprites = new DashboardSpriteService();
   const personaChat = new DashboardPersonaChatService(client);
   const settings = new DashboardSettingsService(core);
+  const channelSettings = new DashboardChannelService(core);
   const app = new Hono<DashboardEnv>();
   sessions.startCleanup();
 
@@ -383,6 +391,7 @@ export function createDashboardApp(client: Client) {
           username: session.user.username,
           displayName: displayName(session.user),
           avatarUrl: discordAvatarUrl(session.user),
+          isGlobalAdmin: config.globalAdminIds.includes(session.user.id),
         },
         csrfToken: session.csrfToken,
         guilds,
@@ -633,6 +642,8 @@ export function createDashboardApp(client: Client) {
           "control_close_dialog",
           "control_sections",
           "control_hold_delete",
+          "control_search_options",
+          "control_no_matches",
           "control_keep_holding",
           "control_hold_confirmed",
           "persona_add_attribute",
@@ -809,6 +820,86 @@ export function createDashboardApp(client: Client) {
           "boundaries_hint",
           "channels",
           "channels_hint",
+          "channel_settings",
+          "channel_conversation",
+          "channel_memory_context",
+          "channel_autochat",
+          "channel_none",
+          "channel_keep",
+          "channel_set",
+          "channel_reset",
+          "channel_choose",
+          "channel_loading",
+          "channel_load_failed",
+          "channel_current",
+          "channel_default",
+          "channel_different",
+          "channel_on_list",
+          "channel_not_on_list",
+          "channel_no_persona_rows",
+          "channel_add_allowlist",
+          "channel_remove_allowlist",
+          "channel_textModel",
+          "channel_textModel_hint",
+          "channel_prompt",
+          "channel_prompt_hint",
+          "channel_prompt_mode",
+          "channel_append",
+          "channel_replace",
+          "channel_contextNote",
+          "channel_contextNote_hint",
+          "channel_depth",
+          "channel_allowlisted",
+          "channel_allowlisted_hint",
+          "channel_required",
+          "channel_cooldown",
+          "channel_cooldown_hint",
+          "channel_cooldown_requires_allowlist",
+          "channel_cooldown_type",
+          "channel_cooldown_off",
+          "channel_cooldown_user",
+          "channel_cooldown_channel",
+          "channel_cooldown_server",
+          "channel_cooldown_strict",
+          "channel_seconds",
+          "channel_persona",
+          "channel_persona_hint",
+          "channel_autochatPersona",
+          "channel_autochatPersona_hint",
+          "channel_restrictions",
+          "channel_restrictions_confirm",
+          "nav_global",
+          "nav_server_settings",
+          "nav_server_administration",
+          "channel_settings_hint",
+          "channel_single_hint",
+          "persona_channels",
+          "channel_personas",
+          "persona_channels_hint",
+          "channel_personas_hint",
+          "persona_channel_required",
+          "all_personas_allowed",
+          "persona_permissions_edit",
+          "persona_permissions_search",
+          "persona_permissions_mixed",
+          "persona_permissions_cancel",
+          "channel_search",
+          "channel_select_all",
+          "channel_deselect_all",
+          "channel_selected",
+          "channel_select_hint",
+          "channel_mixed",
+          "channel_enabled",
+          "channel_disabled",
+          "channel_on",
+          "channel_off",
+          "channel_enable",
+          "channel_disable",
+          "channel_batch_hint",
+          "channel_apply",
+          "channel_saved",
+          "channel_empty",
+          "channel_uncategorized",
           "tools",
           "tools_hint",
           "diagnostics",
@@ -1330,6 +1421,52 @@ export function createDashboardApp(client: Client) {
       }
     },
   );
+
+  app.get(`${BASE_PATH}/api/guilds/:guildId/channel-settings`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const ids = [...new Set(context.req.queries("channelId") ?? [])];
+    const available = new Set(
+      serializeChannels(client.guilds.cache.get(result.guild.id)?.channels.cache.values() ?? []).map(
+        (channel) => channel.id,
+      ),
+    );
+    if (ids.length > 500 || ids.some((id) => !available.has(id)))
+      return jsonError(
+        context,
+        new DashboardServiceError("invalid_channel_settings", 422, "Invalid channel settings."),
+      );
+    try {
+      return context.json(await channelSettings.load(result.snapshot, ids));
+    } catch (error) {
+      await log.error("Dashboard channel settings load failed", error, undefined, { persist: false });
+      return jsonError(context, "Channel settings could not be loaded.");
+    }
+  });
+
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/channel-settings`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    const available = new Set(
+      serializeChannels(client.guilds.cache.get(result.guild.id)?.channels.cache.values() ?? []).map(
+        (channel) => channel.id,
+      ),
+    );
+    try {
+      return context.json(
+        await channelSettings.patch(result.snapshot, await context.req.json().catch(() => null), available),
+      );
+    } catch (error) {
+      if (!(error instanceof DashboardServiceError))
+        await log.error("Dashboard channel settings save failed", error, undefined, { persist: false });
+      return jsonError(
+        context,
+        error instanceof DashboardServiceError ? error : "Channel settings could not be saved.",
+      );
+    }
+  });
 
   app.get(`${BASE_PATH}/api/guilds/:guildId/providers/personal`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config);

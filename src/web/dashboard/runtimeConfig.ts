@@ -10,6 +10,7 @@ export interface DashboardRuntimeConfig {
   clientSecret: string;
   sessionSecret: string;
   secureCookie: boolean;
+  globalAdminIds: string[];
 }
 
 function parseBoolean(value: string | undefined): boolean | null {
@@ -52,5 +53,9 @@ export function getDashboardRuntimeConfig(client: Client): DashboardRuntimeConfi
       process.env.WEB_SETTINGS_DISCORD_CLIENT_SECRET?.trim() || process.env.DISCORD_CLIENT_SECRET?.trim() || "",
     sessionSecret: process.env.WEB_SETTINGS_SESSION_SECRET?.trim() || process.env.CRYPTO_SECRET || "",
     secureCookie: parseBoolean(process.env.WEB_SETTINGS_COOKIE_SECURE) ?? publicUrl.startsWith("https://"),
+    globalAdminIds: (process.env.WEB_SETTINGS_GLOBAL_ADMIN_IDS || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter((id) => /^[0-9]{17,20}$/.test(id)),
   };
 }

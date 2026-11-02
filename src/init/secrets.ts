@@ -76,6 +76,7 @@ export async function loadSecrets(environment: AppEnvironment): Promise<void> {
     "WEB_SETTINGS_HOST",
     "WEB_SETTINGS_PORT",
     "WEB_SETTINGS_PUBLIC_URL",
+    "WEB_SETTINGS_GLOBAL_ADMIN_IDS",
     "WEB_SETTINGS_DISCORD_REDIRECT_URI",
     "WEB_SETTINGS_DISCORD_CLIENT_ID",
     "WEB_SETTINGS_DISCORD_CLIENT_SECRET",

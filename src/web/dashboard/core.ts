@@ -1099,6 +1099,12 @@ export class TomoriDashboardCore {
       }
     }
     const sectionPatch = sectionId === "sampling" || sectionId === "modelBehavior" ? patch : remaining;
+    if (sectionId === "autochat" && Array.isArray(sectionPatch.autoch_disc_ids)) {
+      const selected = new Set(sectionPatch.autoch_disc_ids);
+      sectionPatch.autoch_persona_overrides = (snapshot.config.autoch_persona_overrides ?? []).filter((entry) =>
+        selected.has(entry.channel_disc_id),
+      );
+    }
     const updated =
       Object.keys(sectionPatch).length === 0 ||
       (await this.writeSettingsSection(snapshot.serverId, sectionId, sectionPatch));

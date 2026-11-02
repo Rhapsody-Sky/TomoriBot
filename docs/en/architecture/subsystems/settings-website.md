@@ -10,6 +10,18 @@ handling do not depend on it.
 
 ## Current Coverage
 
+The sidebar separates cross-server preferences under Global, the selected server's
+workspace under Server Settings, and guild management under Server Administration.
+
+Instance administrators are designated through `WEB_SETTINGS_GLOBAL_ADMIN_IDS`, a
+comma-separated list of Discord user IDs in the deployment environment. The default
+is empty; changes take effect after restarting the bot. Only complete numeric IDs
+of 17-20 digits are accepted. The authenticated session reports `user.isGlobalAdmin`
+from this list, never from Discord guild permissions. This designation does not grant
+access to guild data or other users' private memories. Global Administration has no
+pages yet, so the navigation does not display an empty group. Legal-page editing is
+not implemented.
+
 Every shared server member can:
 
 - edit personal profile, pronouns, gender identity, addressing style, privacy,
@@ -122,9 +134,34 @@ when their content exceeds the smaller manual-entry limits used by Discord.
 These limits are defined in code and are not server settings. Writes still use
 the persona repository and invalidate the server's persona cache after success.
 
+Channel settings groups channel-scoped controls around a categorized channel picker.
+The Allowlist tab manages which channels Tomori can use. A nonempty allowlist limits
+the settings picker to those channels; an empty stored allowlist allows all channels
+and is displayed with every channel selected. The dashboard rejects an empty selection.
+Channel settings save per panel; saving one panel preserves unsaved edits in the others.
+Selecting one channel shows its editable values directly. Multiple selections use
+explicit batch changes; omitted settings retain each channel's value. The panels
+include autochat enablement and persona,
+private memory, outgoing context restrictions, roleplay suppression, text-model and
+prompt overrides, context notes, channel allowlists and cooldowns, and persona channel
+restrictions. Persona allowlists restrict a persona to its listed channels, not a channel
+to its listed personas. An empty persona allowlist removes that persona's restriction.
+The persona's Allowed channels tab and the channel's Allowed personas editor update
+the same list. Unrestricted personas appear selected in every channel. Deselecting one
+limits it to the remaining existing channels; future channels are then excluded.
+Selecting all channels restores unrestricted access. Both editors and the dashboard API
+reject removing the final allowed channel. Multi-channel edits preserve untouched personas.
+Channel cooldown overrides require a channel allowlist entry. Writes reuse the owning
+repositories and text-model operations, with their cache invalidation. Batch writes
+are sequential, not atomic; failures may leave earlier writes saved.
+
+Other channel fields, including welcome and thought-log destinations and lorebook
+scopes, use the same categorized, searchable picker. Multi-selection provides select
+and deselect actions for the filtered channels without changing hidden selections.
+
 Server settings groups conversation, models and sampling, channels and automation,
 memory, tools and media, and notices and diagnostics. Memory contains learning
-permissions, channel boundaries, STM behavior and category definitions. Response
+permissions, channel-memory enablement, STM behavior and category definitions. Response
 review belongs to Conversation > Output; thought logs and prompt snapshots belong
 to Notices & diagnostics.
 
