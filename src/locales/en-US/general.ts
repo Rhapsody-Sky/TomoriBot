@@ -258,7 +258,11 @@ export default {
       lorebook_error_channel: "A selected channel is not available in this server.",
       lorebook_error_too_large: "The import exceeds the 2 MiB request limit.",
       interface_memory_server_transfer_unavailable:
-        "Server memory transfer is not available in the dashboard because channel scope cannot be preserved. Use Discord to transfer server memories.",
+        "Use Discord to import or export server memories without losing their channel restrictions.",
+      interface_memory_loading: "Loading memories",
+      interface_providers_loading: "Loading providers",
+      interface_provider_key_hint:
+        "The key is checked with the provider before it is saved. Stored keys are encrypted.",
       interface_memory_personal_tags_hint: "Optional comma-separated labels used to retrieve this personal memory.",
       interface_provider_access: "Credentials & endpoints",
       interface_provider_models: "Models & fallbacks",

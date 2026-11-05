@@ -536,6 +536,7 @@ describe("dashboard lorebook UI", () => {
     const load = runInNewContext(`let lorebookLoadVersion = 0; ${source}; loadLorebooks`, {
       state,
       window: {},
+      loadingBar: () => "",
       lorebookSelections: new Map(),
       lorebookSelectionKey: () => "scope",
       document: { querySelector: () => target },

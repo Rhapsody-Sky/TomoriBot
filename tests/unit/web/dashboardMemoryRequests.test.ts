@@ -23,6 +23,7 @@ describe("dashboard memory requests", () => {
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,
       refreshButton: () => "",
+      loadingBar: () => "",
       fieldLabel: (label: string) => label,
     }) as (input: unknown) => string;
     const persona = { nickname: "Juno" };
@@ -31,9 +32,8 @@ describe("dashboard memory requests", () => {
     expect(personal).toContain('name="tags"');
     expect(personal).toContain('data-memory-export type="button">');
     expect(server).not.toContain('name="tags"');
-    expect(server).toContain('data-memory-export type="button" disabled');
-    expect(server).toContain('data-memory-import type="button" disabled');
-    expect(server).toContain("memory_server_transfer_unavailable");
+    expect(server).toContain('data-memory-export type="button" aria-disabled="true" data-tooltip=');
+    expect(server).toContain('data-memory-import type="button" aria-disabled="true" data-tooltip=');
   });
 
   it("ignores stale responses and failures across scopes and repeated refreshes", async () => {
@@ -47,6 +47,8 @@ describe("dashboard memory requests", () => {
     const load = runInNewContext(`let memoryRequestId = 0; ${loadSource}; loadMemories`, {
       state,
       document: { querySelector: () => list },
+      ui: (key: string) => key,
+      loadingBar: () => "",
       api,
       renderMemoryList: () => {
         renders += 1;

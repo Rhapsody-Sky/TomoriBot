@@ -53,7 +53,6 @@ const providerCredentialSchema = z
   .object({
     provider: providerNameSchema,
     apiKey: z.string().trim().min(10).max(4_000),
-    validateApiKey: z.boolean().default(true),
   })
   .strict();
 
@@ -309,19 +308,14 @@ export class DashboardProviderService {
     }
     const saved =
       scope === "server"
-        ? await this.core.saveServerProviderCredential(
-            snapshot,
-            parsed.data.provider,
-            parsed.data.apiKey,
-            parsed.data.validateApiKey,
-          )
+        ? await this.core.saveServerProviderCredential(snapshot, parsed.data.provider, parsed.data.apiKey, true)
         : await this.core.savePersonalProviderCredential(
             snapshot,
             actor.user.user_id,
             actor.discordId,
             parsed.data.provider,
             parsed.data.apiKey,
-            parsed.data.validateApiKey,
+            true,
           );
     if (!saved) {
       throw new DashboardServiceError(

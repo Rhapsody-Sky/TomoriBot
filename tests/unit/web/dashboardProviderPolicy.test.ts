@@ -50,6 +50,24 @@ function createSnapshot(): DashboardGuildSnapshot {
 describe("dashboard provider policy", () => {
   afterEach(() => mock.restore());
 
+  it("requires provider validation for both dashboard credential scopes", async () => {
+    const save = mock(async (..._args: unknown[]) => true);
+    const core = {
+      getProviderChoices: () => [{ value: "openrouter" }],
+      saveServerProviderCredential: save,
+      savePersonalProviderCredential: save,
+    } as unknown as DashboardProviderCore;
+    const service = new DashboardProviderService(core);
+    const input = { provider: "openrouter", apiKey: "test-credential" };
+    for (const scope of ["personal", "server"] as const) {
+      await expect(
+        service.saveCredential(scope, createActor(), createSnapshot(), { ...input, validateApiKey: false }),
+      ).rejects.toMatchObject({ code: "invalid_provider" });
+      await service.saveCredential(scope, createActor(), createSnapshot(), input);
+    }
+    expect(save.mock.calls.map((args) => args.at(-1))).toEqual([true, true]);
+  });
+
   it("loads and edits parameters for a specified saved server provider", async () => {
     const core = new TomoriDashboardCore();
     const row = savedProviderConfigSchema.parse({

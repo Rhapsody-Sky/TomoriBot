@@ -530,6 +530,14 @@
       </main>`;
   }
 
+  function loadingBar(label) {
+    return `<span class="loading" role="status" aria-label="${escapeHtml(label)}"></span>`;
+  }
+
+  function formatStoredParameterValue(value) {
+    return typeof value === "number" && !Number.isInteger(value) ? String(Number(value.toPrecision(7))) : (value ?? "");
+  }
+
   function renderBootScreen() {
     if (app.querySelector(".boot-screen")) return;
     app.innerHTML = `<div class="boot-screen"><img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="boot-logo"><div class="loading"></div></div>`;
@@ -1116,7 +1124,7 @@
     ${state.statsTimeframe === "custom" && state.statsRange ? `<div class="row usage-range-summary"><p class="hint">${state.statsRange.from} / ${state.statsRange.through} (UTC)</p><button class="button" type="button" data-stats-range-edit>${escapeHtml(ui("stats_edit_range"))}</button></div>` : ""}`;
 
     const statsHeader = `<header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("stats_server_total"))}</p><h2>${escapeHtml(ui("stats_title"))}</h2><p>${escapeHtml(ui("stats_scope_hint"))}</p></div></header>${timeframeControls}`;
-    let content = `<section class="panel stack">${statsHeader}<p class="hint" role="status">${escapeHtml(ui("stats_loading"))}</p></section>`;
+    let content = `<section class="panel stack">${statsHeader}${loadingBar(ui("stats_loading"))}</section>`;
     if (state.serverStatsError) {
       content = `<section class="panel stack">${statsHeader}<strong>${escapeHtml(ui("stats_error"))}</strong><span>${escapeHtml(state.serverStatsError)}</span><button class="button" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></section>`;
     } else if (state.serverStats) {
@@ -1124,7 +1132,7 @@
       const usage = statsModelUsage(state.serverStats, state.statsHistoryModel);
       const selectedLabel = state.statsHistoryModel ?? ui("stats_server_total");
       content = `<section class="panel stack">${statsHeader}
-        ${state.serverStatsLoading ? `<p class="hint" role="status">${escapeHtml(ui("stats_loading"))} ${escapeHtml(ui("stats_showing"))} ${escapeHtml(timeframeOptions.find(([value]) => value === state.serverStats.timeframe)?.[1] || "")}</p>` : ""}
+        ${state.serverStatsLoading ? loadingBar(ui("stats_loading")) : ""}
         ${state.serverStats.history?.models === null ? `<p class="hint">${escapeHtml(ui("stats_history_filter_error"))}</p>` : ""}
         <div class="stat-grid">
           <div class="stat-tile"><div class="stat-copy"><small>${escapeHtml(ui("stats_input"))}</small><strong>${formatStatNumber(usage.inputTokens)}</strong><small>${escapeHtml(selectedLabel)}</small></div></div>
@@ -1157,7 +1165,7 @@
     return `<section class="server-stats-section stack" aria-busy="${state.serverStatsLoading}">
       <div class="grid overview-stat-grid">
         <div class="stat-tile"><div class="stat-copy"><div><p class="eyebrow">${escapeHtml(ui("overview_personas"))}</p><strong>${formatStatNumber(state.overview.personas.length)}</strong></div></div></div>
-        <div class="stat-tile"><div class="stat-copy"><div><p class="eyebrow">${escapeHtml(ui("stats_most_active_persona"))}</p><strong>${mostActivePersona ? escapeHtml(mostActivePersona.name) : "-"}</strong><small>${mostActivePersona ? `${formatStatNumber(mostActivePersona.count)} ${escapeHtml(ui("stats_reply_unit"))}` : escapeHtml(ui(state.serverStatsLoading ? "stats_loading" : "stats_empty"))}</small></div>${activeIdentity ? personaAvatar(activeIdentity, "avatar") : ""}</div></div>
+        <div class="stat-tile"><div class="stat-copy"><div><p class="eyebrow">${escapeHtml(ui("stats_most_active_persona"))}</p><strong>${mostActivePersona ? escapeHtml(mostActivePersona.name) : "-"}</strong><small>${mostActivePersona ? `${formatStatNumber(mostActivePersona.count)} ${escapeHtml(ui("stats_reply_unit"))}` : state.serverStatsLoading ? loadingBar(ui("stats_loading")) : escapeHtml(ui("stats_empty"))}</small></div>${activeIdentity ? personaAvatar(activeIdentity, "avatar") : ""}</div></div>
       </div>
       ${content}
     </section>`;
@@ -1317,17 +1325,20 @@
           ? `Shared facts for ${persona.nickname}. As an administrator, you can manage every entry.`
           : `Shared facts you personally taught ${persona.nickname}. Other members' entries remain hidden.`;
 
+    const transferAttributes = personal
+      ? ""
+      : ` aria-disabled="true" data-tooltip="${escapeHtml(ui("memory_server_transfer_unavailable"))}"`;
+
     return `
       <section class="panel">
         <header class="panel-header"><div class="heading"><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>
         <div class="actions">
           ${refreshButton("memory", ui("refresh_memories"))}
-          <button class="button " data-memory-export type="button"${personal ? "" : " disabled"}>Export</button>
-          <button class="button " data-memory-import type="button"${personal ? "" : " disabled"}>Import</button>
+          <button class="button " data-memory-export type="button"${transferAttributes}>Export</button>
+          <button class="button " data-memory-import type="button"${transferAttributes}>Import</button>
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
         </div></header>
       <div class="stack">
-      ${personal ? "" : `<p class="notice info">${escapeHtml(ui("memory_server_transfer_unavailable"))}</p>`}
       ${
         serverWritesDisabled || personalCreationDisabled
           ? `<div class="notice info"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><p>Existing entries remain visible according to your access.</p></div>`
@@ -1339,7 +1350,7 @@
               </div>
             </form>`
       }
-      <section id="memory-list" class="stack"><div class="loading" role="status" aria-label="Loading memories"></div></section></div></section>`;
+      <section id="memory-list" class="stack">${loadingBar(ui("memory_loading"))}</section></div></section>`;
   }
 
   function renderGlobalMemories(workspace) {
@@ -1364,7 +1375,7 @@
       state.memoryKind === memoryKind &&
       state.lineageId === lineageId &&
       document.querySelector("#memory-list") === list;
-    list.innerHTML = `<div class="notice">Loading memories...</div>`;
+    list.innerHTML = loadingBar(ui("memory_loading"));
     try {
       const path = `/guilds/${guildId}/memories/${memoryKind}?lineageId=${lineageId}`;
       const data = await api(path);
@@ -1443,7 +1454,7 @@
     const version = ++lorebookLoadVersion;
     const currentView = target.querySelector(".mailbox")?.dataset.view || "list";
     const bookId = lineageId === 0 ? state.lorebookBookId : null;
-    target.innerHTML = `<p role="status">${escapeHtml(ui("lorebook_loading"))}</p>`;
+    target.innerHTML = loadingBar(ui("lorebook_loading"));
     try {
       const query = new URLSearchParams({ lineageId: String(lineageId) });
       if (bookId) query.set("bookId", String(bookId));
@@ -1899,7 +1910,7 @@
     const dialogues = persona.sampleDialogues || [];
     return `<div class="workspace">
       <div class="stack">
-        ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}"><p role="status">${escapeHtml(ui("persona_model_loading"))}</p></div>` : ""}
+        ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}">${loadingBar(ui("persona_model_loading"))}</div>` : ""}
         <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="identity">
           ${formHeader("Identity", "Display identity", "The name used by this persona in conversation.")}
           <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
@@ -1987,7 +1998,7 @@
                   .join("")
               : `<p class="hint">Start a clean test conversation.</p>`
           }
-          ${state.personaTestChatBusy ? `<p class="hint" role="status">${escapeHtml(ui("persona_model_loading"))}</p>` : ""}
+          ${state.personaTestChatBusy ? loadingBar(ui("persona_model_loading")) : ""}
         </div>
         <form class="composer" id="persona-test-chat-form" data-persona-id="${persona.personaId}">
           <label class="sr-only" for="persona-test-input">Test message</label>
@@ -2134,7 +2145,7 @@
                   : state.personaPanel === "appearance"
                     ? renderPersonaAppearance(persona)
                     : state.personaPanel === "sprites"
-                      ? `<div class="workspace"><section id="sprite-workspace"><p role="status">${escapeHtml(ui("sprite_loading"))}</p></section>${renderPersonaTestChat(persona)}</div>`
+                      ? `<div class="workspace"><section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>${renderPersonaTestChat(persona)}</div>`
                       : renderMemoryCollection({
                           personal: state.personaPanel === "personal",
                           persona,
@@ -2170,7 +2181,7 @@
   }
 
   async function renderPersonaChannels(host, persona) {
-    host.textContent = ui("channel_loading");
+    host.innerHTML = loadingBar(ui("channel_loading"));
     try {
       const data = await api(`/guilds/${state.guildId}/channel-settings`);
       if (!host.isConnected) return;
@@ -2487,7 +2498,7 @@
       return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${escapeHtml(field.key)}"${["welcome_channel_disc_id", "thought_log_channel_disc_id"].includes(field.key) ? " data-searchable" : ""}>${selectOptions(field, value)}</select></label>`;
     }
     if (field.type === "number") {
-      return `<label class="field">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" type="number" min="${field.min}" max="${field.max}" step="${field.step || 1}" value="${value ?? ""}"${field.nullable ? "" : " required"}></label>`;
+      return `<label class="field">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" type="number" min="${field.min}" max="${field.max}" step="${field.step || 1}" value="${formatStoredParameterValue(value)}"${field.nullable ? "" : " required"}></label>`;
     }
     return `<label class="field span-all">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : (value ?? ""))}"></label>`;
   }
@@ -2614,7 +2625,7 @@
     const request = { key, data: null };
     channelWorkspaces.set(form, request);
     const status = form.querySelector("[data-channel-load]");
-    status.textContent = ui("channel_loading");
+    status.innerHTML = loadingBar(ui("channel_loading"));
     try {
       const query = new URLSearchParams();
       ids.forEach((id) => {
@@ -2772,7 +2783,7 @@
     const channels = state.overview.channels;
     const guildId = state.guildId;
     const renderRequest = ++channelRenderRequest;
-    workspace.innerHTML = `<p class="hint" role="status">${escapeHtml(ui("channel_loading"))}</p>`;
+    workspace.innerHTML = loadingBar(ui("channel_loading"));
     let data;
     try {
       data = await api(`/guilds/${guildId}/channel-settings`);
@@ -2823,7 +2834,7 @@
         </section>
         <div class="stack"><section class="panel stack"><header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("channel_selected"))}</p><h2 data-channel-count>0</h2><p>${escapeHtml(ui("channel_batch_hint"))}</p></div></header>
           <p class="hint" data-channel-prompt>${escapeHtml(ui("channel_select_hint"))}</p>
-          <p class="hint" data-channel-load role="status"></p></section><div class="stack" data-channel-fields hidden>${[
+          <div data-channel-load></div></section><div class="stack" data-channel-fields hidden>${[
             ["channel_conversation", ["rp_channel_ids"], ["textModel", "prompt", "cooldown"]],
             ["channel_memory_context", ["private_channel_ids", "crosschannel_blocklist_ids"], ["contextNote"]],
             ["channel_autochat", ["autoch_disc_ids"], ["autochatPersona"]],
@@ -3186,7 +3197,7 @@
                 ) => `<form class="stack" data-personal-parameters="${escapeHtml(provider.provider)}" data-provider-scope="${scope}">
         <h3>${escapeHtml(provider.displayName)}</h3>
         <div class="grid">
-          ${personalParameterFields.map(([key, min, max, step]) => `<label class="field">${fieldLabel(ui(`parameter_${key}`))}<input type="number" name="${key}" min="${min}" max="${max}" step="${step}" value="${provider[key] ?? ""}" placeholder="${escapeHtml(ui("parameter_unset"))}"></label>`).join("")}
+          ${personalParameterFields.map(([key, min, max, step]) => `<label class="field">${fieldLabel(ui(`parameter_${key}`))}<input type="number" name="${key}" min="${min}" max="${max}" step="${step}" value="${formatStoredParameterValue(provider[key])}" placeholder="${escapeHtml(ui("parameter_unset"))}"></label>`).join("")}
           <label class="field">${fieldLabel(ui("parameter_thinking_level"))}<select name="thinking_level">
             <option value="" disabled${provider.thinking_level == null ? " selected" : ""}>${escapeHtml(ui("parameter_unset"))}</option>
             ${["auto", "none", "minimal", "low", "medium", "high"].map((value) => `<option value="${value}"${provider.thinking_level === value ? " selected" : ""}>${escapeHtml(ui(`thinking_${value}`))}</option>`).join("")}
@@ -3402,7 +3413,7 @@
     const data = state.providerData[scope];
     const personal = scope === "personal";
     if (!data) {
-      workspace.innerHTML = `${pageHeader(personal ? "Personal" : "Administration", personal ? "My providers" : "Server providers", "Loading provider configuration.")}<div class="notice info"><span></span>Loading providers</div>`;
+      workspace.innerHTML = `${pageHeader(personal ? "Personal" : "Administration", personal ? "My providers" : "Server providers", "")}${loadingBar(ui("providers_loading"))}`;
       loadProviderWorkspace(scope);
       return;
     }
@@ -3440,8 +3451,7 @@
       <dialog id="provider-dialog"  aria-labelledby="provider-dialog-title">
         <form class="stack" id="provider-credential-form" data-provider-scope="${scope}">
           <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connections"))}</p><h2 id="provider-dialog-title">${escapeHtml(ui("add_provider"))}</h2></div></div>
-          <label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}</select></label><label class="field">${fieldLabel("API key", "Stored encrypted. Existing secret values are never returned to the browser.")}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label>
-          <label class="toggle"><span class="field-label">Validate before saving<small>Tests the credential with its provider before replacing the stored key.</small></span><input name="validateApiKey" type="checkbox" role="switch" checked></label>
+          <label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}</select></label><label class="field">${fieldLabel("API key", ui("provider_key_hint"))}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label>
           <div class="actions"><button class="button" type="button" data-dialog-close="provider-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">Store encrypted key</button></div>
         </form>
       </dialog>
@@ -4436,8 +4446,9 @@
       await loadMemories();
       toast("Memories refreshed");
     }
-    if (event.target.closest("[data-memory-export]")) await exportMemories();
-    if (event.target.closest("[data-memory-import]")) document.querySelector("#memory-import-file")?.click();
+    if (event.target.closest('[data-memory-export]:not([aria-disabled="true"])')) await exportMemories();
+    if (event.target.closest('[data-memory-import]:not([aria-disabled="true"])'))
+      document.querySelector("#memory-import-file")?.click();
     const providerRefresh = event.target.closest("[data-provider-refresh]");
     if (providerRefresh) await refreshProviders(providerRefresh.dataset.providerRefresh, "Providers refreshed");
     const providerDelete = event.target.closest("[data-provider-delete]");
@@ -4789,7 +4800,6 @@
             body: JSON.stringify({
               provider: form.elements.provider.value,
               apiKey: form.elements.apiKey.value,
-              validateApiKey: form.elements.validateApiKey.checked,
             }),
           });
         });

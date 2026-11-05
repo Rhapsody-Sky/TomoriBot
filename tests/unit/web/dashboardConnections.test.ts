@@ -16,6 +16,18 @@ async function dashboardFunction(name: string): Promise<string> {
 }
 
 describe("dashboard connections", () => {
+  it("renders a widened PostgreSQL REAL value without floating-point noise", async () => {
+    const format = await dashboardFunction("formatStoredParameterValue");
+    const field = await dashboardFunction("renderSettingField");
+    const render = runInNewContext(`${format}; ${field}; renderSettingField`, {
+      escapeHtml: String,
+      fieldLabel: String,
+    }) as (field: object, value: number | null) => string;
+    const topP = { type: "number", key: "llm_top_p", label: "Top P", min: 0, max: 1, step: 0.01, nullable: true };
+    expect(render(topP, Math.fround(0.95))).toContain('value="0.95"');
+    expect(render(topP, null)).toContain('value=""');
+  });
+
   it("groups endpoint models by provider and preserves or repairs selected connections", async () => {
     const connectionsSource = await dashboardFunction("providerConnections");
     const selectSource = await dashboardFunction("selectProviderConnection");

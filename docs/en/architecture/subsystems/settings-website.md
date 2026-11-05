@@ -62,6 +62,8 @@ Members with Manage Server or Administrator can additionally:
 - manage server provider credentials, custom endpoints, scoped OpenRouter
   models, and the ordered fallback chain.
 
+The dashboard validates new and replacement API keys with their provider before storing them.
+
 The `/dashboard` command returns the configured public dashboard link. The URL
 comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
 
