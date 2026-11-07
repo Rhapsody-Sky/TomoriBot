@@ -14,6 +14,7 @@ import {
 } from "@/utils/db/repositories";
 import * as savedProviders from "@/utils/provider/savedProviderConfig";
 import * as providerActivation from "@/utils/provider/providerActivation";
+import * as openRouterModels from "@/utils/provider/openrouterModelRegistry";
 import * as crypto from "@/utils/security/crypto";
 import { customEndpointSchema, savedProviderConfigSchema, userSavedProviderConfigSchema } from "@/types/db/schema";
 import { type DashboardProviderCore, DashboardProviderService } from "@/web/dashboard/providerService";
@@ -284,6 +285,7 @@ describe("dashboard provider policy", () => {
     const activate = spyOn(providerActivation, "activateServerTextModelFromSavedConfig").mockResolvedValue({
       status: "activated",
     });
+    const transcribe = spyOn(providerActivation, "activateProviderTranscriptionDefault").mockResolvedValue(true);
     expect(await core.saveServerProviderCredential(createSnapshot(), activeProvider, "new credential", false)).toBe(
       true,
     );
@@ -296,6 +298,113 @@ describe("dashboard provider policy", () => {
       await core.saveServerProviderCredential(createSnapshot(), "inactive-provider", "new credential", false),
     ).toBe(true);
     expect(activate).toHaveBeenCalledTimes(1);
+    expect(transcribe).not.toHaveBeenCalled();
+  });
+
+  it("initializes transcription in the right scope only after a new provider key is saved", async () => {
+    const core = new TomoriDashboardCore();
+    const snapshot = createSnapshot();
+    const actor = createActor();
+    const provider = "openrouter";
+    const encrypted = Buffer.from("encrypted");
+    const fields = {
+      provider,
+      api_key: encrypted,
+      llm_id: 1,
+      diffusion_model_id: null,
+      embedding_model_id: null,
+      nai_diffusion_model_id: null,
+      nai_preset_name: null,
+    };
+    const serverRow = savedProviderConfigSchema.parse({ ...fields, server_id: snapshot.serverId });
+    const personalRow = userSavedProviderConfigSchema.parse({ ...fields, user_id: actor.user.user_id });
+    spyOn(crypto, "encryptApiKey").mockResolvedValue({ encrypted, version: 1 });
+    spyOn(llmProviderRepo, "loadSavedProviderConfig").mockResolvedValue(null);
+    const loadPersonal = spyOn(llmProviderRepo, "loadUserSavedProviderConfig").mockResolvedValue(null);
+    spyOn(savedProviders, "buildSavedProviderConfigFromExistingOrDefaults").mockResolvedValue(serverRow);
+    spyOn(savedProviders, "buildUserSavedProviderConfigFromExistingOrDefaults").mockResolvedValue(personalRow);
+    spyOn(personaRepository, "loadState").mockResolvedValue(createPersona({ server_id: snapshot.serverId }));
+    spyOn(providerActivation, "activateServerTextModelFromSavedConfig").mockResolvedValue({ status: "activated" });
+    const serverWrite = spyOn(llmProviderRepo, "upsertSavedProviderConfig").mockResolvedValue(false);
+    const personalWrite = spyOn(llmProviderRepo, "upsertUserSavedProviderConfig").mockResolvedValue(false);
+    const activate = spyOn(providerActivation, "activateProviderTranscriptionDefault").mockResolvedValue(true);
+    const saveServer = () => core.saveServerProviderCredential(snapshot, provider, "new credential", false);
+    const savePersonal = () =>
+      core.savePersonalProviderCredential(
+        snapshot,
+        actor.user.user_id,
+        actor.discordId,
+        provider,
+        "new credential",
+        false,
+      );
+
+    expect(await saveServer()).toBe(false);
+    expect(await savePersonal()).toBe(false);
+    expect(activate).not.toHaveBeenCalled();
+    serverWrite.mockResolvedValue(true);
+    personalWrite.mockResolvedValue(true);
+    expect(await saveServer()).toBe(true);
+    expect(await savePersonal()).toBe(true);
+    expect(activate).toHaveBeenCalledWith({ kind: "server", ownerId: snapshot.serverId }, provider);
+    expect(activate).toHaveBeenCalledWith({ kind: "personal", ownerId: actor.user.user_id }, provider);
+
+    loadPersonal.mockResolvedValue(personalRow);
+    expect(await savePersonal()).toBe(true);
+    expect(activate).toHaveBeenCalledTimes(2);
+  });
+
+  it("registers and selects OpenRouter transcription only for a workspace with a saved key", async () => {
+    const core = new TomoriDashboardCore();
+    const snapshot = createSnapshot();
+    const actor = createActor();
+    const service = new DashboardProviderService(core);
+    const fields = {
+      provider: "openrouter",
+      api_key: Buffer.from("encrypted"),
+      llm_id: null,
+      diffusion_model_id: null,
+      embedding_model_id: null,
+      nai_diffusion_model_id: null,
+      nai_preset_name: null,
+    };
+    const serverKey = spyOn(llmProviderRepo, "loadSavedProviderConfig").mockResolvedValue(null);
+    spyOn(llmProviderRepo, "loadUserSavedProviderConfig").mockResolvedValue(
+      userSavedProviderConfigSchema.parse({ ...fields, user_id: actor.user.user_id }),
+    );
+    const input = { capability: "transcription", modelName: "sample/audio-model" };
+    const model = {
+      ...input,
+      capability: "transcription" as const,
+      codename: input.modelName,
+      modelId: 44,
+      description: null,
+    };
+    const register = spyOn(openRouterModels, "registerHostedTranscriptionModelForScope").mockResolvedValue({
+      status: "registered",
+      model,
+    });
+
+    await expect(service.registerOpenRouter("server", actor, snapshot, input)).rejects.toMatchObject({
+      code: "openrouter_key_required",
+    });
+    expect(register).not.toHaveBeenCalled();
+    await expect(service.registerOpenRouter("personal", actor, snapshot, input)).resolves.toMatchObject({ model });
+    expect(register).toHaveBeenCalledWith(
+      { kind: "personal", ownerId: actor.user.user_id },
+      "openrouter",
+      input.modelName,
+    );
+    serverKey.mockResolvedValue(savedProviderConfigSchema.parse({ ...fields, server_id: snapshot.serverId }));
+    await expect(service.registerOpenRouter("server", actor, snapshot, input)).resolves.toMatchObject({ model });
+    expect(register).toHaveBeenCalledWith(
+      { kind: "server", ownerId: snapshot.serverId },
+      "openrouter",
+      input.modelName,
+    );
+    await expect(service.removeOpenRouter("server", actor, snapshot, input)).rejects.toMatchObject({
+      code: "invalid_openrouter_model",
+    });
   });
 
   it("keeps NovelAI image capability separate in the workspace and activation API", async () => {
@@ -449,6 +558,7 @@ describe("dashboard provider policy", () => {
         video: [],
       },
       selected: { text: 1, vision: null, embedding: 20, image: null, imageNai: null, video: null },
+      transcription: { options: [], selected: null },
     });
     const write = spyOn(configModelOperations, "setCapabilityModel").mockResolvedValue({
       status: "success",
@@ -703,7 +813,10 @@ describe("dashboard provider policy", () => {
     const core = {
       loadServerModelWorkspace: mock(async () => ({
         options: {
-          text: [{ id: 11, label: "OpenRouter / text", provider: "openrouter" }],
+          text: [
+            { id: 1, label: "OpenRouter / current text", provider: "openrouter" },
+            { id: 11, label: "OpenRouter / text", provider: "openrouter" },
+          ],
           vision: [{ id: 12, label: "OpenRouter / vision", provider: "openrouter" }],
           embedding: [{ id: 21, label: "OpenRouter / embedding", provider: "openrouter" }],
           image: [],
@@ -718,8 +831,16 @@ describe("dashboard provider policy", () => {
           imageNai: null,
           video: null,
         },
+        transcription: {
+          options: [
+            { id: 42, label: "Hosted audio", provider: "openrouter" },
+            { id: 42, label: "Local audio", provider: "custom:8" },
+          ],
+          selected: { provider: "openrouter", modelId: 42 },
+        },
       })),
       setServerPrimaryModel: mock(async () => true),
+      setServerTranscription: mock(async () => true),
     };
     const service = new DashboardProviderService(core as unknown as DashboardProviderCore);
     const value = {
@@ -742,5 +863,20 @@ describe("dashboard provider policy", () => {
     await expect(service.setServerModels(createSnapshot(), { ...value, embedding: null })).rejects.toMatchObject({
       code: "invalid_server_models",
     });
+    const snapshot = createSnapshot();
+    const unchanged = { ...value, text: 1, vision: null };
+    const endpoint = { provider: "custom:8", modelId: 42 };
+    await expect(service.setServerModels(snapshot, { ...unchanged, transcription: endpoint })).resolves.toMatchObject({
+      transcription: endpoint,
+    });
+    expect(core.setServerTranscription).toHaveBeenCalledWith(snapshot, endpoint);
+    await expect(service.setServerModels(snapshot, { ...unchanged, transcription: null })).resolves.toMatchObject({
+      transcription: null,
+    });
+    expect(core.setServerTranscription).toHaveBeenCalledWith(snapshot, null);
+    await expect(
+      service.setServerModels(snapshot, { ...unchanged, transcription: { ...endpoint, provider: "custom:9" } }),
+    ).rejects.toMatchObject({ code: "invalid_server_models" });
+    expect(core.setServerTranscription).toHaveBeenCalledTimes(2);
   });
 });

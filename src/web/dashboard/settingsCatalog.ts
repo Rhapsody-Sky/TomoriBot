@@ -353,7 +353,6 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   autoch_disc_ids: "Channels where Tomori may join conversations automatically without a direct trigger.",
   autoch_threshold: "Minimum activity threshold used before an automatic response becomes eligible.",
   autoch_threshold_max: "Upper autochat threshold. Zero uses the minimum as a fixed threshold.",
-  voice_transcript_chat_mode: "Adds voice-message transcripts to normal chat context.",
   chatterbox_turbo_enabled: "Uses faster Chatterbox generation, trading some quality for speed.",
   chatterbox_cfg_weight: "Controls how strongly Chatterbox follows voice and text conditioning.",
   chatterbox_exaggeration: "Increases vocal expression and emphasis in generated Chatterbox speech.",
@@ -637,7 +636,11 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
     title: "Voice processing",
     description: "Voice transcription and local Chatterbox generation behavior.",
     fields: [
-      toggle("voice_transcript_chat_mode", "Transcriptions enter chat context"),
+      toggle(
+        "voice_transcript_chat_mode",
+        localizer("en-US", "general.dashboard.speech_transcripts_label"),
+        localizer("en-US", "general.dashboard.speech_transcripts_hint"),
+      ),
       toggle("chatterbox_turbo_enabled", "Chatterbox turbo"),
       number("chatterbox_cfg_weight", "CFG weight", 0, 1, { step: 0.05 }),
       number("chatterbox_exaggeration", "Exaggeration", 0, 1, { step: 0.05 }),

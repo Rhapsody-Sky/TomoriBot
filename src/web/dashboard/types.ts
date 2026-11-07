@@ -23,6 +23,7 @@ export interface DiscordOAuthGuild {
 }
 
 export interface DashboardGuild {
+  isDirectMessage?: boolean;
   id: string;
   name: string;
   iconUrl: string | null;

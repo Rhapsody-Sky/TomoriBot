@@ -30,8 +30,12 @@ describe("dashboard memory requests", () => {
     const personal = render({ personal: true, persona });
     const server = render({ personal: false, persona });
     expect(personal).toContain('name="tags"');
+    expect(personal).toContain('data-memory-add aria-controls="memory-compose-form" aria-expanded="false"');
+    expect(personal).toContain('id="memory-compose-form" hidden');
+    expect(personal).toContain('type="button" data-memory-cancel');
     expect(personal).toContain('data-memory-export type="button">');
     expect(server).not.toContain('name="tags"');
+    expect(server).toContain('id="memory-compose-form" hidden');
     expect(server).toContain('data-memory-export type="button" aria-disabled="true" data-tooltip=');
     expect(server).toContain('data-memory-import type="button" aria-disabled="true" data-tooltip=');
   });

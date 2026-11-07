@@ -2,6 +2,8 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Client } from "discord.js";
 import type { Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { localizer } from "@/utils/text/localizer";
+import type { TomoriDashboardCore } from "./core";
 import type { DashboardRuntimeConfig } from "./runtimeConfig";
 import type { DashboardGuild, DashboardSession, DiscordOAuthGuild, DiscordOAuthUser } from "./types";
 
@@ -184,7 +186,11 @@ export async function loadOAuthUser(accessToken: string): Promise<DiscordOAuthUs
   return discordApi<DiscordOAuthUser>("/users/@me", accessToken);
 }
 
-export async function getSharedGuilds(session: DashboardSession, client: Client): Promise<DashboardGuild[]> {
+export async function getSharedGuilds(
+  session: DashboardSession,
+  client: Client,
+  core: Pick<TomoriDashboardCore, "loadGuildSnapshot">,
+): Promise<DashboardGuild[]> {
   const cacheAge = session.guildCache ? Date.now() - session.guildCache.fetchedAt : null;
   if (session.guildCache && cacheAge !== null && cacheAge < GUILD_CACHE_TTL_MS) {
     return session.guildCache.guilds;
@@ -196,7 +202,7 @@ export async function getSharedGuilds(session: DashboardSession, client: Client)
   const load = (async () => {
     try {
       const userGuilds = await discordApi<DiscordOAuthGuild[]>("/users/@me/guilds", session.accessToken);
-      const guilds = userGuilds
+      const guilds: DashboardGuild[] = userGuilds
         .filter((guild) => client.guilds.cache.has(guild.id))
         .map((guild) => {
           const cachedGuild = client.guilds.cache.get(guild.id);
@@ -209,6 +215,17 @@ export async function getSharedGuilds(session: DashboardSession, client: Client)
           };
         })
         .sort((left, right) => Number(right.canManage) - Number(left.canManage) || left.name.localeCompare(right.name));
+
+      if (await core.loadGuildSnapshot(session.user.id)) {
+        guilds.push({
+          id: session.user.id,
+          name: localizer("en-US", "general.dashboard.direct_messages"),
+          iconUrl: discordAvatarUrl(session.user),
+          memberCount: null,
+          canManage: true,
+          isDirectMessage: true,
+        });
+      }
 
       session.guildCache = { fetchedAt: Date.now(), guilds };
       return guilds;
@@ -235,9 +252,10 @@ export async function assertGuildAccess(
   session: DashboardSession,
   client: Client,
   guildId: string,
+  core: Pick<TomoriDashboardCore, "loadGuildSnapshot">,
   requireManage = false,
 ): Promise<DashboardGuild | null> {
-  const guild = (await getSharedGuilds(session, client)).find((entry) => entry.id === guildId) ?? null;
+  const guild = (await getSharedGuilds(session, client, core)).find((entry) => entry.id === guildId) ?? null;
   if (!guild || (requireManage && !guild.canManage)) return null;
   return guild;
 }

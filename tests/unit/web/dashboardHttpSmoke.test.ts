@@ -15,6 +15,9 @@ import type { DashboardServerStats } from "@/web/dashboard/core";
 import { type PersonalMemoryRow, personalMemorySchema, PrivacyLevel } from "@/types/db/schema";
 import { log } from "@/utils/misc/logger";
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
+import { humanizerSettingsFromDegree } from "@/constants/humanizer";
+import { configPersonaOperations } from "@/utils/discord/interactions/configPersonaOperations";
+import { createPersona } from "../../helpers/fixtures";
 
 const fakeClient = {
   application: { id: "123456789012345678" },
@@ -340,11 +343,12 @@ describe("dashboard memory and naming authorization", () => {
     spyOn(TomoriDashboardCore.prototype, "ensureUser").mockResolvedValue(
       createUserRow({ user_id: 7, user_disc_id: session.user.id, privacy_level: privacyLevel }),
     );
+    spyOn(TomoriDashboardCore.prototype, "loadAllowedChannelIds").mockResolvedValue([]);
     spyOn(TomoriDashboardCore.prototype, "loadGuildSnapshot").mockResolvedValue({
       serverId: 42,
       serverDiscordId: "123456789012345678",
       config: createServerConfig(configOverrides),
-      rawPersonas: [],
+      rawPersonas: [createPersona({ server_id: 42, persona_id: 9 })],
       personas: [
         {
           personaId: 9,
@@ -374,6 +378,45 @@ describe("dashboard memory and naming authorization", () => {
     };
     return { app, headers, session, namingWrite, categoryWrite };
   }
+
+  it("keeps personal character references scoped to the signed-in user and requires CSRF", async () => {
+    const { app, headers, session } = setup(false);
+    const write = spyOn(TomoriDashboardCore.prototype, "replaceUserCharacterReference").mockResolvedValue(true);
+    const read = spyOn(TomoriDashboardCore.prototype, "loadUserCharacterReference").mockResolvedValue(
+      Buffer.from("image"),
+    );
+    const url = "/settings/api/profile/character-reference";
+    expect((await app.request(url)).status).toBe(401);
+    const preview = await app.request(url, { headers });
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("cache-control")).toBe("private, no-store");
+    expect(read.mock.calls[0][1]).toBe(session.user.id);
+    expect(
+      (await app.request(url, { method: "DELETE", headers: { ...headers, "X-CSRF-Token": "wrong" } })).status,
+    ).toBe(403);
+    expect(write).not.toHaveBeenCalled();
+    const invalid = new FormData();
+    invalid.set("file", new File(["not an image"], "reference.txt", { type: "text/plain" }));
+    const uploadHeaders = new Headers(headers);
+    uploadHeaders.delete("Content-Type");
+    expect((await app.request(url, { method: "PUT", headers: uploadHeaders, body: invalid })).status).toBe(422);
+    expect(write).not.toHaveBeenCalled();
+    expect((await app.request(url, { method: "DELETE", headers })).status).toBe(200);
+    expect(write.mock.calls[0][1]).toBe(session.user.id);
+    expect(write.mock.calls[0][2]).toBeNull();
+    const image = new FormData();
+    image.set(
+      "file",
+      new File([await (await app.request("/settings/assets/tomori_texture5.png")).arrayBuffer()], "reference.png", {
+        type: "image/png",
+      }),
+    );
+    const uploaded = await app.request(url, { method: "PUT", headers: uploadHeaders, body: image });
+    expect(uploaded.status).toBe(200);
+    expect((await uploaded.json()).hasCharacterReference).toBe(true);
+    expect(write.mock.calls[1][1]).toBe(session.user.id);
+    expect(write.mock.calls[1][2]?.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  });
 
   it("requires guild management and CSRF for channel settings", async () => {
     const member = setup(false);
@@ -774,11 +817,43 @@ describe("dashboard memory and naming authorization", () => {
     const body = { capability: "text", provider: "openrouter", modelId: 11 };
     expect((await request(body)).status).toBe(200);
     expect(write).toHaveBeenCalledWith(7, session.user.id, "text", "openrouter", 11);
+    expect((await request({ ...body, capability: "transcription" })).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(7, session.user.id, "transcription", "openrouter", 11);
     expect((await request(body, "invalid")).status).toBe(403);
     expect((await request({ ...body, userId: 99 })).status).toBe(422);
     session.guildCache = { fetchedAt: Date.now(), guilds: [] };
     expect((await request(body)).status).toBe(403);
-    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it("restricts Humanizer overrides to a persona in the managed server and supports inheritance", async () => {
+    const { app, headers, session } = setup(true);
+    const write = spyOn(configPersonaOperations, "setHumanizerOverride").mockResolvedValue({ status: "success" });
+    const request = (personaId: number, override: unknown, csrf = session.csrfToken) =>
+      app.request(`/settings/api/guilds/123456789012345678/personas/${personaId}/humanizer`, {
+        method: "PATCH",
+        headers: { ...headers, "X-CSRF-Token": csrf },
+        body: JSON.stringify({ override }),
+      });
+    const override = humanizerSettingsFromDegree(2);
+    expect((await request(9, override, "invalid")).status).toBe(403);
+    expect((await request(99, override)).status).toBe(404);
+    expect((await request(9, { humanizer_streaming_enabled: true })).status).toBe(422);
+    expect(write).not.toHaveBeenCalled();
+
+    expect((await request(9, override)).status).toBe(200);
+    expect((await request(9, null)).status).toBe(200);
+    expect(write.mock.calls.map(([input]) => input.value)).toEqual([override, null]);
+    const guild = session.guildCache?.guilds[0];
+    if (!guild) throw new Error("Missing test guild");
+    guild.canManage = false;
+    expect((await request(9, override)).status).toBe(403);
+    expect(write).toHaveBeenCalledTimes(2);
+    guild.canManage = true;
+    write.mockRestore();
+    const invalid = await request(9, { ...override, humanizer_streaming_enabled: false });
+    expect(invalid.status).toBe(422);
+    expect(await invalid.json()).toMatchObject({ error: { code: "invalid_humanizer" } });
   });
 
   it("allows only the member's personal fallback chain and requires CSRF and guild membership", async () => {

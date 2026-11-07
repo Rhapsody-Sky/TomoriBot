@@ -990,6 +990,41 @@ legend {
   display: flex;
 }
 
+.tab-navigation[data-tabs-overflow="true"] {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tab-navigation[data-tabs-overflow="true"] .tabs-viewport {
+  flex: 1;
+  min-width: 0;
+}
+
+.tab-navigation[data-tabs-overflow="true"] .tab-selection {
+  display: flex;
+  width: 96px;
+  flex: none;
+  justify-content: center;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--muted) 22%, transparent) transparent;
+}
+
+*:hover {
+  scrollbar-color: color-mix(in oklab, var(--muted) 50%, transparent) transparent;
+}
+
+@media (hover: hover) {
+  body[data-theme="light"] .button:not(:disabled):hover,
+  body[data-theme="light"] .select-trigger:hover {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 30%, transparent);
+    border-color: var(--primary);
+  }
+}
+
 .notice {
   --status-color: initial;
   --notice-color: var(--status-color, var(--info));

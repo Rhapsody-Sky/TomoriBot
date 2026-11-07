@@ -168,6 +168,11 @@ describe("dashboard personal models", () => {
         video: { selected: null, enabled: false, options: [] },
         speech_design: { selected: null, enabled: false, options: [] },
         speech_clone: { selected: null, enabled: false, options: [] },
+        transcription: {
+          selected: { id: 13, provider: "openrouter" },
+          enabled: true,
+          options: [{ id: 13, provider: "openrouter", label: "Audio model" }],
+        },
       },
     });
     expect(html).not.toContain("personal_model_unassigned");
@@ -176,6 +181,7 @@ describe("dashboard personal models", () => {
     expect(html).toContain("personal_model_unavailable");
     expect(html).toContain("model_speech_design");
     expect(html).toContain("model_speech_clone");
+    expect(html).toContain('name="transcription"');
     expect(html).toContain('value="" disabled selected');
     expect(html).toContain('value="{&quot;provider&quot;:&quot;custom:1&quot;,&quot;modelId&quot;:7}" selected');
   });

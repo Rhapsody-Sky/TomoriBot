@@ -897,7 +897,8 @@
       picker.setAttribute("aria-haspopup", "dialog");
       picker.setAttribute("aria-expanded", "false");
       const selectedLabel = document.createElement("span");
-      picker.append(document.createTextNode(copy.control_sections || ""), selectedLabel);
+      const pickerLabel = document.createTextNode(copy.control_sections || "");
+      picker.append(pickerLabel, selectedLabel);
       const dialog = document.createElement("dialog");
       dialog.id = `control-tabs-${++controlId}`;
       const header = document.createElement("header");
@@ -962,13 +963,32 @@
         if (!navigation.isConnected) return;
         const available = navigation.getBoundingClientRect().width;
         if (!available) return;
-        const compact = row.getBoundingClientRect().width > available;
+        for (const button of buttons) button.hidden = false;
+        const compact = matchMedia("(max-width: 800px)").matches;
         navigation.dataset.tabsCompact = String(compact);
+        const gap = parseFloat(getComputedStyle(row).gap) || 0;
+        const widths = buttons.map((button) => button.getBoundingClientRect().width + gap);
+        const total = widths.reduce((sum, width) => sum + width, 14);
+        const overflow = !compact && total > available;
+        navigation.dataset.tabsOverflow = String(overflow);
+        if (overflow) {
+          let remaining = available - 110;
+          const selected = selectedTab();
+          const order = [selected, ...buttons.filter((button) => button !== selected)];
+          for (const button of order) {
+            const width = widths[buttons.indexOf(button)];
+            button.hidden = width > remaining;
+            if (!button.hidden) remaining -= width;
+          }
+        }
         viewport.inert = compact;
         viewport.setAttribute("aria-hidden", String(compact));
         if (compact && row.contains(document.activeElement)) picker.focus();
         else if (!compact && document.activeElement === picker) selectedTab().focus();
         sync();
+        pickerLabel.textContent = compact ? copy.control_sections || "" : copy.control_more || "";
+        selectedLabel.hidden = !compact;
+        if (!compact) picker.setAttribute("aria-label", copy.control_more || "");
       }
 
       function open() {
@@ -976,7 +996,7 @@
         options.replaceChildren();
         const selected = selectedTab();
         for (const button of buttons) {
-          if (button.hidden) continue;
+          if (navigation.dataset.tabsCompact !== "true" && !button.hidden) continue;
           const option = document.createElement("button");
           option.type = "button";
           option.className = "button tab-sheet-option";

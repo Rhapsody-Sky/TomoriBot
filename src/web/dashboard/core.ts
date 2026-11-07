@@ -1,4 +1,6 @@
-import { pickHumanizerSettings } from "@/constants/humanizer";
+import { type HumanizerSettings, pickHumanizerSettings } from "@/constants/humanizer";
+import { replaceStoredCharReference } from "@/utils/storage/charRefOperations";
+import { loadCharRefAsBase64 } from "@/utils/storage/charrefStorage";
 import type {
   AssembledServerConfig,
   CustomEndpointApiStyle,
@@ -37,12 +39,13 @@ import {
   serverMemoryRepository,
   statRepository,
   userRepository,
+  whitelistRepository,
 } from "@/utils/db/repositories";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { invalidateUserCache } from "@/utils/cache/userCache";
 import { loadStoredPersonaAvatarBuffer } from "@/utils/storage/avatarStorage";
 import { registerCustomEndpoint, validateCustomEndpointReachability } from "@/utils/provider/customEndpointService";
-import { isCustomProvider, parseCustomProvider } from "@/utils/provider/customProviderUtils";
+import { buildCustomProviderName, isCustomProvider, parseCustomProvider } from "@/utils/provider/customProviderUtils";
 import { getFallbackModelRefKey, getPrimaryFallbackRefKeys } from "@/utils/provider/fallbackModelIdentity";
 import { providerPanelOperations, removeScopedRegistration } from "@/utils/provider/providerPanelOperations";
 import { DashboardServiceError } from "./errors";
@@ -56,6 +59,7 @@ import {
   type OpenRouterModelCapability,
   type RegisteredOpenRouterModelEntry,
   loadRegisteredOpenRouterEntriesForCapability,
+  registerHostedTranscriptionModelForScope,
   registerOpenRouterModelForScope,
 } from "@/utils/provider/openrouterModelRegistry";
 import { ProviderFactory } from "@/utils/provider/providerFactory";
@@ -80,7 +84,10 @@ import {
   loadConfigModelProviders,
   resolveNaiPresetTarget,
 } from "@/utils/discord/interactions/configModelOperations";
-import { activateServerTextModelFromSavedConfig } from "@/utils/provider/providerActivation";
+import {
+  activateProviderTranscriptionDefault,
+  activateServerTextModelFromSavedConfig,
+} from "@/utils/provider/providerActivation";
 import { encryptApiKey } from "@/utils/security/crypto";
 import type { SettingsSectionId } from "./settingsCatalog";
 import type { DashboardGuildSnapshot, DashboardPersona } from "./types";
@@ -132,7 +139,8 @@ export type DashboardPersonalModelKind =
   | "image_nai"
   | "video"
   | "speech_design"
-  | "speech_clone";
+  | "speech_clone"
+  | "transcription";
 
 const PERSONAL_MODEL_KINDS: DashboardPersonalModelKind[] = [
   "text",
@@ -143,6 +151,7 @@ const PERSONAL_MODEL_KINDS: DashboardPersonalModelKind[] = [
   "video",
   "speech_design",
   "speech_clone",
+  "transcription",
 ];
 
 export interface DashboardServerModelOption {
@@ -154,6 +163,15 @@ export interface DashboardServerModelOption {
 export interface DashboardServerModelWorkspace {
   options: Record<DashboardServerModelKind, DashboardServerModelOption[]>;
   selected: Record<DashboardServerModelKind, number | null>;
+  transcription: {
+    options: DashboardServerModelOption[];
+    selected: DashboardTranscriptionSelection | null;
+  };
+}
+
+export interface DashboardTranscriptionSelection {
+  provider: string;
+  modelId: number;
 }
 
 export type DashboardStatsTimeframe = "today" | "week" | "month" | "year" | "all_time" | "custom";
@@ -208,6 +226,24 @@ function serializeProviderParameters(row: SavedProviderConfigRow | UserSavedProv
 }
 
 export class TomoriDashboardCore {
+  async replaceUserCharacterReference(user: UserRow, discordId: string, buffer: Buffer | null): Promise<boolean> {
+    const userId = user.user_id;
+    if (!userId) return false;
+    return replaceStoredCharReference({
+      entityType: "users",
+      entityId: discordId,
+      previousRef: user.char_ref_url ?? null,
+      nextBuffer: buffer,
+      persistNextRef: async (nextRef) => (await this.updateUser(userId, discordId, { char_ref_url: nextRef })) !== null,
+      onPersistSuccess: () => undefined,
+    });
+  }
+
+  async loadUserCharacterReference(user: UserRow, discordId: string): Promise<Buffer | null> {
+    if (!user.char_ref_url) return null;
+    const base64 = await loadCharRefAsBase64(user.char_ref_url, "users", discordId);
+    return base64 ? Buffer.from(base64, "base64") : null;
+  }
   async ensureUser(discordId: string, displayName: string): Promise<UserRow | null> {
     return userRepository.register(discordId, displayName);
   }
@@ -230,6 +266,10 @@ export class TomoriDashboardCore {
     return getProviderDisplayName(provider);
   }
 
+  async loadAllowedChannelIds(serverId: number): Promise<string[]> {
+    return (await whitelistRepository.getAllWhitelistChannels(serverId)).map((row) => row.channel_disc_id);
+  }
+
   async loadServerProviderConfigs(serverId: number): Promise<SavedProviderConfigRow[]> {
     return llmProviderRepo.loadSavedProviderConfigs(serverId);
   }
@@ -247,7 +287,7 @@ export class TomoriDashboardCore {
   }
 
   async loadServerOpenRouterModels(serverId: number): Promise<RegisteredOpenRouterModelEntry[]> {
-    const capabilities: OpenRouterModelCapability[] = ["text", "embedding", "image", "video", "decision"];
+    const capabilities = ["text", "embedding", "image", "video", "decision", "transcription"] as const;
     return (
       await Promise.all(
         capabilities.map((capability) =>
@@ -258,7 +298,7 @@ export class TomoriDashboardCore {
   }
 
   async loadPersonalOpenRouterModels(userId: number): Promise<RegisteredOpenRouterModelEntry[]> {
-    const capabilities: OpenRouterModelCapability[] = ["text", "embedding", "image", "video", "decision"];
+    const capabilities = ["text", "embedding", "image", "video", "decision", "transcription"] as const;
     return (
       await Promise.all(
         capabilities.map((capability) =>
@@ -291,16 +331,17 @@ export class TomoriDashboardCore {
     if (!saved) return false;
     const state = await personaRepository.loadState(snapshot.serverDiscordId);
     if (!state) return false;
-    if (state.llm.llm_provider.toLowerCase() !== provider.toLowerCase()) return true;
-    return (
-      (
-        await activateServerTextModelFromSavedConfig({
-          serverDiscId: snapshot.serverDiscordId,
-          tomoriState: state,
-          savedConfig: config,
-        })
-      ).status === "activated"
-    );
+    if (state.llm.llm_provider.toLowerCase() === provider.toLowerCase()) {
+      const activation = await activateServerTextModelFromSavedConfig({
+        serverDiscId: snapshot.serverDiscordId,
+        tomoriState: state,
+        savedConfig: config,
+      });
+      if (activation.status !== "activated") return false;
+    }
+    return existing?.api_key
+      ? true
+      : activateProviderTranscriptionDefault({ kind: "server", ownerId: snapshot.serverId }, provider);
   }
 
   async savePersonalProviderCredential(
@@ -323,8 +364,14 @@ export class TomoriDashboardCore {
       existingConfig: existing,
     });
     const saved = await llmProviderRepo.upsertUserSavedProviderConfig(userId, config);
-    if (saved) invalidateUserCache(userDiscordId);
-    return saved;
+    if (!saved) return false;
+    try {
+      return existing?.api_key
+        ? true
+        : await activateProviderTranscriptionDefault({ kind: "personal", ownerId: userId }, provider);
+    } finally {
+      invalidateUserCache(userDiscordId);
+    }
   }
 
   async setPersonalProviderCapability(
@@ -424,18 +471,28 @@ export class TomoriDashboardCore {
 
   async registerDashboardOpenRouterModel(
     scope: DashboardProviderScope,
-    capability: OpenRouterModelCapability,
+    capability: OpenRouterModelCapability | "transcription",
     modelName: string,
   ) {
-    const result = await registerOpenRouterModelForScope(
+    const owner =
       scope.kind === "server"
-        ? { kind: "server", ownerId: scope.snapshot.serverId }
-        : { kind: "personal", ownerId: scope.userId },
-      capability,
-      modelName,
-    );
-    if (scope.kind === "personal") invalidateUserCache(scope.userDiscordId);
-    else invalidateTomoriStateCache(scope.snapshot.serverDiscordId);
+        ? { kind: "server" as const, ownerId: scope.snapshot.serverId }
+        : { kind: "personal" as const, ownerId: scope.userId };
+    if (capability === "transcription") {
+      const saved =
+        scope.kind === "server"
+          ? await llmProviderRepo.loadSavedProviderConfig(owner.ownerId, "openrouter")
+          : await llmProviderRepo.loadUserSavedProviderConfig(owner.ownerId, "openrouter");
+      if (!saved?.api_key) return { status: "missing_credential" as const };
+    }
+    const result =
+      capability === "transcription"
+        ? await registerHostedTranscriptionModelForScope(owner, "openrouter", modelName)
+        : await registerOpenRouterModelForScope(owner, capability, modelName);
+    if (result.status === "registered") {
+      if (scope.kind === "personal") invalidateUserCache(scope.userDiscordId);
+      else invalidateTomoriStateCache(scope.snapshot.serverDiscordId);
+    }
     return result;
   }
 
@@ -585,7 +642,9 @@ export class TomoriDashboardCore {
                       ? row.video_model_id
                       : capability === "speech_design"
                         ? row.speech_design_model_id
-                        : row.speech_clone_model_id;
+                        : capability === "speech_clone"
+                          ? row.speech_clone_model_id
+                          : row.transcription_model_id;
         return [
           capability,
           {
@@ -689,6 +748,7 @@ export class TomoriDashboardCore {
 
     return {
       options,
+      transcription: await this.loadServerTranscriptionWorkspace(snapshot),
       selected: {
         text: snapshot.config.llm_id ?? null,
         vision: snapshot.config.vision_llm_id ?? null,
@@ -698,6 +758,55 @@ export class TomoriDashboardCore {
         video: snapshot.config.video_model_id ?? null,
       },
     };
+  }
+
+  private async loadServerTranscriptionWorkspace(snapshot: DashboardGuildSnapshot) {
+    const { serverId, config } = snapshot;
+    const providers = await loadConfigModelProviders(serverId, "stt");
+    const options = (
+      await Promise.all(
+        providers.map(async (provider) =>
+          (
+            await loadConfigModelChoices(serverId, "stt", provider)
+          ).map((model) => ({
+            id: model.id,
+            provider,
+            label: isCustomProvider(provider) ? model.name : `${getProviderDisplayName(provider)} / ${model.name}`,
+          })),
+        ),
+      )
+    )
+      .flat()
+      .sort((left, right) => left.label.localeCompare(right.label));
+
+    if (config.transcription_model_id != null) {
+      const model = await llmModelRepo.loadTranscriptionModelById(config.transcription_model_id);
+      return {
+        options,
+        selected: model ? { provider: model.provider, modelId: model.transcription_model_id } : null,
+      };
+    }
+    const endpoint = (await this.loadServerCustomEndpoints(serverId)).find(
+      (row) => row.capability === "transcription" && row.is_default,
+    );
+    return {
+      options,
+      selected: endpoint?.custom_endpoint_id
+        ? { provider: buildCustomProviderName(endpoint.connection_id), modelId: endpoint.custom_endpoint_id }
+        : null,
+    };
+  }
+
+  async setServerTranscription(snapshot: DashboardGuildSnapshot, selection: DashboardTranscriptionSelection | null) {
+    const tomoriState = await personaRepository.loadState(snapshot.serverDiscordId);
+    if (!tomoriState) return false;
+    const input = { tomoriState, serverDiscId: snapshot.serverDiscordId, capability: "stt" } as const;
+    if (!selection) {
+      const result = await configModelOperations.clearCapabilityModel(input);
+      return result.status === "success" || result.status === "already-clear";
+    }
+    const result = await configModelOperations.setCapabilityModel({ ...input, ...selection });
+    return result.status === "success" || result.status === "already-selected";
   }
 
   async loadPersonaTextModelWorkspace(snapshot: DashboardGuildSnapshot, personaId: number) {
@@ -1124,6 +1233,12 @@ export class TomoriDashboardCore {
     invalidateTomoriStateCache(snapshot.serverDiscordId);
     const state = await personaRepository.loadState(snapshot.serverDiscordId);
     return state ? { ...(await this.serverDefaults(state)), ...(await this.loadStmSettings(snapshot.serverId)) } : null;
+  }
+
+  async updatePersonaHumanizer(snapshot: DashboardGuildSnapshot, personaId: number, value: HumanizerSettings | null) {
+    const persona = snapshot.rawPersonas.find((entry) => entry.persona_id === personaId);
+    if (!persona) return { status: "not-found" as const };
+    return configPersonaOperations.setHumanizerOverride({ persona, serverDiscId: snapshot.serverDiscordId, value });
   }
 
   async updatePersonaIdentity(

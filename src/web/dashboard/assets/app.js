@@ -91,6 +91,7 @@
 
   const saveAppearance = () => {
     applyAppearance();
+    stopReducedPanelMotion();
     try {
       localStorage.setItem("tomoribot.dashboard.palette", appearance.palette);
       localStorage.setItem("tomoribot.dashboard.theme", appearance.theme);
@@ -131,7 +132,7 @@
 
   applyAppearance();
 
-  const ui = (key) => state.overview.interfaceCopy[key];
+  const ui = (key) => state.overview?.interfaceCopy[key] ?? state.publicSite?.interfaceCopy[key];
 
   const settingsGroups = [
     {
@@ -299,6 +300,7 @@
   ];
 
   const state = {
+    publicSite: null,
     session: null,
     csrfToken: "",
     guildId: "",
@@ -413,10 +415,89 @@
   };
 
   const draftForms =
-    "[data-profile-section], [data-settings-sections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-lorebook-form], #stm-categories-form";
+    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-lorebook-form], #stm-categories-form";
+  const localEditForms =
+    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-sprite-form], #persona-channel-workspace form, #server-models-form, [data-personal-model], [data-personal-parameters], #fallback-form, #memory-edit-form";
+  const editForms = `${draftForms}, ${localEditForms}`;
+  const editSubmit = 'button[type="submit"]:not([value="reset"]), button[value="save"]:not([type])';
   const drafts = new Map();
   const formBaselines = new WeakMap();
+  const panelSizes = new Map();
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  reducedMotion.addEventListener("change", stopReducedPanelMotion);
+  const panelObserver = new MutationObserver((records) => {
+    const changed = new Set();
+    for (const { target } of records) {
+      const element = target instanceof Element ? target : target.parentElement;
+      const panel = element?.closest(".panel");
+      if (panelSizes.has(panel)) changed.add(panel);
+    }
+    for (const target of changed) {
+      const panel = panelSizes.get(target);
+      if (!target.isConnected) continue;
+      const height = panel.animation ? target.offsetHeight : panel.height;
+      panel.animation?.cancel();
+      panel.animation = null;
+      delete target.dataset.resizing;
+      panel.height = target.offsetHeight;
+      if (height && panel.height) animatePanelSize(target, panel, height, panel.height);
+    }
+  });
+  panelObserver.observe(app, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["hidden", "open", "rows"],
+  });
+  window.addEventListener("resize", () => {
+    for (const [target, panel] of panelSizes) {
+      panel.height = target.offsetHeight;
+    }
+  });
   let savingForms = 0;
+
+  function canAnimatePanels() {
+    return !reducedMotion.matches && document.body.dataset.motion === "full";
+  }
+
+  function stopReducedPanelMotion() {
+    if (canAnimatePanels()) return;
+    for (const panel of panelSizes.values()) panel.animation?.cancel();
+  }
+
+  function animatePanelSize(target, panel, from, to) {
+    if (Math.abs(from - to) < 1 || !canAnimatePanels()) return;
+    target.dataset.resizing = "";
+    const animation = target.animate([{ blockSize: `${from}px` }, { blockSize: `${to}px` }], {
+      duration: 320,
+      easing: "cubic-bezier(.22, .61, .36, 1)",
+    });
+    panel.animation = animation;
+    const finish = () => {
+      if (panel.animation !== animation) return;
+      panel.animation = null;
+      delete target.dataset.resizing;
+      panel.height = target.offsetHeight;
+    };
+    animation.onfinish = finish;
+    animation.oncancel = finish;
+  }
+
+  function observePanelSizes(root) {
+    for (const [panel, entry] of panelSizes) {
+      if (panel.isConnected) continue;
+      entry.animation?.cancel();
+      panelSizes.delete(panel);
+    }
+    const selector = ".panel:not(.persona-test-panel)";
+    const panels = [...root.querySelectorAll(selector)];
+    if (root.matches(selector)) panels.push(root);
+    for (const panel of panels) {
+      if (panelSizes.has(panel) || panel.parentElement.closest(".panel")) continue;
+      panelSizes.set(panel, { height: panel.offsetHeight });
+    }
+  }
 
   function formSnapshot(form) {
     return Array.from(form.querySelectorAll("input[name], select[name], textarea[name]"), (input) => ({
@@ -445,22 +526,32 @@
     form.querySelectorAll("[data-naming-mode]").forEach((mode) => {
       form.elements[mode.dataset.namingMode].disabled = mode.value !== "custom";
     });
+    const humanizerFields = form.querySelector("[data-persona-humanizer-fields]");
+    if (humanizerFields) humanizerFields.hidden = form.elements.humanizerMode.value === "inherit";
     resizeAutoGrowTextareas(form);
+    form.dispatchEvent(new Event("dashboard:restore"));
   }
 
   function initDraftForms(root) {
     root.querySelectorAll(draftForms).forEach((form) => {
       if (formBaselines.has(form)) return;
-      const key = form.dataset.profileSection
-        ? `profile/${form.dataset.profileSection}`
-        : `${state.guildId}/${form.dataset.settingsKey || (form.dataset.personaNaming ? `naming/${form.dataset.personaNaming}` : "stm-categories")}`;
+      const key = form.dataset.siteEntry
+        ? `site/${form.dataset.siteEntry}`
+        : form.dataset.profileSection
+          ? `profile/${form.dataset.profileSection}`
+          : `${state.guildId}/${form.dataset.settingsKey || (form.dataset.personaNaming ? `naming/${form.dataset.personaNaming}` : "stm-categories")}`;
       form.dataset.draftKey = key;
       formBaselines.set(form, formSnapshot(form));
-      const status = document.createElement("div");
-      status.className = "draft-status";
-      status.hidden = true;
-      status.innerHTML = `<span>${escapeHtml(ui("unsaved"))}</span><button class="button  " type="button" data-discard-draft>${escapeHtml(ui("discard"))}</button>`;
-      form.append(status);
+      form.querySelectorAll(editSubmit).forEach((save) => {
+        const discard = document.createElement("button");
+        discard.type = "button";
+        discard.className = "button";
+        discard.dataset.discardDraft = "";
+        discard.dataset.editAction = "";
+        discard.hidden = true;
+        discard.textContent = ui("discard");
+        save.before(discard);
+      });
       if (!form.querySelector("input[name], select[name], textarea[name]")) {
         form.querySelector('button[type="submit"]').disabled = true;
       }
@@ -469,21 +560,52 @@
     });
   }
 
+  function setEditActions(form, changed) {
+    form.querySelectorAll(editSubmit).forEach((button) => {
+      button.dataset.editAction = "";
+      const visible =
+        changed &&
+        (!form.matches("[data-channel-settings]") || channelHasChanges(form, button.closest("[data-channel-panel]")));
+      if (button.hidden === visible) button.hidden = !visible;
+      const discard = button.previousElementSibling;
+      if (discard?.hasAttribute("data-discard-draft") && discard.hidden === visible) discard.hidden = !visible;
+    });
+  }
+
+  function initLocalEditForm(form) {
+    if (formBaselines.has(form)) return;
+    const snapshot = formSnapshot(form);
+    const original = form.dataset.editBaseline ? JSON.parse(form.dataset.editBaseline) : null;
+    formBaselines.set(
+      form,
+      original
+        ? snapshot.map(({ name, value, checked }) =>
+            checked === undefined
+              ? { name, value: String(original[name] ?? ""), checked }
+              : { name, value, checked: Boolean(original[name]) },
+          )
+        : snapshot,
+    );
+    captureDraft(form);
+  }
+
   function captureDraft(form) {
     if (!form || !formBaselines.has(form)) return;
     const values = formSnapshot(form);
     const changed = form.matches("[data-channel-settings]")
       ? channelHasChanges(form)
-      : JSON.stringify(values) !== JSON.stringify(formBaselines.get(form));
-    if (changed) drafts.set(form.dataset.draftKey, values);
-    else drafts.delete(form.dataset.draftKey);
-    form.querySelector(".draft-status").hidden = !changed;
+      : form.dataset.editFile !== undefined || JSON.stringify(values) !== JSON.stringify(formBaselines.get(form));
+    if (form.dataset.draftKey) {
+      if (changed) drafts.set(form.dataset.draftKey, values);
+      else drafts.delete(form.dataset.draftKey);
+    }
+    setEditActions(form, changed);
   }
 
   function completeFormSave(form) {
     drafts.delete(form.dataset.draftKey);
     formBaselines.set(form, formSnapshot(form));
-    form.querySelector(".draft-status")?.setAttribute("hidden", "");
+    setEditActions(form, false);
     form.querySelector(".form-error")?.remove();
   }
 
@@ -530,6 +652,7 @@
           <h1>${escapeHtml(loginMessage)}</h1>
           <p class="login-copy">Sign in with Discord to manage your own Tomori data and the servers you administer.</p>
           <a class="button primary login-button" href="/settings/login">Continue with Discord</a>
+          ${renderPublicLinks()}
         </div>
       </main>`;
   }
@@ -564,7 +687,26 @@
     return `<a href="#${id}" data-nav="${id}" aria-current="${state.view === id ? "location" : "false"}">${navigationIcon(navigationIcons[id])}<span class="sidebar-link-label">${escapeHtml(label)}</span></a>`;
   }
 
+  function renderPublicLinks(sidebar = false) {
+    const site = state.publicSite;
+    if (!site?.entries.length) return "";
+    const links = site.entries
+      .map(
+        (entry) =>
+          `<a href="${escapeHtml(entry.kind === "page" ? `/settings/pages/${entry.id}` : entry.url)}">${sidebar ? navigationIcon("book-open") : ""}<span>${escapeHtml(entry.title)}</span></a>`,
+      )
+      .join("");
+    return sidebar
+      ? `<section class="sidebar-group site-public-nav"><h2 class="group-label">${escapeHtml(site.copy.public_links)}</h2><div class="sidebar-group-links">${links}</div></section>`
+      : `<nav class="site-public-links" aria-label="${escapeHtml(site.copy.public_links)}">${links}</nav>`;
+  }
+
+  async function refreshPublicSite() {
+    state.publicSite = await api("/site");
+  }
+
   function renderShell() {
+    clearSearchSpotlight();
     const guilds = state.session?.guilds || [];
     const selected = guilds.find((guild) => guild.id === state.guildId) || guilds[0];
     const user = state.session?.user;
@@ -590,6 +732,10 @@
         </header>
         <div class="shell"><div class="sidebar-rail"><aside class="sidebar" data-variant="detailed">
           <nav class="nav-stack sidebar-sections" id="dashboard-navigation" aria-label="Dashboard">
+            ${
+              state.overview
+                ? `
+            <button class="button" type="button" data-settings-search-open aria-haspopup="dialog">${escapeHtml(ui("settings_search"))}</button>
             <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_global"))}</h2><div class="sidebar-group-links">
             ${navButton("profile", ui("my_settings"))}
             ${navButton("personal-memory", "Global memory")}
@@ -604,10 +750,15 @@
               state.overview?.canManage
                 ? `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_administration"))}</h2><div class="sidebar-group-links">
                    ${navButton("server-providers", "Server providers", true)}
-                   ${navButton("channel-settings", ui("channel_settings"), true)}
+                   ${state.overview.guild.isDirectMessage ? "" : navButton("channel-settings", ui("channel_settings"), true)}
                    ${navButton("settings", "Server settings", true)}</div></section>`
                 : ""
             }
+            `
+                : ""
+            }
+            ${state.session?.user.isGlobalAdmin && state.publicSite ? `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(state.publicSite.copy.admin)}</h2><div class="sidebar-group-links">${navButton("site-admin", state.publicSite.copy.title)}</div></section>` : ""}
+            ${renderPublicLinks(true)}
           </nav>
           <section class="sidebar-context sidebar-account" aria-label="${escapeHtml(ui("account"))}"><div class="row">
             ${
@@ -627,13 +778,14 @@
       <dialog id="server-picker-dialog" class="wide" aria-labelledby="server-picker-title">
         <div class="stack">
           <header class="panel-header">
-            <div class="heading"><p class="eyebrow">Your Tomori spaces</p><h2 id="server-picker-title">Switch server</h2>
+            <div class="heading"><p class="eyebrow">Your Tomori spaces</p><h2 id="server-picker-title" tabindex="-1" autofocus>Switch server</h2>
               <p>Select the server you want to view or manage.</p>
             </div>
             <button class="button icon" type="button" data-server-picker-close aria-label="Close server selection">${navigationIcon("x")}</button>
           </header>
           <div class="persona-picker-grid">
-            ${guilds
+            ${[...guilds]
+              .sort((left, right) => Number(Boolean(right.isDirectMessage)) - Number(Boolean(left.isDirectMessage)))
               .map(
                 (guild) =>
                   `<button class="persona-choice" aria-pressed="${guild.id === state.guildId}" type="button" data-guild-select="${escapeHtml(guild.id)}">
@@ -642,7 +794,7 @@
                       ? `<img src="${escapeHtml(guild.iconUrl)}" alt="" class="avatar">`
                       : `<span class="avatar avatar-fallback">${escapeHtml((guild.name || "?").slice(0, 1))}</span>`
                   }
-                  <span class="server-choice-copy"><strong>${escapeHtml(guild.name)}</strong><small>${guild.memberCount ?? "?"} members</small></span>
+                  <span class="server-choice-copy"><strong>${escapeHtml(guild.name)}</strong><small>${guild.isDirectMessage ? escapeHtml(ui("direct_messages_owner")) : `${guild.memberCount ?? "?"} members`}</small></span>
                   <span class="server-choice-access">${guild.canManage ? "Manage" : "Member"}</span>
                 </button>`,
               )
@@ -728,6 +880,9 @@
   }
 
   function enhanceDashboard(container) {
+    requestAnimationFrame(focusSearchDestination);
+    container.querySelectorAll(localEditForms).forEach(initLocalEditForm);
+    observePanelSizes(container);
     container
       .querySelectorAll(
         ".server-model-panel select, [data-persona-text-model] select, #fallback-form select, [data-history-model]",
@@ -746,6 +901,7 @@
           "control_choose_section",
           "control_close_dialog",
           "control_sections",
+          "control_more",
           "control_hold_delete",
           "control_search_options",
           "control_no_matches",
@@ -781,6 +937,7 @@
   }
 
   const navigationIcons = {
+    "site-admin": "settings-2",
     overview: "house",
     personas: "users-round",
     profile: "user-round",
@@ -841,7 +998,32 @@
 
   function renderView() {
     const workspace = document.querySelector("#workspace");
-    if (!workspace || !state.overview) return;
+    if (!workspace) return;
+    if (state.view === "site-admin" && state.session?.user.isGlobalAdmin) {
+      window.TomoriSite.renderAdmin(workspace, {
+        api,
+        escapeHtml,
+        fieldLabel,
+        pageHeader,
+        navigationIcon,
+        toast,
+        confirmAction,
+        withBusyForm,
+        initDraftForms,
+        enhanceDashboard,
+        completeFormSave,
+        isCurrent: () => state.view === "site-admin",
+        copy: state.publicSite.copy,
+        afterSave: async () => {
+          await refreshPublicSite();
+          const navigation = document.querySelector("#dashboard-navigation");
+          navigation.querySelector(".site-public-nav")?.remove();
+          navigation.insertAdjacentHTML("beforeend", renderPublicLinks(true));
+        },
+      });
+      return;
+    }
+    if (!state.overview) return;
     switch (state.view) {
       case "profile":
         renderProfile(workspace);
@@ -876,6 +1058,7 @@
     initDraftForms(workspace);
     enhanceDashboard(workspace);
     initNavigationMenus();
+    focusSearchDestination();
     workspace.querySelectorAll(".tabs, .tabs").forEach((nav) => {
       const active = nav.querySelector('[aria-current="page"]');
       if (!active) return;
@@ -884,6 +1067,373 @@
       if (button.right > bounds.right) nav.scrollLeft += button.right - bounds.right;
       else if (button.left < bounds.left) nav.scrollLeft += button.left - bounds.left;
     });
+  }
+
+  let settingsSearchEntries = [];
+  let pendingSearchDestination = null;
+  let clearSearchSpotlight = () => {};
+
+  function settingSearchText(element) {
+    const label = (element.querySelector(".field-label, .sr-only") || element).cloneNode(true);
+    label.querySelectorAll("small, input, select, textarea, button").forEach((child) => {
+      child.remove();
+    });
+    return label.textContent.replace(/\s+/g, " ").trim();
+  }
+
+  function buildSettingsSearchIndex() {
+    const entries = [];
+    const addMarkup = (html, route, path) => {
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      for (const element of template.content.querySelectorAll("label.field, label.toggle, h2, h3, legend")) {
+        if (element.closest(".entry-list, .chat")) continue;
+        const title = settingSearchText(element);
+        if (!title) continue;
+        const hint = element.querySelector("small")?.textContent || "";
+        const name = element.querySelector("[name]")?.getAttribute("name");
+        const dialog = element.closest("dialog")?.id;
+        const entry = { ...route, dialog, title, hint, name, tag: element.tagName.toLowerCase(), path };
+        if (
+          !entries.some(
+            (existing) =>
+              existing.personaId === entry.personaId &&
+              existing.path === path &&
+              existing.title === title &&
+              existing.dialog === dialog,
+          )
+        )
+          entries.push(entry);
+      }
+    };
+    const page = (view, title, extra = {}) => entries.push({ view, title, path: title, hint: "", ...extra });
+    page("profile", ui("my_settings"));
+    for (const section of ["profile", "privacy", "conversation"])
+      addMarkup(renderProfilePanel(section), { view: "profile" }, ui("my_settings"));
+    page("personal-memory", "Global memory");
+    page("lorebooks", ui("lorebooks"));
+    if (state.overview.canManage) {
+      for (const [section, fields] of [
+        [
+          "content",
+          [
+            ["lorebook_title", "title"],
+            ["lorebook_content", "content"],
+            ["lorebook_enabled", "enabled"],
+          ],
+        ],
+        [
+          "matching",
+          [
+            ["lorebook_constant", "constant"],
+            ["lorebook_keys", "keys"],
+          ],
+        ],
+        [
+          "rules",
+          [
+            ["lorebook_secondary", "secondaryKeys"],
+            ["lorebook_logic", "selectiveLogic"],
+            ["lorebook_scan", "scanDepth"],
+            ["lorebook_chance", "triggerChance"],
+            ["lorebook_order", "insertionOrder"],
+          ],
+        ],
+      ]) {
+        for (const [key, name] of fields)
+          entries.push({
+            view: "lorebooks",
+            title: ui(key),
+            hint: ui(`${key}_hint`) || "",
+            path: ui("lorebooks"),
+            name,
+            lorebookSection: section,
+          });
+      }
+    }
+    if (state.overview.canManage && state.overview.settings) {
+      for (const group of settingsGroups) {
+        const route = { view: "settings", settingsGroup: group.id };
+        const path = `Server settings / ${group.labelKey ? ui(group.labelKey) : group.label}`;
+        for (const panel of group.panels) addMarkup(renderSettingsPanel(panel), route, path);
+        if (group.id === "memory") addMarkup(renderStmCategories(), route, path);
+      }
+      for (const [sectionId, key] of channelSettingsFields) {
+        const field = state.overview.settings.catalog
+          .find((section) => section.id === sectionId)
+          ?.fields.find((field) => field.key === key);
+        if (field)
+          entries.push({
+            view: "channel-settings",
+            title: field.label,
+            hint: field.hint,
+            path: ui("channel_settings"),
+            channelTab: "settings",
+          });
+      }
+      addMarkup(
+        renderChannelOverrides(),
+        { view: "channel-settings", channelTab: "settings", channelSelection: true },
+        ui("channel_settings"),
+      );
+      page("channel-settings", ui("channel_allowlisted"), { channelTab: "allowlist" });
+      page("channel-settings", ui("channel_personas"), { channelTab: "settings" });
+    }
+    for (const persona of state.overview.personas.filter((entry) => entry.lineageId !== 0)) {
+      const route = { view: "personas", personaId: persona.personaId };
+      page("personas", persona.nickname, {
+        ...route,
+        personaPanel: "personal",
+        personaHome: true,
+        path: `Personas / ${persona.nickname}`,
+      });
+      for (const [panel, title] of [
+        ["personal", "Personal memory"],
+        ["server", "Server knowledge"],
+        ["lorebook", ui("lorebooks")],
+        ["preferences", state.overview.personaNaming.copy.tab],
+      ])
+        page("personas", title, { ...route, personaPanel: panel, path: `Personas / ${persona.nickname} / ${title}` });
+      addMarkup(
+        renderPersonaNaming(persona),
+        { ...route, personaPanel: "preferences" },
+        `Personas / ${persona.nickname} / ${state.overview.personaNaming.copy.tab}`,
+      );
+      if (state.overview.canManage) {
+        entries.push({
+          ...route,
+          personaPanel: "settings",
+          title: ui("persona_model_title"),
+          hint: ui("persona_model_hint"),
+          name: "modelId",
+          path: `Personas / ${persona.nickname} / Persona settings`,
+        });
+        addMarkup(
+          renderPersonaSettings(persona),
+          { ...route, personaPanel: "settings" },
+          `Personas / ${persona.nickname} / Persona settings`,
+        );
+        addMarkup(
+          renderPersonaAppearance(persona),
+          { ...route, personaPanel: "appearance" },
+          `Personas / ${persona.nickname} / Appearance & image prompt`,
+        );
+        page("personas", ui("sprites"), { ...route, personaPanel: "sprites", path: `Personas / ${persona.nickname}` });
+        page("personas", ui("persona_channels"), {
+          ...route,
+          personaPanel: "channels",
+          path: `Personas / ${persona.nickname}`,
+        });
+      }
+    }
+    for (const scope of state.overview.canManage ? ["personal", "server"] : ["personal"]) {
+      const view = `${scope === "personal" ? "personal" : "server"}-providers`;
+      const path = scope === "personal" ? "My providers" : "Server providers";
+      const data = state.providerData[scope];
+      const hasModels = scope !== "personal" || !data || providerConnections(data).length > 0;
+      for (const [panel, key] of [
+        ["connections", "connections"],
+        ["models", "primary_models"],
+        ["fallbacks", "connection_fallbacks"],
+      ])
+        if (panel === "connections" || hasModels) page(view, ui(key), { scope, providerPanel: panel, path });
+      if (!data) continue;
+      for (const connection of providerConnections(data))
+        addMarkup(
+          renderConnectionDetail(data, scope, connection),
+          { view, scope, providerPanel: "connections", connection: connection.key },
+          `${path} / ${connection.name}`,
+        );
+      if (!hasModels) continue;
+      addMarkup(
+        scope === "personal" ? renderPersonalModels(data) : renderServerModels(data),
+        { view, scope, providerPanel: "models" },
+        `${path} / ${ui("primary_models")}`,
+      );
+      addMarkup(
+        renderFallbacks(data, scope),
+        { view, scope, providerPanel: "fallbacks" },
+        `${path} / ${ui("connection_fallbacks")}`,
+      );
+      if (scope === "server")
+        addMarkup(
+          renderSettingsPanel({ section: "byok" }),
+          { view, scope, providerPanel: "models" },
+          `${path} / ${ui("primary_models")}`,
+        );
+      const workspace = { innerHTML: "" };
+      renderProviders(workspace, scope);
+      const template = document.createElement("template");
+      template.innerHTML = workspace.innerHTML;
+      for (const dialog of template.content.querySelectorAll("dialog"))
+        addMarkup(
+          dialog.outerHTML,
+          { view, scope, providerPanel: "connections" },
+          `${path} / ${dialog.querySelector("h2")?.textContent || ""}`,
+        );
+    }
+    return entries;
+  }
+
+  function filterSettingsSearch(entries, query) {
+    const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    return entries
+      .map((entry) => {
+        const title = entry.title.toLocaleLowerCase();
+        const text = `${title} ${entry.path} ${entry.hint || ""}`.toLocaleLowerCase();
+        return {
+          entry,
+          score: words.every((word) => text.includes(word))
+            ? title === query.toLocaleLowerCase().trim()
+              ? 3
+              : words.some((word) => title.includes(word)) &&
+                  words.every((word) => `${title} ${entry.path}`.toLocaleLowerCase().includes(word))
+                ? 2
+                : 1
+            : 0,
+        };
+      })
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map(({ entry }) => entry);
+  }
+
+  function updateSettingsSearch(dialog) {
+    const matches = filterSettingsSearch(settingsSearchEntries, dialog.querySelector("input").value);
+    const list = dialog.querySelector("[data-search-results]");
+    list.innerHTML = matches
+      .slice(0, 60)
+      .map((entry) => {
+        const persona = state.overview.personas.find((persona) => persona.personaId === entry.personaId);
+        return `<button type="button" class="settings-search-result" data-settings-search-result="${settingsSearchEntries.indexOf(entry)}">${persona ? personaAvatar(persona, "avatar") : ""}<span class="settings-search-copy"><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.path)}</small>${entry.hint ? `<span>${escapeHtml(entry.hint)}</span>` : ""}</span></button>`;
+      })
+      .join("");
+    dialog.querySelector("[role=status]").textContent = matches.length
+      ? ui("settings_search_count").replace("{count}", String(matches.length))
+      : ui("settings_search_empty");
+  }
+
+  async function openSettingsSearch() {
+    clearSearchSpotlight();
+    if (document.getElementById("navigation-sheet")?.open) initNavigationMenus();
+    if (!state.overview || document.querySelector("dialog[open]")) return;
+    const guildId = state.guildId;
+    const dialog = document.createElement("dialog");
+    dialog.className = "dialog wide settings-search";
+    dialog.setAttribute("aria-labelledby", "settings-search-title");
+    dialog.innerHTML = `<header class="panel-header"><div class="heading"><h2 id="settings-search-title">${escapeHtml(ui("settings_search"))}</h2></div><button class="button icon" type="button" data-search-close aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header><label class="field"><span class="sr-only">${escapeHtml(ui("settings_search"))}</span><input type="search" placeholder="${escapeHtml(ui("settings_search_placeholder"))}" autocomplete="off"></label><p class="hint" role="status"></p><div class="settings-search-results" data-search-results></div>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.querySelector("[data-search-close]").onclick = () => dialog.close();
+    dialog.querySelector("input").addEventListener("input", () => updateSettingsSearch(dialog));
+    dialog.addEventListener("keydown", (event) => {
+      const buttons = [...dialog.querySelectorAll("[data-settings-search-result]")];
+      const index = buttons.indexOf(document.activeElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const next = index + (event.key === "ArrowDown" ? 1 : -1);
+        if (next < 0) dialog.querySelector("input").focus();
+        else buttons[Math.min(next, buttons.length - 1)]?.focus();
+      } else if (event.key === "Enter" && event.target.matches("input")) {
+        event.preventDefault();
+        buttons[0]?.click();
+      }
+    });
+    dialog.showModal();
+    settingsSearchEntries = buildSettingsSearchIndex();
+    updateSettingsSearch(dialog);
+    dialog.querySelector("input").focus();
+    for (const scope of state.overview.canManage ? ["personal", "server"] : ["personal"]) {
+      if (state.providerData[scope]) continue;
+      try {
+        const data = await api(`/guilds/${guildId}/providers/${scope}`);
+        if (!dialog.open || state.guildId !== guildId) return;
+        state.providerData[scope] = data;
+        settingsSearchEntries = buildSettingsSearchIndex();
+        updateSettingsSearch(dialog);
+      } catch {
+        if (dialog.open) dialog.querySelector("[role=status]").textContent = ui("settings_search_partial");
+      }
+    }
+  }
+
+  function focusSearchDestination() {
+    const entry = pendingSearchDestination;
+    if (!entry) return;
+    if (state.view !== entry.view) {
+      pendingSearchDestination = null;
+      return;
+    }
+    const root = entry.dialog ? document.getElementById(entry.dialog) : document.getElementById("workspace");
+    if (!root) return;
+    if (entry.dialog && !root.open) root.showModal();
+    let target;
+    if (entry.personaHome) target = root.querySelector(".persona-focus");
+    else if (entry.view === "channel-settings" && entry.channelTab !== "allowlist")
+      target = root.querySelector("[data-channel-settings] .panel");
+    else if (entry.name)
+      target = [...root.querySelectorAll("[name]")]
+        .find((input) => input.name === entry.name && input.getClientRects().length)
+        ?.closest(".field, .toggle, fieldset");
+    if (!target && entry.tag)
+      target = [...root.querySelectorAll(entry.tag)].find(
+        (element) => settingSearchText(element) === entry.title && element.getClientRects().length,
+      );
+    if (!target && !entry.tag && !entry.name)
+      target = root.querySelector(entry.personaPanel ? ".persona-panel-content" : "h1");
+    if (!target) return;
+    if (target.matches("h2, h3, legend")) target = target.closest("fieldset, .panel") || target;
+    pendingSearchDestination = null;
+    target.scrollIntoView({ block: "center", behavior: "instant" });
+    const control =
+      target.querySelector(
+        'input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), button',
+      ) || target;
+    if (control === target) target.tabIndex = -1;
+    control.focus({ preventScroll: true });
+    showSearchSpotlight(target);
+  }
+
+  function showSearchSpotlight(target) {
+    clearSearchSpotlight();
+    const spotlight = document.createElement("div");
+    spotlight.className = "settings-search-spotlight";
+    spotlight.popover = "manual";
+    spotlight.setAttribute("aria-hidden", "true");
+    document.body.append(spotlight);
+    const position = () => {
+      if (!target.isConnected) {
+        clearSearchSpotlight();
+        return;
+      }
+      const rect = target.getBoundingClientRect();
+      const left = Math.max(4, rect.left - 12);
+      const top = Math.max(4, rect.top - 12);
+      Object.assign(spotlight.style, {
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${Math.max(0, Math.min(innerWidth - 4, rect.right + 12) - left)}px`,
+        height: `${Math.max(0, Math.min(innerHeight - 4, rect.bottom + 12) - top)}px`,
+      });
+    };
+    const resize = new ResizeObserver(position);
+    const dismiss = () => clearSearchSpotlight();
+    clearSearchSpotlight = () => {
+      spotlight.remove();
+      resize.disconnect();
+      document.removeEventListener("scroll", position, true);
+      window.removeEventListener("resize", position);
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("keydown", dismiss, true);
+      clearSearchSpotlight = () => {};
+    };
+    position();
+    spotlight.showPopover();
+    resize.observe(target);
+    document.addEventListener("scroll", position, true);
+    window.addEventListener("resize", position);
+    document.addEventListener("pointerdown", dismiss, true);
+    document.addEventListener("keydown", dismiss, true);
   }
 
   function renderOverview(workspace) {
@@ -1253,6 +1803,7 @@
           </select></label>
         </div>
         <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated traits used when image generation needs to depict you.")}<input name="physical_appearance_tags" value="${escapeHtml((profile.physicalAppearanceTags || []).join(", "))}"></label>
+        <section class="subsection stack" id="character-reference-controls">${renderCharacterReference()}</section>
         `
             : ""
         }
@@ -1307,9 +1858,36 @@
       </form>`;
   }
 
+  function renderCharacterReference() {
+    return `<div class="heading"><h3>${escapeHtml(ui("character_reference"))}</h3><p>${escapeHtml(ui("character_reference_hint"))}</p></div>
+      ${state.overview.profile.hasCharacterReference ? `<img class="character-reference-preview" src="${BASE}/profile/character-reference?v=${Date.now()}" alt="${escapeHtml(ui("character_reference"))}">` : ""}
+      <div class="actions"><button class="button" type="button" data-character-reference-upload>${escapeHtml(ui("character_reference_upload"))}</button>
+      ${state.overview.profile.hasCharacterReference ? `<button class="button danger" type="button" data-character-reference-remove>${escapeHtml(ui("character_reference_remove"))}</button>` : ""}</div>
+      <input type="file" id="character-reference-file" accept="image/*" hidden>`;
+  }
+
+  async function saveCharacterReference(file) {
+    const controls = document.getElementById("character-reference-controls");
+    try {
+      await withBusyForm(controls, async () => {
+        const body = new FormData();
+        if (file) body.set("file", file);
+        const result = await api("/profile/character-reference", {
+          method: file ? "PUT" : "DELETE",
+          ...(file ? { body } : {}),
+        });
+        state.overview.profile.hasCharacterReference = result.hasCharacterReference;
+        controls.innerHTML = renderCharacterReference();
+      });
+      toast(ui("character_reference_saved"));
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
   function renderProfile(workspace) {
     workspace.innerHTML = `${pageHeader("Personal", ui("my_settings"), "These preferences belong to you, not to the selected server.")}
-      <div class="columns">${["profile", "privacy", "conversation"].map(renderProfilePanel).join("")}</div>`;
+      <div class="grid"><div class="stack">${renderProfilePanel("profile")}</div><div class="stack">${["privacy", "conversation"].map(renderProfilePanel).join("")}</div></div>`;
   }
 
   function renderMemoryCollection({ personal, global = false, persona = null }) {
@@ -1340,21 +1918,35 @@
           ${refreshButton("memory", ui("refresh_memories"))}
           <button class="button " data-memory-export type="button"${transferAttributes}>Export</button>
           <button class="button " data-memory-import type="button"${transferAttributes}>Import</button>
+          ${serverWritesDisabled || personalCreationDisabled ? "" : `<button class="button primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false">${escapeHtml(ui("memory_add"))}</button>`}
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
         </div></header>
       <div class="stack">
       ${
         serverWritesDisabled || personalCreationDisabled
           ? `<div class="notice info"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><p>Existing entries remain visible according to your access.</p></div>`
-          : `<form class="stack" id="memory-compose-form">
+          : `<form class="stack" id="memory-compose-form" hidden>
               <label class="field">${fieldLabel("New memory", "Write one concise fact. Its visibility follows the memory scope shown above.")}<textarea name="content" rows="3" required placeholder="A concise fact Tomori should remember"></textarea></label>
               <div class="stack">
                 ${personal ? `<label class="field">${fieldLabel("Tags", ui("memory_personal_tags_hint"))}<input name="tags" placeholder="preference, character"></label>` : ""}
-                <div class="actions"><button class="button primary" type="submit">Add memory</button></div>
+                <div class="actions"><button class="button" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
               </div>
             </form>`
       }
       <section id="memory-list" class="stack">${loadingBar(ui("memory_loading"))}</section></div></section>`;
+  }
+
+  function setMemoryComposer(form, open) {
+    const trigger = form.closest(".panel").querySelector("[data-memory-add]");
+    form.hidden = !open;
+    trigger.hidden = open;
+    trigger.setAttribute("aria-expanded", String(open));
+    if (open) {
+      form.elements.content.focus();
+    } else {
+      form.reset();
+      trigger.focus({ preventScroll: true });
+    }
   }
 
   function renderGlobalMemories(workspace) {
@@ -1482,10 +2074,15 @@
       if (selectedEntry) {
         openLorebookEditor(
           selectedEntry.entry_id,
-          selectedEntry.entry_id === selected?.entryId ? selected.section : "content",
+          pendingSearchDestination?.lorebookSection ||
+            (selectedEntry.entry_id === selected?.entryId ? selected.section : "content"),
           false,
         );
         target.querySelector(".mailbox").dataset.view = currentView;
+      }
+      if (pendingSearchDestination?.lorebookSection) {
+        target.querySelector(".mailbox").dataset.view = selectedEntry ? "detail" : "list";
+        focusSearchDestination();
       }
     } catch (error) {
       if (version !== lorebookLoadVersion || !lorebookCurrent(lineageId, target, guildId)) return;
@@ -1906,15 +2503,35 @@
     }
   }
 
+  function renderPersonaHumanizer(persona) {
+    const settings = state.overview.settings;
+    const fields = settings?.catalog
+      .find((section) => section.id === "chat")
+      ?.fields.filter((field) => field.key.startsWith("humanizer_"));
+    if (!fields?.length) return "";
+    const override = persona.humanizerOverride;
+    const values = override ?? settings.values.chat;
+    return `<form class="panel stack" data-persona-id="${persona.personaId}" data-persona-section="humanizer">
+      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_humanizer_title"))}</h2><p>${escapeHtml(ui("persona_humanizer_hint"))}</p></div></header>
+      <label class="field">${fieldLabel(ui("persona_humanizer_source"))}<select name="humanizerMode" data-persona-humanizer-mode>
+        <option value="inherit"${override ? "" : " selected"}>${escapeHtml(ui("persona_humanizer_inherit"))}</option>
+        <option value="custom"${override ? " selected" : ""}>${escapeHtml(ui("persona_humanizer_custom"))}</option>
+      </select></label>
+      <fieldset class="stack" data-persona-humanizer-fields${override ? "" : " hidden"}>${fields.map((field) => renderSettingField(field, values[field.key])).join("")}</fieldset>
+      <footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>
+    </form>`;
+  }
+
   function renderPersonaSettings(persona) {
     const formHeader = (eyebrow, title, description) =>
       `<header class="panel-header"><div class="heading"><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p></div></header>`;
     const saveActions = `<footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>`;
     const attributes = persona.attributes || [];
     const dialogues = persona.sampleDialogues || [];
-    return `<div class="workspace">
+    return `<div class="${state.overview.guild.isDirectMessage ? "stack" : "workspace"}">
       <div class="stack">
         ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}">${loadingBar(ui("persona_model_loading"))}</div>` : ""}
+        ${renderPersonaHumanizer(persona)}
         <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="identity">
           ${formHeader("Identity", "Display identity", "The name used by this persona in conversation.")}
           <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
@@ -1968,10 +2585,11 @@
     const read = attributes
       ? `<div class="entry-copy"><p class="read-text">${escapeHtml(saved.text)}</p>${saved.isPublic ? `<span class="entry-visibility">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span>` : ""}</div>`
       : `<dl class="dialogue-copy"><dt>${escapeHtml(ui("persona_dialogue_user"))}</dt><dd class="read-text" data-read-field="user">${escapeHtml(saved.input)}</dd><dt>${escapeHtml(persona.nickname)}</dt><dd class="read-text" data-read-field="persona">${escapeHtml(saved.output)}</dd></dl>`;
-    return `<article class="inline-entry" data-entry-kind="${kind}" data-entry-index="${index}" data-persona-id="${persona.personaId}">${draft ? `<form class="entry-form" data-persona-entry-form>${fields}<div class="actions"><button class="button" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `<div class="entry-read">${read}<div class="entry-actions"><button class="button" type="button" data-entry-edit>${escapeHtml(ui("persona_edit"))}</button><button class="button icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}" data-tooltip="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div></div>`}</article>`;
+    return `<article class="inline-entry" data-entry-kind="${kind}" data-entry-index="${index}" data-persona-id="${persona.personaId}">${draft ? `<form class="entry-form" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}">${fields}<div class="actions"><button class="button" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `<div class="entry-read">${read}<div class="entry-actions"><button class="button" type="button" data-entry-edit>${escapeHtml(ui("persona_edit"))}</button><button class="button icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}" data-tooltip="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div></div>`}</article>`;
   }
 
   function renderPersonaTestChat(persona) {
+    if (state.overview.guild.isDirectMessage) return "";
     const chat = state.personaTestChats[persona.personaId] || [];
     return `<aside class="panel chat persona-test-panel" data-persona-id="${persona.personaId}">
         <header class="panel-header"><div class="heading"><p class="eyebrow">Private preview</p><h2>Test ${escapeHtml(persona.nickname)}</h2></div>
@@ -2020,11 +2638,15 @@
     return `<div class="stack">
       <section class="panel" data-persona-id="${persona.personaId}">
         <header class="panel-header"><div class="heading"><p class="eyebrow">Portrait</p><h2>Persona avatar</h2><p>${persona.isAlter ? "Used by this persona's webhook messages." : "Updates TomoriBot's server-specific Discord avatar."}</p></div></header>
-        <div class="media-settings"><div class="media-item"><label class="avatar-upload media-upload" data-upload-zone>
+        ${
+          state.overview.guild.isDirectMessage
+            ? personaAvatar(persona, "avatar")
+            : `<div class="media-settings"><div class="media-item"><label class="avatar-upload media-upload" data-upload-zone>
           ${personaAvatar(persona, "avatar")}
           <span class="media-overlay">Change avatar</span>
           <input id="persona-avatar-file-${persona.personaId}" data-persona-avatar-file="${persona.personaId}" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" aria-label="Change avatar">
-        </label><button class="button" type="button" data-persona-avatar-remove="${persona.personaId}">Remove</button></div></div>
+        </label><button class="button" type="button" data-persona-avatar-remove="${persona.personaId}">Remove</button></div></div>`
+        }
       </section>
         <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="prompt">
           ${formHeader("Image generation", "Visual character prompt", "A visual description Tomori can also use when generating images. This is not the persona's main conversation prompt.")}
@@ -2086,10 +2708,11 @@
 
   function renderPersonaWorkspace(workspace) {
     const personas = (state.overview.personas || []).filter((persona) => persona.lineageId !== 0);
-    const personaActions = state.overview.canManage
-      ? `<button class="button secondary" type="button" data-persona-import-open>Import</button>
+    const personaActions =
+      state.overview.canManage && !state.overview.guild.isDirectMessage
+        ? `<button class="button secondary" type="button" data-persona-import-open>Import</button>
          <button class="button primary" type="button" data-persona-create-open>New persona</button>`
-      : "";
+        : "";
     if (!personas.length) {
       workspace.innerHTML = `${pageHeader("Persona workspace", "Personas", "Create or import an identity for this server.", personaActions)}
         <div class="empty"><strong>No personas are available in this server.</strong></div>`;
@@ -2117,6 +2740,7 @@
         personaActions,
       )}
       ${renderPersonaPicker(personas, persona.personaId)}
+      ${state.overview.guild.isDirectMessage ? `<p class="hint">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
       <section class="persona-focus" data-glow>
         ${persona.avatarUrl ? `<div class="persona-atmosphere" aria-hidden="true"><img src="${escapeHtml(persona.avatarUrl)}" alt=""></div>` : ""}
         <div class="persona-identity"><p class="eyebrow">${persona.isAlter ? "Alter persona" : "Main persona"}</p><h2>${escapeHtml(persona.nickname)}</h2><button class="button persona-picker-trigger" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_choose"))}${navigationIcon("arrow-up-down")}</button></div>
@@ -2130,7 +2754,7 @@
           ${
             state.overview.canManage
               ? `<button type="button" role="tab" aria-selected="${state.personaPanel === "settings"}" data-persona-panel="settings">Persona settings</button>
-                 <button type="button" role="tab" aria-selected="${state.personaPanel === "channels"}" data-persona-panel="channels">${escapeHtml(ui("persona_channels"))}</button>
+                 ${state.overview.guild.isDirectMessage ? "" : `<button type="button" role="tab" aria-selected="${state.personaPanel === "channels"}" data-persona-panel="channels">${escapeHtml(ui("persona_channels"))}</button>`}
                  <button type="button" role="tab" aria-selected="${state.personaPanel === "appearance"}" data-persona-panel="appearance">Appearance &amp; image prompt</button>
                  <button type="button" role="tab" aria-selected="${state.personaPanel === "sprites"}" data-persona-panel="sprites">${escapeHtml(ui("sprites"))}</button>`
               : ""
@@ -2149,7 +2773,7 @@
                   : state.personaPanel === "appearance"
                     ? renderPersonaAppearance(persona)
                     : state.personaPanel === "sprites"
-                      ? `<div class="workspace"><section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>${renderPersonaTestChat(persona)}</div>`
+                      ? `<div class="${state.overview.guild.isDirectMessage ? "stack" : "workspace"}"><section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>${renderPersonaTestChat(persona)}</div>`
                       : renderMemoryCollection({
                           personal: state.personaPanel === "personal",
                           persona,
@@ -2203,11 +2827,12 @@
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         event.stopPropagation();
-        if (!selected().length) return;
+        if (!selected().length || form.querySelector(editSubmit).hidden) return;
         try {
           await withBusyForm(form, () =>
             savePersonaChannels([{ personaId: persona.personaId, channelIds: selected() }]),
           );
+          completeFormSave(form);
           toast(ui("channel_saved"));
         } catch (error) {
           showFormError(form, error);
@@ -2253,13 +2878,18 @@
       bulk.innerHTML = `<button type="button" class="button" data-personas-select="all">${escapeHtml(ui("channel_select_all"))}</button><button type="button" class="button" data-personas-select="none">${escapeHtml(ui("channel_deselect_all"))}</button>`;
       form.querySelector(".channel-choices").before(bulk);
       const boxes = [...form.querySelectorAll('[type="checkbox"]')];
-      const changed = new Set(all ? personas.map((persona) => persona.personaId) : []);
+      const original = new Map(
+        personas.map((persona) => {
+          const channels = personaChannelSelection(data, persona.personaId);
+          return [persona.personaId, ids.filter((id) => channels.has(id)).length];
+        }),
+      );
       boxes.forEach((box) => {
         box.indeterminate = box.dataset.mixed === "true";
       });
       const assignments = () =>
         boxes
-          .filter((box) => changed.has(Number(box.value)))
+          .filter((box) => !box.indeterminate && original.get(Number(box.value)) !== (box.checked ? ids.length : 0))
           .map((box) => {
             const channels = personaChannelSelection(data, Number(box.value));
             ids.forEach((id) => {
@@ -2269,15 +2899,14 @@
             return { personaId: Number(box.value), channelIds: [...channels] };
           });
       const validate = () => {
-        const invalid = assignments().some((entry) => !entry.channelIds.length);
-        form.querySelector('[type="submit"]').disabled = invalid || !changed.size;
+        const changes = assignments();
+        const invalid = changes.some((entry) => !entry.channelIds.length);
+        form.querySelector('[type="submit"]').disabled = invalid || !changes.length;
+        setEditActions(form, changes.length > 0);
         form.querySelector('[role="alert"]').hidden = !invalid;
         form.querySelector('[role="alert"]').textContent = ui("persona_channel_required");
       };
-      form.addEventListener("change", (event) => {
-        if (event.target.type === "checkbox") changed.add(Number(event.target.value));
-        validate();
-      });
+      form.addEventListener("change", validate);
       form.querySelector('[type="search"]').addEventListener("input", (event) => {
         form.querySelectorAll("[data-permission-name]").forEach((row) => {
           row.hidden = !row.dataset.permissionName.includes(event.target.value.trim().toLowerCase());
@@ -2291,16 +2920,16 @@
           .forEach((box) => {
             box.checked = button.dataset.personasSelect === "all";
             box.indeterminate = false;
-            changed.add(Number(box.value));
           });
         validate();
       });
       form.querySelector('footer [type="button"]').onclick = () => dialog.close();
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
-        if (!changed.size || assignments().some((entry) => !entry.channelIds.length)) return;
+        const changes = assignments();
+        if (!changes.length || changes.some((entry) => !entry.channelIds.length)) return;
         try {
-          await withBusyForm(form, () => savePersonaChannels(assignments()));
+          await withBusyForm(form, () => savePersonaChannels(changes));
           const refreshed = await api(`/guilds/${state.guildId}/channel-settings`);
           if (host.isConnected) renderChannelPersonas(host, refreshed, ids);
           dialog.close();
@@ -2356,6 +2985,7 @@
         <footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_model_save"))}</button></footer>
       </form>`;
       enhanceDashboard(target);
+      focusSearchDestination();
     } catch {
       if (current()) target.innerHTML = `<p role="alert">${escapeHtml(ui("persona_model_failed"))}</p>`;
     }
@@ -2413,7 +3043,7 @@
         const draft = personaEntryDrafts.get(key);
         const value = draft || sprite || {};
         const image = draft?.preview || sprite?.imageUrl;
-        return `<form class="sprite-card" data-sprite-form novalidate data-persona-id="${personaId}" ${sprite ? `data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
+        return `<form class="sprite-card" data-sprite-form data-edit-baseline="${escapeHtml(JSON.stringify({ name: sprite?.name, instructions: sprite?.instructions, identity: sprite?.identity }))}"${draft?.file ? " data-edit-file" : ""} novalidate data-persona-id="${personaId}" ${sprite ? `data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
           <div class="sprite-image" ${draft ? "data-upload-zone" : ""}>${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(value.name || "")}" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span>` : ""}${draft ? `<label class="media-upload sprite-image-upload"><span class="media-overlay">${escapeHtml(ui("sprite_file"))}</span><input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif" aria-label="${escapeHtml(ui("sprite_file"))}"></label>` : ""}</div>
           ${
             draft
@@ -2425,12 +3055,18 @@
           }
         </form>`;
       };
-      root.innerHTML = `<section class="panel"><header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("sprites"))} <small>${data.sprites.length} / ${data.limits.count}</small></h2><p>${escapeHtml(ui("sprites_hint"))}</p></div><div class="actions"><button class="button" type="button" popovertarget="sprite-actions">${navigationIcon("ellipsis")}${escapeHtml(ui("sprite_actions"))}</button><div id="sprite-actions" class="action-menu" popover aria-label="${escapeHtml(ui("sprite_actions"))}"><button class="button" type="button" data-sprite-new>${escapeHtml(ui("sprite_add"))}</button><button type="button" class="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button type="button" class="button" data-sprite-export ${data.sprites.length ? "" : "disabled"}>${escapeHtml(ui("sprite_export"))}</button></div><input type="file" accept=".zip,application/zip" data-sprite-archive hidden></div></header>
+      let panel = root.querySelector(":scope > section.panel");
+      if (!panel) {
+        panel = document.createElement("section");
+        panel.className = "panel";
+        root.replaceChildren(panel);
+      }
+      panel.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("sprites"))} <small>${data.sprites.length} / ${data.limits.count}</small></h2><p>${escapeHtml(ui("sprites_hint"))}</p></div><div class="actions"><button class="button" type="button" popovertarget="sprite-actions">${navigationIcon("ellipsis")}${escapeHtml(ui("sprite_actions"))}</button><div id="sprite-actions" class="action-menu" popover aria-label="${escapeHtml(ui("sprite_actions"))}"><button class="button" type="button" data-sprite-new>${escapeHtml(ui("sprite_add"))}</button><button type="button" class="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button type="button" class="button" data-sprite-export ${data.sprites.length ? "" : "disabled"}>${escapeHtml(ui("sprite_export"))}</button></div><input type="file" accept=".zip,application/zip" data-sprite-archive hidden></div></header>
         ${data.inherited ? `<p class="hint">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
         ${data.sprites.length ? "" : `<p class="hint">${escapeHtml(ui("sprite_empty"))}</p>`}
-        <div class="entry-list sprite-grid">${data.sprites.map(editor).join("")}${personaEntryDrafts.has(personaEntryKey(personaId, "sprite", "new")) ? editor(null) : ""}</div></section>`;
+        <div class="entry-list sprite-grid">${data.sprites.map(editor).join("")}${personaEntryDrafts.has(personaEntryKey(personaId, "sprite", "new")) ? editor(null) : ""}</div>`;
       root._sprites = data.sprites;
-      window.TomoriControls?.enhance(root);
+      enhanceDashboard(root);
     } catch (error) {
       if (!current()) return;
       document.querySelector("#sprite-workspace").innerHTML =
@@ -2440,18 +3076,33 @@
 
   function renderChannelSelector(name, values = [], single = false, channels = state.overview.channels) {
     const selected = new Set(values.map(String));
+    const allowed = state.overview.allowedChannelIds || [];
+    const excluded =
+      name === "allowedChannels"
+        ? []
+        : (channels || []).filter((channel) => allowed.length && !allowed.includes(channel.id));
+    channels = (channels || []).filter((channel) => !excluded.includes(channel));
     const groups = new Map();
     for (const channel of channels || []) {
       const key = channel.parentId ?? channel.parentName ?? "";
       if (!groups.has(key)) groups.set(key, { name: channel.parentName || ui("channel_uncategorized"), channels: [] });
       groups.get(key).channels.push(channel);
     }
-    const rows = [...groups.values()]
+    const preserved = excluded
+      .filter((channel) => selected.has(channel.id))
       .map(
-        (group) =>
-          `<h3 class="channel-category">${escapeHtml(group.name)}</h3>${group.channels.map((channel) => `<label class="channel-choice" data-channel-search="${escapeHtml(`${channel.name} ${group.name}`.toLowerCase())}"><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}><span aria-hidden="true">#</span><span>${escapeHtml(channel.name)}</span></label>`).join("")}`,
+        (channel) =>
+          `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}" checked></label>`,
       )
       .join("");
+    const rows =
+      preserved +
+      [...groups.values()]
+        .map(
+          (group) =>
+            `<h3 class="channel-category">${escapeHtml(group.name)}</h3>${group.channels.map((channel) => `<label class="channel-choice" data-channel-search="${escapeHtml(`${channel.name} ${group.name}`.toLowerCase())}"><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}><span aria-hidden="true">#</span><span>${escapeHtml(channel.name)}</span></label>`).join("")}`,
+        )
+        .join("");
     return `<div class="channel-selector stack" data-channel-selector><label class="field"><span class="field-label">${escapeHtml(ui("channel_search"))}</span><input type="search" data-channel-filter></label>${single ? `<label class="channel-choice"><input type="radio" name="${escapeHtml(name)}" value=""${!values[0] ? " checked" : ""}><span>${escapeHtml(ui("channel_none"))}</span></label>` : `<div class="actions channel-selection-actions"><button class="button" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`}<div class="channel-choices">${rows}<p data-channel-empty class="hint"${rows ? " hidden" : ""}>${escapeHtml(ui("channel_empty"))}</p></div></div>`;
   }
 
@@ -2708,6 +3359,15 @@
         request.singleBaseline = singleChannelSnapshot(form);
         request.pendingBaseline = false;
         formBaselines.set(form, formSnapshot(form));
+      } else {
+        const modes = new Set([
+          ...channelSettingsFields.map(([, key]) => key),
+          ...channelExtraFields.map((key) => `channel_${key}`),
+        ]);
+        formBaselines.set(
+          form,
+          formSnapshot(form).map((entry) => (modes.has(entry.name) ? { ...entry, value: "keep" } : entry)),
+        );
       }
       if (form._pendingPanels) {
         for (const [panel, values] of form._pendingPanels) restoreSnapshot(panel, values);
@@ -3088,7 +3748,7 @@
       .map(
         (model) => `<article class="panel-header">
           <div class="heading"><span class="eyebrow">${escapeHtml(model.capability)}</span><h3>${escapeHtml(model.codename)}</h3></div>
-          <div class="actions"><button class="button danger" type="button" data-openrouter-delete="${escapeHtml(model.codename)}" data-openrouter-capability="${escapeHtml(model.capability)}" data-provider-scope="${scope}" data-tooltip="${escapeHtml(ui("connection_remove_registration_hint"))}">${escapeHtml(ui("connection_remove_registration"))}</button></div>
+          ${model.capability === "transcription" ? "" : `<div class="actions"><button class="button danger" type="button" data-openrouter-delete="${escapeHtml(model.codename)}" data-openrouter-capability="${escapeHtml(model.capability)}" data-provider-scope="${scope}" data-tooltip="${escapeHtml(ui("connection_remove_registration_hint"))}">${escapeHtml(ui("connection_remove_registration"))}</button></div>`}
         </article>`,
       )
       .join("");
@@ -3117,6 +3777,26 @@
         .join("");
       return `${none}${options}`;
     };
+    const transcription = workspace.transcription;
+    const transcriptionOptions =
+      transcription?.options
+        .map((option) => {
+          const selected =
+            option.provider === transcription.selected?.provider && option.id === transcription.selected?.modelId;
+          const value = JSON.stringify({ provider: option.provider, modelId: option.id });
+          return `<option value="${escapeHtml(value)}"${selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`;
+        })
+        .join("") ?? "";
+    const unavailable =
+      transcription?.selected &&
+      !transcription.options.some(
+        (option) => option.provider === transcription.selected.provider && option.id === transcription.selected.modelId,
+      );
+    const originalTranscription = unavailable
+      ? "unavailable"
+      : transcription?.selected
+        ? JSON.stringify(transcription.selected)
+        : "";
     return `<form class="panel stack provider-panel server-model-panel" id="server-models-form">
       <div class="panel-header"><div class="heading"><p class="eyebrow">Server defaults</p><h2>Primary models</h2><p>Global model choices used unless a persona, channel, or personal provider overrides them.</p></div></div>
       <div class="grid">
@@ -3126,6 +3806,7 @@
               `<label class="field">${fieldLabel(label, description)}<select name="${kind}"${kind === "text" ? " required" : ""}>${renderOptions(kind, allowNone)}</select></label>`,
           )
           .join("")}
+        ${transcription ? `<label class="field">${fieldLabel(ui("model_transcription"), ui("transcription_server_hint"))}<select name="transcription" data-original-model="${escapeHtml(originalTranscription)}"><option value="">${escapeHtml(ui("transcription_disabled"))}</option>${unavailable ? `<option value="unavailable" selected disabled>${escapeHtml(ui("personal_model_unavailable"))}</option>` : ""}${transcriptionOptions}</select></label>` : ""}
       </div>
       <div class="actions"><button class="button primary" type="submit">Save primary models</button></div>
     </form>`;
@@ -3136,9 +3817,20 @@
     return `<form class="panel stack provider-panel server-model-panel" data-personal-model>
       <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("model_routing"))}</p><h2>${escapeHtml(ui("personal_models"))}</h2><p>${escapeHtml(ui("personal_models_hint"))}</p></div></div>
       <div class="grid">
-        ${["text", "vision", "embedding", "image", "image_nai", "video", "speech_design", "speech_clone"]
+        ${[
+          "text",
+          "vision",
+          "embedding",
+          "image",
+          "image_nai",
+          "video",
+          "speech_design",
+          "speech_clone",
+          "transcription",
+        ]
           .map((capability) => {
             const model = data.models[capability];
+            if (!model) return "";
             const selected = model.selected;
             const hasSelected =
               selected &&
@@ -3151,7 +3843,13 @@
               })
               .join("");
             const original = hasSelected ? JSON.stringify({ provider: selected.provider, modelId: selected.id }) : "";
-            return `<label class="field">${fieldLabel(ui(`model_${capability}`), selected && !model.enabled ? ui("personal_model_disabled") : undefined)}<select name="${capability}" data-original-model="${escapeHtml(original)}"${model.options.length ? "" : " disabled"}><option value="" disabled${hasSelected ? "" : " selected"}>${escapeHtml(ui(placeholder))}</option>${options}</select></label>`;
+            const hint =
+              selected && !model.enabled
+                ? "personal_model_disabled"
+                : capability === "transcription"
+                  ? "transcription_personal_hint"
+                  : null;
+            return `<label class="field">${fieldLabel(ui(`model_${capability}`), hint ? ui(hint) : undefined)}<select name="${capability}" data-original-model="${escapeHtml(original)}"${model.options.length ? "" : " disabled"}><option value="" disabled${hasSelected ? "" : " selected"}>${escapeHtml(ui(placeholder))}</option>${options}</select></label>`;
           })
           .join("")}
       </div>
@@ -3365,11 +4063,24 @@
     if (!provider || provider.startsWith("custom:")) return "";
     const kinds =
       scope === "personal"
-        ? ["text", "vision", "embedding", "image", "image_nai", "video", "speech_design", "speech_clone"]
-        : ["text", "vision", "embedding", "image", "imageNai", "video"];
+        ? [
+            "text",
+            "vision",
+            "embedding",
+            "image",
+            "image_nai",
+            "video",
+            "speech_design",
+            "speech_clone",
+            "transcription",
+          ]
+        : ["text", "vision", "embedding", "image", "imageNai", "video", "transcription"];
     const groups = kinds
       .map((kind) => {
-        const options = scope === "personal" ? data.models?.[kind]?.options : data.models?.options?.[kind];
+        const options =
+          scope === "personal" || kind === "transcription"
+            ? data.models?.[kind]?.options
+            : data.models?.options?.[kind];
         const models = (options || []).filter((option) => option.provider === provider);
         if (!models.length) return "";
         const key = kind === "imageNai" ? "image_nai" : kind;
@@ -3401,8 +4112,9 @@
           ? `<section class="panel provider-panel">
         <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connection_provider"))}</p><h2>${escapeHtml(ui("connection_models"))}</h2><p>${escapeHtml(ui("connection_models_hint"))}</p></div></div>
         <form id="openrouter-form" data-provider-scope="${scope}">
-          <div class="grid"><label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option></select></label>
-          <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label></div>
+          <div class="grid"><label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option><option value="transcription">${escapeHtml(ui("model_transcription"))}</option></select></label>
+            <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label></div>
+          <p class="hint" data-openrouter-transcription-hint hidden>${escapeHtml(ui("openrouter_transcription_hint"))}</p>
           <div class="actions"><button class="button primary" type="submit">${escapeHtml(ui("connection_register_model"))}</button></div>
         </form>
       </section>`
@@ -3423,6 +4135,9 @@
     }
     const { connections, connection } = selectProviderConnection(data, scope);
 
+    const hasPersonalModels = !personal || connections.length > 0;
+    if (!hasPersonalModels) state.providerPanel[scope] = "connections";
+
     workspace.innerHTML = `
       ${pageHeader(
         personal ? "Personal" : "Administration",
@@ -3434,11 +4149,12 @@
           : "Server-owned credentials, endpoints, registrations, and failover.",
         refreshButton("provider", ui("refresh_providers"), scope),
       )}
-      <nav class="tabs" aria-label="${escapeHtml(personal ? "My providers" : "Server providers")}">${[
+      <nav class="tabs provider-primary-tabs tabs-parent${state.providerPanel[scope] === "connections" ? " tabs-joined" : ""}" aria-label="${escapeHtml(personal ? "My providers" : "Server providers")}">${[
         ["connections", "connections"],
         ["models", "primary_models"],
         ["fallbacks", "connection_fallbacks"],
       ]
+        .filter(([id]) => id === "connections" || hasPersonalModels)
         .map(
           ([id, key]) =>
             `<button type="button" aria-selected="${state.providerPanel[scope] === id}" aria-current="${state.providerPanel[scope] === id ? "page" : "false"}" data-provider-panel="${id}" data-provider-scope="${scope}">${escapeHtml(ui(key))}</button>`,
@@ -3446,7 +4162,7 @@
         .join("")}</nav>
       <section class="stack" aria-label="${escapeHtml(ui("connections"))}"${state.providerPanel[scope] === "connections" ? "" : " hidden"}>
         <div class="row provider-toolbar">
-        ${connections.length ? `<nav class="tabs" aria-label="${escapeHtml(ui("connections"))}">${connections.map((entry) => `<button type="button" data-connection-select="${escapeHtml(entry.key)}" data-provider-scope="${scope}" aria-selected="${entry.key === connection?.key}">${escapeHtml(entry.name)}</button>`).join("")}</nav>` : ""}
+        ${connections.length ? `<nav class="tabs tabs-child" aria-label="${escapeHtml(ui("connections"))}">${connections.map((entry) => `<button type="button" data-connection-select="${escapeHtml(entry.key)}" data-provider-scope="${scope}" aria-selected="${entry.key === connection?.key}">${escapeHtml(entry.name)}</button>`).join("")}</nav>` : ""}
         <div class="actions"><button class="button secondary" type="button" data-provider-open aria-haspopup="dialog">${escapeHtml(ui("add_provider"))}</button><button class="button secondary" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button></div>
         </div>${renderConnectionDetail(data, scope, connection)}
       </section>
@@ -3711,6 +4427,7 @@
     form.elements.tags.value = (memory.tags || []).join(", ");
     form.querySelector("[data-memory-tags]").hidden = state.memoryKind !== "personal";
     form.elements.memoryId.value = memory.id;
+    completeFormSave(form);
     dialog.showModal();
   }
 
@@ -3859,6 +4576,11 @@
   );
 
   document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      openSettingsSearch();
+      return;
+    }
     const historyPoint = event.target.closest?.("[data-history-index]");
     if (historyPoint && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
@@ -3905,7 +4627,7 @@
       saveAppearance();
       return;
     }
-    captureDraft(event.target.closest(draftForms));
+    captureDraft(event.target.closest(editForms));
     if (event.target.matches("[data-persona-picker-search]")) {
       const query = event.target.value.trim().toLowerCase();
       document.querySelectorAll("[data-persona-search]").forEach((choice) => {
@@ -3970,6 +4692,52 @@
   });
 
   async function handleDashboardAction(event) {
+    if (event.target.closest("[data-settings-search-open]")) {
+      await openSettingsSearch();
+      return;
+    }
+    const searchResult = event.target.closest("[data-settings-search-result]");
+    if (searchResult) {
+      if (savingForms) {
+        toast(ui("saving"));
+        return;
+      }
+      const entry = settingsSearchEntries[Number(searchResult.dataset.settingsSearchResult)];
+      if (!entry) return;
+      searchResult.closest("dialog").close();
+      const unsaved = [...document.querySelectorAll(localEditForms)].some(
+        (form) =>
+          formBaselines.has(form) &&
+          (form.dataset.editFile !== undefined ||
+            JSON.stringify(formSnapshot(form)) !== JSON.stringify(formBaselines.get(form))),
+      );
+      if (unsaved && !(await confirmAction(ui("discard_title"), ui("leave_detail")))) return;
+      pendingSearchDestination = entry;
+      setTimeout(() => {
+        if (pendingSearchDestination === entry) pendingSearchDestination = null;
+      }, 10000);
+      state.view = entry.view;
+      if (entry.settingsGroup) state.settingsGroup = entry.settingsGroup;
+      if (entry.personaPanel) {
+        state.personaPanel = entry.personaPanel;
+        state.personaId = entry.personaId;
+      }
+      if (entry.scope) {
+        state.providerPanel[entry.scope] = entry.providerPanel;
+        if (entry.connection) state.providerConnection[entry.scope] = entry.connection;
+      }
+      if (entry.channelTab) channelTab = entry.channelTab;
+      renderShell();
+      return;
+    }
+    if (event.target.closest("[data-character-reference-upload]")) {
+      document.getElementById("character-reference-file").click();
+      return;
+    }
+    if (event.target.closest("[data-character-reference-remove]")) {
+      await saveCharacterReference(null);
+      return;
+    }
     if (event.target.closest("[data-stats-range-cancel], [data-stats-range-edit]")) {
       state.statsRangeEditing = !!event.target.closest("[data-stats-range-edit]");
       updateServerStatsSection();
@@ -4210,13 +4978,16 @@
     const discard = event.target.closest("[data-discard-draft]");
     if (discard) {
       const form = discard.form;
+      const panel = discard.closest("[data-channel-panel]") || form;
       if (await confirmAction(ui("discard_title"), ui("discard_detail"))) {
-        restoreSnapshot(form, formBaselines.get(form));
+        restoreSnapshot(panel, formBaselines.get(form));
         if (form.matches("[data-channel-settings]")) form.dispatchEvent(new Event("change", { bubbles: true }));
         captureDraft(form);
         enhanceDashboard(form);
-        form.querySelector(".form-error")?.remove();
-        form.querySelector('button[type="submit"]:not([value="reset"])')?.focus({ preventScroll: true });
+        panel.querySelector(".form-error")?.remove();
+        panel
+          .querySelector('input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])')
+          ?.focus({ preventScroll: true });
       }
       return;
     }
@@ -4406,7 +5177,13 @@
           .querySelector(".entry-list")
           .insertAdjacentHTML("beforeend", renderPersonaEntry(persona, kind, index, {}));
       }
-      document.querySelector(`[data-entry-kind="${kind}"][data-entry-index="${index}"] textarea`)?.focus();
+      const editor = document.querySelector(
+        `[data-entry-kind="${kind}"][data-entry-index="${index}"] [data-persona-entry-form]`,
+      );
+      if (editor) {
+        initLocalEditForm(editor);
+        editor.querySelector("textarea")?.focus();
+      }
       return;
     }
     const personaSelect = event.target.closest("[data-persona-select]");
@@ -4440,6 +5217,16 @@
       state.memoryData = null;
       renderShell();
       focusNavigation(`.nav-stack [data-nav="${state.view}"]`);
+      return;
+    }
+    const memoryAdd = event.target.closest("[data-memory-add]");
+    if (memoryAdd) {
+      setMemoryComposer(memoryAdd.closest(".panel").querySelector("#memory-compose-form"), true);
+      return;
+    }
+    const memoryCancel = event.target.closest("[data-memory-cancel]");
+    if (memoryCancel) {
+      setMemoryComposer(memoryCancel.form, false);
       return;
     }
     const edit = event.target.closest("[data-memory-edit]");
@@ -4485,6 +5272,19 @@
   document.addEventListener("holdcomplete", handleDashboardAction);
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-persona-humanizer-mode]")) {
+      event.target.form.querySelector("[data-persona-humanizer-fields]").hidden = event.target.value === "inherit";
+    }
+    if (event.target.matches('#openrouter-form select[name="capability"]')) {
+      event.target.form.querySelector("[data-openrouter-transcription-hint]").hidden =
+        event.target.value !== "transcription";
+    }
+    if (event.target.id === "character-reference-file") {
+      const file = event.target.files?.[0];
+      if (file) await saveCharacterReference(file);
+      event.target.value = "";
+      return;
+    }
     if (event.target.matches('#fallback-form select[name^="fallback-"]')) {
       const slots = [...event.target.form.querySelectorAll("[data-fallback-slot]")];
       const lastFilled = slots.reduce((last, slot, index) => (slot.querySelector("select").value ? index : last), -1);
@@ -4583,7 +5383,7 @@
       }
       return;
     }
-    captureDraft(event.target.closest(draftForms));
+    captureDraft(event.target.closest(editForms));
     const namingMode = event.target.closest("[data-naming-mode]");
     if (namingMode) {
       namingMode.form.elements[namingMode.dataset.namingMode].disabled = namingMode.value !== "custom";
@@ -4614,6 +5414,10 @@
   });
 
   document.addEventListener("submit", async (event) => {
+    if (event.submitter?.matches("[data-edit-action][hidden]")) {
+      event.preventDefault();
+      return;
+    }
     if (event.target.id === "stats-range-form") {
       event.preventDefault();
       const { from, through } = event.target.elements;
@@ -4869,12 +5673,15 @@
           });
         });
         form.reset();
+        form.querySelector("[data-openrouter-transcription-hint]").hidden = true;
         const message =
-          result?.status === "already_available"
-            ? "This model is already in Tomori's built-in OpenRouter catalog"
-            : result?.status === "already_registered"
-              ? "This OpenRouter model was already registered for this scope"
-              : "OpenRouter model registered";
+          result?.model?.capability === "transcription"
+            ? ui("openrouter_transcription_saved")
+            : result?.status === "already_available"
+              ? "This model is already in Tomori's built-in OpenRouter catalog"
+              : result?.status === "already_registered"
+                ? "This OpenRouter model was already registered for this scope"
+                : "OpenRouter model registered";
         toast(message);
         await refreshProviders(scope);
       } catch (error) {
@@ -4920,6 +5727,7 @@
         const value = form.elements[name].value;
         return value ? Number(value) : null;
       };
+      const transcription = form.elements.transcription;
       try {
         await withBusyForm(form, async () => {
           await api(`/guilds/${state.guildId}/providers/server/models`, {
@@ -4931,6 +5739,9 @@
               image: readModelId("image"),
               imageNai: readModelId("imageNai"),
               video: readModelId("video"),
+              ...(transcription && transcription.value !== transcription.dataset.originalModel
+                ? { transcription: transcription.value ? JSON.parse(transcription.value) : null }
+                : {}),
             }),
           });
         });
@@ -4980,16 +5791,20 @@
     if (event.target.id === "memory-compose-form") {
       event.preventDefault();
       const form = event.target;
+      if (form.hidden) return;
       try {
-        await api(`/guilds/${state.guildId}/memories/${state.memoryKind}`, {
-          method: "POST",
-          body: JSON.stringify({
-            lineageId: state.lineageId,
-            content: form.elements.content.value,
-            tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
+        await withBusyForm(form, () =>
+          api(`/guilds/${state.guildId}/memories/${state.memoryKind}`, {
+            method: "POST",
+            body: JSON.stringify({
+              lineageId: state.lineageId,
+              content: form.elements.content.value,
+              tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
+            }),
           }),
-        });
-        form.reset();
+        );
+        if (!form.isConnected) return;
+        setMemoryComposer(form, false);
         toast("Memory saved");
         await loadMemories();
       } catch (error) {
@@ -5120,6 +5935,7 @@
           }
           completeFormSave(allowlistForm);
         });
+        state.overview = await api(`/guilds/${state.guildId}/overview`);
         renderChannelSettings(allowlistForm.closest("#workspace"));
         toast(ui("channel_saved"));
       } catch (error) {
@@ -5265,7 +6081,19 @@
                   contextNote: values.contextNote.value || null,
                   contextNoteDepth: Number(values.contextNoteDepth.value),
                 }
-              : { physicalAppearanceTags: parseTags(values.physicalAppearanceTags.value) };
+              : section === "humanizer"
+                ? {
+                    override:
+                      values.humanizerMode.value === "inherit"
+                        ? null
+                        : Object.fromEntries(
+                            [...personaForm.querySelectorAll("[data-persona-humanizer-fields] input")].map((input) => [
+                              input.name,
+                              input.checked,
+                            ]),
+                          ),
+                  }
+                : { physicalAppearanceTags: parseTags(values.physicalAppearanceTags.value) };
       try {
         await api(`/guilds/${state.guildId}/personas/${personaId}/${section}`, {
           method: "PATCH",
@@ -5282,10 +6110,21 @@
 
   async function boot() {
     try {
+      await refreshPublicSite();
+    } catch {
+      state.publicSite = null;
+    }
+    try {
       const session = await api("/session");
       state.session = session;
       state.csrfToken = session.csrfToken;
-      if (!session.guilds.length) return renderNoGuilds();
+      if (!session.guilds.length) {
+        if (session.user.isGlobalAdmin && state.publicSite) {
+          state.view = "site-admin";
+          return renderShell();
+        }
+        return renderNoGuilds();
+      }
       const guildId = new URLSearchParams(window.location.search).get("guild");
       const guild = session.guilds.find((item) => item.id === guildId) || session.guilds[0];
       await selectGuild(guild.id);

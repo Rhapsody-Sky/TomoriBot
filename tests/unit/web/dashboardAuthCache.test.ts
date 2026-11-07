@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { Client } from "discord.js";
-import { getSharedGuilds } from "@/web/dashboard/auth";
+import { assertGuildAccess, getSharedGuilds } from "@/web/dashboard/auth";
+import type { DashboardGuildSnapshot } from "@/web/dashboard/types";
 import type { DashboardSession } from "@/web/dashboard/types";
 
 const originalFetch = globalThis.fetch;
+const emptyCore = { loadGuildSnapshot: async () => null };
 
 function createSession(): DashboardSession {
   const now = Date.now();
@@ -56,8 +58,8 @@ describe("dashboard Discord guild cache", () => {
     const session = createSession();
 
     const [first, second] = await Promise.all([
-      getSharedGuilds(session, createClient()),
-      getSharedGuilds(session, createClient()),
+      getSharedGuilds(session, createClient(), emptyCore),
+      getSharedGuilds(session, createClient(), emptyCore),
     ]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -87,7 +89,25 @@ describe("dashboard Discord guild cache", () => {
       guilds: cachedGuilds,
     };
 
-    await expect(getSharedGuilds(session, createClient())).resolves.toBe(cachedGuilds);
+    await expect(getSharedGuilds(session, createClient(), emptyCore)).resolves.toBe(cachedGuilds);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("only discovers and grants management of the signed-in user's DM workspace", async () => {
+    globalThis.fetch = mock(async () => Response.json([])) as unknown as typeof fetch;
+    const session = createSession();
+    const core = {
+      loadGuildSnapshot: mock(async (id: string) => ({ serverDiscordId: id }) as DashboardGuildSnapshot),
+    };
+    const spaces = await getSharedGuilds(session, createClient(), core);
+    expect(core.loadGuildSnapshot.mock.calls).toEqual([[session.user.id]]);
+    expect(spaces).toMatchObject([{ id: session.user.id, isDirectMessage: true, canManage: true }]);
+    expect(await assertGuildAccess(session, createClient(), session.user.id, core, true)).not.toBeNull();
+    expect(await assertGuildAccess(session, createClient(), "111111111111111111", core, true)).toBeNull();
+  });
+
+  it("does not offer an uninitialized DM workspace", async () => {
+    globalThis.fetch = mock(async () => Response.json([])) as unknown as typeof fetch;
+    expect(await getSharedGuilds(createSession(), createClient(), emptyCore)).toEqual([]);
   });
 });

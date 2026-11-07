@@ -5,6 +5,8 @@ import { bodyLimit } from "hono/body-limit";
 import { Hono } from "hono";
 import { z } from "zod";
 import { log } from "@/utils/misc/logger";
+import { convertToPNG } from "@/utils/image/imageProcessor";
+import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { localizer } from "@/utils/text/localizer";
 import {
   PERSONA_NAMING_VALUE_MAX_LENGTH,
@@ -38,7 +40,7 @@ import { DashboardPersonaService } from "./personaService";
 import { DashboardSpriteService, SPRITE_UPLOAD_MAX_BYTES } from "./spriteService";
 import { getDashboardRuntimeConfig } from "./runtimeConfig";
 import { getSettingsCatalog, isSettingsSectionId, serializeSettingsValues } from "./settingsCatalog";
-import { DashboardSettingsService } from "./settingsService";
+import { DashboardSettingsService, personaSettingsSectionSchema } from "./settingsService";
 import { DashboardChannelService } from "./channelService";
 import type {
   DashboardActor,
@@ -48,8 +50,15 @@ import type {
   RegisteredDashboardUser,
 } from "./types";
 import { renderDashboardHtml } from "./ui";
+import { DashboardSiteService, cleanSiteHtml, siteCopy, siteInterfaceCopy } from "./siteService";
+import { escapeToBuffer } from "hono/utils/html";
 
 const BASE_PATH = "/settings";
+function escapeHtml(value: string): string {
+  const buffer = [""];
+  escapeToBuffer(value, buffer);
+  return buffer.join("");
+}
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 const DASHBOARD_STATS_TIMEFRAMES = new Set<DashboardStatsTimeframe>([
   "today",
@@ -73,6 +82,9 @@ const memoryImportSchema = z
   .strict();
 
 const dashboardAssets = {
+  "quill.js": { path: "node_modules/quill/dist/quill.js", contentType: "application/javascript; charset=utf-8" },
+  "quill.core.css": { path: "node_modules/quill/dist/quill.core.css", contentType: "text/css; charset=utf-8" },
+  "site.js": { path: "src/web/dashboard/assets/site.js", contentType: "application/javascript; charset=utf-8" },
   "ui-kit.css": { path: "src/web/dashboard/assets/ui-kit.css", contentType: "text/css; charset=utf-8" },
   "dashboard.css": { path: "src/web/dashboard/assets/dashboard.css", contentType: "text/css; charset=utf-8" },
   "controls.css": { path: "src/web/dashboard/assets/controls.css", contentType: "text/css; charset=utf-8" },
@@ -181,6 +193,7 @@ function serializeProfile(actor: DashboardActor) {
     naturalNudgeOptOut: actor.user.natural_nudge_opt_out,
     impersonationPrompt: actor.user.impersonation_prompt ?? null,
     physicalAppearanceTags: actor.user.physical_appearance_tags ?? [],
+    hasCharacterReference: Boolean(actor.user.char_ref_url),
   };
 }
 
@@ -250,7 +263,7 @@ async function requireGuildContext(
   if (!guildId) {
     return jsonError(context, new DashboardServiceError("guild_required", 422, "A server is required."));
   }
-  const guild = await assertGuildAccess(actorResult.session, client, guildId, requireManage);
+  const guild = await assertGuildAccess(actorResult.session, client, guildId, core, requireManage);
   if (!guild) {
     return jsonError(
       context,
@@ -296,6 +309,7 @@ export function createDashboardApp(client: Client) {
   const personaChat = new DashboardPersonaChatService(client);
   const settings = new DashboardSettingsService(core);
   const channelSettings = new DashboardChannelService(core);
+  const site = new DashboardSiteService();
   const app = new Hono<DashboardEnv>();
   sessions.startCleanup();
 
@@ -313,6 +327,63 @@ export function createDashboardApp(client: Client) {
 
   app.get("/", (context) => context.redirect(BASE_PATH));
   app.get(BASE_PATH, (context) => context.html(renderDashboardHtml()));
+  app.get(`${BASE_PATH}/api/site`, async (context) => {
+    context.header("Cache-Control", "no-store");
+    const entries = await site.list();
+    return context.json({
+      entries: entries.map(({ id, kind, title, url }) => ({ id, kind, title, url })),
+      copy: siteCopy(),
+      interfaceCopy: siteInterfaceCopy(),
+    });
+  });
+  app.get(`${BASE_PATH}/pages/:pageId`, async (context) => {
+    context.header("Cache-Control", "no-store");
+    const entries = await site.list();
+    const page = entries.find((entry) => entry.kind === "page" && entry.id === context.req.param("pageId"));
+    if (!page) return context.text(siteCopy().missing, 404);
+    const links = entries
+      .map(
+        (entry) =>
+          `<a href="${escapeHtml(entry.kind === "page" ? `${BASE_PATH}/pages/${entry.id}` : entry.url)}">${escapeHtml(entry.title)}</a>`,
+      )
+      .join("");
+    return context.html(
+      renderDashboardHtml(`<main class="public-site-page stack">
+      <a class="button" href="${BASE_PATH}">${escapeHtml(siteCopy().back)}</a>
+      <article class="panel"><header class="panel-header"><div class="heading"><h1>${escapeHtml(page.title)}</h1></div></header>
+      <div class="site-prose">${page.content}</div></article>
+      <nav class="site-public-links" aria-label="${escapeHtml(siteCopy().public_links)}">${links}</nav></main>`),
+    );
+  });
+  app.use(`${BASE_PATH}/api/site-admin/*`, async (context, next) => {
+    const session = getSession(context, config, sessions);
+    if (!session) return jsonError(context, new DashboardServiceError("auth_required", 401, siteCopy().forbidden));
+    if (!config.globalAdminIds.includes(session.user.id))
+      return jsonError(context, new DashboardServiceError("global_admin_required", 403, siteCopy().forbidden));
+    if (context.req.method !== "GET") {
+      const error = requireMutationCsrf(context, session);
+      if (error) return error;
+    }
+    context.header("Cache-Control", "no-store");
+    await next();
+  });
+  app.get(`${BASE_PATH}/api/site-admin/entries`, async (context) => context.json({ entries: await site.list(true) }));
+  app.post(`${BASE_PATH}/api/site-admin/preview`, bodyLimit({ maxSize: 150_000 }), async (context) => {
+    const parsed = z
+      .object({ content: z.string().max(100_000) })
+      .strict()
+      .safeParse(await context.req.json());
+    if (!parsed.success)
+      return jsonError(context, new DashboardServiceError("invalid_site_entry", 422, siteCopy().invalid));
+    return context.json({ content: cleanSiteHtml(parsed.data.content) });
+  });
+  app.put(`${BASE_PATH}/api/site-admin/entries/:id`, bodyLimit({ maxSize: 150_000 }), async (context) => {
+    return context.json({ entry: await site.save(context.req.param("id"), await context.req.json()) });
+  });
+  app.delete(`${BASE_PATH}/api/site-admin/entries/:id`, async (context) => {
+    await site.deleteLink(context.req.param("id"));
+    return context.json({ success: true });
+  });
   app.get(`${BASE_PATH}/assets/:assetName`, async (context) => {
     const assetName = context.req.param("assetName") as keyof typeof dashboardAssets;
     const asset = dashboardAssets[assetName];
@@ -323,6 +394,7 @@ export function createDashboardApp(client: Client) {
     context.header(
       "Cache-Control",
       assetName === "controls.js" ||
+        assetName === "site.js" ||
         assetName === "ui-kit.css" ||
         assetName === "dashboard.css" ||
         assetName === "controls.css" ||
@@ -384,7 +456,7 @@ export function createDashboardApp(client: Client) {
     const session = getSession(context, config, sessions);
     if (!session) return jsonError(context, new DashboardServiceError("auth_required", 401, "Sign in required."));
     try {
-      const guilds = await getSharedGuilds(session, client);
+      const guilds = await getSharedGuilds(session, client, core);
       return context.json({
         user: {
           id: session.user.id,
@@ -415,6 +487,8 @@ export function createDashboardApp(client: Client) {
       canManage: result.actor.canManage,
       interfaceCopy: Object.fromEntries(
         [
+          "direct_messages_owner",
+          "direct_messages_guild_only",
           "overview_title",
           "lorebooks",
           "lorebook_library_hint",
@@ -641,6 +715,7 @@ export function createDashboardApp(client: Client) {
           "control_choose_section",
           "control_close_dialog",
           "control_sections",
+          "control_more",
           "control_hold_delete",
           "control_search_options",
           "control_no_matches",
@@ -696,6 +771,19 @@ export function createDashboardApp(client: Client) {
           "endpoint_features",
           "memory_server_transfer_unavailable",
           "memory_loading",
+          "memory_add",
+          "settings_search",
+          "settings_search_placeholder",
+          "settings_search_count",
+          "settings_search_empty",
+          "settings_search_partial",
+          "character_reference",
+          "character_reference_hint",
+          "character_reference_upload",
+          "character_reference_remove",
+          "character_reference_saved",
+          "character_reference_failed",
+          "character_reference_invalid",
           "providers_loading",
           "provider_key_hint",
           "memory_personal_tags_hint",
@@ -747,6 +835,17 @@ export function createDashboardApp(client: Client) {
           "persona_test_configured_model",
           "model_speech_design",
           "model_speech_clone",
+          "model_transcription",
+          "transcription_server_hint",
+          "transcription_personal_hint",
+          "transcription_disabled",
+          "openrouter_transcription_hint",
+          "openrouter_transcription_saved",
+          "persona_humanizer_title",
+          "persona_humanizer_hint",
+          "persona_humanizer_source",
+          "persona_humanizer_inherit",
+          "persona_humanizer_custom",
           "personal_parameters",
           "personal_parameters_hint",
           "personal_parameters_empty",
@@ -950,6 +1049,7 @@ export function createDashboardApp(client: Client) {
         },
       },
       channels,
+      allowedChannelIds: await core.loadAllowedChannelIds(result.snapshot.serverId),
       memoryPolicy: {
         personalMemoryUseEnabled: result.snapshot.config.personal_memories_enabled !== false,
         serverMemoryTeachingEnabled: result.snapshot.config.server_memteaching_enabled !== false,
@@ -1032,6 +1132,59 @@ export function createDashboardApp(client: Client) {
       return jsonError(context, "Server statistics could not be loaded.");
     }
   });
+
+  app.get(`${BASE_PATH}/api/profile/character-reference`, async (context) => {
+    const result = await requireActor(context, core, sessions, config);
+    if (result instanceof Response) return result;
+    const image = await core.loadUserCharacterReference(result.actor.user, result.actor.discordId);
+    if (!image) return context.notFound();
+    context.header("Cache-Control", "private, no-store");
+    context.header("Content-Type", "image/png");
+    return context.body(new Uint8Array(image));
+  });
+
+  app.on(
+    ["PUT", "DELETE"],
+    `${BASE_PATH}/api/profile/character-reference`,
+    bodyLimit({ maxSize: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB * 1024 * 1024 + 65536 }),
+    async (context) => {
+      const result = await requireActor(context, core, sessions, config);
+      if (result instanceof Response) return result;
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+      try {
+        let buffer: Buffer | null = null;
+        if (context.req.method === "PUT") {
+          const { file } = await context.req.parseBody();
+          if (
+            !(file instanceof File) ||
+            !file.type.startsWith("image/") ||
+            file.size === 0 ||
+            file.size > MEDIA_LIMITS.MAX_MEDIA_SIZE_MB * 1024 * 1024
+          ) {
+            throw new DashboardServiceError(
+              "invalid_reference",
+              422,
+              localizer("en-US", "general.dashboard.interface_character_reference_invalid"),
+            );
+          }
+          buffer = await convertToPNG(Buffer.from(await file.arrayBuffer()));
+        }
+        if (!(await core.replaceUserCharacterReference(result.actor.user, result.actor.discordId, buffer))) {
+          throw new Error("Character reference storage failed");
+        }
+        return context.json({ hasCharacterReference: buffer !== null });
+      } catch (error) {
+        if (!(error instanceof DashboardServiceError)) log.warn("Dashboard character reference update failed", error);
+        return jsonError(
+          context,
+          error instanceof DashboardServiceError
+            ? error
+            : localizer("en-US", "general.dashboard.interface_character_reference_failed"),
+        );
+      }
+    },
+  );
 
   app.patch(`${BASE_PATH}/api/profile`, async (context) => {
     const result = await requireActor(context, core, sessions, config);
@@ -2090,18 +2243,14 @@ export function createDashboardApp(client: Client) {
     const csrfError = requireMutationCsrf(context, result.session);
     if (csrfError) return csrfError;
     const personaId = parsePositiveInt(context.req.param("personaId"));
-    const section = context.req.param("section");
-    if (!personaId || !["identity", "prompt", "context", "appearance"].includes(section)) {
+    const parsedSection = personaSettingsSectionSchema.safeParse(context.req.param("section"));
+    if (!personaId || !parsedSection.success) {
       return jsonError(context, new DashboardServiceError("invalid_persona", 422, "Invalid persona update."));
     }
     try {
       const body = await context.req.json().catch(() => null);
-      await settings.updatePersona(
-        result.snapshot,
-        personaId,
-        section as "identity" | "prompt" | "context" | "appearance",
-        body,
-      );
+      const section = parsedSection.data;
+      await settings.updatePersona(result.snapshot, personaId, section, body);
       const editedPersona = result.snapshot.personas.find((persona) => persona.personaId === personaId);
       if (
         section === "identity" &&
@@ -2132,7 +2281,7 @@ export function createDashboardApp(client: Client) {
     if (!session) return jsonError(context, new DashboardServiceError("auth_required", 401, "Sign in required."));
     const guildId = context.req.param("guildId");
     if (!guildId) return context.notFound();
-    if (!(await assertGuildAccess(session, client, guildId))) {
+    if (!(await assertGuildAccess(session, client, guildId, core))) {
       return jsonError(context, new DashboardServiceError("guild_forbidden", 403, "This server is not available."));
     }
     const personaId = parsePositiveInt(context.req.param("personaId"));

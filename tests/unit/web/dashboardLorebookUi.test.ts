@@ -535,6 +535,7 @@ describe("dashboard lorebook UI", () => {
     const pending: { resolve: (value: unknown) => void; reject: (error: Error) => void }[] = [];
     const load = runInNewContext(`let lorebookLoadVersion = 0; ${source}; loadLorebooks`, {
       state,
+      pendingSearchDestination: null,
       window: {},
       loadingBar: () => "",
       lorebookSelections: new Map(),

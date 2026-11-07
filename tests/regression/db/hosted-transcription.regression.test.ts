@@ -1,8 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { llmModelRepo, llmProviderRepo } from "@/utils/db/repositories";
 import { setHostedTranscriptionSelection } from "@/utils/db/repositories/SpeechRepository";
 import { resolveTranscriptionTargets } from "@/utils/provider/speechEndpointResolver";
 import { activateProviderTranscriptionDefault } from "@/utils/provider/providerActivation";
+import {
+  loadRegisteredOpenRouterEntriesForCapability,
+  registerHostedTranscriptionModelForScope,
+} from "@/utils/provider/openrouterModelRegistry";
+import * as transcriptionCatalog from "@/utils/cache/openrouterTranscriptionModelCache";
 import { encryptApiKey } from "@/utils/security/crypto";
 import { DB_TESTS_AVAILABLE, setupTestDb, testSql } from "./setup/testDb";
 import { insertFixtures, cleanupFixtures, type FixtureRefs } from "./setup/fixtures";
@@ -172,6 +177,23 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Hosted transcription persistence", () => {
       WHERE server_id = ${refs.serverId} AND transcription_model_id = ${scoped.transcription_model_id}
     `;
     expect(await serverSelection()).toBeNull();
+  });
+
+  it("lists a registered OpenRouter transcription model only for the scope that registered it", async () => {
+    const catalog = spyOn(transcriptionCatalog, "validateOpenRouterTranscriptionModel").mockResolvedValue(true);
+    try {
+      const codename = "_rt/listed-stt";
+      const result = await registerHostedTranscriptionModelForScope(server(), "openrouter", codename);
+      expect(result.status).toBe("registered");
+      if (result.status !== "registered") throw new Error("Missing test registration");
+      expect(await serverSelection()).toBe(result.model.modelId);
+      const listed = await loadRegisteredOpenRouterEntriesForCapability(server(), "transcription");
+      expect(listed).toContainEqual(result.model);
+      const personalModels = await loadRegisteredOpenRouterEntriesForCapability(personal(), "transcription");
+      expect(personalModels.some((model) => model.codename === codename)).toBe(false);
+    } finally {
+      catalog.mockRestore();
+    }
   });
 
   it("orders the sender's personal model before the server's and honors routing policy", async () => {

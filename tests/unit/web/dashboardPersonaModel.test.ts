@@ -22,7 +22,7 @@ describe("dashboard persona text model", () => {
       state: {
         personaTestChats: {},
         personaTestChatBusy: false,
-        overview: { modelSummary: { text: { name: "server-primary" } } },
+        overview: { guild: { isDirectMessage: false }, modelSummary: { text: { name: "server-primary" } } },
       },
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,
@@ -42,6 +42,7 @@ describe("dashboard persona text model", () => {
       state,
       document: { querySelector: () => target },
       enhanceDashboard: () => {},
+      focusSearchDestination: () => {},
       api: () => new Promise((resolve) => pending.push(resolve)),
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,

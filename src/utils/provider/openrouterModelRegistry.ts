@@ -199,9 +199,18 @@ async function upsertScopedOpenRouterVideoModel(modelCodename: string): Promise<
 
 export async function loadRegisteredOpenRouterEntriesForCapability(
   scope: OpenRouterModelRegistryScope,
-  capability: OpenRouterModelCapability,
+  capability: OpenRouterModelCapability | "transcription",
 ): Promise<RegisteredOpenRouterModelEntry[]> {
   switch (capability) {
+    case "transcription":
+      return (await llmModelRepo.loadAvailableTranscriptionModels("openrouter", scope))
+        .filter((model) => model.is_scoped_registration)
+        .map((model) => ({
+          capability,
+          codename: model.codename,
+          description: resolveDescription(model.descriptions, "en-US"),
+          modelId: model.transcription_model_id,
+        }));
     case "text":
       return (await llmProviderRepo.loadScopedOpenRouterModels(scope, true))
         .filter((model) => model.is_scoped_registration)

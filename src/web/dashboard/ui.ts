@@ -1,4 +1,4 @@
-export function renderDashboardHtml(): string {
+export function renderDashboardHtml(content?: string): string {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -9,7 +9,7 @@ export function renderDashboardHtml(): string {
     <title>TomoriBot Control Room</title>
     <link rel="icon" href="/settings/assets/tomori_companion_logo.svg">
     <link rel="stylesheet" href="/settings/assets/ui-kit.css?v=3">
-    <link rel="stylesheet" href="/settings/assets/dashboard.css?v=3">
+    <link rel="stylesheet" href="/settings/assets/dashboard.css?v=5">
     <link rel="stylesheet" href="/settings/assets/controls.css?v=3">
   </head>
   <body data-palette="tomori" data-theme="dark" data-motion="full" data-surface="glass" data-color-mode="colorful" data-halftone="on">
@@ -28,14 +28,18 @@ export function renderDashboardHtml(): string {
       </div>
     </div>
     <div id="app" class="app-shell">
-      <div class="boot-screen">
+      ${
+        content ??
+        `<div class="boot-screen">
         <img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="boot-logo">
         <div class="loading"></div>
-      </div>
+      </div>`
+      }
     </div>
     <div id="toast-region" class="toasts" role="status"></div>
     <script src="/settings/assets/controls.js" defer></script>
-    <script src="/settings/assets/app.js" defer></script>
+    ${content === undefined ? '<script src="/settings/assets/site.js" defer></script>' : ""}
+    ${content === undefined ? '<script src="/settings/assets/app.js?v=2" defer></script>' : ""}
   </body>
 </html>`;
 }

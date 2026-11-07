@@ -97,6 +97,13 @@ const personaAppearanceSchema = z
   .object({ physicalAppearanceTags: z.array(z.string().trim().min(1).max(120)).max(80) })
   .strict();
 
+export const personaSettingsSectionSchema = z.enum(["identity", "prompt", "context", "appearance", "humanizer"]);
+const personaHumanizerSchema = z
+  .object({
+    override: z.record(z.enum(HUMANIZER_TOGGLES), z.boolean()).nullable(),
+  })
+  .strict();
+
 export type DashboardSettingsCore = Pick<
   TomoriDashboardCore,
   | "updateUser"
@@ -106,6 +113,7 @@ export type DashboardSettingsCore = Pick<
   | "updatePersonaPrompt"
   | "updatePersonaContext"
   | "updatePersonaAppearance"
+  | "updatePersonaHumanizer"
   | "updatePersonaNaming"
   | "updateStmCategories"
 >;
@@ -228,7 +236,7 @@ export class DashboardSettingsService {
   async updatePersona(
     snapshot: DashboardGuildSnapshot,
     personaId: number,
-    section: "identity" | "prompt" | "context" | "appearance",
+    section: z.infer<typeof personaSettingsSectionSchema>,
     value: unknown,
   ): Promise<void> {
     let updated = false;
@@ -275,6 +283,33 @@ export class DashboardSettingsService {
         const parsed = personaAppearanceSchema.safeParse(value);
         if (!parsed.success) throw new DashboardServiceError("invalid_persona", 422, "Invalid appearance tags.");
         updated = await this.core.updatePersonaAppearance(snapshot, personaId, parsed.data as PersonaAppearancePatch);
+        break;
+      }
+      case "humanizer": {
+        const parsed = personaHumanizerSchema.safeParse(value);
+        if (!parsed.success) {
+          throw new DashboardServiceError(
+            "invalid_humanizer",
+            422,
+            localizer("en-US", "general.dashboard.persona_humanizer_invalid"),
+          );
+        }
+        const result = await this.core.updatePersonaHumanizer(snapshot, personaId, parsed.data.override);
+        if (result.status === "not-found") {
+          throw new DashboardServiceError(
+            "persona_not_found",
+            404,
+            localizer("en-US", "general.dashboard.persona_humanizer_not_found"),
+          );
+        }
+        if (result.status === "invalid-value") {
+          throw new DashboardServiceError(
+            "invalid_humanizer",
+            422,
+            localizer("en-US", "general.dashboard.humanizer_requires_streaming"),
+          );
+        }
+        updated = result.status === "success" || result.status === "unchanged";
         break;
       }
     }

@@ -17,6 +17,20 @@ describe("dashboard settings catalog", () => {
   beforeAll(() => initializeLocalizer());
   afterEach(() => mock.restore());
 
+  it("describes transcript visibility without changing the stored speech setting", () => {
+    const field = getSettingsCatalog()
+      .find((section) => section.id === "speech")
+      ?.fields.find((entry) => entry.key === "voice_transcript_chat_mode");
+    expect(field).toMatchObject({
+      type: "toggle",
+      label: localizedCopy("en-US", "general.dashboard.speech_transcripts_label"),
+      hint: localizedCopy("en-US", "general.dashboard.speech_transcripts_hint"),
+    });
+    expect(parseSettingsPatch("speech", { voice_transcript_chat_mode: false })).toEqual({
+      voice_transcript_chat_mode: false,
+    });
+  });
+
   it("places every catalog field in exactly one task-based panel without crossing write domains", async () => {
     const source = await Bun.file("src/web/dashboard/assets/app.js").text();
     const ast = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -24,6 +38,7 @@ describe("dashboard settings catalog", () => {
     type Panel = Source & { sources?: Source[] };
     const panels: Panel[] = [];
     const walk = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === "buildSettingsSearchIndex") return;
       if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "settingsGroups" && node.initializer) {
         const groups = runInNewContext(`(${node.initializer.getText(ast)})`) as { panels: Panel[] }[];
         panels.push(...groups.flatMap((group) => group.panels));

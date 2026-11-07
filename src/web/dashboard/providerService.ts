@@ -6,6 +6,7 @@ import type {
 } from "@/types/db/schema";
 import { z } from "zod";
 import { buildCustomProviderName } from "@/utils/provider/customProviderUtils";
+import { localizer } from "@/utils/text/localizer";
 import type {
   DashboardCustomEndpointInput,
   DashboardProviderScope,
@@ -25,6 +26,7 @@ const capabilitySchema = z.enum([
   "vision",
   "speech_design",
   "speech_clone",
+  "transcription",
 ]);
 const openRouterCapabilitySchema = z.enum(["text", "embedding", "image", "video", "decision"]);
 const personalModelSchema = z
@@ -100,6 +102,9 @@ const openRouterSchema = z
     modelName: z.string().trim().min(1).max(240),
   })
   .strict();
+const openRouterRegistrationSchema = openRouterSchema.extend({
+  capability: z.enum([...openRouterCapabilitySchema.options, "transcription"]),
+});
 
 const fallbackSchema = z
   .object({
@@ -124,6 +129,11 @@ const serverModelsSchema = z
     image: z.number().int().positive().nullable(),
     imageNai: z.number().int().positive().nullable(),
     video: z.number().int().positive().nullable(),
+    transcription: z
+      .object({ provider: providerNameSchema, modelId: z.number().int().positive() })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -227,6 +237,7 @@ export type DashboardProviderCore = Pick<
   | "setPersonalFallbacks"
   | "loadServerModelWorkspace"
   | "setServerPrimaryModel"
+  | "setServerTranscription"
   | "loadPersonaTextModelWorkspace"
   | "setPersonaTextModelOverride"
 >;
@@ -444,7 +455,7 @@ export class DashboardProviderService {
     snapshot: DashboardGuildSnapshot,
     value: unknown,
   ) {
-    const parsed = openRouterSchema.safeParse(value);
+    const parsed = openRouterRegistrationSchema.safeParse(value);
     if (!parsed.success) {
       throw new DashboardServiceError("invalid_openrouter_model", 422, "The OpenRouter model is invalid.");
     }
@@ -453,6 +464,13 @@ export class DashboardProviderService {
       parsed.data.capability,
       parsed.data.modelName,
     );
+    if (result.status === "missing_credential") {
+      throw new DashboardServiceError(
+        "openrouter_key_required",
+        422,
+        localizer("en-US", "general.dashboard.openrouter_transcription_key_required"),
+      );
+    }
     if (result.status === "invalid_model") {
       throw new DashboardServiceError("openrouter_model_not_found", 404, "OpenRouter did not return that model.");
     }
@@ -535,9 +553,22 @@ export class DashboardProviderService {
     }
 
     const workspace = await this.core.loadServerModelWorkspace(snapshot);
-    const kinds = Object.keys(parsed.data) as DashboardServerModelKind[];
+    const { transcription, ...models } = parsed.data;
+    const kinds = Object.keys(models) as DashboardServerModelKind[];
+    if (
+      transcription &&
+      !workspace.transcription.options.some(
+        (option) => option.id === transcription.modelId && option.provider === transcription.provider,
+      )
+    ) {
+      throw new DashboardServiceError(
+        "invalid_server_models",
+        422,
+        localizer("en-US", "general.dashboard.transcription_unavailable"),
+      );
+    }
     for (const kind of kinds) {
-      const modelId = parsed.data[kind];
+      const modelId = models[kind];
       const canClear = kind === "vision" || kind === "image" || kind === "imageNai";
       if (modelId === null) {
         if (!canClear && workspace.selected[kind] !== null) {
@@ -551,10 +582,22 @@ export class DashboardProviderService {
     }
 
     for (const kind of kinds) {
-      const modelId = parsed.data[kind];
+      const modelId = models[kind];
       if (workspace.selected[kind] === modelId) continue;
       if (!(await this.core.setServerPrimaryModel(snapshot, kind, modelId))) {
         throw new DashboardServiceError("server_model_save_failed", 500, `The ${kind} model was not saved.`);
+      }
+    }
+    if (transcription !== undefined) {
+      const current = workspace.transcription.selected;
+      if (current?.provider !== transcription?.provider || current?.modelId !== transcription?.modelId) {
+        if (!(await this.core.setServerTranscription(snapshot, transcription))) {
+          throw new DashboardServiceError(
+            "server_model_save_failed",
+            500,
+            localizer("en-US", "general.dashboard.transcription_save_failed"),
+          );
+        }
       }
     }
     return parsed.data;

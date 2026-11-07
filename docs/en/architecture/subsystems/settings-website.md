@@ -13,14 +13,37 @@ handling do not depend on it.
 The sidebar separates cross-server preferences under Global, the selected server's
 workspace under Server Settings, and guild management under Server Administration.
 
+The workspace selector also includes an initialized DM workspace owned by the
+signed-in user. Its scope is the authenticated Discord user ID, never a supplied
+recipient ID. The owner can manage its stored settings and memories. Channel
+administration, persona creation/import, avatar changes, and test chat require a
+Discord guild and are not offered in the DM workspace.
+
 Instance administrators are designated through `WEB_SETTINGS_GLOBAL_ADMIN_IDS`, a
 comma-separated list of Discord user IDs in the deployment environment. The default
 is empty; changes take effect after restarting the bot. Only complete numeric IDs
 of 17-20 digits are accepted. The authenticated session reports `user.isGlobalAdmin`
 from this list, never from Discord guild permissions. This designation does not grant
-access to guild data or other users' private memories. Global Administration has no
-pages yet, so the navigation does not display an empty group. Legal-page editing is
-not implemented.
+access to guild data or other users' private memories.
+
+Global Administration includes Pages & links, available even without a shared guild.
+Global administrators edit Imprint, Data protection, and Cookie notice with a rich-text
+editor, and add external links such as support pages. Each item has a title, display
+order, and visibility setting. Pages start empty and hidden; operators supply their
+own content. Visible items appear below the login and in the dashboard sidebar.
+Hiding a page also makes its public URL return 404 without deleting its draft.
+
+`DashboardSiteRepository` stores these installation-wide entries in
+`dashboard_site_entries`, created by migration `900_dashboard_site_entries` during
+normal bot startup. The deployment-specific migration band runs on both fresh and
+existing databases without adding dashboard tables to the upstream schema snapshot.
+Existing entries are preserved if the table already exists. Include this table in
+database backups. The down migration refuses to remove a table containing pages or
+links, including hidden drafts. `siteService.ts` validates writes and sanitizes rich text
+on both write and read. Public navigation and `/settings/pages/:pageId` require no
+login and expose only enabled items. The `/settings/api/site-admin/*` routes require
+a configured global administrator; mutations also require the session CSRF token.
+The editor assets are served locally and loaded only when opening administration.
 
 Every shared server member can:
 
@@ -69,6 +92,12 @@ comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
 
 ## Settings Navigation
 
+Channel selectors follow the server channel allowlist. The allowlist editor itself
+shows every channel. Saved selections outside the allowlist are preserved when
+editing other fields; filtering the choices does not delete stored assignments.
+Desktop tab bars keep the tabs that fit and offer the remainder through More.
+At the mobile breakpoint, the section picker shows all tabs.
+
 The dashboard uses the shared UI kit in `assets/ui-kit.css`. Application layout
 adapters live in `assets/dashboard.css`; `assets/controls.js` and
 `assets/controls.css` connect kit controls to native form fields. The legacy
@@ -110,6 +139,17 @@ same mobile category menu as Server settings. Each scope keeps its selected tab.
 Personal model choices share one save action. Only changed choices are sent to
 the existing per-capability operation, which enables those capabilities. If a
 request fails, retrying skips choices already saved by that action.
+Under `Primary models`, server managers can choose a hosted transcription model,
+select a registered transcription endpoint, or turn off server transcription.
+Members can select a hosted transcription model for their own audio attachments.
+Adding a provider key can fill an empty transcription slot with that provider's
+default, as in Discord. Replacing a key leaves the selection unchanged.
+Turning off `Post speech transcripts in Discord` hides them from the channel
+without disabling transcription or removing transcripts from Tomori's context.
+In an OpenRouter connection, registering a transcription model also selects it
+for that workspace. A saved OpenRouter key is required.
+Under `Persona settings`, the Humanizer can inherit the server settings or use
+custom delivery switches for that persona.
 Persona-specific naming stays under Personas > My preferences and affects only
 the signed-in member. Administrative persona settings remain permission-gated.
 Lorebooks opens serverwide collections; Personas > Lorebook opens the selected
