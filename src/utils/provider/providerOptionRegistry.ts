@@ -9,6 +9,7 @@ import type { PanelReceipt } from "@/types/discord/panel";
 import type { ProviderPanelCapability, ProviderPanelEntry } from "@/types/discord/providerPanel";
 import type { SetupDraftRecord } from "@/types/discord/setupWizard";
 import type { GlobalRoutableInteraction } from "@/utils/discord/interactions/routeRegistry";
+import type { ChoicePricing } from "@/utils/provider/modelPricing";
 import type { ProviderUsageContext } from "@/utils/provider/providerUsage";
 import type { VoiceSourceMode } from "@/utils/speech/voiceSourceCapabilities";
 import { localizer } from "@/utils/text/localizer";
@@ -54,6 +55,7 @@ interface ProviderOptionCopy {
   addActionDescriptionKeys: { server: string; personal: string };
   removeImpactKey: string;
   modelDescriptionKey?: string;
+  modelSelectorGuidanceKey?: string;
 }
 
 /** @public Release-only `src/modules/supporter-billing/discord/providerOption.ts` imports this. */
@@ -161,6 +163,11 @@ export interface ProviderOptionDefinition {
         | { usageContext: ProviderUsageContext },
     ): Promise<ProviderOptionCredentials | null>;
   };
+  /**
+   * Replaces catalog prices and default markers in this option's model pickers. Receives the whole
+   * catalog rather than one page, so a comparison can find its baseline model off-page.
+   */
+  describeModelChoices?(input: ProviderOptionModelChoicesInput): Promise<ReadonlyMap<number, ProviderOptionModelCost>>;
   panel?: {
     entryComponents?(context: ProviderOptionEntryContext): readonly ComponentInContainerData[];
     entryActions?(context: ProviderOptionEntryContext): ActionRowData<ButtonComponentData> | null;
@@ -170,8 +177,25 @@ export interface ProviderOptionDefinition {
   setup?: ProviderOptionSetup;
 }
 
+/** @public Release-only `src/modules/supporter-billing/discord/providerOption.ts` imports this. */
+export interface ProviderOptionModelChoicesInput {
+  scope: ProviderOptionScope;
+  capability: ProviderOptionCapability;
+  locale: string;
+  choices: ReadonlyArray<{ id: number; name: string; pricing?: ChoicePricing | null }>;
+}
+
+/**
+ * A null `priceLabel` hides the price; choices missing from the map keep their catalog price.
+ * @public Release-only `src/modules/supporter-billing/discord/modelCosts.ts` imports this.
+ */
+export interface ProviderOptionModelCost {
+  priceLabel: string | null;
+  isDefault: boolean;
+}
+
 export interface ProviderOptionCopyContext {
-  surface: "recovery" | "completion" | "registration_failed";
+  surface: "recovery" | "registration_failed";
   userDiscId: string | undefined;
   serverId: number | null | undefined;
   credentialScope: "server" | "personal" | undefined;
@@ -205,7 +229,8 @@ export async function withProviderOptionCopy(keys: string[], context: ProviderOp
       log.warn("Provider option copy eligibility could not be checked", { metadata: { option: option.value } });
     }
   }
-  return contributions.length ? [...keys, ...contributions] : keys;
+  // Contributed copy leads on purpose: an option's own offer (such as a subscription) outranks the generic recovery tips.
+  return contributions.length ? [...contributions, ...keys] : keys;
 }
 
 export function findProviderOption(value: string | null | undefined): ProviderOptionDefinition | undefined {
@@ -285,10 +310,11 @@ export type ProviderOptionModelViewCapability =
   | "nai-image"
   | "video"
   | "tts-design"
-  | "tts-clone";
+  | "tts-clone"
+  | "stt";
 
 const MODEL_VIEW_CAPABILITY: Record<
-  Exclude<ProviderOptionModelViewCapability, "nai-image">,
+  Exclude<ProviderOptionModelViewCapability, "nai-image" | "stt">,
   ProviderOptionCapability
 > = {
   text: "text",
@@ -304,7 +330,7 @@ const MODEL_VIEW_CAPABILITY: Record<
 export function providerOptionCapabilityForModelView(
   capability: ProviderOptionModelViewCapability,
 ): ProviderOptionCapability | null {
-  return capability === "nai-image" ? null : MODEL_VIEW_CAPABILITY[capability];
+  return capability === "nai-image" || capability === "stt" ? null : MODEL_VIEW_CAPABILITY[capability];
 }
 
 export function providerOptionOffersModelViewCapability(
@@ -323,9 +349,13 @@ export type ProviderOptionPersonalCapability =
   | "video"
   | "vision"
   | "speech_design"
-  | "speech_clone";
+  | "speech_clone"
+  | "transcription";
 
-const PERSONAL_CAPABILITY: Record<Exclude<ProviderOptionPersonalCapability, "image_nai">, ProviderOptionCapability> = {
+const PERSONAL_CAPABILITY: Record<
+  Exclude<ProviderOptionPersonalCapability, "image_nai" | "transcription">,
+  ProviderOptionCapability
+> = {
   text: "text",
   embedding: "embedding",
   image: "image",
@@ -338,7 +368,7 @@ const PERSONAL_CAPABILITY: Record<Exclude<ProviderOptionPersonalCapability, "ima
 export function providerOptionCapabilityForPersonal(
   capability: ProviderOptionPersonalCapability,
 ): ProviderOptionCapability | null {
-  return capability === "image_nai" ? null : PERSONAL_CAPABILITY[capability];
+  return capability === "image_nai" || capability === "transcription" ? null : PERSONAL_CAPABILITY[capability];
 }
 
 export function providerOptionOffersPersonalCapability(
@@ -362,6 +392,24 @@ export function findProviderOptionByActiveProvider(
 export function providerOptionDisplayName(provider: string, locale: string): string | null {
   const option = findProviderOption(provider);
   return option ? localizer(locale, option.copy.labelKey) : null;
+}
+
+export async function describeProviderOptionModelChoices<
+  T extends { id: number; name: string; pricing?: ChoicePricing | null; isDefault?: boolean },
+>(
+  provider: string,
+  input: Omit<ProviderOptionModelChoicesInput, "choices" | "capability"> & {
+    capability: ProviderOptionCapability | null;
+    choices: T[];
+  },
+): Promise<Array<T & { priceLabel?: string | null }>> {
+  const describe = findProviderOption(provider)?.describeModelChoices;
+  if (!describe || !input.capability || input.choices.length === 0) return input.choices;
+  const costs = await describe({ ...input, capability: input.capability });
+  return input.choices.map((choice) => {
+    const cost = costs.get(choice.id);
+    return cost ? { ...choice, priceLabel: cost.priceLabel, isDefault: cost.isDefault } : choice;
+  });
 }
 
 export function providerOptionModelDescription(locale: string, provider: string): string | undefined {

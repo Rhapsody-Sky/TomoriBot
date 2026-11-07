@@ -45,13 +45,21 @@ Running such an attempt switches credential attribution to the server. Tools ret
 ### Context preparation and prefill
 
 Each attempt prepares media for its capabilities, formats prefill as a model continuation or tail
-directive, and trims history to known context limits with an output reserve. The prefill's tokens
+directive, and trims history to known context limits with an output reserve. Context is assembled
+once for the planned model, so an attempt whose provider config carries no tools drops the items
+marked `requiresToolCalling` (the same-channel short-term memory block and its nudge). The prefill's tokens
 are reserved against the same budget but kept out of the truncated list, because a tail directive
 is a dialogue user turn the truncator would otherwise protect in place of the real trigger.
 
 Personal Text attempts apply the active provider's saved sampler settings before request construction
 and history truncation. An explicit personal output-token limit overrides the server limit for both;
 an unset personal limit inherits the server setting. Both paths clamp the limit to the model's ceiling.
+
+NovelAI receives the original native context and one assistant prefill for each attempt. Its own
+fitter uses the key in the attempt's provider config to resolve the subscription window and count
+the final rendered prompt. Generic history truncation returns no budget for NovelAI. A rotated
+credential therefore prepares its request from the original source instead of an already-trimmed
+list. Other providers retain the preset-assembled context and generic truncation.
 
 ### Fallback text continuation
 
@@ -64,16 +72,18 @@ attempt continues the reply from where the failed one stopped:
   usage to the model that finished the turn.
 - Once any text is carried, it replaces the turn's `/respond` or server prefill. Each key attempt
   applies it as a `continuation` prefill and trims history to make room for it. The prefill is a
-  native trailing assistant turn when the model can continue one, otherwise a `[System:]` tail
-  directive. Either way the stream strips an echo of the
-  carried text, so only the continuation is posted. Tool macros are not expanded in carried text.
+  native trailing assistant turn when the model can continue one. Otherwise it is a `[System:]` tail
+  directive that shows the carried text as already sent and asks only for what follows, because the
+  echo strip matches character by character and one divergence in a long echo reposts the reply.
+  The stream still strips an echo of the carried text, so only the continuation is posted. Tool
+  macros are not expanded in carried text.
 - A provider error with a suppressed embed does not flush the stream buffer, so an unfinished clause
   is never posted as a fragment for the continuation to repeat. An error the user sees still flushes
   it first. Unhumanized replies aggregate into one final send, so their failed attempts post nothing
   and the next attempt starts fresh.
 - An empty continuation completes the turn with the carried text, unless the emptiness is a failure
-  the empty-response retry handles specifically: an output-token cap, a speaker-guard discard, or a
-  held NovelAI fragment.
+  the empty-response retry handles specifically: an output-token cap or a speaker-guard discard. NovelAI handles held fragments within its own
+  streaming session and reports an exhausted empty continuation as a provider error.
 - `prependDeliveredOutput()` adds the carried text to the final result, including a terminal failure,
   so short-term memory records everything posted.
 - After an SDK timeout, the tool loop awaits the abandoned stream for up to
@@ -90,6 +100,9 @@ attempt continues the reply from where the failed one stopped:
   renders a compact Discord button notice informing users that a fallback model answered the turn.
   Each failed attempt is listed by error type and display-safe code only, because context assembly
   reads the notice back for the model; the upstream message stays in the operator log.
+- **Impersonation completion**: provider error results carry `providerFailureReported` after the stream
+  handler schedules their report. The impersonation command keeps its safe error reply and skips a
+  duplicate report; failures outside that stream path retain command-level error logging.
 - **Final emission**: if all attempts fail, only the terminal error is emitted to the response sink.
 
 ## Constraints and rationale
@@ -172,3 +185,7 @@ refusals, timeouts and upstream outages produce a metric plus a retained warning
 - `src/utils/security/keyRotation.ts`: API key selection and rotation tracking.
 - `src/utils/chat/responseReview.ts`: shared state, admitted evidence and reviewer lifecycle.
 - `src/utils/chat/responseRuleCheck.ts`: internal checker validation and bounded evidence.
+
+Reviewer resolution diagnostics distinguish missing, deprecated, unavailable, or unsupported models,
+unsupported providers, unavailable provider options, and missing credentials. They include the model
+ID, codename, and provider when available, without credentials or draft content.

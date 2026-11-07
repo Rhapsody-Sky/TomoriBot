@@ -1,3 +1,4 @@
+import { pickHumanizerSettings } from "@/constants/humanizer";
 import { callCustomDecisions } from "@/providers/custom/customDecisions";
 import type { ProviderDecisionRequest, DecisionResult, SupportsDecisions } from "@/types/provider/featureInterfaces";
 /**
@@ -87,6 +88,7 @@ import { parseCustomProvider } from "@/utils/provider/customProviderUtils";
 import { buildCustomHeaders } from "@/providers/custom/customOpenAICompatibleUtils";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
+import { getEndpointRemotePolicy } from "@/utils/security/remoteUrlSecurity";
 
 /**
  * Default model name placeholder for custom provider
@@ -174,14 +176,18 @@ export class CustomProvider
       throw new Error("Custom embedding endpoint is not configured.");
     }
 
-    const response = await fetchUserRemoteUrl(`${endpointUrl.replace(/\/+$/, "")}/embeddings`, {
-      method: "POST",
-      headers: buildCustomHeaders(request.apiKey),
-      body: JSON.stringify({
-        model: modelName,
-        input: request.inputs,
-      }),
-    });
+    const response = await fetchUserRemoteUrl(
+      `${endpointUrl.replace(/\/+$/, "")}/embeddings`,
+      {
+        method: "POST",
+        headers: buildCustomHeaders(request.apiKey),
+        body: JSON.stringify({
+          model: modelName,
+          input: request.inputs,
+        }),
+      },
+      getEndpointRemotePolicy(),
+    );
 
     if (!response.ok) {
       throw new Error(`Custom embedding request failed: ${response.status} ${response.statusText}`);
@@ -524,7 +530,7 @@ export class CustomProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         seesImages: tomoriState.llm.sees_images,
         forceReason: streamingContext?.forceReason,

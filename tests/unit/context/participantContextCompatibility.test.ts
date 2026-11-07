@@ -2,12 +2,15 @@ import { localizer } from "@/utils/text/localizer";
 import { describe, expect, it } from "bun:test";
 import { PrivacyLevel } from "@/types/db/schema";
 import type { StructuredContextItem } from "@/types/misc/context";
-import { buildParticipantContextItem } from "@/utils/text/context/participants";
+import { buildParticipantContextItems } from "@/utils/text/context/participants";
+import { fitNovelAIPrompt } from "@/providers/novelai/promptFitting";
+import { getNovelAIProfile } from "@/providers/novelai/modelProfiles";
 import type { PublicPersonaProfile } from "@/utils/text/context/types";
 import { resolveContextReferences } from "@/utils/text/contextReferences";
 import { buildParticipantDiscoveryPlan } from "@/utils/text/participants/discoveryPlan";
 import { createPersonaKey } from "@/utils/text/participants/identity";
 import { composeParticipantDiscoveryPlan } from "@/utils/text/participants/sources";
+import { createLlmRow, createPersona } from "../../helpers/fixtures";
 import {
   createParticipantContextFixture,
   PARTICIPANT_FIXTURE_IDS,
@@ -46,7 +49,7 @@ async function buildHumanItem(
     personas: fixture.personas,
     referencePlan,
   });
-  const item = await buildParticipantContextItem({
+  const [item] = await buildParticipantContextItems({
     client: fixture.client,
     guildId: PARTICIPANT_FIXTURE_IDS.guild,
     channelName: "general",
@@ -134,6 +137,12 @@ describe("participant context compatibility matrix", () => {
 
         const item = await buildHumanItem(fixture);
         const text = getText(item);
+        const memoryText = JSON.stringify(item.personalMemoryItems);
+        expect(memoryText.includes('"id":"personal:91"')).toBe(scenario.memoriesVisible);
+        expect(memoryText).not.toMatch(/\bID:\d+/u);
+        for (const excluded of ["Current time", "Server Roles", "Status:", "Reminders:", "Mention:"]) {
+          expect(memoryText).not.toContain(excluded);
+        }
 
         expect(text.includes("Alice Saved")).toBe(scenario.savedNameVisible);
         expect(text.includes("Server Roles: Archivist")).toBe(scenario.rolesVisible);
@@ -150,6 +159,38 @@ describe("participant context compatibility matrix", () => {
       }
     });
   }
+
+  it("uses resolved personal memory contents without speaker labels in every NovelAI renderer", async () => {
+    const fixture = createParticipantContextFixture();
+    try {
+      const memory = fixture.personalMemories[0];
+      memory.content = "Mirri keeps reference ID:505 in a notebook.";
+      memory.tags = ["maps"];
+      const item = await buildHumanItem(fixture);
+      const entry = item.personalMemoryItems?.[0]?.memoryEntries?.[0];
+      expect(entry?.text).toBe(memory.content);
+      expect(entry?.id).toBe(`personal:${memory.personal_memory_id}`);
+      expect(getText(item)).toContain(`ID:${memory.personal_memory_id}`);
+      for (const model of ["glm-4-6", "xialong-v1", "kayra-v1", "llama-3-erato-v1"]) {
+        const fitted = fitNovelAIPrompt({
+          contextItems: [item],
+          tomoriState: createPersona({
+            ...fixture.activePersona,
+            llm: createLlmRow({ llm_codename: model, llm_provider: "novelai" }),
+          }),
+          profile: getNovelAIProfile(model),
+          window: 4096,
+          maxOutputTokens: 96,
+        });
+        expect(fitted.prompt).toContain(memory.content);
+        expect(fitted.prompt).not.toContain(`ID:${memory.personal_memory_id}`);
+        expect(fitted.prompt).not.toContain(`: ${memory.content}`);
+        expect(fitted.prompt).not.toContain("[tags:");
+      }
+    } finally {
+      fixture.restoreRepositories();
+    }
+  });
 
   it("keeps deterministic saved-name rendering available at full privacy", async () => {
     const fixture = createParticipantContextFixture();
@@ -179,7 +220,7 @@ describe("participant context compatibility matrix", () => {
         personas: fixture.personas,
         referencePlan: references.discoveryPlan,
       });
-      const item = await buildParticipantContextItem({
+      const [item] = await buildParticipantContextItems({
         client: fixture.client,
         guildId: PARTICIPANT_FIXTURE_IDS.guild,
         channelName: "general",

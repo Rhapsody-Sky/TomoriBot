@@ -1,3 +1,4 @@
+import type { ConditioningActionKey } from "@/utils/conditioning/conditioning";
 import type { GenerationModelSelection } from "@/types/provider/generationModels";
 import type { ProviderUsageContext } from "@/utils/provider/providerUsage";
 import type { BaseGuildTextChannel, Client, Guild, GuildMember, Message, Webhook } from "discord.js";
@@ -26,6 +27,8 @@ export interface ChatReminderData {
   reminder_purpose: string;
   reminder_lateness?: string | null;
   self_reminder?: boolean;
+  /** Routes the turn's personal key, because the borrowed trigger message's author is a bystander. */
+  created_by_user_id?: number | null;
 }
 
 export type QueuedMessageDiscardReason =
@@ -113,7 +116,6 @@ export interface TomoriChatInput {
   textQuotaUserDiscId?: string;
   manualSystemPrompt?: string;
   manualPrefill?: string;
-  naiContinuationPrefill?: string;
   emptyResponseFinishReason?: string;
   shouldSurfaceUserErrors?: boolean;
   injectedContextItems?: StructuredContextItem[];
@@ -124,12 +126,12 @@ export interface TomoriChatInput {
   sceneTurn?: SceneTurnMetadata;
   /** Unprompted Natural Nudges turn: never queues and never feeds engagement stats. */
   naturalNudge?: NaturalNudgeTurn;
-  conditioningInteraction?: { actorType: "user" | "persona"; type: ConditioningType };
+  conditioningInteraction?: { actorType: "user" | "persona"; type: ConditioningType; action: ConditioningActionKey };
   /** A member's message that interrupted a Natural Nudges scene, answered by the persona about to speak. */
   nudgeSceneCatcherPersonaId?: number;
   /**
    * System turn that borrows the channel's latest message as its trigger, so that message's author is
-   * a bystander: no personal key, and none of their access gates.
+   * a bystander: not their personal key, reunion clock, or access gates.
    */
   borrowsTriggerMessage?: boolean;
   carriedExpressionDelivery?: CarriedExpressionDelivery;
@@ -161,7 +163,6 @@ export interface ChatIncoming {
   textQuotaUserDiscId?: string;
   manualSystemPrompt?: string;
   manualPrefill?: string;
-  naiContinuationPrefill?: string;
   emptyResponseFinishReason?: string;
   shouldSurfaceUserErrors?: boolean;
   injectedContextItems?: StructuredContextItem[];
@@ -172,12 +173,12 @@ export interface ChatIncoming {
   sceneTurn?: SceneTurnMetadata;
   /** Unprompted Natural Nudges turn: never queues and never feeds engagement stats. */
   naturalNudge?: NaturalNudgeTurn;
-  conditioningInteraction?: { actorType: "user" | "persona"; type: ConditioningType };
+  conditioningInteraction?: { actorType: "user" | "persona"; type: ConditioningType; action: ConditioningActionKey };
   /** A member's message that interrupted a Natural Nudges scene, answered by the persona about to speak. */
   nudgeSceneCatcherPersonaId?: number;
   /**
    * System turn that borrows the channel's latest message as its trigger, so that message's author is
-   * a bystander: no personal key, and none of their access gates.
+   * a bystander: not their personal key, reunion clock, or access gates.
    */
   borrowsTriggerMessage?: boolean;
   carriedExpressionDelivery?: CarriedExpressionDelivery;
@@ -271,6 +272,7 @@ export interface ChatTurn {
 }
 
 export interface ChatTurnContext {
+  memoryRecall?: import("@/utils/text/context/memoryRecall").MemoryRecallOutcome;
   usageContext?: ProviderUsageContext;
   responseReview?: import("@/utils/chat/responseReview").ResponseReviewState;
   /** Successful tool calls by request identity, kept across key rotation and model fallback. */
@@ -302,6 +304,7 @@ export interface ChatTurnContext {
   tomoriState: TomoriState;
   requestSnapshot: RequestSnapshot;
   contextItems: StructuredContextItem[];
+  nativeContextItems?: StructuredContextItem[];
   /** Kept out of `contextItems` because each attempt decides how its own model takes it. */
   assistantPrefill: TurnPrefill | null;
   /** Shared by every attempt of this persona turn; see {@link ExpressionDeliveryState}. */

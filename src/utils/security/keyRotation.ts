@@ -14,6 +14,7 @@
  */
 
 import { sql } from "@/utils/db/client";
+import { invalidateNovelAISubscription } from "@/utils/cache/novelaiSubscriptionCache";
 import { log } from "../misc/logger";
 import { encryptApiKey, decryptApiKey } from "./crypto";
 import { type ApiKeyRotationErrorType, type TomoriState, apiKeyRotationSchema } from "@/types/db/schema";
@@ -359,31 +360,12 @@ export async function addRotationKey(serverId: number, provider: string, apiKey:
       `;
     }
 
+    if (keyId && normalizedProvider === "novelai") invalidateNovelAISubscription(apiKey);
     log.success(`Added rotation key for server ${serverId} (provider: ${normalizedProvider})`);
     return true;
   } catch (error) {
     log.error(`Error adding rotation key for server ${serverId}:`, error);
     return false;
-  }
-}
-
-/**
- * Covers the main key pointer and all additional rotation keys.
- * Runtime state rows cascade-delete automatically via FK ON DELETE CASCADE.
- */
-export async function purgeRotationKeys(serverId: number): Promise<number> {
-  try {
-    const result = await sql`
-      DELETE FROM api_key_rotation
-      WHERE server_id = ${serverId}
-    `;
-
-    const deletedCount = result.count || 0;
-    log.success(`Purged ${deletedCount} rotation key(s) for server ${serverId}`);
-    return deletedCount;
-  } catch (error) {
-    log.error(`Error purging rotation keys for server ${serverId}:`, error);
-    return 0;
   }
 }
 
@@ -409,25 +391,6 @@ export async function purgeRotationKeysForProvider(serverId: number, provider: s
     return deletedCount;
   } catch (error) {
     log.error(`Error purging rotation keys for server ${serverId}, provider ${provider}:`, error);
-    return 0;
-  }
-}
-
-/**
- * Gets the count of rotation keys for a server (excluding main key pointer).
- *
- * @returns The count of additional rotation keys (not including main key pointer)
- */
-export async function getRotationKeyCount(serverId: number): Promise<number> {
-  try {
-    const result = await sql`
-      SELECT COUNT(*) as count FROM api_key_rotation
-      WHERE server_id = ${serverId} AND is_main_key_pointer = false
-    `;
-
-    return Number(result[0]?.count || 0);
-  } catch (error) {
-    log.error(`Error counting rotation keys for server ${serverId}:`, error);
     return 0;
   }
 }

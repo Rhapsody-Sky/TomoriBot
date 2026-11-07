@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { DEFAULT_HUMANIZER_SETTINGS } from "@/constants/humanizer";
+import { createHumanizerCheckboxGroups } from "@/utils/discord/humanizerOptions";
 import { NOTICE_VERBOSITY_LEVELS, TOOL_NOTICE_DEFINITIONS, TOOL_NOTICE_KEYS } from "@/constants/toolNotices";
 import { RESPONSE_REVIEW_ITEMS } from "@/constants/responseReview";
 import { responseReviewerPromptSchema, responseReviewItemsSchema, utcOffsetSchema } from "@/types/db/schema";
@@ -82,7 +84,11 @@ const modelBehaviorSchema = z
 
 const chatSchema = z
   .object({
-    humanizer_degree: z.number().int().min(0).max(3).optional(),
+    humanizer_streaming_enabled: z.boolean().optional(),
+    humanizer_pacing_enabled: z.boolean().optional(),
+    humanizer_sentence_split_enabled: z.boolean().optional(),
+    humanizer_lowercase_enabled: z.boolean().optional(),
+    humanizer_punctuation_split_enabled: z.boolean().optional(),
     message_fetch_limit: z.number().int().min(20).max(100).optional(),
     send_message_limit: z.number().int().min(0).max(40).optional(),
     match_limit: z.number().int().min(1).max(10).optional(),
@@ -284,7 +290,6 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   llm_temperature: "Controls response variety. Lower values are steadier; higher values are more creative.",
   thinking_level: "Sets the reasoning effort used by models that support adjustable thinking.",
   hide_respond_embed: "Hides the technical response-details panel shown below Tomori's messages.",
-  humanizer_degree: "Adds natural variation to phrasing and message rhythm. Higher levels are more noticeable.",
   message_fetch_limit: "Number of recent Discord messages loaded as conversation context for each response.",
   send_message_limit: "Maximum number of separate Discord messages Tomori may send for one response.",
   match_limit: "Maximum number of personas whose trigger words may match a single incoming message.",
@@ -447,17 +452,9 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
     title: "Conversation defaults",
     description: "Server-wide response shape and context defaults.",
     fields: [
-      {
-        key: "humanizer_degree",
-        label: "Humanizer",
-        type: "select",
-        options: [
-          { value: 0, label: "Off" },
-          { value: 1, label: "Light" },
-          { value: 2, label: "Natural" },
-          { value: 3, label: "Heavy" },
-        ],
-      },
+      ...createHumanizerCheckboxGroups("en-US", DEFAULT_HUMANIZER_SETTINGS).flatMap((group) =>
+        group.options.map((option) => toggle(option.value, option.label, option.description)),
+      ),
       number("message_fetch_limit", "Messages fetched", 20, 100),
       number("send_message_limit", "Reply message limit", 0, 40),
       number("match_limit", "Persona match limit", 1, 10),

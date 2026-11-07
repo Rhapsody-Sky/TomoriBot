@@ -32,6 +32,9 @@ async function buildTurnContext(
     hasTools?: boolean;
     includeInteractionHistory?: boolean;
     gestureHistory?: boolean;
+    borrowsTriggerMessage?: boolean;
+    nativeContext?: boolean;
+    agenda?: string;
   } = {},
 ): Promise<{
   context: ChatTurnContext;
@@ -115,6 +118,7 @@ async function buildTurnContext(
     isFromQueue: false,
     isManuallyTriggered: true,
     naturalNudge,
+    borrowsTriggerMessage: options.borrowsTriggerMessage ?? naturalNudge !== undefined,
     conditioningInteraction: options.conditioningInteraction,
     injectedContextItems: interactionEvent ? [interactionEvent] : undefined,
   });
@@ -145,9 +149,11 @@ async function buildTurnContext(
     spyOn(userCache, "getCachedPrivacyLevel").mockResolvedValue(PrivacyLevel.MINIMAL),
     spyOn(userCache, "getCachedBlacklistStatus").mockResolvedValue(false),
     spyOn(blockCache, "getCachedActiveBlocksForPersona").mockResolvedValue([]),
-    spyOn(naturalNudgeRepository, "loadAgendas").mockResolvedValue(new Map()),
-    spyOn(contextBuilder, "buildContext").mockImplementation(async (params) => ({
-      contextItems:
+    spyOn(naturalNudgeRepository, "loadAgendas").mockResolvedValue(
+      options.agenda ? new Map([["persona-last", options.agenda]]) : new Map(),
+    ),
+    spyOn(contextBuilder, "buildContext").mockImplementation(async (params) => {
+      const contextItems =
         options.conditioningInteraction || options.gestureHistory
           ? params.simplifiedMessageHistory
               .filter((item) => options.includeInteractionHistory !== false || item.id !== trigger.id)
@@ -156,15 +162,20 @@ async function buildTurnContext(
                   role: "user",
                   metadataTag: ContextItemTag.DIALOGUE_HISTORY,
                   messageId: item.id,
+                  completionText: item.completionContent,
                   parts: [{ type: "text", text: item.content ?? "" }],
                 }),
               )
-          : [],
-      tailDirectives: [],
-      lowerPriorityTailDirectives: [],
-      nudgeInjectionDepth: 0,
-      messageIdMap: new MessageIdMap(),
-    })),
+          : [];
+      return {
+        contextItems,
+        nativeContextItems: options.nativeContext ? [...contextItems] : undefined,
+        tailDirectives: [],
+        lowerPriorityTailDirectives: [],
+        nudgeInjectionDepth: 0,
+        messageIdMap: new MessageIdMap(),
+      };
+    }),
   ];
   const reunion = spyOn(reunionPresence, "resolveReunionNote").mockResolvedValue({ note: null, presence: null });
   try {
@@ -177,6 +188,13 @@ async function buildTurnContext(
 const CONTINUE_DIRECTIVE = "Continue your last message without repeating it";
 
 describe("Natural Nudges turn context", () => {
+  it("marks a historical agenda as a system notice without changing the opener's identity", async () => {
+    const { context } = await buildTurnContext(undefined, { agenda: "Check the map" });
+    const agenda = context.simplifiedMessages.find((message) => message.id === "synthetic-nudge-agenda-persona-last");
+    expect(agenda?.isSystemNotice).toBe(true);
+    expect(context.simplifiedMessages.find((message) => message.id === "persona-last")?.isSystemNotice).toBe(false);
+  });
+
   it("admits the idle nudge's tools under Deliberate Tool Mode", async () => {
     const { context } = await buildTurnContext({ toolNames: ["web_search"] });
     expect(context.streamingContext.disableAllTools).not.toBe(true);
@@ -191,6 +209,11 @@ describe("Natural Nudges turn context", () => {
     const nudge = await buildTurnContext({ toolNames: [] });
     expect(nudge.reunionCalls).toBe(0);
     expect(JSON.stringify(nudge.context.contextItems)).not.toContain(CONTINUE_DIRECTIVE);
+  });
+
+  it("skips the anchor author's reunion for every borrowed-trigger turn, such as a reminder", async () => {
+    const reminder = await buildTurnContext(undefined, { borrowsTriggerMessage: true });
+    expect(reminder.reunionCalls).toBe(0);
   });
 
   it("lets a Ping User nudge ping only its target, and leaves other nudges unrestricted", async () => {
@@ -214,7 +237,7 @@ describe("conditioning turn context", () => {
         [true, false],
       ]) {
         const { context, interactionEvent } = await buildTurnContext(undefined, {
-          conditioningInteraction: { actorType, type: "reward" },
+          conditioningInteraction: { actorType, type: "reward", action: "hug" },
           interactionEnabled,
           hasTools,
         });
@@ -250,9 +273,30 @@ describe("conditioning turn context", () => {
     }
   });
 
+  it("offers reciprocation only for hugs and kisses", async () => {
+    for (const action of [
+      "hug",
+      "kiss",
+      "headpat",
+      "tickle",
+      "feed",
+      "spank",
+      "pinch",
+      "bite",
+      "squeeze",
+      "bonk",
+    ] as const) {
+      const { context, interactionEvent } = await buildTurnContext(undefined, {
+        conditioningInteraction: { actorType: "user", type: "reward", action },
+      });
+      const event = context.contextItems.find((item) => item.messageId === interactionEvent?.messageId);
+      expect(JSON.stringify(event).includes("`interact_with_target`")).toBe(action === "hug" || action === "kiss");
+    }
+  });
+
   it("keeps the reaction event when the delivered message is outside the fetched history", async () => {
     const { context, interactionEvent } = await buildTurnContext(undefined, {
-      conditioningInteraction: { actorType: "persona", type: "reward" },
+      conditioningInteraction: { actorType: "persona", type: "reward", action: "hug" },
       includeInteractionHistory: false,
     });
     const event = context.contextItems.find((item) => item.messageId === interactionEvent?.messageId);
@@ -277,6 +321,22 @@ describe("conditioning turn context", () => {
       }),
     );
     expect(text).not.toContain("`interact_with_target`");
+  });
+
+  it("retains one semantic gesture event in native context with or without fetched history", async () => {
+    for (const includeInteractionHistory of [true, false]) {
+      const { context, interactionEvent } = await buildTurnContext(undefined, {
+        conditioningInteraction: { actorType: "user", type: "reward", action: "hug" },
+        nativeContext: true,
+        includeInteractionHistory,
+      });
+      for (const items of [context.contextItems, context.nativeContextItems ?? []]) {
+        const events = items.filter((item) => item.messageId === interactionEvent?.messageId);
+        expect(events).toHaveLength(1);
+        expect(events[0].completionText).toBe(interactionEvent?.completionText);
+        expect(events[0].completionText).not.toMatch(/System:|interact_with_target/u);
+      }
+    }
   });
 });
 

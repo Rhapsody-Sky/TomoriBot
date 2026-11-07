@@ -1,4 +1,7 @@
 import type { Client, Message } from "discord.js";
+import { isPrimaryProcess } from "@/utils/cluster/shardLeases";
+import type { ShardTopology } from "@/utils/discord/shardOwnership";
+import { canRunScheduledWork, type ScheduledWorkContext } from "@/timers/scheduledWorkContext";
 import type { TomoriState } from "@/types/db/schema";
 import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
 import type {
@@ -71,7 +74,7 @@ import { type NudgeModelRef, resolvePlannerModel } from "@/modules/natural-nudge
 import { runIdleNudgeAttempt, type IdleNudgeAttempt } from "@/modules/natural-nudges/runtime/runner";
 import type { PlannerCandidate, ScenePartner } from "@/modules/natural-nudges/runtime/planner";
 import { recordIdleNudgeSample } from "@/modules/natural-nudges/runtime/telemetry";
-import { loadAvailableToolNames } from "@/modules/natural-nudges/runtime/tools";
+import { loadChannelAvailableToolNames } from "@/modules/natural-nudges/runtime/tools";
 import { getCachedAllPersonas } from "@/utils/cache/tomoriStateCache";
 import { statRepository } from "@/utils/db/repositories";
 import { whitelistRepository } from "@/utils/db/repositories/WhitelistRepository";
@@ -123,25 +126,29 @@ export class NaturalNudgeProcessor {
   private readonly plannerBudget = new NudgeRequestBudget();
   private lastPruneAt = 0;
 
-  constructor(client: Client) {
+  constructor(
+    client: Client,
+    private readonly topology?: ShardTopology,
+  ) {
     this.client = client;
   }
 
-  public async processDueIdleNudges(): Promise<void> {
-    if (!this.client.isReady()) return;
-    await this.pruneIfDue();
+  public async processDueIdleNudges(work?: ScheduledWorkContext): Promise<void> {
+    if (!canRunScheduledWork(work) || !this.client.isReady()) return;
+    if (isPrimaryProcess()) await this.pruneIfDue();
     let servers: EnabledIdleNudgeServer[];
     try {
-      servers = await naturalNudgeRepository.listEnabledIdleNudgeServers(new Date());
+      servers = await naturalNudgeRepository.listEnabledIdleNudgeServers(new Date(), this.topology);
     } catch (error) {
       log.error("Natural Nudges: failed to list enabled servers", error);
       return;
     }
     for (const server of servers) {
+      if (!canRunScheduledWork(work)) return;
       if (isNudgeServerBusy(server.server_id)) continue;
       try {
         await runWithErrorContext({ source: "natural_nudge", serverId: server.server_id }, () =>
-          this.evaluateServer(server),
+          this.evaluateServer(server, work),
         );
       } catch (error) {
         await log.error("Natural Nudges: idle nudge evaluation failed", error, { serverId: server.server_id });
@@ -206,7 +213,7 @@ export class NaturalNudgeProcessor {
       await naturalNudgeRepository.setFireAnswered(fire.fire_id, false);
   }
 
-  private async evaluateServer(server: EnabledIdleNudgeServer): Promise<void> {
+  private async evaluateServer(server: EnabledIdleNudgeServer, work?: ScheduledWorkContext): Promise<void> {
     const now = new Date();
     const serverId = server.server_id;
     const gate = await readNaturalNudgeGate(server.server_disc_id);
@@ -295,9 +302,10 @@ export class NaturalNudgeProcessor {
       return;
     }
 
-    if (!claimNudgeServer(serverId)) return;
-    void runIdleNudgeAttempt(attempt)
+    if (!canRunScheduledWork(work) || !claimNudgeServer(serverId)) return;
+    void runIdleNudgeAttempt({ ...attempt, work })
       .then((result) => {
+        if (!canRunScheduledWork(work)) return;
         if (result === "fired") {
           this.lullHours.delete(serverId);
           this.notBefore.delete(serverId);
@@ -306,6 +314,7 @@ export class NaturalNudgeProcessor {
         this.deferRetry(serverId, new Date());
       })
       .catch(async (error) => {
+        if (!canRunScheduledWork(work)) return;
         this.deferRetry(serverId, new Date());
         await log.error("Natural Nudges: idle nudge attempt failed", error, { serverId });
       })
@@ -390,11 +399,19 @@ export class NaturalNudgeProcessor {
       scopes,
       personaConfig,
     });
-    const availableTools = await loadAvailableToolNames(persona);
+    const toolsByChannel = new Map(
+      await Promise.all(
+        plannerChannels.map(
+          async (channel) =>
+            [channel.channel.id, await loadChannelAvailableToolNames(persona, channel.channel)] as const,
+        ),
+      ),
+    );
+    const availableTools = new Set([...toolsByChannel.values()].flatMap((tools) => [...tools]));
     const channelFacts = (channelId: string): Omit<PrerequisiteFacts, "target"> => ({
       hasHangingConversation: hanging.some((entry) => entry.channel.id === channelId),
       hasScenePartner: hasScenePartner(partnerCandidates, [channelId]),
-      availableTools,
+      availableTools: toolsByChannel.get(channelId) ?? new Set(),
     });
     const channelEligible = runnable.filter((idleNudge) =>
       plannerChannels.some((channel) => isIdleNudgeChannelEligible(idleNudge, channelFacts(channel.channel.id))),

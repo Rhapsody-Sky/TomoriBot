@@ -1,4 +1,5 @@
 import type { SendableChannel } from "@/utils/discord/resolveSendableChannel";
+import { stubAllShardOwnership } from "../../helpers/shardOwnership";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import {
@@ -10,6 +11,7 @@ import {
   type Sticker,
   type Client,
   type ChatInputCommandInteraction,
+  type REST,
   type WebhookMessageCreateOptions,
 } from "discord.js";
 import {
@@ -23,7 +25,6 @@ import {
   GENERIC_WEBHOOK_AVATAR_URL,
   getCachedManagedWebhookForChannel,
   getOrCreateWebhook,
-  getSingleAttemptWebhookRest,
   resolveAuthoringWebhook,
   resolveManagedWebhookForChannel,
   runWithWebhookIdentity,
@@ -64,6 +65,8 @@ import * as matrixMedia from "@/utils/bridges/matrix/media";
 import * as matrixState from "@/utils/bridges/matrix/state";
 import type { Request as BridgeRequest, WeakEvent } from "matrix-appservice-bridge";
 
+const applyOwnership = stubAllShardOwnership();
+
 const avatarA =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jG5kAAAAASUVORK5CYII=";
 const avatarB =
@@ -92,6 +95,7 @@ function deferredPatch() {
 }
 
 function makePool() {
+  applyOwnership();
   const rows: ManagedDiscordWebhookRow[] = [];
   const webhooks = new Map<string, Webhook>();
   const delivered: {
@@ -1252,16 +1256,18 @@ describe("managed local avatar dispatch", () => {
       turn: { lockedTurn: { admission: { incoming: {} } } },
     } as unknown as ChatTurnContext;
     const selectedId = route === "reuse" ? "_expression" : route === "generic" ? primary.id : "_created_1";
-    const posts = spyOn(getSingleAttemptWebhookRest(), "post").mockImplementation(async (path, options) => {
-      expect(path.split("/").at(-2)).toBe(selectedId);
-      expect(options?.body).toMatchObject({ username: "Juno", allowed_mentions: { parse: [] } });
-      expect((options?.body as { avatar_url?: string }).avatar_url).toBe(
-        route === "generic" ? GENERIC_WEBHOOK_AVATAR_URL : undefined,
-      );
-      expect(options?.query?.get("thread_id")).toBe(channel.id);
-      if (route === "unconfirmed") throw new Error("socket reset");
-      return { id: "_sent_expression", webhook_id: selectedId };
-    });
+    const posts = spyOn(pool.channel.client.rest as unknown as REST, "post").mockImplementation(
+      async (path, options) => {
+        expect(path.split("/").at(-2)).toBe(selectedId);
+        expect(options?.body).toMatchObject({ username: "Juno", allowed_mentions: { parse: [] } });
+        expect((options?.body as { avatar_url?: string }).avatar_url).toBe(
+          route === "generic" ? GENERIC_WEBHOOK_AVATAR_URL : undefined,
+        );
+        expect(options?.query?.get("thread_id")).toBe(channel.id);
+        if (route === "unconfirmed") throw new Error("socket reset");
+        return { id: "_sent_expression", webhook_id: selectedId };
+      },
+    );
     const selection = {
       kind: "native" as const,
       sticker: {

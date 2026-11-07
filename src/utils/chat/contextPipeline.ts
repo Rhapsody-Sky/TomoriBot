@@ -1,5 +1,6 @@
+import { applyPromptLayoutInserts } from "@/utils/text/context/promptLayout";
 import { mapWithConcurrency } from "@/utils/async/bounded";
-import { isHistoryWindowMessageDeleted, readChannelHistory } from "@/utils/chat/historyWindow";
+import { isHistoryWindowMessageDeleted, readChannelHistory, selectAnchoredHistory } from "@/utils/chat/historyWindow";
 import { verifyMessageWebhook, isManagedWebhookMessage } from "@/utils/chat/webhookIdentity";
 import type { Message } from "discord.js";
 import { MessageReferenceType, MessageType } from "discord.js";
@@ -68,8 +69,6 @@ import {
   hasContextReactions,
   buildReplyReferenceContextAnnotation,
   findReplyContextTargetInMessage,
-  insertAtDialogueDepth,
-  insertBeforeLatestDialoguePair,
   appendInjectedContextItems,
   mergeForcedMentions,
   stripAtPersonaTriggers,
@@ -115,6 +114,8 @@ import { resolveEffectiveUserNaming } from "@/utils/text/userNaming";
 import { createExpressionDeliveryState } from "@/utils/chat/expressionDelivery";
 import { CONDITIONING_INTERACTION_RESPONSE_TEMPLATE } from "@/utils/conditioning/conditioningInteractionContext";
 import { createToolPromptMacroResolverForState } from "@/utils/tools/toolPromptMacros";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
+import { resolveRouteTextModel } from "@/utils/provider/textModelSelection";
 
 import {
   chatTurnContextTimings,
@@ -268,8 +269,41 @@ export function resolveTurnDeliberateToolMode(turn: ChatTurn): boolean {
   return resolveDeliberateToolMode(turn.persona.config.deliberate_tool_mode, personalMode);
 }
 
+/**
+ * The persona state that context assembly gates tool-dependent text on: the planned route's model,
+ * narrowed by the server Tool Use switch and this turn's kill switch, because a channel or persona
+ * model row never passes through the persona cache that narrows `has_tools`.
+ */
+async function resolvePromptPersona(
+  turn: ChatTurn,
+  effectivePersona: TomoriState,
+  disableAllTools: boolean,
+): Promise<TomoriState> {
+  const incoming = turn.lockedTurn.admission.incoming;
+  let llm: TomoriState["llm"];
+  try {
+    ({ llm } = await resolveRouteTextModel({
+      state: effectivePersona,
+      route: "planned",
+      textCredentialSource: turn.textCredentialSource,
+      personalRoutingUserId: turn.personalRoutingUserId,
+      channel: incoming.message.channel,
+      isUserImpersonation: incoming.isUserImpersonation,
+      hasSceneModelSelection: Boolean(incoming.sceneTurn?.modelSelection),
+      llmOverrideCodename: incoming.llmOverrideCodename,
+    }));
+  } catch (error) {
+    // Falls back instead of throwing because generation resolves the same route and reports the failure to the user.
+    log.warn("Could not resolve the planned text model for context assembly; gating on the persona model.", error);
+    return effectivePersona;
+  }
+  if (llm === effectivePersona.llm) return effectivePersona;
+  const hasTools = !disableAllTools && resolveToolsEnabled({ llm, config: effectivePersona.config }, llm.has_tools);
+  return { ...effectivePersona, llm: { ...llm, has_tools: hasTools } };
+}
+
 export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnContext> {
-  recordChatTurnConfiguration(turn.persona.llm.llm_provider, turn.persona.config.humanizer_degree);
+  recordChatTurnConfiguration(turn.persona.llm.llm_provider, turn.persona.config);
   const incoming = turn.lockedTurn.admission.incoming;
   const { client, message } = incoming;
   const channel = message.channel;
@@ -287,11 +321,11 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
     suppressUserErrors: !turn.shouldSurfaceUserErrors,
     textCredentialSource: turn.textCredentialSource,
     disableAllTools: incoming.isUserImpersonation,
-    naiContinuationPrefill: incoming.naiContinuationPrefill,
     emptyResponseRetryCount: incoming.retryCount,
     messageIdMap,
     triggererUserId: turn.userRow.user_id,
     triggererDiscId: turn.userRow.user_disc_id,
+    triggerMessageId: message.id,
     forcedMentions: await resolveForcedMentions(turn),
     ...(incoming.naturalNudge?.targetUserDiscId && {
       mentionableUserIds: [incoming.naturalNudge.targetUserDiscId],
@@ -323,8 +357,8 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
     streamingContext.disableRecentMessageReplyTool = true;
   }
 
-  const assets = await loadPersonaAssets(turn);
-  const history = await buildSimplifiedHistory(turn, messageIdMap);
+  const assets = await measureChatTurnStage("assets_ms", () => loadPersonaAssets(turn));
+  const history = await measureChatTurnStage("history_build_ms", () => buildSimplifiedHistory(turn, messageIdMap));
 
   let impersonatedUserNickname: string | undefined;
   let impersonatedUserPrompt: string | undefined;
@@ -487,35 +521,42 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
     streamingContext.disableAllTools && rpBasePersona.llm.has_tools
       ? { ...rpBasePersona, llm: { ...rpBasePersona.llm, has_tools: false } }
       : rpBasePersona;
+  // Generation re-resolves the route from `effectivePersona` and swaps credentials when the
+  // provider changes, so only the prompt state carries the planned model.
+  const promptPersona = await resolvePromptPersona(turn, effectivePersona, !!streamingContext.disableAllTools);
   let participantRequestScope = participantRequestScopes.get(turn.lockedTurn);
   if (!participantRequestScope) {
     participantRequestScope = createParticipantRequestScope();
     participantRequestScopes.set(turn.lockedTurn, participantRequestScope);
   }
   const participantStartedAt = performance.now();
-  const preparedParticipantContext = await prepareParticipantContext({
-    client,
-    guildId: turn.serverDiscId,
-    simplifiedMessageHistory: history.simplifiedMessages,
-    personas: turn.allPersonas,
-    activePersona: effectivePersona,
-    visibleUserIds: [...history.userIds],
-    syntheticUsers: history.syntheticUsers,
-    matrixUsers: history.matrixUsers,
-    messageProxyUsers: history.messageProxyUsers,
-    responderPersonaIds: new Set(turn.triggeredPersonaIds),
-    requestScope: participantRequestScope,
-  });
+  const preparedParticipantContext = await measureChatTurnStage("participant_ms", () =>
+    prepareParticipantContext({
+      client,
+      guildId: turn.serverDiscId,
+      simplifiedMessageHistory: history.simplifiedMessages,
+      personas: turn.allPersonas,
+      activePersona: effectivePersona,
+      visibleUserIds: [...history.userIds],
+      syntheticUsers: history.syntheticUsers,
+      matrixUsers: history.matrixUsers,
+      messageProxyUsers: history.messageProxyUsers,
+      responderPersonaIds: new Set(turn.triggeredPersonaIds),
+      requestScope: participantRequestScope,
+    }),
+  );
   const participantMs = performance.now() - participantStartedAt;
-  const historyNaming = await buildHistoryNamingProjection({
-    messages: history.simplifiedMessages,
-    receivingPersona: effectivePersona,
-    allPersonas: turn.allPersonas,
-    guild: message.guild,
-    personalizationEnabled: effectivePersona.config.personal_memories_enabled !== false,
-    extraUserIds: incoming.impersonatedUserId ? [incoming.impersonatedUserId] : [],
-    requestScope: participantRequestScope,
-  });
+  const historyNaming = await measureChatTurnStage("naming_ms", () =>
+    buildHistoryNamingProjection({
+      messages: history.simplifiedMessages,
+      receivingPersona: effectivePersona,
+      allPersonas: turn.allPersonas,
+      guild: message.guild,
+      personalizationEnabled: effectivePersona.config.personal_memories_enabled !== false,
+      extraUserIds: incoming.impersonatedUserId ? [incoming.impersonatedUserId] : [],
+      requestScope: participantRequestScope,
+    }),
+  );
   if (incoming.impersonatedUserId) {
     impersonatedUserNickname = historyNaming.userLabels.get(incoming.impersonatedUserId) ?? impersonatedUserNickname;
     streamingContext.impersonatedSpeakerLabel = impersonatedUserNickname;
@@ -541,18 +582,20 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
   const proxiedSpeakerName = proxiedIdentity.userDiscId
     ? (await getCachedUserRow(proxiedIdentity.userDiscId))?.user_nickname?.trim() || proxiedIdentity.name
     : null;
-  // A nudge borrows an absent author's message as its trigger, so it must neither greet nor clock them.
-  const { note: reunionNote, presence: reunionPresence } = incoming.naturalNudge
+  // A system turn borrows a bystander's message as its trigger, so it must neither greet nor clock them.
+  const { note: reunionNote, presence: reunionPresence } = incoming.borrowsTriggerMessage
     ? { note: null, presence: null }
-    : await resolveReunionNote({
-        turn,
-        effectivePersona,
-        isUserImpersonation: incoming.isUserImpersonation,
-        // A chain turn carries the originator's clock but answers a persona, so it must not greet or clock them.
-        isPersonaSpeaker: turn.isSelfMessage || (incoming.sceneTurn?.turnIndex ?? 0) > 0,
-        proxiedIdentityName: proxiedIdentity.name,
-        proxiedIdentityUserDiscId: proxiedIdentity.userDiscId,
-      });
+    : await measureChatTurnStage("reunion_ms", () =>
+        resolveReunionNote({
+          turn,
+          effectivePersona,
+          isUserImpersonation: incoming.isUserImpersonation,
+          // A chain turn carries the originator's clock but answers a persona, so it must not greet or clock them.
+          isPersonaSpeaker: turn.isSelfMessage || (incoming.sceneTurn?.turnIndex ?? 0) > 0,
+          proxiedIdentityName: proxiedIdentity.name,
+          proxiedIdentityUserDiscId: proxiedIdentity.userDiscId,
+        }),
+      );
 
   const contextBuild = await measureChatTurnStage("native_ms", () =>
     buildContext({
@@ -583,7 +626,7 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
       personaPrompt: effectivePersona.persona_prompt ?? null,
       personaLineageId: effectivePersona.persona_lineage_id,
       isDMChannel: turn.isDMChannel,
-      snapshot: { ...turn.requestSnapshot, tomoriState: effectivePersona },
+      snapshot: { ...turn.requestSnapshot, tomoriState: promptPersona },
       preloadedEmojis: assets.loadedEmojis,
       preloadedStickers: assets.loadedStickers,
       preloadedCustomExpressions: assets.loadedCustomExpressions,
@@ -610,11 +653,10 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
   let injectedContextItems = incoming.injectedContextItems;
   let builtContextItems = contextBuild.contextItems;
   if (incoming.conditioningInteraction && !incoming.isUserImpersonation) {
-    const resolver = createToolPromptMacroResolverForState(
-      effectivePersona,
-      streamingContext.deliberateToolAllowedNames,
-    );
-    const hint = await resolver.expand(CONDITIONING_INTERACTION_RESPONSE_TEMPLATE);
+    const resolver = createToolPromptMacroResolverForState(promptPersona, streamingContext.deliberateToolAllowedNames);
+    const hint = ["hug", "kiss"].includes(incoming.conditioningInteraction.action)
+      ? await resolver.expand(CONDITIONING_INTERACTION_RESPONSE_TEMPLATE)
+      : "";
     injectedContextItems = await Promise.all(
       (injectedContextItems ?? []).map(async (item) => {
         if (item.messageId !== message.id) return item;
@@ -635,7 +677,20 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
             return { ...part, text: `[System: ${text}${hint ? ` ${hint}` : ""}]` };
           }),
         );
-        return { ...item, parts };
+        const completionText =
+          item.completionText === undefined
+            ? undefined
+            : await convertMentions(
+                item.completionText,
+                client,
+                turn.serverDiscId,
+                turn.triggererName,
+                effectivePersona.persona_nickname,
+                effectivePersona.config.personal_memories_enabled,
+                turn.requestSnapshot,
+                "preserve",
+              );
+        return { ...item, parts, completionText };
       }),
     );
     builtContextItems = builtContextItems.filter((item) => item.messageId !== message.id);
@@ -660,12 +715,24 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
     buildPersonaMentionCatalog(turn.allPersonas),
   );
 
+  let nativeContextItems = contextBuild.nativeContextItems ? [...contextBuild.nativeContextItems] : undefined;
+  if (nativeContextItems && incoming.conditioningInteraction && !incoming.isUserImpersonation) {
+    nativeContextItems = appendInjectedContextItems(
+      nativeContextItems.filter((item) => item.messageId !== message.id),
+      injectedContextItems?.filter((item) => item.messageId === message.id),
+    );
+  }
+  if (nativeContextItems) {
+    applyPromptLayoutInserts(nativeContextItems, [
+      { tag: "stm_content", items: contextBuild.memoryInjectionItems ?? [], depth: contextBuild.memoryInjectionDepth },
+    ]);
+  }
   const assistantPrefill = await resolveTurnAssistantPrefill(turn, effectivePersona);
   const carried = incoming.carriedExpressionDelivery;
   const expressionDelivery =
     carried && carried.personaId === effectivePersona.persona_id ? carried.state : createExpressionDeliveryState();
 
-  recordChatTurnConfiguration(effectivePersona.llm.llm_provider, effectivePersona.config.humanizer_degree);
+  recordChatTurnConfiguration(effectivePersona.llm.llm_provider, effectivePersona.config);
   recordChatTurnFlags({
     rag: contextItems.some((item) => item.metadataTag === ContextItemTag.KNOWLEDGE_SERVER_DOCUMENTS),
   });
@@ -693,6 +760,10 @@ export async function buildChatTurnContext(turn: ChatTurn): Promise<ChatTurnCont
     tomoriState: effectivePersona,
     requestSnapshot: { ...turn.requestSnapshot, tomoriState: effectivePersona },
     contextItems,
+    memoryRecall: contextBuild.memoryRecall,
+    nativeContextItems: nativeContextItems
+      ? attachPersonaMentionMapToContextItems(nativeContextItems, buildPersonaMentionCatalog(turn.allPersonas))
+      : undefined,
     assistantPrefill,
     expressionDelivery,
     simplifiedMessages: history.simplifiedMessages,
@@ -809,6 +880,7 @@ async function buildSimplifiedHistory(
     !messages.some((message) => message.id === turn.lockedTurn.admission.message.id)
   ) {
     messages.push(turn.lockedTurn.admission.message);
+    messages.sort((left, right) => left.id.length - right.id.length || left.id.localeCompare(right.id));
   }
   const fetchedMessages = messages;
   const fetchedMessagesById = new Map<string, Message | null>(fetchedMessages.map((message) => [message.id, message]));
@@ -831,6 +903,7 @@ async function buildSimplifiedHistory(
   // "reset" starts after the marker; "compact_refresh" starts at the marker (it's included).
   let resetIndex = -1;
   let resetType: "reset" | "compact_refresh" | null = null;
+  let resetMessageId: string | undefined;
   for (let i = messages.length - 1; i >= 0; i--) {
     for (const embed of messages[i].embeds) {
       const embedCheck = checkTargetEmbed(embed);
@@ -843,10 +916,18 @@ async function buildSimplifiedHistory(
     if (resetIndex !== -1) break;
   }
   if (resetIndex !== -1) {
+    resetMessageId = messages[resetIndex].id;
     const startIndex = resetType === "compact_refresh" ? resetIndex : resetIndex + 1;
     log.info(`Reset marker at index ${resetIndex} (${resetType}). History starts from index ${startIndex}.`);
     messages = messages.slice(startIndex);
   }
+  messages = selectAnchoredHistory(
+    channel.id,
+    messages,
+    fetchLimit,
+    resetMessageId,
+    turn.lockedTurn.admission.message.id,
+  );
 
   const activeUserBlocks = await loadActivePersonaUserBlocks(turn);
   // Map each 'block'-type target to its row so the simplify loop can render a
@@ -980,8 +1061,10 @@ async function buildSimplifiedHistory(
         authorId: blockComparableId,
         authorName: "System",
         authorType: "user",
+        isSystemNotice: true,
         personaName: null,
         content: formatBlockedUserNoticeContent(blockedLabel, activeContextBlock.expires_at),
+        completionContent: "",
         createdAt: msg.createdTimestamp,
         imageAttachments: [],
         videoAttachments: [],
@@ -1017,8 +1100,10 @@ async function buildSimplifiedHistory(
         authorId: AGENDA_NOTICE_AUTHOR_ID,
         authorName: "System",
         authorType: "user",
+        isSystemNotice: true,
         personaName: null,
         content: formatAgendaNotice(turn.persona.persona_nickname, agenda),
+        completionContent: "",
         createdAt: msg.createdTimestamp,
         imageAttachments: [],
         videoAttachments: [],
@@ -1086,6 +1171,12 @@ async function buildSimplifiedHistory(
       previousEntry.combinedMessageIds.push(simplified.id);
       previousEntry.individualContents?.push(simplified.content);
       previousEntry.combinedCreatedAts?.push(simplified.createdAt ?? 0);
+      previousEntry.completionContent = [
+        previousEntry.completionContent ?? previousEntry.content,
+        simplified.completionContent ?? simplified.content,
+      ]
+        .filter(Boolean)
+        .join("\n");
       previousEntry.content = `${previousEntry.content}\n${simplified.content}`;
       continue;
     }
@@ -1128,8 +1219,11 @@ async function buildSimplifiedHistory(
       authorId: fallbackAuthorId,
       authorName: "System",
       authorType: "user",
+      isSystemNotice: true,
       personaName: null,
       content: reminderContent,
+      completionContent: `*${isSelfReminder ? "A task reminder" : `A reminder for ${incoming.reminderRecipientID?.startsWith("@") ? incoming.reminderRecipientID : `<@${incoming.reminderRecipientID}>`}`}: ${incoming.reminderData.reminder_purpose}*`,
+      completionSpeaker: false,
       imageAttachments: [],
       videoAttachments: [],
     });
@@ -1188,6 +1282,7 @@ async function simplifyMessage(
   if (!content && messageProxyIdentitiesByMessageId.get(msg.id)?.serviceId === "pluralbuddy") {
     content = extractTextDisplayContent(msg.components);
   }
+  let completionContent = isJoin ? `*<@${msg.author.id}> joined ${turn.serverName}.*` : content;
   const replyContext = await withReplyContext(
     turn,
     msg,
@@ -1320,6 +1415,7 @@ async function simplifyMessage(
     msg.author.id === turn.lockedTurn.admission.client.user?.id || authorType === "persona";
   if (content && !isTomoriAuthoredMessage) {
     content = stripAtPersonaTriggers(content, turn.allPersonas);
+    completionContent = stripAtPersonaTriggers(completionContent, turn.allPersonas);
   }
 
   const preForwardImageCount = imageAttachments.length;
@@ -1327,6 +1423,7 @@ async function simplifyMessage(
   const forwardContext = await buildForwardContext({
     message: msg,
     content,
+    completionContent,
     imageAttachments,
     videoAttachments,
     messageIdMap,
@@ -1336,6 +1433,7 @@ async function simplifyMessage(
     selfDebugEnabled: turn.persona.config.self_debug_enabled ?? false,
   });
   content = forwardContext.content;
+  completionContent = forwardContext.completionContent;
   if (imageAttachments.length > preForwardImageCount || videoAttachments.length > preForwardVideoCount) {
     tagNewMediaWithSource(imageAttachments, preForwardImageCount, videoAttachments, preForwardVideoCount, msg.id);
   }
@@ -1350,12 +1448,14 @@ async function simplifyMessage(
     components: msg.components,
     minimalNoticeBody: minimalNoticeBodies.get(msg.id),
     content,
+    completionContent,
     imageAttachments,
     isTomoriAuthoredMessage,
     selfDebugEnabled: turn.persona.config.self_debug_enabled ?? false,
     tomoriNickname: turn.persona.persona_nickname,
   });
   content = embedResult.content;
+  completionContent = embedResult.completionContent;
   hasProcessedEmbed = embedResult.processedSystemEmbed;
 
   appendDirectMediaFromMessage({
@@ -1366,6 +1466,9 @@ async function simplifyMessage(
     voiceTranscriptChatMode: turn.persona.config.voice_transcript_chat_mode ?? true,
     appendTextHint: (hint) => {
       content = content ? `${content} ${hint}` : hint;
+    },
+    appendCompletionText: (text) => {
+      completionContent = [completionContent, text].filter(Boolean).join("\n");
     },
   });
 
@@ -1403,10 +1506,13 @@ async function simplifyMessage(
       authorId,
       authorName,
       authorType,
+      isSystemNotice: hasProcessedEmbed || isJoin,
       personaName,
       authorPersonaId,
       authorPersonaLineageId,
       content,
+      completionContent,
+      ...(hasProcessedEmbed || isJoin ? { completionSpeaker: false as const } : {}),
       createdAt: msg.createdTimestamp,
       mediaSourceMessageIds:
         imageAttachments.length > 0 || videoAttachments.length > 0
@@ -1523,6 +1629,11 @@ function getBlockComparableAuthorId(
       (isManagedWebhookMessage(msg) ? getCachedImpersonatedUserIdForWebhook(msg.webhookId) : null) ?? msg.author.id
     );
   }
+  // A slash-command reply is authored by the bot but speaks for its invoker, so a blocked user's
+  // /reward or /punish embed would otherwise reach the persona that blocked them.
+  if (msg.author.bot && msg.interactionMetadata) {
+    return msg.interactionMetadata.user.id;
+  }
   return msg.author.id;
 }
 
@@ -1540,8 +1651,8 @@ function getBlacklistCandidateAuthorId(msg: Message): string | null {
 /**
  * Resolves the name a persona knows a blocked user by, for use in the block
  * notice. Prefers the cached bot-facing nickname, then Discord display/global/
- * username; for webhook-impersonated authors whose underlying user differs, falls
- * back to a mention of the impersonated Discord ID.
+ * username; when the message speaks for someone other than its author (a webhook
+ * impersonation or a slash-command reply), falls back to a mention of that user.
  *
  * @param msg - The original (blocked) Discord message.
  * @param comparableId - The block-comparable author ID from getBlockComparableAuthorId.
@@ -1551,7 +1662,7 @@ async function resolveBlockedAuthorLabel(msg: Message, comparableId: string): Pr
   if (row?.user_nickname) {
     return row.user_nickname;
   }
-  if (!msg.webhookId) {
+  if (comparableId === msg.author.id) {
     return msg.member?.displayName || msg.author.globalName || msg.author.username;
   }
   return `<@${comparableId}>`;
@@ -1674,39 +1785,17 @@ function appendTailDirectives(args: {
     : null;
 
   const lowerPriorityTailMessage = buildCombinedTailDirectiveMessage(lowerPriority);
-  if (lowerPriorityTailMessage) {
-    insertBeforeLatestDialoguePair(contextItems, lowerPriorityTailMessage);
-  }
-
-  // Inject the deferred STM content block at its configured dialogue depth (only when
-  // the server opted into positional placement; depth -1 keeps it inline upstream).
-  // Done BEFORE the nudge so that at equal depths the nudge lands just below the block:
-  // each item is spliced before the same Nth dialogue turn, and the block (inserted
-  // first, in order) ends up above the later-inserted nudge.
-  if (args.memoryInjectionItems && args.memoryInjectionItems.length > 0 && (args.memoryInjectionDepth ?? -1) >= 0) {
-    for (const memoryItem of args.memoryInjectionItems) {
-      insertAtDialogueDepth(contextItems, memoryItem, args.memoryInjectionDepth ?? 0);
-    }
-  }
-
-  // Inject the unified STM nudge at its configured dialogue depth (0 = tail). Done
-  // here: after dialogue history is assembled: so depth is measured against real
-  // conversation turns regardless of native vs. preset assembly.
-  if (args.nudgeItem) {
-    insertAtDialogueDepth(contextItems, args.nudgeItem, args.nudgeInjectionDepth ?? 0);
-  }
-
   const combinedTailMessage = buildCombinedTailDirectiveMessage(tail);
-  if (combinedTailMessage) {
-    contextItems.push(combinedTailMessage);
-  }
-
-  for (const directive of [queuedDirective, args.uncensorDirective]) {
-    const item = buildTailDirectiveItem(directive);
-    if (item) {
-      contextItems.push(item);
-    }
-  }
+  const queuedItem = buildTailDirectiveItem(queuedDirective);
+  const uncensorItem = buildTailDirectiveItem(args.uncensorDirective);
+  applyPromptLayoutInserts(contextItems, [
+    { tag: "lower_priority_tail", items: lowerPriorityTailMessage ? [lowerPriorityTailMessage] : [] },
+    { tag: "stm_content", items: args.memoryInjectionItems ?? [], depth: args.memoryInjectionDepth },
+    { tag: "stm_nudge", items: args.nudgeItem ? [args.nudgeItem] : [], depth: args.nudgeInjectionDepth },
+    { tag: "combined_tail", items: combinedTailMessage ? [combinedTailMessage] : [] },
+    { tag: "queued_reply", items: queuedItem ? [queuedItem] : [] },
+    { tag: "uncensor", items: uncensorItem ? [uncensorItem] : [] },
+  ]);
 
   return contextItems;
 }

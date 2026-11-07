@@ -11,6 +11,7 @@ import {
   buildPersonalConfigRouteId,
   PERSONAL_FALLBACK_PAGE_SIZE,
   PERSONAL_MODEL_PAGE_SIZE,
+  QUICK_TOGGLE_CAPABILITIES,
   ROUTING_CAPABILITY_LOCALE_KEYS,
   SPOTLIGHT_PERSONA_PAGE_SIZE,
   SPOTLIGHT_REMOVE_PAGE_SIZE,
@@ -28,7 +29,7 @@ import {
   resolveSupportedLocale,
 } from "@/utils/text/localizer";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
-import { providerOptionModelDescription } from "@/utils/provider/providerOptionRegistry";
+import { buildModelSelectOption, type ModelSelectChoice } from "@/utils/discord/ui/modelSelectOption";
 import {
   getActivePersonalProviderForCapability,
   getStoredPersonalProviderForCapability,
@@ -41,15 +42,10 @@ export function buildPersonalConfigModalFieldId(field: string, nonce: string): s
   return `${field}_${nonce}`;
 }
 
-/**
- * @param standalone `/personal language` shows this modal with no panel behind it, so its submit
- * routes to the action that answers with a receipt instead of repainting a message.
- */
 export function buildLanguageModal(
   locale: string,
   nonce: string,
   currentLanguage: string,
-  standalone = false,
 ): { custom_id: string; title: string; components: RawDiscordComponent[] } {
   const selectedLanguage = getRegisterableLocales().some((code) => code === currentLanguage)
     ? resolveSupportedLocale(currentLanguage)
@@ -57,7 +53,7 @@ export function buildLanguageModal(
 
   return {
     custom_id: buildPersonalConfigRouteId({
-      action: standalone ? "language-only-submit" : "language-submit",
+      action: "language-submit",
       locale,
       nonce,
     }),
@@ -465,7 +461,7 @@ export function buildQuickToggleModal(
           type: 22,
           custom_id: buildPersonalConfigModalFieldId("capabilities", nonce),
           min_values: 0,
-          max_values: 8,
+          max_values: QUICK_TOGGLE_CAPABILITIES.length,
           required: false,
           options: [
             {
@@ -504,7 +500,7 @@ export function buildQuickToggleModal(
               description: safeSelectOptionText(getDesc(videoStored), 100),
               default: videoActive,
             },
-            ...(["speech_design", "speech_clone"] as const).map((capability) => ({
+            ...(["speech_design", "speech_clone", "transcription"] as const).map((capability) => ({
               value: capability,
               label: safeSelectOptionText(localizer(locale, ROUTING_CAPABILITY_LOCALE_KEYS[capability]), 100),
               description: safeSelectOptionText(
@@ -525,18 +521,13 @@ export function buildModelSelectModal(
   nonce: string,
   capability: PersonalConfigManagedCapability,
   provider: string,
-  availableModels: Array<{ id: number; name: string; description?: string }>,
+  availableModels: ModelSelectChoice[],
   currentModelId: number | null,
 ): { custom_id: string; title: string; components: RawDiscordComponent[] } {
   const capName = localizer(locale, ROUTING_CAPABILITY_LOCALE_KEYS[capability]);
-  const options = availableModels.slice(0, PERSONAL_MODEL_PAGE_SIZE).map((m) => ({
-    value: String(m.id),
-    label: safeSelectOptionText(m.name, 100),
-    description: m.description
-      ? safeSelectOptionText(m.description, 100)
-      : providerOptionModelDescription(locale, provider),
-    default: m.id === currentModelId,
-  }));
+  const options = availableModels
+    .slice(0, PERSONAL_MODEL_PAGE_SIZE)
+    .map((model) => buildModelSelectOption(locale, provider, model, currentModelId));
 
   return {
     custom_id: buildPersonalConfigRouteId({

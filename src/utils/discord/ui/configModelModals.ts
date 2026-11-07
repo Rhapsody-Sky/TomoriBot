@@ -9,7 +9,7 @@ import {
   CONFIG_MODEL_PAGE_SIZE,
   CONFIG_STOP_STRING_CHECKBOX_GROUP_SIZE,
   buildConfigRouteId,
-  type ConfigCatalogModelCapability,
+  type ConfigModelCapability,
 } from "@/utils/discord/configPanelCatalog";
 import {
   CONFIG_FALLBACK_CLEAR_VALUE,
@@ -17,7 +17,7 @@ import {
 } from "@/utils/discord/interactions/configModelOperations";
 import { CONFIG_MODEL_CAPABILITY_LOCALE_KEYS } from "@/utils/discord/ui/configModelsPanel";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
-import { providerOptionModelDescription } from "@/utils/provider/providerOptionRegistry";
+import { buildModelSelectOption } from "@/utils/discord/ui/modelSelectOption";
 import {
   buildCheckboxGroupComponent,
   buildConfigModalFieldId,
@@ -428,7 +428,7 @@ export interface ConfigFallbackOption {
  */
 export function buildConfigModelSelectModal(
   locale: string,
-  capability: ConfigCatalogModelCapability,
+  capability: ConfigModelCapability,
   provider: string,
   nonce: string,
   models: readonly ConfigModelChoice[],
@@ -461,14 +461,9 @@ export function buildConfigModelSelectModal(
           required: true,
           min_values: 1,
           max_values: 1,
-          options: models.slice(0, CONFIG_MODEL_PAGE_SIZE).map((model) => ({
-            value: String(model.id),
-            label: safeSelectOptionText(model.name, 100),
-            description: model.description
-              ? safeSelectOptionText(model.description, 100)
-              : providerOptionModelDescription(locale, provider),
-            default: model.id === currentModelId,
-          })),
+          options: models
+            .slice(0, CONFIG_MODEL_PAGE_SIZE)
+            .map((model) => buildModelSelectOption(locale, provider, model, currentModelId)),
         },
       },
     ],

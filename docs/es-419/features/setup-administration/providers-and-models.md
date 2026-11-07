@@ -2,7 +2,6 @@
 title: "Proveedores y modelos"
 sidebar:
   order: 1
-aiGenerated: true
 ---
 
 TomoriBot se conecta a proveedores de IA externos en lugar de alojar un modelo integrado. Puede conectar servicios alojados como Google Gemini, OpenRouter y NovelAI, o dirigirla a puntos finales autohospedados locales. Necesitas al menos un proveedor para empezar a chatear.
@@ -65,13 +64,16 @@ En `/config` > `Modelos` > Modelos de conmutador, puede asignar modelos y puntos
 
 - **Texto**: el modelo de chat principal.
 - **Visión**: lee imágenes cuando el modelo de chat no puede.
-- **Incrustaciones**: potencia la [base de conocimiento de documentos](/es-419/features/knowledge/memory/#document-knowledge-base-rag).
+- **Incrustaciones**: potencia la [base de conocimiento de documentos](/es-419/features/knowledge/memory/documents/).
 - **Decisión**: un [modelo de decisión](#decision-models) registrado. [Natural Nudges](/features/chatting-personality/natural-nudges/#active-nudges) lo utiliza para decidir cuándo unirse a una conversación.
 - **Imagen estándar**: generación de imágenes estándar (consulte [Generación de imágenes](/es-419/features/capabilities/media-generation/image-generation/)).
-- **Imagen NovelAI**: Generación de imágenes NovelAI.
+- **Imagen NovelAI**: [generación de imágenes de NovelAI](/features/integrations/novelai/#image-generation).
 - **Video**: generación de video.
-- **Punto final TTS**: punto final de voz de texto a voz.
-- **Punto final STT**: punto final de transcripción de audio de voz a texto.
+- **TTS (Diseño de voz)**: habla usando una descripción de voz guardada.
+- **TTS (Clon de voz)**: habla usando una muestra de referencia o una voz del proveedor.
+- **Voz a texto**: transcribe archivos adjuntos de audio con un modelo de transcripción alojado o un endpoint personalizado. Elige un proveedor y luego su modelo; `- Ningún modelo` detiene la transcripción con la clave del servidor.
+
+La lista de modelos señala el modelo predeterminado de cada proveedor y muestra los precios en dólares estadounidenses. Los modelos de Texto y de Decisión muestran el precio por cada millón de tokens de entrada y salida. Los modelos de imagen, video y voz de OpenRouter muestran la unidad que factura OpenRouter: por imagen o por millón de tokens de imagen, por segundo de video en la resolución predeterminada de TomoriBot, y por millón de caracteres o por segundo de audio. Los modelos de imagen que registres tú mismo no muestran ningún precio. Un modelo sin precio indicado no tiene medición de uso o no tiene precio en el catálogo de TomoriBot, así que consulta la página de precios de tu proveedor antes de depender de él.
 
 Los primeros seis espacios eligen registros del catálogo de modelos. En su lugar, las ranuras TTS y STT eligen puntos finales con ámbito de servidor, activando el punto final seleccionado en lugar de escribir una columna de modelo. Registre y edite esos puntos finales en `/providers`. `/personal config` conserva seis ranuras de enrutamiento de modelos personales y no incluye selectores de puntos finales personales TTS/STT.
 
@@ -135,7 +137,7 @@ Si no tiene el hardware para alojar sus propios modelos, TomoriBot admite una am
 | Google Géminis | ✅ | ✅ | ✅ | ✅ | Modelos gratuitos disponibles |
 | OpenRouter | ✅ | ✅ | ✅ | ✅ | Usa créditos de OpenRouter |
 | Antrópico (API) | ✅ | ✅ | ✅ | - | No código Claude |
-| NovelAI | ✅ | ✅ | - | - | Sólo GLM 4.6 puede utilizar herramientas |
+| NovelAI | ✅ | - | - | - | Los modelos de texto no pueden usar herramientas; consulta [NovelAI](/features/integrations/novelai/) |
 | NVIDIA NIM | ✅ | ✅ | ✅ | ✅ | Modelos gratuitos disponibles |
 | búsqueda profunda | ✅ | ✅ | - | - | - |
 | Z.ai | ✅ | ✅ | ✅ | - | Modelos gratuitos; 🟡 ToS = codificación y uso exclusivo del agente |
@@ -168,9 +170,10 @@ Estos son los valores predeterminados desde los que parten los modelos de imáge
 | Proveedor | Texto a voz | Voz a texto |
 |---|---|---|
 | ElevenLabs | ✅ | ✅ |
-| Google Gemini | Diseño de voz | No |
-| Vertex AI (estándar, global) | Diseño de voz | No |
+| Google Gemini | Diseño de voz | ✅ |
+| Vertex AI (estándar, global) | Diseño de voz | ✅ |
 | OpenRouter Fish | Clon de voz | No |
 | OpenRouter Seed Audio | Diseño de voz | No |
+| Modelos de transcripción de OpenRouter | No | ✅ |
 
-Los motores de voz locales están cubiertos en [Autoalojamiento](/es-419/self-hosting/). Para búsqueda web integrada y lectura de URL, consulte [Herramientas y extensiones](/es-419/features/capabilities/tools-and-extensions/#web-search--url-reading).
+Los motores de voz locales están cubiertos en [Autoalojamiento](/self-hosting/). Para búsqueda web integrada y lectura de URL, consulta [Herramientas y extensiones](/features/capabilities/tools-and-extensions/web-search/).

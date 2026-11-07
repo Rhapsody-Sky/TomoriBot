@@ -79,7 +79,6 @@ export default {
     },
     user_block: {
       error_missing_permission: `I need the {permission} permission in this channel to announce a block. Ask a server administrator to grant it, then try again.`,
-      notice_failed: `The block was saved, but I could not post the confirmation in this channel. Ask a server administrator to check my channel permissions.`,
       type_mute: `mute`,
       type_block: `block`,
       effect_mute: `The target cannot trigger this persona.`,
@@ -204,7 +203,7 @@ export default {
     fetch: {
       fetch_url_title: `🌐  Reading webpage...`,
       fetch_failed_description: `I couldn't fetch that page: {error}`,
-      private_network_blocked_description: `I couldn't fetch that page because it points to a private or internal network address. TomoriBot blocks those in production unless the host sets \`FETCH_URL_ALLOW_PRIVATE_NETWORK=true\`. {error}`,
+      private_network_blocked_description: `I couldn't fetch that page because it points to a private or internal network address, which TomoriBot blocks by default. To allow it, the host can add \`FETCH_URL_ALLOW_PRIVATE_NETWORK=true\` to \`.env\` and restart TomoriBot. {error}`,
       reading_title_page: `🌐  Reading webpage (page {page})...`,
       reading_description: `Fetching and reading: {url}`,
       reading_offset_line: `Starting from character {start_index}`,

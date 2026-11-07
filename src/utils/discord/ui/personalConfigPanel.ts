@@ -32,6 +32,7 @@ import {
   encodeProviderPageValue,
   encodeProviderParam,
   encodeProviderRangeValue,
+  visiblePersonalConfigPages,
   type PersonalConfigCategory,
   type PersonalConfigManagedCapability,
   type PersonalConfigPage,
@@ -55,6 +56,7 @@ import {
 } from "@/utils/discord/ui/personalConfigParameterControls";
 import { escapeDiscordMarkdown } from "@/utils/text/discordMarkdown";
 import { truncateDiscordText } from "@/utils/text/discordTextLimits";
+import { renderFencedPreview } from "@/utils/text/textPreview";
 import { formatUTCOffset } from "@/utils/text/timezoneHelper";
 import { statusNote } from "@/utils/discord/ui/statusTitle";
 import { getLocaleEndonym, localizer } from "@/utils/text/localizer";
@@ -242,74 +244,11 @@ function getPageOptionsForCategory(
   currentPage: PersonalConfigPage,
   guildId: string | null,
 ): SelectMenuComponentOptionData[] {
-  switch (category) {
-    case "profile":
-      return [
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.profile.general), 100),
-          value: "general",
-          default: currentPage === "general",
-        },
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.profile.persona), 100),
-          value: "persona",
-          default: currentPage === "persona",
-        },
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.profile.appearance), 100),
-          value: "appearance",
-          default: currentPage === "appearance",
-        },
-      ];
-    case "privacy":
-      return [
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.privacy.controls), 100),
-          value: "controls",
-          default: currentPage === "controls",
-        },
-      ];
-    case "models":
-      return [
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.models.switch), 100),
-          value: "switch",
-          default: currentPage === "switch",
-        },
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.models.parameters), 100),
-          value: "parameters",
-          default: currentPage === "parameters",
-        },
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.models.fallbacks), 100),
-          value: "fallbacks",
-          default: currentPage === "fallbacks",
-        },
-      ];
-    case "advanced": {
-      const options: SelectMenuComponentOptionData[] = [
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.advanced["response-modes"]), 100),
-          value: "response-modes",
-          default: currentPage === "response-modes",
-        },
-        {
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.advanced.impersonation), 100),
-          value: "impersonation",
-          default: currentPage === "impersonation",
-        },
-      ];
-      if (guildId !== null) {
-        options.push({
-          label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS.advanced.spotlight), 100),
-          value: "spotlight",
-          default: currentPage === "spotlight",
-        });
-      }
-      return options;
-    }
-  }
+  return visiblePersonalConfigPages(category, guildId).map((page) => ({
+    label: safeSelectOptionText(localizer(locale, PERSONAL_PAGE_LOCALE_KEYS[category][page]), 100),
+    value: page,
+    default: currentPage === page,
+  }));
 }
 
 function renderPanelView(
@@ -1086,17 +1025,20 @@ ${localizer(locale, "commands.personal.config.persona_naming_description")}`,
         );
       }
     } else if (page === "appearance") {
+      const tagsLabel = localizer(locale, "commands.personal.config.tags_label");
       const tagsText =
         user.physical_appearance_tags && user.physical_appearance_tags.length > 0
-          ? `\`${escapeDiscordMarkdown(user.physical_appearance_tags.join(", "))}\``
-          : localizer(locale, "commands.personal.config.not_set_label");
+          ? `${tagsLabel}:\n${renderFencedPreview(locale, user.physical_appearance_tags.join(", "), {
+              actionLabel: localizer(locale, "commands.personal.config.edit_appearance_button"),
+            })}`
+          : `> ${tagsLabel}: ${localizer(locale, "commands.personal.config.not_set_label")}`;
 
       components.push(
         {
           type: ComponentType.TextDisplay,
           content: `### ${localizer(locale, "commands.personal.config.appearance_title")}
 ${localizer(locale, "commands.personal.config.appearance_description")}
-> ${localizer(locale, "commands.personal.config.tags_label")}: ${tagsText}
+${tagsText}
 -# ${localizer(locale, "commands.personal.config.teach_persona_hint").split("\n").join("\n-# ")}`,
         },
         {
@@ -1346,6 +1288,12 @@ ${localizer(locale, "commands.personal.config.models_description")}`,
           ],
         },
       );
+      if (routing?.text.storedProvider === "novelai") {
+        components.push({
+          type: ComponentType.TextDisplay,
+          content: `**${localizer(locale, "commands.config.panel.capability_notice_title")}**\n> - ${localizer(locale, "commands.config.panel.novelai_context_note")}`,
+        });
+      }
     } else if (page === "parameters") {
       const selectedProvider = input.selectedParametersProvider ?? input.modelDisplayInfo?.parametersProviders[0] ?? "";
       const config = input.modelDisplayInfo?.selectedParametersConfig;

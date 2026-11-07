@@ -2,10 +2,9 @@
 title: "振る舞いの調整"
 sidebar:
   order: 3
-aiGenerated: true
 ---
 
-TomoriBotに許可する操作や返答の生成方法は、`/config`の設定で調整できます。性格は[複数のペルソナ](/ja/features/chatting-personality/multiple-personas/)、知識は[記憶](/ja/features/knowledge/memory/)のページを参照してください。このページでは、よく使う動作設定を紹介します。
+TomoriBotに許可する操作や返答の生成方法は、`/config`の設定で調整できます。性格は[複数のペルソナ](/ja/features/chatting-personality/multiple-personas/)、知識は[記憶](/ja/features/knowledge/memory/long-term-memory/)のページを参照してください。このページでは、よく使う動作設定を紹介します。
 
 ## 機能の有効化：許可する操作
 <!-- anchor: capabilities-what-shes-allowed-to-do -->
@@ -73,8 +72,8 @@ TomoriBotに許可する操作や返答の生成方法は、`/config`の設定�
 <!-- anchor: generation-tuning -->
 
 - `/config` > `モデル` > `テキストサンプラーとパラメーター`: 温度やトップpなどのサンプリングパラメーター。温度が高いほど多様性が増します。
-- `/config` > `動作` > `一般的な動作`: 応答ヒューマナイザーの程度。彼女がどれだけカジュアルにテキストメッセージを送信するかを調整します。この設定は、デフォルトではサーバー全体に適用されるか、個々のペルソナに適用されます。
-- `/config` > `動作` > `一般的な動作`: メッセージ履歴の制限。会話のコンテキストを深くするには値を上げ、トークンを節約するには値を下げます。
+- `/config` > `動作` > `一般的な動作`: 返答ヒューマナイザー。ペース配分メッセージは、逐次送信されるメッセージの間に遅延や休止を挟みます。ペース配分と両方の分割オプションにはライブ逐次送信が必要ですが、小文字への統一は逐次送信なしでも機能します（日本語には効果がありません）。これらの設定は、デフォルトではサーバー全体に適用されるか、個々のペルソナに適用されます。`/setup` では同じ動作傾向を4つの既製プリセットとして選択できます。
+- `/config` > `動作` > `一般的な動作`: メッセージ履歴の上限。会話のコンテキストを深くするには値を上げ、トークンを節約するには値を下げます。これは最大値であり、最近の履歴は増加した後に古いメッセージをバッチ単位で削除します。ウィンドウと配置ルールについては [プロンプトの中身](/features/knowledge/inside-the-prompt/) を参照してください。
 
 ## システムプロンプト
 <!-- anchor: system-prompt -->
@@ -85,7 +84,7 @@ TomoriBotに許可する操作や返答の生成方法は、`/config`の設定�
 - `/config` > `動作` > `一般的な動作`: プリセットのシステムプロンプトから選択します。`Default + Image Generation Expert` は、デフォルトのプロンプトに正確なアニメタグとキャラクター衣装のガイダンスを追加します（[タグ検索](/features/capabilities/media-generation/image-generation/#tag-lookup) を参照）。
 - `/config` > `動作` > `一般的な動作`: デフォルトにリセットします。確認には前のプロンプトが表示されるため、誤ってクリアした場合でも復元できます。
 
-[SillyTavernプリセット](/ja/features/integrations/sillytavern-support/) がアクティブな場合、組み込みのフォールバックシステムプロンプトは置き換えられますが、ここで設定したカスタムプロンプトは引き続き送信されます。
+[SillyTavernプリセット](/features/integrations/sillytavern-support/) がアクティブな場合、それがシステムプロンプトを制御します。保存されたサーバープロンプトを再度編集するには、プリセットをオフにしてください。
 
 ## 検閲なしの出力
 <!-- anchor: uncensored-output -->

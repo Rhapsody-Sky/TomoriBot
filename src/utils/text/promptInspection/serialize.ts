@@ -1,3 +1,7 @@
+import { isPromptSystemItem } from "@/utils/text/context/promptLayout";
+import { getNovelAIProfile } from "@/providers/novelai/modelProfiles";
+import type { PreparedNovelAIRequest } from "@/providers/novelai/promptFitting";
+import { convertToOpenAIParams, usesOpenAIEndpoint } from "@/providers/novelai/novelaiService";
 import type { TomoriState } from "@/types/db/schema";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import { AnthropicStreamAdapter } from "@/providers/anthropic/anthropicStreamAdapter";
@@ -49,6 +53,7 @@ const TAG_LABELS: Readonly<Record<ContextItemTag, TagLabel>> = {
   [ContextItemTag.KNOWLEDGE_PERSONA_SPRITES]: { title: "Persona Sprites", hint: "/config > Persona > Sprites" },
   [ContextItemTag.KNOWLEDGE_SERVER_MEMORIES]: { title: "Server Memories", hint: "/memories" },
   [ContextItemTag.KNOWLEDGE_SERVER_DOCUMENTS]: { title: "Server Documents", hint: "/memories" },
+  [ContextItemTag.KNOWLEDGE_RECALLED_MEMORIES]: { title: "Recalled Memories", hint: "/memories, /personal memories" },
   [ContextItemTag.KNOWLEDGE_LOREBOOK_BEFORE]: { title: "Lorebook (Before)", hint: "/memories" },
   [ContextItemTag.KNOWLEDGE_LOREBOOK_AFTER]: { title: "Lorebook (After)", hint: "/memories" },
   [ContextItemTag.KNOWLEDGE_SERVER_CONDITIONING]: { title: "Conditioning Log", hint: "/conditioning" },
@@ -62,7 +67,6 @@ const TAG_LABELS: Readonly<Record<ContextItemTag, TagLabel>> = {
     hint: "composite",
     subsections: [
       { title: "Personal/Server Memories", hint: "/memories, /personal memories" },
-      { title: "Discord Presence/Role/Channel", hint: "system-managed" },
       { title: "Other Personas' Public Attributes", hint: "/config > Persona > Identity & Personality" },
     ],
   },
@@ -114,6 +118,7 @@ export function buildTextSnapshot(
   contextItems: StructuredContextItem[],
   requestConfig: Record<string, unknown>,
   snapshotInfo: string[],
+  novelaiRequest?: PreparedNovelAIRequest,
 ): string {
   const lines: string[] = [
     "=== Snapshot Info (annotation, NOT part of the prompt) ===",
@@ -123,6 +128,16 @@ export function buildTextSnapshot(
     JSON.stringify(requestConfig, null, 2),
     "",
   ];
+
+  if (novelaiRequest) {
+    lines.push(
+      novelaiRequest.prompt,
+      "",
+      "=== Fitting Report (annotation, NOT part of the prompt) ===",
+      JSON.stringify(novelaiRequest.report, null, 2),
+    );
+    return lines.join("\n");
+  }
 
   for (const item of contextItems) {
     lines.push(renderTagHeader(item.metadataTag));
@@ -161,10 +176,6 @@ export function buildTextSnapshot(
  *   - openrouter-family → OpenrouterStreamAdapter.buildProbeMessages
  *   - anthropic         → AnthropicStreamAdapter.buildProbeMessages
  *
- * All other providers (novelai, custom, etc.) fall back to a flat OpenAI-style
- * `{model, messages: [{role, content}]}` shape. Messages with media use the
- * OpenAI-vision array-content form; text-only messages use plain strings.
- *
  * Metadata (server/channel/persona/provider/preset) is NOT embedded in the file:
  * the payload must stay shaped like the provider request.
  *
@@ -178,7 +189,27 @@ export async function buildJsonSnapshot(
   modelName: string,
   toolsData: Array<Record<string, unknown>> | null,
   requestConfig: Record<string, unknown>,
+  novelaiRequest?: PreparedNovelAIRequest,
 ): Promise<Record<string, unknown>> {
+  if (novelaiRequest) {
+    const stops = novelaiRequest.stopStrings;
+    return {
+      ...(usesOpenAIEndpoint(modelName)
+        ? {
+            model: modelName,
+            prompt: novelaiRequest.prompt,
+            ...convertToOpenAIParams(novelaiRequest.parameters, stops),
+            stream: true,
+          }
+        : {
+            input: novelaiRequest.prompt,
+            model: modelName,
+            parameters: novelaiRequest.parameters,
+            openAIStopStrings: stops,
+          }),
+      fitting: novelaiRequest.report,
+    };
+  }
   const activeLlm = persona.persona_llm ?? persona.llm;
   const seesImages = activeLlm.sees_images;
   const seesVideos = activeLlm.sees_videos;
@@ -264,10 +295,6 @@ export async function buildJsonSnapshot(
 
     requestData = { model: modelName, system, messages: sanitizedMessages };
   } else {
-    // Fallback for providers without a public probe builder (novelai, custom, etc.):
-    // flatten `contextItems` into a plain `{model, messages: [{role, content}]}` shape.
-    // Role remap: `model` → `assistant` to match OpenAI conventions.
-
     // OpenAI-compatible APIs accept only one leading `role: "system"` message, so the
     //    system blocks (personality, rules, knowledge) are flattened into a single entry
     //    by joining their text parts. A second system message would be rejected or, worse,
@@ -275,7 +302,7 @@ export async function buildJsonSnapshot(
     const systemTextChunks: string[] = [];
     const nonSystemItems: StructuredContextItem[] = [];
     for (const item of contextItems) {
-      if (item.role === "system") {
+      if (isPromptSystemItem(item)) {
         const text = item.parts
           .filter((p): p is { type: "text"; text: string } => p.type === "text")
           .map((p) => p.text)
@@ -358,7 +385,13 @@ export function buildRequestConfig(
   providerName: string,
   modelName: string,
   maxOutputTokens: number | undefined,
+  novelaiRequest?: PreparedNovelAIRequest,
 ): Record<string, unknown> {
+  if (novelaiRequest) {
+    return usesOpenAIEndpoint(modelName)
+      ? { ...convertToOpenAIParams(novelaiRequest.parameters, novelaiRequest.stopStrings) }
+      : { ...novelaiRequest.parameters };
+  }
   const activeLlm = persona.persona_llm ?? persona.llm;
   const config = persona.config;
   const disabledParams = config.llm_disabled_params ?? [];
@@ -483,7 +516,11 @@ export function buildRequestConfig(
       }
     },
     novelai: () => {
-      out.thinking_directive = getNovelAiThinkingDirective(config.thinking_level);
+      out.thinking_directive = getNovelAiThinkingDirective(
+        config.thinking_level,
+        undefined,
+        getNovelAIProfile(modelName).thinkingByDefault,
+      );
     },
   };
   requestConfigMutators[providerKey]?.();

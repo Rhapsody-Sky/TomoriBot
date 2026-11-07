@@ -29,6 +29,7 @@ function collectActiveConfigs(
     "vision",
     "speech_design",
     "speech_clone",
+    "transcription",
   ] as const) {
     // The model check keeps this in step with what the commands call active. Without
     // it an enabled row whose model pointer went NULL would swap its credential in
@@ -110,6 +111,9 @@ export async function applyPersonalProviderSelectionsToTomoriState(
   const fallbackSettings = activeConfigs.text ? await llmProviderRepo.loadPersonalFallbackSettings(userId) : null;
 
   if (activeConfigs.text && fallbackSettings) {
+    if (activeConfigs.text.provider.toLowerCase() === "novelai") {
+      nextConfig.nai_preset_name = activeConfigs.text.nai_preset_name;
+    }
     nextConfig.llm_id = activeConfigs.text.llm_id ?? nextConfig.llm_id;
     nextConfig.api_key = activeConfigs.text.api_key;
     nextConfig.key_version = activeConfigs.text.key_version ?? nextConfig.key_version;
@@ -153,6 +157,9 @@ export async function applyPersonalProviderSelectionsToTomoriState(
     nextConfig.speech_clone_model_id = activeConfigs.speech_clone.speech_clone_model_id;
     nextConfig.speech_clone_endpoint_id = null;
   }
+  if (activeConfigs.transcription?.transcription_model_id) {
+    nextConfig.transcription_model_id = activeConfigs.transcription.transcription_model_id;
+  }
 
   let nextLlm = tomoriState.llm;
   if (activeConfigs.text?.llm_id) {
@@ -186,6 +193,10 @@ export async function applyPersonalProviderSelectionsToTomoriState(
     tomoriState: {
       ...tomoriState,
       config: nextConfig,
+      ...(activeConfigs.text?.provider.toLowerCase() === "novelai" &&
+      tomoriState.nai_preset?.preset_name !== nextConfig.nai_preset_name
+        ? { nai_preset: undefined }
+        : {}),
       llm: nextLlm,
       vision_llm: nextVisionLlm,
       fallback_llms: nextFallbackLlms && nextFallbackLlms.length > 0 ? nextFallbackLlms : undefined,

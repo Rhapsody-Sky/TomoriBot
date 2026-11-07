@@ -84,8 +84,8 @@ Tente {model_text_command} para atribuir um modelo funcional, ou {provider_add_c
       settings_persona_label: `Persona`,
       settings_persona_description: `Escolha a persona que usarei após a configuração.`,
       settings_persona_placeholder: `Escolha uma predefinição de persona...`,
-      settings_humanizer_label: `Grau do Humanizador`,
-      settings_humanizer_description: `O quão humana deve ser a resposta? Baseado em regras, sem latência ou custo de token.`,
+      settings_humanizer_label: `Predefinição do Humanizador`,
+      settings_humanizer_description: `O quão humana deve ser a resposta? Baseado em regras, sem latência ou custo. Ajuste no /config.`,
       settings_humanizer_placeholder: `Escolha um estilo de resposta...`,
       settings_timezone_label: `Fuso Horário`,
       settings_timezone_description: `Para lembretes e noção de tempo. Deixe em branco para usar o UTC.`,
@@ -186,7 +186,7 @@ Tente {model_text_command} para atribuir um modelo funcional, ou {provider_add_c
 - Use \`/config\` para ajustar como eu ajo e o que posso fazer.
 - Use \`/memories\` para me ensinar sobre você.`,
       receipt_learn_more:
-        "Leia a [Wiki Oficial](https://docs.tomoribot.app/pt-BR/features/) ou abra {help} (então Features) para mais do que posso fazer.\n- [Múltiplas Personas](https://docs.tomoribot.app/pt-BR/features/chatting-personality/multiple-personas/) = visuais, vozes e gatilhos\n- [Chat & Gatilhos](https://docs.tomoribot.app/pt-BR/features/chatting-personality/chatting-and-triggers/) = quando e como eu participo\n- [Memória](https://docs.tomoribot.app/pt-BR/features/knowledge/memory/) = pessoas, fatos e contexto\n- [Personalização](https://docs.tomoribot.app/pt-BR/features/knowledge/personalization/) = como você gosta de ser tratado\n- [Geração de Mídia](https://docs.tomoribot.app/pt-BR/features/capabilities/media-generation/image-generation/) = imagens, vídeo e voz\n- [Ferramentas e Extensões](https://docs.tomoribot.app/pt-BR/features/capabilities/tools-and-extensions/built-in-tools/) = pesquisa na web e mais",
+        "Leia a [Wiki Oficial](https://docs.tomoribot.app/pt-BR/features/) ou abra {help} (então Features) para mais do que posso fazer.\n- [Múltiplas Personas](https://docs.tomoribot.app/pt-BR/features/chatting-personality/multiple-personas/) = visuais, vozes e gatilhos\n- [Chat & Gatilhos](https://docs.tomoribot.app/pt-BR/features/chatting-personality/chatting-and-triggers/) = quando e como eu participo\n- [Memória](https://docs.tomoribot.app/pt-BR/features/knowledge/memory/long-term-memory/) = pessoas, fatos e contexto\n- [Personalização](https://docs.tomoribot.app/pt-BR/features/knowledge/personalization/) = como você gosta de ser tratado\n- [Geração de Mídia](https://docs.tomoribot.app/pt-BR/features/capabilities/media-generation/image-generation/) = imagens, vídeo e voz\n- [Ferramentas e Extensões](https://docs.tomoribot.app/pt-BR/features/capabilities/tools-and-extensions/built-in-tools/) = pesquisa na web e mais",
       permission_denied: `Você precisa da permissão Gerenciar Servidor para configurar.`,
       env_mismatch: `A configuração do ambiente mudou. Por favor, reinicie a configuração.`,
       forbidden: `Esta sessão de configuração pertence a outro usuário ou canal.`,

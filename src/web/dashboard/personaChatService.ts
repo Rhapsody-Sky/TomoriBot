@@ -1,5 +1,6 @@
 import type { BaseGuildTextChannel, Client, Guild, Message, MessageCreateOptions } from "discord.js";
 import { z } from "zod";
+import { humanizerSettingsFromDegree } from "@/constants/humanizer";
 import { buildContext } from "@/utils/text/context/builder";
 import type { SimplifiedMessageForContext } from "@/utils/text/context/types";
 import { prepareParticipantContext } from "@/utils/text/participants/preparation";
@@ -76,7 +77,7 @@ function safeTestState(state: TomoriState): TomoriState {
     },
     config: {
       ...state.config,
-      humanizer_degree: 0,
+      ...humanizerSettingsFromDegree(0),
       send_message_limit: 0,
       tool_use_enabled: false,
       web_search_enabled: false,

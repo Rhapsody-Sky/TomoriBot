@@ -16,6 +16,7 @@ import {
 import {
   AttachmentBuilder,
   MessageFlags,
+  type AutocompleteInteraction,
   type ChannelSelectMenuInteraction,
   type ChatInputCommandInteraction,
   type ModalSubmitInteraction,
@@ -96,7 +97,6 @@ import {
   loadConfigFallbackOptions,
   loadConfigFallbacksView,
   loadConfigImageGenerationView,
-  loadConfigCapabilityEndpoints,
   loadConfigParametersView,
   loadConfigSwitchModelsView,
 } from "@/utils/discord/interactions/configModelLoaders";
@@ -160,7 +160,6 @@ import {
 import {
   deniedReceipt,
   missingScopeMessageKey,
-  outdatedConfigPanelMessage,
   repaint,
   resolveSelectedPersona,
   staleReceipt,
@@ -176,9 +175,19 @@ import {
   type ConfigPersonaMemoryView,
   type ConfigRouteDependencies,
   type ConfigScope,
+  missingScopeReceipt,
+  outdatedConfigPanelReceipt,
 } from "@/utils/discord/interactions/configRouteContext";
 import type { GlobalInteractionRoute, GlobalRoutableInteraction } from "@/utils/discord/interactions/routeRegistry";
-import type { ConfigPanelView } from "@/utils/discord/ui/configPanel";
+import { CATEGORY_LOCALE_KEYS, PAGE_LOCALE_KEYS, type ConfigPanelView } from "@/utils/discord/ui/configPanel";
+import {
+  panelPageNotFoundReceipt,
+  panelPersonaNotFoundReceipt,
+  resolvePanelPage,
+  respondWithPanelPages,
+  type PanelPageDestination,
+} from "@/utils/discord/autocomplete/panelPageAutocomplete";
+import { resolveSelectedPersona as resolvePersonaOption } from "@/utils/persona/personaOptionValue";
 import { createNonce } from "@/utils/discord/panelRouteTokens";
 import { resolvePersonaPanelAvatar, resolvePersonaPanelAvatarReference } from "@/utils/discord/personaPanelAvatar";
 import { resolvePersonaPanelCharacterReference } from "@/utils/discord/personaPanelCharacterReference";
@@ -220,6 +229,7 @@ import {
   CONFIG_NAI_ATTG_GENRE_FIELD,
   CONFIG_NAI_ATTG_STARS_FIELD,
   CONFIG_HUMANIZER_FIELD,
+  CONFIG_HUMANIZER_TOGGLES_FIELD,
   CONFIG_CONTEXT_NOTE_DEPTH_FIELD,
   CONFIG_CONTEXT_NOTE_TEXT_FIELD,
   CONFIG_PERSONA_PROMPT_PART_FIELDS,
@@ -246,16 +256,18 @@ import {
 import { storeChecklistSnapshot, takeChecklistSnapshot } from "@/utils/discord/interactions/checklistSnapshotStore";
 import { combineModalPromptParts } from "@/utils/text/modalPromptParts";
 import { buildTextPreview, textPreviewFooterKey, textPreviewFooterVars } from "@/utils/text/textPreview";
+import { DEFAULT_HUMANIZER_SETTINGS, pickHumanizerSettings } from "@/constants/humanizer";
 import {
-  getHumanizerLabel,
-  HUMANIZER_DEFAULT,
+  formatHumanizerSummary,
+  HUMANIZER_CUSTOM_VALUE,
   HUMANIZER_INHERIT_VALUE,
-  HUMANIZER_MAX,
-  HUMANIZER_MIN,
+  humanizerCheckboxFieldName,
+  humanizerDependencyViolationVars,
+  readHumanizerCheckboxGroups,
 } from "@/utils/discord/humanizerOptions";
 import { DEFAULT_MESSAGE_FETCH_LIMIT } from "@/utils/discord/messageFetchLimit";
 import { hasPersonaPrompt } from "@/utils/discord/ui/personaEligibility";
-import { MAX_TAG_LENGTH, MAX_TAGS } from "@/utils/image/tagHelpers";
+import { formatImageTagsForConfirmation, MAX_TAG_LENGTH, MAX_TAGS } from "@/utils/image/tagHelpers";
 import { PERSONA_SPRITE_LIMITS } from "@/utils/persona/sprites";
 import { IMPORT_LIMITS, PERSONA_LIMITS } from "@/utils/security/rateLimiter";
 import { log } from "@/utils/misc/logger";
@@ -271,6 +283,7 @@ import { mcpConfigOperations } from "@/utils/mcp/mcpConfigOperations";
 import { startMcpSignIn } from "@/utils/mcp/oauth/signIn";
 import { handleConfigMcpModalOpen, handleConfigMcpRoutes } from "@/utils/discord/interactions/configMcpRoutes";
 import { handleConfigStPresetsRoute } from "@/utils/discord/interactions/configStPresetsRoutes";
+import { replyPanelReceipt } from "@/utils/discord/ui/panel";
 
 const MODAL_OPEN_ACTIONS = new Set<ConfigPanelRoute["action"]>([
   "avatar-open",
@@ -563,8 +576,10 @@ const defaultDependencies: ConfigRouteDependencies = {
   fetchElevenLabsVoiceCatalog,
   setPersonaVoiceConfig: (personaId, voice) => personaRepository.setVoiceConfig(personaId, voice),
   invalidatePersonaVoiceCache: invalidateTomoriStateCache,
-  loadServerHumanizerDegree: async (serverId) =>
-    (await configRepository.getChatConfig(serverId))?.humanizer_degree ?? null,
+  loadServerHumanizer: async (serverId) => {
+    const chatConfig = await configRepository.getChatConfig(serverId);
+    return chatConfig ? pickHumanizerSettings(chatConfig) : null;
+  },
   loadPersonaSprites: loadPersonaSpriteList,
   loadSavedTextProviders: async (serverId) => loadSavedProvidersForCapability(serverId, "text"),
   loadPersonaTextModels: async (provider, serverId) =>
@@ -580,7 +595,6 @@ const defaultDependencies: ConfigRouteDependencies = {
   operations: configPersonaOperations,
   spriteOperations: configSpriteOperations,
   modelOperations: configModelOperations,
-  loadCapabilityEndpoints: loadConfigCapabilityEndpoints,
   loadSwitchModelsView: loadConfigSwitchModelsView,
   loadParametersView: loadConfigParametersView,
   loadNaiPresets: (target) => configRepository.loadNaiPresets(target),
@@ -613,9 +627,9 @@ const defaultDependencies: ConfigRouteDependencies = {
       prefillModelName: state.llm.llm_codename,
       contextNote: rawChatConfig?.context_note ?? state.config.context_note ?? null,
       contextNoteDepth: rawChatConfig?.context_note_depth ?? state.config.context_note_depth ?? 0,
-      // The assembled state may overlay a persona-specific degree; the General page is the raw
+      // The assembled state may overlay persona-specific toggles; the General page is the raw
       // workspace setting and must not mistake that overlay for its global value.
-      humanizerDegree: rawChatConfig?.humanizer_degree ?? HUMANIZER_DEFAULT,
+      humanizer: rawChatConfig ? pickHumanizerSettings(rawChatConfig) : DEFAULT_HUMANIZER_SETTINGS,
       messageFetchLimit:
         rawChatConfig?.message_fetch_limit ?? state.config.message_fetch_limit ?? DEFAULT_MESSAGE_FETCH_LIMIT,
       timezoneOffset: rawChatConfig?.timezone_offset ?? state.config.timezone_offset ?? 0,
@@ -845,39 +859,31 @@ async function handleModalOpen(
   actor: ConfigActor,
 ): Promise<void> {
   if (!isConfigRouteAuthorized(route, actor)) {
-    await interaction.reply({
-      content: localizer(route.locale, "commands.config.panel.denied_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "error",
+      heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+      detail: localizer(route.locale, "commands.config.panel.denied_detail"),
     });
     return;
   }
 
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {
-    await interaction.reply({
-      content: localizer(route.locale, missingScopeMessageKey(interaction, dependencies)),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, missingScopeReceipt(route.locale, interaction, dependencies));
     return;
   }
 
   const { personaId } = personaLocation(route);
   const persona = findExactPersona(scope.personas, personaId);
   if (!persona?.persona_id) {
-    await interaction.reply({
-      content: outdatedConfigPanelMessage(route.locale),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, outdatedConfigPanelReceipt(route.locale));
     return;
   }
 
   const locale = route.locale;
   if (!(await authorizeCollectionOperation(interaction, scope, collectionOperationForRoute(route)))) {
     const denied = deniedReceipt(locale);
-    await interaction.reply({
-      content: `${denied.heading}\n${denied.detail}`,
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, denied);
     return;
   }
 
@@ -887,9 +893,10 @@ async function handleModalOpen(
     case "stm-edit-open": {
       const memoryView = await dependencies.loadPersonaMemoryView(interaction, scope, persona);
       if (!memoryView.channelId) {
-        await interaction.reply({
-          content: localizer(locale, "commands.config.panel.stm_no_channel"),
-          flags: MessageFlags.Ephemeral,
+        await replyPanelReceipt(interaction, {
+          tone: "info",
+          heading: localizer(locale, "general.panel_notice.empty_heading"),
+          detail: localizer(locale, "commands.config.panel.stm_no_channel"),
         });
         return;
       }
@@ -905,9 +912,10 @@ async function handleModalOpen(
         .filter(hasManageableReason)
         .slice(0, CONFIG_CONDITIONING_CHECKBOX_CAPACITY);
       if (presentedGroups.length === 0) {
-        await interaction.reply({
-          content: localizer(locale, "commands.config.panel.conditioning_no_groups_detail"),
-          flags: MessageFlags.Ephemeral,
+        await replyPanelReceipt(interaction, {
+          tone: "info",
+          heading: localizer(locale, "general.panel_notice.empty_heading"),
+          detail: localizer(locale, "commands.config.panel.conditioning_no_groups_detail"),
         });
         return;
       }
@@ -954,7 +962,13 @@ async function handleModalOpen(
     case "humanizer-open":
       await dependencies.showModal(
         interaction,
-        buildPersonaHumanizerModal(locale, persona.persona_id, nonce, persona.humanizer_degree_override),
+        buildPersonaHumanizerModal(
+          locale,
+          persona.persona_id,
+          nonce,
+          persona.humanizer_override,
+          pickHumanizerSettings(persona.config),
+        ),
       );
       return;
     case "avatar-open":
@@ -968,7 +982,7 @@ async function handleModalOpen(
       const sprite = resolveSpriteAtIndex(sprites, persona.persona_id, route.index, route.fp);
       if (!sprite) {
         const stale = staleReceipt(locale);
-        await interaction.reply({ content: `${stale.heading}\n${stale.detail}`, flags: MessageFlags.Ephemeral });
+        await replyPanelReceipt(interaction, stale);
         return;
       }
       await dependencies.showModal(
@@ -999,9 +1013,10 @@ async function handleModalOpen(
     case "trigger-remove-open": {
       const triggerWords = persona.trigger_words ?? [];
       if (triggerWords.length === 0) {
-        await interaction.reply({
-          content: localizer(locale, "commands.config.panel.trigger_remove_none_detail"),
-          flags: MessageFlags.Ephemeral,
+        await replyPanelReceipt(interaction, {
+          tone: "info",
+          heading: localizer(locale, "general.panel_notice.no_changes_heading"),
+          detail: localizer(locale, "commands.config.panel.trigger_remove_none_detail"),
         });
         return;
       }
@@ -1027,7 +1042,7 @@ async function handleModalOpen(
         computeAttributeFingerprint(persona.persona_id, route.index, attribute, isPublic) !== route.fp
       ) {
         const stale = staleReceipt(locale);
-        await interaction.reply({ content: `${stale.heading}\n${stale.detail}`, flags: MessageFlags.Ephemeral });
+        await replyPanelReceipt(interaction, stale);
         return;
       }
       await dependencies.showModal(
@@ -1039,7 +1054,7 @@ async function handleModalOpen(
     case "dialogue-edit-open": {
       if (!(await repairDialogueState(scope, persona, dependencies))) {
         const stale = staleReceipt(locale);
-        await interaction.reply({ content: `${stale.heading}\n${stale.detail}`, flags: MessageFlags.Ephemeral });
+        await replyPanelReceipt(interaction, stale);
         return;
       }
       const input = persona.sample_dialogues_in?.[route.index];
@@ -1050,7 +1065,7 @@ async function handleModalOpen(
         computeDialogueFingerprint(persona.persona_id, route.index, input, output) !== route.fp
       ) {
         const stale = staleReceipt(locale);
-        await interaction.reply({ content: `${stale.heading}\n${stale.detail}`, flags: MessageFlags.Ephemeral });
+        await replyPanelReceipt(interaction, stale);
         return;
       }
       await dependencies.showModal(
@@ -1069,34 +1084,29 @@ async function handleCollectionAddSelection(
   actor: ConfigActor,
 ): Promise<void> {
   if (!isConfigRouteAuthorized(route, actor)) {
-    await interaction.reply({
-      content: localizer(route.locale, "commands.config.panel.denied_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "error",
+      heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+      detail: localizer(route.locale, "commands.config.panel.denied_detail"),
     });
     return;
   }
 
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {
-    await interaction.reply({
-      content: localizer(route.locale, missingScopeMessageKey(interaction, dependencies)),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, missingScopeReceipt(route.locale, interaction, dependencies));
     return;
   }
   const operation = collectionOperationForRoute(route, "add");
   if (!(await authorizeCollectionOperation(interaction, scope, operation))) {
     const denied = deniedReceipt(route.locale);
-    await interaction.reply({ content: `${denied.heading}\n${denied.detail}`, flags: MessageFlags.Ephemeral });
+    await replyPanelReceipt(interaction, denied);
     return;
   }
 
   const persona = findExactPersona(scope.personas, personaLocation(route).personaId);
   if (!persona?.persona_id) {
-    await interaction.reply({
-      content: outdatedConfigPanelMessage(route.locale),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, outdatedConfigPanelReceipt(route.locale));
     return;
   }
 
@@ -1116,28 +1126,23 @@ async function handleSpriteAddSelection(
   actor: ConfigActor,
 ): Promise<void> {
   if (resolvePersonaSpritesActionState("add", actor) !== "enabled") {
-    await interaction.reply({
-      content: localizer(route.locale, "commands.config.panel.denied_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "error",
+      heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+      detail: localizer(route.locale, "commands.config.panel.denied_detail"),
     });
     return;
   }
 
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {
-    await interaction.reply({
-      content: localizer(route.locale, missingScopeMessageKey(interaction, dependencies)),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, missingScopeReceipt(route.locale, interaction, dependencies));
     return;
   }
 
   const persona = findExactPersona(scope.personas, personaLocation(route).personaId);
   if (!persona?.persona_id) {
-    await interaction.reply({
-      content: outdatedConfigPanelMessage(route.locale),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, outdatedConfigPanelReceipt(route.locale));
     return;
   }
 
@@ -1262,28 +1267,23 @@ async function handleTextOverrideModelModalOpen(
   actor: ConfigActor,
 ): Promise<void> {
   if (!isConfigRouteAuthorized(route, actor)) {
-    await interaction.reply({
-      content: localizer(route.locale, "commands.config.panel.denied_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "error",
+      heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+      detail: localizer(route.locale, "commands.config.panel.denied_detail"),
     });
     return;
   }
 
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {
-    await interaction.reply({
-      content: localizer(route.locale, missingScopeMessageKey(interaction, dependencies)),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, missingScopeReceipt(route.locale, interaction, dependencies));
     return;
   }
 
   const persona = findExactPersona(scope.personas, route.personaId);
   if (!persona?.persona_id) {
-    await interaction.reply({
-      content: outdatedConfigPanelMessage(route.locale),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, outdatedConfigPanelReceipt(route.locale));
     return;
   }
 
@@ -1311,18 +1311,20 @@ async function handleTextOverrideModelModalOpen(
     (saved) => saved.provider.toLowerCase() === selectedProvider?.toLowerCase(),
   )?.provider;
   if (!provider) {
-    await interaction.reply({
-      content: localizer(route.locale, "commands.config.panel.stale_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "warning",
+      heading: localizer(route.locale, "commands.config.panel.stale_heading"),
+      detail: localizer(route.locale, "commands.config.panel.stale_detail"),
     });
     return;
   }
 
   const models = await dependencies.loadPersonaTextModels(provider, persona.server_id);
   if (models.length === 0) {
-    await interaction.reply({
-      content: localizer(route.locale, "commands.model.text.no_models_description"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "error",
+      heading: localizer(route.locale, "commands.model.text.no_models_title"),
+      detail: localizer(route.locale, "commands.model.text.no_models_description"),
     });
     return;
   }
@@ -1395,7 +1397,7 @@ async function runPersonaWrite(
             result.tags.length === 0
               ? "commands.persona.image-tags.cleared_description"
               : "commands.persona.image-tags.success_description",
-            { persona_name: persona.persona_nickname, tag_list: result.tags.join(", ") },
+            { persona_name: persona.persona_nickname, tag_list: formatImageTagsForConfirmation(result.tags) },
           ),
           telemetry: "server-config.workspace.persona-image-tags.set",
         };
@@ -1704,12 +1706,21 @@ async function runPersonaWrite(
     }
 
     case "humanizer-submit": {
-      const selectedValue =
-        dependencies.takeSelectValue(
-          (interaction as ModalSubmitInteraction).id,
-          buildConfigModalFieldId(CONFIG_HUMANIZER_FIELD, route.nonce),
-        ) ?? "";
-      const value = selectedValue === HUMANIZER_INHERIT_VALUE ? null : Number.parseInt(selectedValue, 10);
+      const submittedId = (interaction as ModalSubmitInteraction).id;
+      const source = dependencies.takeSelectValue(
+        submittedId,
+        buildConfigModalFieldId(CONFIG_HUMANIZER_FIELD, route.nonce),
+      );
+      const checked = readHumanizerCheckboxGroups((group) =>
+        dependencies.takeCheckboxValues(
+          submittedId,
+          buildConfigModalFieldId(humanizerCheckboxFieldName(CONFIG_HUMANIZER_TOGGLES_FIELD, group), route.nonce),
+        ),
+      );
+      if (source !== HUMANIZER_INHERIT_VALUE && (source !== HUMANIZER_CUSTOM_VALUE || !checked)) {
+        return { receipt: staleReceipt(locale) };
+      }
+      const value = source === HUMANIZER_INHERIT_VALUE ? null : checked;
       const result = await dependencies.operations.setHumanizerOverride({
         persona,
         serverDiscId: scope.serverDiscId,
@@ -1721,8 +1732,8 @@ async function runPersonaWrite(
             locale,
             "error",
             "commands.config.panel.invalid_input_heading",
-            "commands.config.humanizer.invalid_value_description",
-            { min: HUMANIZER_MIN, max: HUMANIZER_MAX },
+            "commands.config.humanizer.dependency_invalid_description",
+            (value && humanizerDependencyViolationVars(locale, value)) ?? {},
           ),
         };
       }
@@ -1733,7 +1744,7 @@ async function runPersonaWrite(
             "info",
             "commands.config.humanizer.already_set_title",
             "commands.config.humanizer.persona_already_set_description",
-            { persona: persona.persona_nickname, value: getHumanizerLabel(locale, value) },
+            { persona: persona.persona_nickname, value: formatHumanizerSummary(locale, value) },
           ),
         };
       }
@@ -1755,8 +1766,8 @@ async function runPersonaWrite(
           "commands.config.humanizer.persona_success_description",
           {
             persona: persona.persona_nickname,
-            value: getHumanizerLabel(locale, value),
-            previous_value: getHumanizerLabel(locale, persona.humanizer_degree_override ?? null),
+            value: formatHumanizerSummary(locale, value),
+            previous_value: formatHumanizerSummary(locale, persona.humanizer_override),
           },
         ),
         telemetry: "server-config.workspace.persona-humanizer.set",
@@ -4104,15 +4115,38 @@ export function createConfigInteractionRoute(overrides: Partial<ConfigRouteDepen
 
 export const configInteractionRoute = createConfigInteractionRoute();
 
+/** Pages `/config page:` may open for this actor, in panel order. */
+export function listConfigPageDestinations(
+  locale: string,
+  actor: ConfigActor,
+): PanelPageDestination<ConfigCategory, ConfigPage>[] {
+  return CONFIG_CATEGORY_ORDER.flatMap((category) =>
+    visibleConfigPages(category, actor).map((page) => ({
+      category,
+      page,
+      categoryLabel: localizer(locale, CATEGORY_LOCALE_KEYS[category]),
+      pageLabel: localizer(locale, PAGE_LOCALE_KEYS[category][page]),
+    })),
+  );
+}
+
+export async function autocompleteConfigPage(interaction: AutocompleteInteraction): Promise<void> {
+  await respondWithPanelPages(
+    interaction,
+    listConfigPageDestinations(interaction.locale, resolveConfigActor(interaction)),
+  );
+}
+
 /**
- * Opens the panel from the bare `/config` root.
+ * Opens `/config` on the requested page and persona when they resolve for this actor.
  *
- * The opening destination comes from `resolveConfigLanding` rather than the landing constants, so the
+ * The default destination comes from `resolveConfigLanding` rather than the landing constants, so the
  * page the panel opens on is always one this actor may also navigate back to after a denial.
  */
 export async function executeConfigCommand(
   interaction: ChatInputCommandInteraction,
   locale: string,
+  request: { page: string | null; persona: string | null },
   dependenciesOverride: Partial<ConfigRouteDependencies> = {},
 ): Promise<void> {
   const dependencies: ConfigRouteDependencies = { ...defaultDependencies, ...dependenciesOverride };
@@ -4124,13 +4158,23 @@ export async function executeConfigCommand(
     return;
   }
 
-  const landing = resolveConfigLanding(scope.actor);
+  const destination = request.page
+    ? resolvePanelPage(listConfigPageDestinations(locale, scope.actor), request.page)
+    : null;
+  const opening = destination ?? resolveConfigLanding(scope.actor);
+  const persona = request.persona ? resolvePersonaOption(scope.personas, request.persona) : null;
   await repaint(interaction, {
     locale,
     scope,
-    category: landing.category,
-    page: landing.page,
-    selectedPersonaId: resolveSelectedPersona(scope.personas, null)?.persona_id ?? null,
+    category: opening.category,
+    page: opening.page,
+    selectedPersonaId: (persona ?? resolveSelectedPersona(scope.personas, null))?.persona_id ?? null,
+    receipt:
+      request.persona && !persona
+        ? panelPersonaNotFoundReceipt(locale)
+        : request.page && !destination
+          ? panelPageNotFoundReceipt(locale)
+          : undefined,
     dependencies,
   });
 }

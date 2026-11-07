@@ -12,11 +12,11 @@ Delivery is shared by `StreamMessageDelivery.sendSegment()` and `StreamUiUpdater
 The flusher passes normalized segments from [stage 06](/architecture/pipelines/provider/06-segment-normalization/)
 to `sendSegment()`, which selects the delivery mode and chunks text:
 
-- **Aggregated mode (`HumanizerDegree.NONE`):** Queues segments into `state.pendingAggregatedText`.
+- **Aggregated mode (Live Streaming off):** Queues segments into `state.pendingAggregatedText`.
   Output is withheld until a tool call, table attachment, or final flush, delivering content in a
   single batch. Identity overrides flush queued text immediately to keep webhook identities aligned
   with their specific lines.
-- **Streaming mode (`HumanizerDegree.LIGHT`, `MEDIUM`, `HEAVY`):** Splits segments into Discord-safe
+- **Streaming mode (Live Streaming on):** Splits segments into Discord-safe
   chunks via `chunkMessage()`. Chunks send immediately or pace through `sendChunksWithTyping()`.
 
 `StreamUiUpdater.sendSinglePayload()` executes Discord REST calls, routing payloads through webhooks
@@ -33,16 +33,20 @@ or standard bot messages based on context.
 - **Emoji isolation:** Custom emojis isolate into individual messages unless positioned mid-sentence
   or inside numbered or bulleted list items. Consecutive emojis sharing an initial name prefix merge
   into emoji runs.
-- **Humanizer splitting:** Paragraph breaks divide messages at degrees 1 and 2. Degree 3 splits at
-  sentence boundaries and runs `humanizeString()`, rolling punctuation marks between deletion,
-  splitting, and preservation while keeping styled markup spans intact.
+- **Humanizer splitting:** In streaming mode, paragraph breaks divide messages. Sentence Splitting
+  also splits at sentence boundaries and drops closing periods. Force Lowercase and Punctuation Splits run
+  `humanizeString()`; Punctuation Splits rolls punctuation marks between deletion, splitting, and
+  preservation while keeping styled markup spans intact.
 
-## Typing simulation
+## Paced messages
 
-`sendChunksWithTyping()` calculates delays scaled to character count, bounded by
-`minVisibleDurationMs` (750 ms) and `maxTypingTimeMs` (4,000 ms), with optional thinking pauses.
+With Paced Messages on, `sendChunksWithTyping()` calculates delays scaled to character count,
+bounded by `minVisibleDurationMs` (750 ms) and `maxTypingTimeMs` (4,000 ms). The same toggle adds
+random pauses between follow-up messages.
 Delays poll the stop registry every 250 ms through `interruptibleDelay()` and exit promptly if a stop
 or interrupt arrives.
+The queue sends Discord's typing indicator regardless of the humanizer toggles.
+Force Lowercase also applies when Live Streaming is off.
 
 ## Dispatch and identity routing
 
@@ -55,6 +59,13 @@ or interrupt arrives.
   invalidation and retry with a recreated webhook.
 - **Bot messages:** Used for the main persona's base appearance through single-attempt channel delivery,
   with native reply references when applicable.
+
+Single-attempt delivery lives in `src/utils/discord/webhook/singleAttemptMessage.ts` and posts at
+most once. Neither route carries a nonce, so a timeout, reset, or 5xx after the request left ends
+as `unconfirmed` instead of being retried. Rate limits are the exception, because Discord accepted
+nothing: the module waits them out for up to 30 seconds and runs the caller's stop check
+throughout. Its REST client never leaves that module, so a new at-most-once send calls one of its
+functions instead of building a client.
 
 `sendWebhookMessageWithIdentity()` and its batch variant use the managed pool dispatcher in
 `webhookCore.ts`. Local avatars reuse verified image assignments across threads; a deferred avatar
@@ -132,7 +143,7 @@ Tables detected in stage 06 bypass `chunkMessage()`. They are rasterized to PNG 
 
 ## Source pointers
 
-- `src/utils/discord/stream/messageDelivery.ts`: `StreamMessageDelivery` and typing simulation.
+- `src/utils/discord/stream/messageDelivery.ts`: `StreamMessageDelivery` and message pacing.
 - `src/utils/discord/stream/uiUpdater.ts`: `StreamUiUpdater.sendSinglePayload` and webhook routing.
 - `src/utils/text/processors/chunkProcessor.ts`: `chunkMessage` and span preservation.
 - `src/utils/discord/markdownTableButton.ts`: interactive table button and cache interaction.

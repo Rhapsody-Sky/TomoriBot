@@ -1,6 +1,7 @@
 export default {
   genai: {
     tool_failure: {
+      endpoint_blocked: `目前主機不允許向該端點的位址發送請求。`,
       content_blocked: `供應商的內容過濾機制拒絕了此工具請求。`,
       authentication: `供應商拒絕了此工具請求所使用的憑證。`,
       quota: `因達到配額或計費上限，供應商拒絕了此工具請求。`,
@@ -15,6 +16,8 @@ export default {
       script_too_long: `語音腳本超出所選語音模型的長度上限。`,
       cancelled: `此工具請求已取消。`,
       model_error: `供應商拒絕了為此工具請求選用的模型。`,
+      model_files_missing: `生成伺服器未安裝以下已設定的模型檔案：{models}。`,
+      not_configured: `此工具未設定可用的供應商。`,
       balance_exhausted: `此工具請求使用的供應商帳戶額度已用盡。`,
       credit_limit: `供應商帳戶額度無法涵蓋所請求的輸出長度。`,
       context_length: `此工具請求超出所選模型的脈絡上限。`,
@@ -29,8 +32,6 @@ export default {
     max_iterations_streaming_description: `我卡在思考迴圈裡，無法完成要求，如果問題持續發生請使用 \`/refresh\`。`,
     still_working_title: `還在處理...`,
     still_working_description: `這個任務比平常需要更多步驟。如果你覺得我卡住了，請使用 \`/kill\`。`,
-    nai_tool_retry_exhausted_title: `工具錯誤`,
-    nai_tool_retry_exhausted_description: `某個工具連續失敗多次，無法完成要求。請再試一次，如果問題持續發生請使用 \`/refresh\`。`,
     tool_error_loop_title: `工具錯誤迴圈`,
     tool_error_loop_description: `我一直遇到工具錯誤，無法完成要求。請換個說法，如果問題持續發生請使用 \`/refresh\`。`,
     fallback_used_title: `已使用備援模型`,
@@ -41,6 +42,7 @@ export default {
     fallback_used_personal_opt_out_footer: `用 \`/personal config\` > 模型 > 備援停止讓伺服器模型代為處理你個人供應商的失敗`,
     markdown_table: {
       show_button: `顯示 Markdown`,
+      source_expired_title: `表格來源已過期`,
       source_expired: `那張表格的 Markdown 已經不在快取中，所以我沒辦法再顯示原始碼。`,
       source_attached: `這張表格太長，無法直接顯示，所以改用檔案附上：`,
     },
@@ -98,6 +100,7 @@ export default {
       context_length_title: `🔴 訊息對這個模型來說太長`,
       credit_limit_title: `🔴 供應商額度不足`,
       balance_exhausted_title: `🔴 供應商帳號餘額不足`,
+      endpoint_blocked_title: `不允許存取該端點`,
       flush_limit_title: `🟡️ 已達回覆長度上限`,
       flush_limit_description: `這則回覆已達到訊息長度上限並停止。需要的話，你可以用 \`/respond\` 手動繼續回覆。`,
       inactivity_timeout_title: `🟡️ 回覆逾時`,
@@ -131,9 +134,13 @@ export default {
       choose_supported_model_personal: `用 \`/personal config\` 或你的自訂端點設定，選擇支援的模型 ID。`,
       verify_api_key: `請再次確認這個伺服器的 API 金鑰，然後再試一次。`,
       verify_api_key_personal: `請用 \`/personal providers\` 再次確認你的個人 API 金鑰，然後再試一次。`,
+      endpoint_not_allowed: `用 \`/providers\` 切換到公開的 HTTPS 端點，或向目前主機的管理者詢問是否允許使用本機伺服器。`,
+      endpoint_not_allowed_personal: `用 \`/personal providers\` 切換到公開的 HTTPS 端點，或向目前主機的管理者詢問是否允許使用本機伺服器。`,
       verify_api_key_expiry: `NVIDIA NIM 金鑰會過期，而 NVIDIA 對過期金鑰回傳的錯誤和輸錯的金鑰一樣。請到 [build.nvidia.com](https://build.nvidia.com) 查看它的有效期限，如果已經失效就重新產生一組。`,
       nvidia_register_free_model: `NVIDIA 經常下架託管的模型。請從 [NVIDIA 的免費端點](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview)選一個它目前提供的模型，複製模型 ID（例如 \`deepseek-ai/deepseek-v4.1-flash\`），再到 \`/providers\` > NVIDIA NIM > **+ 新增文字模型** 新增。`,
       nvidia_register_free_model_personal: `NVIDIA 經常下架託管的模型。請從 [NVIDIA 的免費端點](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview)選一個它目前提供的模型，複製模型 ID（例如 \`deepseek-ai/deepseek-v4.1-flash\`），再到 \`/personal providers\` > NVIDIA NIM > **+ 新增文字模型** 新增。`,
+      google_free_tier_daily: `這組 API 金鑰已用完 Gemini 今天的免費請求額度。額度會在太平洋時間午夜重設。`,
+      google_free_tier_minute: `這組 API 金鑰發送請求的頻率已超過 Gemini 免費方案的限制。請等待一分鐘後再試。`,
       google_credential_type: `這看起來像 OAuth 或服務帳號權杖。\`google\` 供應商需要來自 [Google AI Studio](https://aistudio.google.com/apikey) 的一般 API 金鑰；Google Cloud 憑證請改用 \`vertex\` 供應商。`,
       openrouter_privacy_settings: `請到 [OpenRouter 隱私設定](https://openrouter.ai/settings/privacy)調整你的「資料政策」設定以允許這個模型，或改選其他模型。`,
       openrouter_fund_account: `在你的 OpenRouter 帳號儲值至少 10 點，就能解鎖每天 1000 次免費模型要求。`,
@@ -178,6 +185,15 @@ export default {
       "403_predict_permission_message": `這組金鑰無法呼叫 Vertex AI Express 模型。請使用 Express 模式的金鑰，或改用獨立的 \`vertex\` 供應商來連接完整的 Google Cloud 專案。`,
     },
     novelai: {
+      tokenizer_setup:
+        "NovelAI 的 tokenizer 遺失或無效。請聯繫 bot 管理員執行 `bun run setup:tokenizers` 並重新啟動 TomoriBot。",
+      input_complexity: "此提示詞包含過多文字或異常長的不中斷單字。請縮短後重試。",
+      context_overflow: "人格、最少範例與近期對話超出了此模型的脈絡視窗。請縮短它們或選擇具有更大視窗的模型。",
+      subscription_unavailable: "無法載入 NovelAI 訂閱資訊。請稍後重試。",
+      subscription_inactive: "此 NovelAI 金鑰沒有有效的訂閱。",
+      model_tier: "此 NovelAI 訂閱不包含所選的文字模型。",
+      xialong_opus: "Xialong 需要有效的 NovelAI Opus 訂閱。請使用 Opus 金鑰或選擇其他文字模型。",
+      continuation_exhausted: "NovelAI 在輸出額度內未能產生完整的回覆就已結束。請重試或增加設定的輸出長度。",
       "400_default_message": `要求格式或參數無效。請確認你輸入的 API 金鑰正確。`,
       "400_trial_message": `你的試用帳號需要通過 recaptcha 驗證才能生成。API 存取需要付費的 NovelAI 訂閱。請到 https://novelai.net/ 升級帳號`,
       "401_default_message": `你的 NovelAI API 金鑰無效或已過期`,
@@ -216,6 +232,7 @@ export default {
     },
     custom: {
       "402_default_message": `你在這個端點的帳號餘額不足`,
+      PRIVATE_NETWORK_BLOCKED_default_message: `目前主機不允許向該端點的位址發送請求。`,
       REDIRECT_CREDENTIALS_WITHHELD_default_message: `該端點重新導向到了另一個位址，因此 TomoriBot 沒有向其傳送 API 金鑰。在 \`/providers\` 中管理此端點的人可以將其 URL 改為伺服器最終重新導向的位址來修正此問題。`,
       unknown_default_message: `發生未預期的錯誤`,
     },
@@ -240,33 +257,42 @@ export default {
       unknown_default_message: `發生未預期的錯誤`,
     },
     self_teach: {
+      memory_forgotten_description: `已遺忘一則休眠記憶以騰出空間：
+\`\`\`
+{forgotten_content}
+\`\`\``,
+      memory_saved_with_eviction_content: `已儲存：
+{memory_content}
+
+已遺忘：
+{forgotten_content}`,
       server_memory_learned_title: `🧠 {persona_nickname} 學到了新東西！`,
-      server_memory_learned_description: `已儲存一則 **[伺服器記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/#long-term-memory)**：
+      server_memory_learned_description: `已儲存一則 **[伺服器記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/long-term-memory/)**：
 \`\`\`
 {memory_content}
 \`\`\``,
       server_memory_updated_title: `📝 {persona_nickname} 更新了一則記憶！`,
-      server_memory_updated_description: `已更新一則 **[伺服器記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/#long-term-memory)**：
+      server_memory_updated_description: `已更新一則 **[伺服器記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/long-term-memory/)**：
 \`\`\`
 {memory_content}
 \`\`\``,
       server_memory_deleted_title: `🗑️ {persona_nickname} 刪除了一則記憶！`,
-      server_memory_deleted_description: `已刪除一則 **[伺服器記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/#long-term-memory)**：
+      server_memory_deleted_description: `已刪除一則 **[伺服器記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/long-term-memory/)**：
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_learned_title: `💡 {persona_nickname} 學到了關於 {user_nickname} 的新東西！`,
-      personal_memory_learned_description: `已儲存一則關於 {user_nickname} 的 **[個人記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/#long-term-memory)**：
+      personal_memory_learned_description: `已儲存一則關於 {user_nickname} 的 **[個人記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/long-term-memory/)**：
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_updated_title: `📝 {persona_nickname} 更新了一則關於 {user_nickname} 的記憶！`,
-      personal_memory_updated_description: `已更新一則關於 {user_nickname} 的 **[個人記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/#long-term-memory)**：
+      personal_memory_updated_description: `已更新一則關於 {user_nickname} 的 **[個人記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/long-term-memory/)**：
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_deleted_title: `🗑️ {persona_nickname} 刪除了一則關於 {user_nickname} 的記憶！`,
-      personal_memory_deleted_description: `已刪除一則關於 {user_nickname} 的 **[個人記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/#long-term-memory)**：
+      personal_memory_deleted_description: `已刪除一則關於 {user_nickname} 的 **[個人記憶](https://docs.tomoribot.app/zh-TW/features/knowledge/memory/long-term-memory/)**：
 \`\`\`
 {memory_content}
 \`\`\``,

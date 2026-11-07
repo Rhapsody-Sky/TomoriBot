@@ -7,7 +7,7 @@ The RAG document contributor injects relevant text chunks from server-uploaded d
 
 ## Flow and ownership
 
-The contributor `buildServerDocumentContextItem` in `src/utils/text/context/rag.ts` retrieves document chunks for the user's latest query. Native assembly starts it right after the persona state resolves and awaits it at its insertion point, so its embedding round trip and database query overlap the rest of assembly while prompt order stays unchanged.
+The contributor `buildServerDocumentContextItem` in `src/utils/text/context/rag.ts` retrieves document chunks for the user's latest query. Native assembly starts shared query retrieval right after the persona state resolves. Documents and memory recall consume the same query-vector promise, so one query embedding serves both searches while the rest of assembly proceeds. The embedding provider can differ from the reply provider. See the [memory recall lifecycle](/architecture/pipelines/memory/ltm/#decay-lifecycle).
 
 1. **Preconditions**:
    - `isRagAvailable()` must return true (pgvector support enabled).
@@ -15,11 +15,13 @@ The contributor `buildServerDocumentContextItem` in `src/utils/text/context/rag.
    - Returns `null` if system memory pressure is `critical` (`memoryGuard.getStatus() === "critical"`).
 2. **Query extraction**:
    - Scans recent history for the latest non-system user message.
-   - Truncates query text to `DOCUMENT_QUERY_MAX_LENGTH` (1,000 characters). Queries shorter than `DOCUMENT_QUERY_MIN_LENGTH` (3 characters) return `null`.
+   - Truncates query text to `QUERY_MAX_LENGTH` (1,000 characters). Queries shorter than `QUERY_MIN_LENGTH` (3 characters) return `null`.
 3. **Scope and credentials**:
-   - Checks `serverMemoryRepository.hasDocumentInScope(serverId, personaId)`. An empty scope returns `null` with outcome `no_documents`; a failed lookup reaches the contributor's error handler and records `error`.
+   - Checks `serverMemoryRepository.hasDocumentInScope(serverId, personaId)`. An empty document scope returns `null` with outcome `no_documents`, but visible memory candidates can still require the shared embedding. A failed lookup records `error`.
    - Resolves embedding credentials via `resolveCapabilityCredentials`, supporting server and personal providers, including registered managed options.
    - Loads the configured embedding model via `llmModelRepo.loadEmbeddingModelById`.
+   - Missing embedding configuration, including a required personal provider, skips with `no_model`
+     without reporting a provider failure; credential decryption and unexpected failures still warn.
 4. **Hybrid retrieval**:
    - Calls `ragRepository.retrieveRelevantChunks` with a similarity threshold of `DOCUMENT_MIN_SIMILARITY` (0.5) and a result limit of `DOCUMENT_MAX_RESULTS` (10 chunks).
    - Builds candidate lists from vector distance and full-text rank, each limited to `maxResults * 4` (40), then fuses them by reciprocal rank fusion with k = 60.
@@ -93,11 +95,12 @@ applies before retrieval, even though the lexical stage supports shorter CJK ter
 - **Stable document block**: Chunks render in `(document_id, chunk_index)` order rather than RRF score order, so two retrievals that select the same chunks produce byte-identical text and a rank-only change cannot break the provider's prompt-prefix cache. `formatRetrievedChunksForPrompt` itself is unchanged, so channel-history extraction keeps its own order.
 - **Fail-safe fallback**: Database or embedding API failures log a warning and return `null`, allowing context assembly to finish without document chunks.
 - **Retrieval telemetry**: `rag_retrieval` carries a fixed `outcome` label for every exit (`rag_unavailable`, `memory_critical`, `no_server`, `no_query`, `query_too_short`, `no_documents`, `no_model`, `no_results`, `injected`, `error`). `total_ms` is always present, and `embedding_ms`, `sql_ms`, `result_count`, `injected_chars`, and `injected_tokens` appear when those phases ran. The fields are aggregate only: query text, document text, names, vectors, keys, and server, channel, or user identifiers never reach a log. Like other graphable samples, it goes to both `log.metric` and `metricSampleRepository` so the host JSONL and Grafana each keep a copy.
-- **Preset reassembly**: Tagged as `KNOWLEDGE_SERVER_DOCUMENTS`. Each world info marker pulls its own lore block first and then documents, and the first marker consumes the document block. When neither marker exists, the before lore block, documents, and the after lore block flush before the first dialogue anchor.
+- **Placement**: `KNOWLEDGE_SERVER_DOCUMENTS` uses the registry tail-slot anchor, after activated lore and before participant status and the clock. Preset reassembly excludes documents from world-info marker buckets and preserves them for the same downstream placement.
 
 ## Source pointers
 
-- `src/utils/text/context/rag.ts`: `buildServerDocumentContextItem` and query extraction.
+- `src/utils/text/context/rag.ts`: `buildServerDocumentContextItem`.
+- `src/utils/text/context/queryRetrieval.ts`: query extraction, credentials, and the shared embedding promise.
 - `src/utils/db/repositories/RagRepository.ts`: `retrieveRelevantChunks` and chunk formatting.
 - `src/utils/db/ragAvailability.ts`: `isRagAvailable` capability check.
 - `src/utils/security/rateLimiter.ts`: `memoryGuard` memory pressure status.

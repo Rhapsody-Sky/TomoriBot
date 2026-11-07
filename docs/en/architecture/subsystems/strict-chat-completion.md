@@ -28,6 +28,7 @@ A single bundled toggle would prevent configuring backends that need only one of
 
 - **Tool conflicts on DeepSeek**: DeepSeek rejects `prefix: true` in requests that also carry `tools`. When tool calling is active, the prefill resolver (`resolvePrefillBlocker` in `src/utils/chat/assistantPrefill.ts`) skips server prefills and converts `/respond` prefills into written prompt instructions.
 - **Tool loop folding**: When a model initiates a tool call, trailing prefill text is folded into the first tool call's assistant message (`foldPrefillIntoToolHistory`). This prevents consecutive assistant turns that strict-alternation backends would reject.
+- **Persona's own message last**: A turn that starts without new user input (a self-triggered or system-initiated turn) can build history that ends on the persona's own delivered message. `applyAssistantPrefill` then appends a user directive asking for the next message, because only this attempt's own prefill may end the request. NovelAI is exempt: text completion continues from a trailing persona line by design.
 
 ### Media relocation
 
@@ -38,6 +39,24 @@ The structured request builders apply media relocation independently of the alte
 ```
 
 When no sender name is available, the notice falls back to `[System: The following image was sent]`. Relocation runs on structured context items before provider-specific serialization, preserving participant indices and mention metadata.
+
+## Prompt layout and cache identity
+
+Serializers use `isPromptSystemItem()` from the prompt-layout registry for system routing. A system
+role alone does not determine placement for tagged items. Untagged preset nodes keep their authored
+roles. Normalization preserves the cacheable-prefix marker through media relocation and same-role
+merging, including when the boundary item ends in media.
+
+Direct Anthropic and Anthropic models through OpenRouter request two five-minute cache breakpoints:
+the system-message end and the final serialized item above the tail slot. Each is admitted only when
+the local text estimate reaches the model minimum; missing boundaries or undersized prefixes omit
+that marker. `src/providers/utils/anthropicCache.ts` owns this policy. Explicit rejection of
+`cache_control` removes it for a targeted retry.
+
+`resolveToolCallId()` in `src/providers/utils/toolCallIds.ts` preserves usable unique provider IDs
+and generates deterministic IDs in interaction-history order otherwise. OpenRouter, OpenAI-compatible,
+and Anthropic serializers reuse the resolved ID for the call and result, so appending tool-loop steps
+does not change IDs already serialized into the prefix.
 
 ## Resolution and persistence
 

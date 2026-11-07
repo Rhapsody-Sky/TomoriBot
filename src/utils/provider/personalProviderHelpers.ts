@@ -4,10 +4,16 @@ import type {
   UserSavedProviderConfigRow,
   UserSavedProviderConfigUpsert,
 } from "@/types/db/schema";
-import { llmProviderRepo } from "@/utils/db/repositories";
+import { configRepository, llmModelRepo, llmProviderRepo } from "@/utils/db/repositories";
+import {
+  getNovelAIProfile,
+  getNovelAISamplerConfig,
+  enableNovelAIPresetSamplers,
+  isNovelAITextModel,
+} from "@/providers/novelai/modelProfiles";
 import { prunePrimaryFallbackRefs } from "@/utils/provider/fallbackModelIdentity";
 import { writeProviderSpeechSelection } from "@/utils/provider/providerOptionRegistry";
-import { setHostedSpeechSelection } from "@/utils/db/repositories/SpeechRepository";
+import { setHostedSpeechSelection, setHostedTranscriptionSelection } from "@/utils/db/repositories/SpeechRepository";
 
 function sortProviderRows(rows: UserSavedProviderConfigRow[]): UserSavedProviderConfigRow[] {
   return [...rows].sort((left, right) => left.provider.localeCompare(right.provider));
@@ -34,6 +40,8 @@ export function hasConfiguredPersonalModel(
       return row.speech_design_model_id != null;
     case "speech_clone":
       return row.speech_clone_model_id != null;
+    case "transcription":
+      return row.transcription_model_id != null;
   }
 }
 
@@ -107,8 +115,19 @@ export async function setPersonalTextPrimary(
   llmId: number,
   endpoints: Iterable<FallbackIdentityEndpoint> = [],
 ): Promise<boolean> {
+  const model = provider.toLowerCase() === "novelai" ? await llmModelRepo.loadById(llmId) : null;
+  // A stored row is a user-registered codename, so one without a NovelAI profile must refuse instead of throwing.
+  if (provider.toLowerCase() === "novelai" && (!model || !isNovelAITextModel(model.llm_codename))) return false;
+  const preset = model ? await configRepository.resolveNaiPreset(model.llm_codename) : undefined;
+  if (model && getNovelAIProfile(model.llm_codename).samplingPresetTarget && !preset) return false;
   const assigned = await assignPersonalCapabilityToProvider(userId, provider, "text", (row) => ({
     ...row,
+    ...(model && row.llm_id !== llmId
+      ? {
+          ...getNovelAISamplerConfig(model.llm_codename, preset),
+          llm_disabled_params: enableNovelAIPresetSamplers(row.llm_disabled_params),
+        }
+      : {}),
     llm_id: llmId,
   }));
   return assigned && (await prunePersonalFallbackChain(userId, llmId, endpoints));
@@ -202,6 +221,12 @@ export async function assignPersonalCapabilityToProvider(
         setHostedSpeechSelection({ kind: "personal", ownerId: userId }, modelId, mode),
       )
     );
+  }
+
+  if (capability === "transcription") {
+    const row = rows.find((entry) => entry.provider === provider.toLowerCase());
+    const modelId = row ? updater(row).transcription_model_id : null;
+    return modelId != null && setHostedTranscriptionSelection({ kind: "personal", ownerId: userId }, modelId);
   }
 
   let updated = false;

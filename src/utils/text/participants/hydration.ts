@@ -1,3 +1,5 @@
+import type { MemoryRecallCollector } from "@/utils/text/context/memoryRecall";
+import type { ContextMemoryEntry } from "@/types/misc/context";
 import { GatewayIntentBits, type Client, type Guild, type GuildMember, type User } from "discord.js";
 import {
   PrivacyLevel,
@@ -65,6 +67,7 @@ export type ParticipantProfileFieldKind =
   | "physical_appearance"
   | "naming"
   | "timezone"
+  | "local_time"
   | "identity"
   | "presence"
   | "roles"
@@ -92,6 +95,7 @@ export interface ParticipantProfileField {
     reason: ParticipantFieldVisibilityReason;
   };
   lines: readonly string[];
+  memoryEntries?: ContextMemoryEntry[];
 }
 
 export interface HydratedParticipantProfile {
@@ -183,6 +187,7 @@ export interface ParticipantHydrationDependencies {
 }
 
 export interface ParticipantHydrationParams {
+  memoryRecall?: MemoryRecallCollector;
   client: Client;
   guildId: string;
   channelName: string;
@@ -663,28 +668,33 @@ function enrichPhysicalAppearanceField(
   );
 }
 
-function enrichTimezoneField(
+function enrichTimezoneFields(
   base: HydratedDiscordUserBase,
   params: ParticipantHydrationParams,
-): ParticipantProfileField {
+): ParticipantProfileField[] {
   const offset = base.userRow.timezone_offset;
-  const lines =
-    base.policy.exposeTimezone && offset != null
-      ? [
-          `- ${base.profile.displayName}'s timezone: ${formatUTCOffset(offset)} (their local time: ${getCurrentTimeWithOffset(offset)})`,
-        ]
-      : [];
-  return field(
-    base.profile.key,
-    "timezone",
-    20,
-    lines,
-    hiddenReasonForPolicy(base.policy, "timezone", {
-      blacklisted: base.blacklisted,
-      personalizationEnabled: base.personalizationEnabled,
-      isUserImpersonation: params.activePersonaScope.isUserImpersonation,
-    }),
-  );
+  const visible = base.policy.exposeTimezone && offset != null;
+  const hiddenReason = hiddenReasonForPolicy(base.policy, "timezone", {
+    blacklisted: base.blacklisted,
+    personalizationEnabled: base.personalizationEnabled,
+    isUserImpersonation: params.activePersonaScope.isUserImpersonation,
+  });
+  return [
+    field(
+      base.profile.key,
+      "timezone",
+      20,
+      visible ? [`- ${base.profile.displayName}'s timezone: ${formatUTCOffset(offset)}`] : [],
+      hiddenReason,
+    ),
+    field(
+      base.profile.key,
+      "local_time",
+      21,
+      visible ? [`${base.profile.displayName}'s local time: ${getCurrentTimeWithOffset(offset)}`] : [],
+      hiddenReason,
+    ),
+  ];
 }
 
 function enrichIdentityField(base: HydratedDiscordUserBase): ParticipantProfileField {
@@ -709,20 +719,26 @@ async function enrichPersonalMemoriesField(
   params: ParticipantHydrationParams,
   dependencies: ParticipantHydrationDependencies,
 ): Promise<ParticipantProfileField> {
-  const lines = base.policy.exposePersonalMemories
-    ? await hydratePersonalMemoryLines(base.userRow, base.profile.displayName, params, dependencies)
+  const memories = base.policy.exposePersonalMemories
+    ? await hydratePersonalMemoryEntries(base.userRow, base.profile.displayName, params, dependencies)
     : [];
-  return field(
-    base.profile.key,
-    "personal_memories",
-    50,
-    lines,
-    hiddenReasonForPolicy(base.policy, "personal_memories", {
-      blacklisted: base.blacklisted,
-      personalizationEnabled: base.personalizationEnabled,
-      isUserImpersonation: params.activePersonaScope.isUserImpersonation,
-    }),
-  );
+  const lines = memories.length
+    ? [`- Memories about ${base.profile.displayName}: ${memories.map((entry) => entry.formattedText).join("; ")}`]
+    : [];
+  return {
+    ...field(
+      base.profile.key,
+      "personal_memories",
+      50,
+      lines,
+      hiddenReasonForPolicy(base.policy, "personal_memories", {
+        blacklisted: base.blacklisted,
+        personalizationEnabled: base.personalizationEnabled,
+        isUserImpersonation: params.activePersonaScope.isUserImpersonation,
+      }),
+    ),
+    memoryEntries: memories.map(({ formattedText: _formattedText, ...entry }) => entry),
+  };
 }
 
 async function enrichHumanRemindersField(
@@ -812,7 +828,7 @@ async function hydrateDiscordUser(
     enrichPhysicalAppearanceField(base, params),
     enrichNamingField(base, params),
     enrichIdentityField(base),
-    enrichTimezoneField(base, params),
+    ...enrichTimezoneFields(base, params),
     await enrichPresenceField(base, params, dependencies),
     enrichRolesField(base, params),
     await enrichPersonalMemoriesField(base, params, dependencies),
@@ -829,12 +845,12 @@ function buildRoleLines(member: GuildMember, guild: Guild | undefined): string[]
   return roles.length > 0 ? [`- Server Roles: ${roles.join(", ")}`] : [];
 }
 
-async function hydratePersonalMemoryLines(
+async function hydratePersonalMemoryEntries(
   userRow: UserRow,
   displayName: string,
   params: ParticipantHydrationParams,
   dependencies: ParticipantHydrationDependencies,
-): Promise<string[]> {
+): Promise<Array<ContextMemoryEntry & { formattedText: string }>> {
   if (!userRow.user_id) return [];
   const memories = await dependencies.loadPersonalMemories(
     userRow.user_id,
@@ -852,10 +868,26 @@ async function hydratePersonalMemoryLines(
         params.botName,
         params.tomoriConfig.personal_memories_enabled,
       );
-      return formatMemoryWithId(memory.personal_memory_id ?? index + 1, processed, memory.tags ?? []);
+      const formattedText = formatMemoryWithId(memory.personal_memory_id ?? index + 1, processed, memory.tags ?? []);
+      if (
+        params.memoryRecall &&
+        !(await params.memoryRecall.include({
+          kind: "personal",
+          id: memory.personal_memory_id as number,
+          decayDays: memory.decay_days,
+          line: `- Memories about ${displayName}: ${formattedText}`,
+        }))
+      )
+        return null;
+      return {
+        id: `personal:${memory.personal_memory_id ?? index + 1}`,
+        text: processed,
+        formattedText,
+        createdAt: memory.created_at?.getTime(),
+      };
     }),
   );
-  return [`- Memories about ${displayName}: ${processedMemories.join("; ")}`];
+  return processedMemories.filter((memory) => memory !== null);
 }
 
 function memoryMatchesContext(memory: PersonalMemoryRow, params: ParticipantHydrationParams): boolean {

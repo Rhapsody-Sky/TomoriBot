@@ -115,7 +115,7 @@ Web access tools enforce security boundaries before network dispatch:
 
 - `web_search`: Tries Brave, SearXNG, OpenRouter Search, and DuckDuckGo in that order and returns the first success. Engine-specific tool names stay hidden from the model. On OpenRouter turns with an active credential, `openrouterEngine.ts` makes a separate search request using the active model and the Exa web plugin. It returns citation excerpts and URLs for `fetch_url`, without fetching the result pages. OpenRouter also handles `news`, `papers`, and `code` calls after an earlier engine fails, with category-specific query hints and progress notices. It skips `image`, `video`, `files`, and `music`; if their configured engines fail, the model receives the localized category-unavailable result. The request shares `WEB_SEARCH_TIMEOUT_MS` and turn cancellation; credentials go only to OpenRouter's fixed endpoint, with redirects refused. Search uses OpenRouter credits even for free chat models. Failed text searches or unusable text citations fall through to DuckDuckGo without a Discord error embed. DuckDuckGo reads its fixed HTML results endpoint through the strict pinned fetcher, with a deadline and a 1 MiB cap, and sends no credentials. It unwraps result links without following them. A challenge, rate limit, or changed markup returns a failure, so the model cannot mistake a blocked search for zero results. Search results are untrusted model input.
   Search dispatch shares one progress-notice state across engine attempts, so the conversation and thought log each receive at most one progress notice per call. Error embeds remain separate. Turn cancellation ends the chain before another engine starts; an engine's own timeout can still fall through.
-- `fetch_url`: The primary URL-reading tool. In production (`RUN_ENV === "production"`), requests to private, localhost, or reserved IP ranges are blocked unless `FETCH_URL_ALLOW_PRIVATE_NETWORK=true` is set. A hostname that does not resolve is refused in every environment.
+- `fetch_url`: The primary URL-reading tool. Requests to private, localhost, or reserved IP ranges are blocked in every `RUN_ENV` unless `FETCH_URL_ALLOW_PRIVATE_NETWORK=true` is set. A hostname that does not resolve is refused in every environment.
 - **Crawl4AI engine:** Optional. Setting `CRAWL4AI_BASE_URL` puts it ahead of `safe_http`, but only where private-network fetching is permitted. Its external browser resolves DNS, follows redirects, and loads subresources itself, so the bot's preflight and metadata denylist do not cover those requests. Responses are read under a byte limit and checked for the expected shape before use. See [Setup: Crawl4AI](/self-hosting/local-endpoints/setup-crawl4ai/).
 - **Cloud metadata protection:** Cloud instance metadata and link-local ranges (`169.254.0.0/16`, IPv6 link-local, AWS IMDS) are blocked unconditionally by `src/utils/security/cloudMetadata.ts`. This check cannot be bypassed by configuration.
 - **Safe HTTP engine:** The `safe_http` engine validates and pins DNS, follows a bounded number of redirects (revalidating each hop), limits downloaded byte counts, and converts HTML to Markdown.
@@ -135,6 +135,7 @@ The `block_user` and `unblock_user` tools allow personas to manage interpersonal
 
 - **Scoping:** Blocks persist in `persona_user_blocks`, keyed by server, local persona ID, and target user ID.
 - **Channel permission check:** Before saving a block, `block_user` checks whether the bot can view the channel and send embeds. Missing permissions abort the save and return an error to the model.
+- **Confirmation notices:** Mutes, blocks, and unblocks use the shared notice router, so notice visibility, verbosity, and thought-log privacy checks apply. A Minimal server shows the title alone and mirrors the full card to the thought log.
 - **Dialogue filtering:** Active blocks suppress the target user's messages in dialogue history, replacing them with a system notice: `[System: ... sent a message but is currently blocked by you ...]`. The notice is an English system injection, mirroring reminder and join injections. The pointer to `unblock_user` lives in the active-blocks knowledge item instead, inside `{{if tool:unblock_user}}`, so it appears only on turns that expose the tool. Blocking suppresses dialogue turns and reply annotations without deleting stored long-term memories or documents.
 
 ## Structured user info updates
@@ -160,7 +161,9 @@ The `review_capabilities` tool inspects system configuration dynamically:
 
 ## NovelAI constraints
 
-The `fetch_url` tool is excluded from NovelAI models. NovelAI tool calling is prompt-based and token-constrained, requiring dedicated budget validation before large URL payloads can be admitted.
+NovelAI text models do not support tool calling. The provider returns an empty tool list, and
+prompt inspection omits tool schemas. NovelAI image generation remains available through its
+dedicated commands and through tools called by other text providers.
 
 ## Source pointers
 

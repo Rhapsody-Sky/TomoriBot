@@ -32,7 +32,7 @@ hands that instance to every later reader, history reads use `fetch`, and histor
 look up their target in the fetched window before the cache.
 
 Presence caching admits only guild-user pairs with a successful chat turn in that guild. Startup
-loads these pairs from persisted `message_sent` and `presence_seen` counters before gateway login;
+loads owned guild pairs from persisted `message_sent` and `presence_seen` counters before gateway login;
 successful text or tool-only turns admit new pairs immediately. The index is process-local and
 survives cache clearing, while PostgreSQL restores its history after a restart. Presence events
 still arrive for every member allowed by the intent, so this limits retained objects rather than
@@ -69,6 +69,12 @@ Application caches are partitioned by domain ownership, lifetime, and storage ba
 
 ### Content and conversation memory
 
+- **History anchors (`src/utils/chat/historyWindow.ts`)**: owner-process, channel-keyed ID metadata
+  keeps the live history start stable between stride jumps. Entries expire five minutes after a new
+  start, without read renewal; selection sweeps expired entries and caps the map at 2,000, evicting
+  the oldest inserted key. Idle release discards fetched messages but retains anchors. Boundary
+  deletion and gateway connection changes invalidate anchors. This is runtime state, outside the
+  database invalidation bus. See [Build Context](/architecture/pipelines/chat/06-per-turn/01-build-context/).
 - **Short-term memory cache (`shortTermMemoryCache.ts`)**: stores recent conversation dialogue turns and generated summaries. Keyed by user-channel or server-channel identifiers, with persona-scoped variants. Fixed lifetimes: 12 hours for raw dialogue (`CRUDE_CONVERSATION_TTL_HOURS`) and 24 hours for summaries (`SUMMARY_TTL_HOURS`). Raw dialogue is volatile. Summaries, categories, and cadence state are backed by PostgreSQL; category-only entries use the 12-hour cache lifetime.
 - **Emoji and sticker cache (`emojiStickerCache.ts`)**: keyed by internal `server_id`. Stores native server expressions and registered custom expressions. Tracks category synchronization state so initial emoji fetches do not mask sticker data on later turns. Uses a 10-minute TTL.
 - **Markdown table cache (`markdownTableCache.ts`)**: keyed by Discord message ID. Stores original markdown text behind rendered table images. Uses a 120-minute TTL, matching the expiration window of the interactive `Show Markdown` component button.
@@ -80,7 +86,7 @@ Application caches are partitioned by domain ownership, lifetime, and storage ba
 - **LLM model cache (`llmCacheStore.ts`)**: static model catalog warmed from the `llms` table at startup. Remains immutable during normal runtime.
 - **OpenRouter catalogs (`openrouterCatalog.ts`)**: separates models into text, embedding, image, and video catalogs (`openrouterCapabilityCache.ts`, `openrouterEmbeddingModelCache.ts`, `openrouterImageModelCache.ts`, `openrouterVideoModelCache.ts`). Keyed by lowercase model codename. Refreshed on misses and in the background via a 6-hour TTL. Collapses concurrent lookups into single network requests and enforces a 60-second minimum refresh interval. Excluded from emergency clearing to prevent chat traffic from blocking on provider discovery. Speech registration uses the same catalogue machinery in `openrouterSpeechModelCache.ts`, requires a successful fresh snapshot, and checks endpoint cloning flags separately. Speech targets and voice bindings are read from the database.
 - **Live model limits cache (`liveModelLimitsCache.ts`)**: keyed by `provider:codename` for Anthropic and Google models APIs. Successful lookups persist for 24 hours. Failed attempts cache a 10-minute retry interval while serving catalog defaults.
-- **NovelAI caches (`novelaiCapabilityCache.ts`, `novelaiSubscriptionCache.ts`)**: static model token limits and subscription tier definitions.
+- **NovelAI subscription cache (`novelaiSubscriptionCache.ts`)**: validated active-subscription facts cached for 24 hours by SHA-256 of the actual credential. Personal, DM, and rotation requests use their selected key. Model profiles derive allowances; inactive results and failed or malformed lookups remain uncached and fail preparation. Credential identities stay inside the cache and are omitted from logs and prompt exports.
 - **Guild MCP configuration cache (`guildMcpConfigCache.ts`)**: caches active MCP server registrations and discovered tool name snapshots.
 
 ### Ephemeral workflow sessions
@@ -116,8 +122,9 @@ updates both stores after successful delivery. Held response drafts update neith
 Caches derive their state from PostgreSQL. To prevent serving stale data, write operations must invalidate affected cache keys directly after a database transaction commits successfully.
 
 Repositories or their calling workflows own database writes and paired invalidation. Check both
-when changing a write path; the [memory creation stage](/architecture/pipelines/memory/ltm/01-ltm-create/)
-records an existing notification-ordering limitation. Domain invalidators include:
+when changing a write path. Memory creation invalidates both scopes before notification. Scoped
+memory rows and vectors used by [recall](/architecture/pipelines/memory/ltm/#decay-lifecycle) load
+fresh; daily accounting invalidates affected server snapshots after commit. Domain invalidators include:
 
 - Server or persona updates: `invalidateTomoriStateCache(serverDiscId)`.
 - User setting or memory writes: `invalidateUserCache(userDiscId)`.
@@ -131,8 +138,32 @@ records an existing notification-ordering limitation. Domain invalidators includ
 - Personal spotlight updates: `invalidatePersonalSpotlightCache(serverId, userId?, channelDiscId?)` (drops the server gate alongside matching result entries).
 - Webhook deletion or recreation: webhook invalidation helpers in `src/utils/discord/webhook/cache.ts`.
 - MCP tool discovery updates: `invalidateGuildMcpConfigCache(serverId)`.
+- NovelAI credential add/replacement: saved-config repository upserts invalidate the old and new credentials after successful writes. Adding a rotation key invalidates that key after insertion. Unchanged stored credentials retain their entries.
 
 Invalidating before write success is forbidden: a rolled-back transaction would leave the cache empty, prompting an immediate refetch of the pre-write database state.
+
+## Cross-process invalidation
+
+In [subset mode](/architecture/subsystems/sharding/), `src/utils/cache/invalidationBus.ts` uses
+PostgreSQL LISTEN/NOTIFY for derived-cache eviction. Startup acquires shard leases, subscribes,
+and flushes registered caches before presence restoration, warming, or Discord login. Subscription
+failure or a failed initial flush prevents startup. Bun's subscription callback flushes registered
+caches again after reconnection because notifications missed while disconnected cannot be replayed.
+All-owner mode opens no listener and publishes nothing.
+
+Write owners keep local eviction immediately after database success. Registered invalidators also
+publish bounded batches of identifiers; peer handlers validate the envelope and arguments, ignore
+self echoes, and evict without rebroadcasting. Payloads contain no cached values or credentials.
+Publish and handler failures emit metrics and warnings; notification delivery is best effort and
+does not roll back an already successful write. Existing cache expiry remains a recovery path.
+
+Registrations live beside their domain invalidators: server/persona state, users and blacklists,
+whitelists, emoji/stickers, channel prompt/model/context overrides, sprite and appearance state,
+persona blocks, spotlights, SillyTavern presets, guild MCP configuration, and Natural Nudge settings.
+New cross-owner database-derived caches must register eviction and reconnect flushing with the bus.
+Active channel queues, webhook slots, and conversation runtime state stay in their owner process;
+notifications do not transfer live work. Shutdown stops publishing, unsubscribes, and settles pending
+publishes within the shared coordination cleanup bound.
 
 ## Emergency memory cleanup
 <!-- anchor: emergency-memory-cleanup -->

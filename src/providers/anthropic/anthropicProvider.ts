@@ -13,6 +13,7 @@
  * - API key sent via `x-api-key` header with `anthropic-version` header
  */
 
+import { pickHumanizerSettings } from "@/constants/humanizer";
 import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type {
   AnyThreadChannel,
@@ -68,9 +69,11 @@ import { log } from "@/utils/misc/logger";
 import { buildActiveSamplingParams, getActiveTemperature } from "@/utils/provider/samplingControl";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
+import { MODEL_LOOKUP_TIMEOUT_MS, reportModelLookupFailure } from "@/utils/provider/modelCatalogLookup";
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_API_VERSION = "2023-06-01";
 
 export interface AnthropicProviderConfig extends ProviderConfig {
@@ -85,6 +88,22 @@ export class AnthropicProvider
 {
   getInfo(): ProviderInfo {
     return anthropicProviderInfo;
+  }
+
+  async checkTextModel(apiKey: string, codename: string): Promise<boolean | null> {
+    try {
+      const response = await fetch(`${ANTHROPIC_MODELS_URL}/${encodeURIComponent(codename)}`, {
+        headers: { "x-api-key": apiKey, "anthropic-version": ANTHROPIC_API_VERSION },
+        signal: AbortSignal.timeout(MODEL_LOOKUP_TIMEOUT_MS),
+      });
+      if (response.ok) return true;
+      if (response.status === 404) return false;
+      await reportModelLookupFailure("anthropic", new Error(`Anthropic models API returned ${response.status}`));
+      return null;
+    } catch (error) {
+      await reportModelLookupFailure("anthropic", error, apiKey);
+      return null;
+    }
   }
 
   /**
@@ -325,7 +344,7 @@ export class AnthropicProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         seesImages: tomoriState.llm.sees_images,
         forceReason: streamingContext?.forceReason,

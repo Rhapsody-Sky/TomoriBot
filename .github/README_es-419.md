@@ -128,7 +128,7 @@ Simplemente menciona al bot en un servidor o usa las palabras de activación con
 - `/config` y `/personal config` - Múltiples formas de ajustar a TomoriBot en el servidor actual o para ti
 - `/providers` y `/personal providers` - Agrega más puntos de enlace de modelos o proveedores en la nube
 - `/persona` - Dale una personalidad o añade nuevos personajes (consulta [Personas múltiples](https://docs.tomoribot.app/es-419/features/chatting-personality/multiple-personas/))
-- `/memories` - Enséñale datos a través de las conversaciones (consulta [Memoria](https://docs.tomoribot.app/es-419/features/knowledge/memory/))
+- `/memories` - Enséñale datos a través de las conversaciones (consulta [Memoria](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/))
 
 Consulta la [referencia de comandos](https://docs.tomoribot.app/es-419/features/command-reference/) completa para ver todos los comandos de barra.
 
@@ -186,15 +186,8 @@ Este proyecto está bajo la licencia [AGPLv3](../LICENSE).
 Si encuentras útil (o divertido) a TomoriBot, ¡considera darle una ⭐ al repositorio o apoyar el desarrollo a través de Ko-fi o Patreon!
 
 <p align="left">
-
-  &nbsp;
-  <a href="https://ko-fi.com/bredrumb">
-    <img src="https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
-  </a>
-  &nbsp;
-  <a href="https://www.patreon.com/cw/tomoribot">
-    <img src="https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon">
-  </a>
+  <a href="https://ko-fi.com/bredrumb"><img src="https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
+  <a href="https://www.patreon.com/cw/tomoribot"><img src="https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon"></a>
 </p>
 
 

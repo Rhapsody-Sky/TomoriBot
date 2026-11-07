@@ -2,7 +2,6 @@
 title: "供應商與模型"
 sidebar:
   order: 1
-aiGenerated: true
 ---
 
 TomoriBot連接到外部AI供應商，而不是託管內建模型。你可以連接Google Gemini、OpenRouter和NovelAI等託管服務，或將其指向本機自架端點。你至少需要一位供應商才能開始聊天。
@@ -65,13 +64,16 @@ Brave Search與你的AI供應商分開，並透過圖像、影片和新聞結果
 
 - **文字**：主要聊天模型。
 - **視覺**：當聊天模型無法讀取影像時。
-- **嵌入**：為[文件知識庫](/zh-TW/features/knowledge/memory/#document-knowledge-base-rag)提供支援。
+- **嵌入**：為[文件知識庫](/zh-TW/features/knowledge/memory/documents/)提供支援。
 - **判定**：已註冊的[判定模型](#decision-models)。[Natural Nudges](/features/chatting-personality/natural-nudges/#active-nudges)使用它來決定何時加入對話。
 - **標準影像**：標準影像產生（請參閱[影像生成](/zh-TW/features/capabilities/media-generation/image-generation/)）。
-- **NovelAI圖片**：NovelAI影像生成。
+- **NovelAI 圖片**：[NovelAI 影像生成](/features/integrations/novelai/#image-generation)。
 - **影片**：影片產生。
-- **TTS端點**：文字轉語音語音端點。
-- **STT端點**：語音到文字的音訊轉錄端點。
+- **TTS（語音設計）**：使用已儲存的語音描述發聲。
+- **TTS（語音複製）**：使用參考樣本或供應商語音發聲。
+- **語音轉文字**：使用託管轉錄模型或自訂端點轉錄音訊附件。先選擇供應商再選擇其模型；選取 `- 無模型` 即可停止使用伺服器的金鑰進行轉錄。
+
+模型清單會標示各供應商的預設模型，並以美元顯示價格。文字與判定模型顯示每 100 萬輸入與輸出 token 的價格。OpenRouter 的影像、影片與語音模型則會顯示 OpenRouter 計費的單位：每張圖片或每 100 萬圖片 token、以 TomoriBot 預設解析度計算的每秒影片，以及每 100 萬字元或每秒音訊。自行註冊的影像模型不會顯示價格。未列出價格的模型可能是未計量，或是未記錄在 TomoriBot 的目錄中，依賴該模型前請先查看供應商的定價頁面。
 
 前六個槽選擇模型目錄記錄。TTS和STT插槽改為選擇伺服器範圍的端點，啟動選定的端點而不是編寫模型列。在`/providers`中註冊並編輯這些端點。`/personal config`保留6個個人模型路由插槽，不包含個人TTS/STT端點選擇器。
 
@@ -135,7 +137,7 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) 和OpenCode Zen (`https://opencode
 | Google雙子座 | ✅ | ✅ | ✅ | ✅ | 提供免費模型 |
 | OpenRouter | ✅ | ✅ | ✅ | ✅ | 消耗 OpenRouter 額度 |
 | 人擇 (API) | ✅ | ✅ | ✅ | - | 不是克勞德·代碼 |
-| NovelAI | ✅ | ✅ | - | - | 只有GLM 4.6可以使用工具 |
+| NovelAI | ✅ | - | - | - | 文字模型無法使用工具；請參閱 [NovelAI](/features/integrations/novelai/) |
 | NVIDIA NIM | ✅ | ✅ | ✅ | ✅ | 提供免費模型 |
 | 深度搜尋 | ✅ | ✅ | - | - | - |
 | Z.ai | ✅ | ✅ | ✅ | - | 免費模型； 🟡 ToS = 僅限編碼和代理使用 |
@@ -168,9 +170,10 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) 和OpenCode Zen (`https://opencode
 | 供應商 | 文字轉語音 | 語音轉文字 |
 |---|---|---|
 | ElevenLabs | ✅ | ✅ |
-| Google Gemini | 語音設計 | 否 |
-| Vertex AI（標準、全域） | 語音設計 | 否 |
+| Google Gemini | 語音設計 | ✅ |
+| Vertex AI（標準、全域） | 語音設計 | ✅ |
 | OpenRouter Fish | 語音複製 | 否 |
 | OpenRouter Seed Audio | 語音設計 | 否 |
+| OpenRouter 轉錄模型 | 否 | ✅ |
 
 本機語音引擎包含在[自架](/zh-TW/self-hosting/) 中。內建的網路搜尋和URL讀取，請參閱[工具和擴充功能](/zh-TW/features/capabilities/tools-and-extensions/#web-search--url-reading)。

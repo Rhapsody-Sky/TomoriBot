@@ -1,3 +1,4 @@
+import type { MemoryRecallCollector } from "@/utils/text/context/memoryRecall";
 import type { Client } from "discord.js";
 import { getCurrentTimeWithOffset, formatUTCOffset, getTimeOfDayPhrase } from "@/utils/text/timezoneHelper";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
@@ -12,8 +13,9 @@ import type { ParticipantRequestScope } from "@/utils/text/participants/preparat
 
 export { formatPendingReminderForContext } from "@/utils/text/participants/hydration";
 
-export async function buildParticipantContextItem(params: {
+export async function buildParticipantContextItems(params: {
   client: Client;
+  memoryRecall?: MemoryRecallCollector;
   guildId: string;
   channelName: string;
   channelId: string;
@@ -39,7 +41,7 @@ export async function buildParticipantContextItem(params: {
   convertMentions: MentionConverter;
   profileEnricherRegistry?: ParticipantProfileEnricherRegistry;
   requestScope?: ParticipantRequestScope;
-}): Promise<StructuredContextItem | null> {
+}): Promise<StructuredContextItem[]> {
   const typedKeys = new Set<string>();
   for (const seed of params.participantSeeds) {
     const serializedKey = serializeParticipantKey(seed.key);
@@ -49,10 +51,11 @@ export async function buildParticipantContextItem(params: {
     typedKeys.add(serializedKey);
   }
   if (params.participantSeeds.length === 0) {
-    return null;
+    return [];
   }
 
   const hydrated = await hydrateParticipantProfiles({
+    memoryRecall: params.memoryRecall,
     client: params.client,
     guildId: params.guildId,
     channelName: params.channelName,
@@ -100,7 +103,7 @@ export async function buildParticipantContextItem(params: {
     timeOfDayPhrase: getTimeOfDayPhrase(timezoneOffset),
   });
 
-  return {
+  const profileItem: StructuredContextItem = {
     role: "user",
     parts: [
       {
@@ -116,6 +119,35 @@ export async function buildParticipantContextItem(params: {
       },
     ],
     metadataTag: ContextItemTag.KNOWLEDGE_USERS_IN_CONVERSATION,
+    personalMemoryItems: await Promise.all(
+      hydrated.profiles.flatMap((profile) => {
+        const entries = profile.fields
+          .filter((field) => field.kind === "personal_memories" && field.visibility.visible)
+          .flatMap((field) => field.memoryEntries ?? []);
+        return entries.length === 0
+          ? []
+          : [
+              Promise.all(
+                entries.map(async (entry) => ({
+                  ...entry,
+                  text: await params.convertMentions(
+                    entry.text,
+                    params.client,
+                    params.guildId,
+                    params.triggererName,
+                    params.botName,
+                    params.tomoriConfig.personal_memories_enabled,
+                  ),
+                })),
+              ).then((memoryEntries) => ({
+                role: "system" as const,
+                metadataTag: ContextItemTag.KNOWLEDGE_USER_MEMORIES,
+                parts: [{ type: "text" as const, text: memoryEntries.map((entry) => entry.text).join("\n") }],
+                memoryEntries,
+              })),
+            ];
+      }),
+    ),
     participantReviewEvidence: {
       participants: hydrated.profiles.map((profile) => ({
         name: profile.displayName,
@@ -128,4 +160,29 @@ export async function buildParticipantContextItem(params: {
     conversationUsers: rendered.conversationUsers,
     participantTargetIndex: rendered.targetIndex,
   };
+  const items = [profileItem];
+  for (const [metadataTag, text] of [
+    [ContextItemTag.KNOWLEDGE_USER_STATUS, rendered.statusText ? `[System: ${rendered.statusText}\n]` : ""],
+    [ContextItemTag.KNOWLEDGE_CURRENT_CONTEXT, rendered.currentContextText],
+  ] as const) {
+    if (!text) continue;
+    items.push({
+      role: "user",
+      metadataTag,
+      parts: [
+        {
+          type: "text",
+          text: await params.convertMentions(
+            text,
+            params.client,
+            params.guildId,
+            params.triggererName,
+            params.botName,
+            params.tomoriConfig.personal_memories_enabled,
+          ),
+        },
+      ],
+    });
+  }
+  return items;
 }

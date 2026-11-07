@@ -27,10 +27,18 @@ import {
   getStoredPersonalProviderForCapability,
 } from "@/utils/provider/personalProviderHelpers";
 import { loadUserSavedProvidersForCapability } from "@/utils/provider/savedProviderConfig";
-import { findProviderOption, providerOptionOffersPersonalCapability } from "@/utils/provider/providerOptionRegistry";
+import {
+  describeProviderOptionModelChoices,
+  findProviderOption,
+  providerOptionCapabilityForPersonal,
+  providerOptionOffersPersonalCapability,
+} from "@/utils/provider/providerOptionRegistry";
 import { getProviderOptionFallbackRefOwner } from "@/utils/provider/providerOptionRegistry";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { resolveDescription } from "@/utils/text/localizer";
+import { freeModelPriceLabel, resolveRowPricing } from "@/utils/provider/modelPricing";
+import { openRouterMediaRates } from "@/utils/provider/openrouterMediaPricing";
+import type { ModelSelectChoice } from "@/utils/discord/ui/modelSelectOption";
 import { messageProxyRepository } from "@/utils/db/repositories/MessageProxyRepository";
 import { formatManagedIdentityLabel } from "@/utils/discord/interactions/managedIdentityPanelRoutes";
 
@@ -145,14 +153,39 @@ export async function loadAvailableModelsForCapability(
   provider: string,
   capability: PersonalConfigManagedCapability,
   locale = "en-US",
-): Promise<Array<{ id: number; name: string; description?: string }>> {
+): Promise<ModelSelectChoice[]> {
   const option = findProviderOption(provider);
   if (option) {
     if (!providerOptionOffersPersonalCapability(option, capability)) return [];
     if (!(await option.availability({ kind: "personal", ownerId: userId })).eligible) return [];
-    provider = option.catalogProvider;
   }
+  const choices = await loadPersonalCatalogModels(userId, option?.catalogProvider ?? provider, capability, locale);
+  return describeProviderOptionModelChoices(provider, {
+    scope: { kind: "personal", ownerId: userId },
+    capability: providerOptionCapabilityForPersonal(capability),
+    locale,
+    choices,
+  });
+}
+
+async function loadPersonalCatalogModels(
+  userId: number,
+  provider: string,
+  capability: PersonalConfigManagedCapability,
+  locale: string,
+): Promise<ModelSelectChoice[]> {
   try {
+    if (capability === "transcription") {
+      const models = await llmModelRepo.loadAvailableTranscriptionModels(provider, {
+        kind: "personal",
+        ownerId: userId,
+      });
+      return models.map((model) => ({
+        id: model.transcription_model_id,
+        name: model.codename,
+        isDefault: model.is_default,
+      }));
+    }
     if (capability === "speech_design" || capability === "speech_clone") {
       const models = await llmModelRepo.loadAvailableSpeechModels(provider, { kind: "personal", ownerId: userId });
       const mode = capability === "speech_design" ? "design" : "clone";
@@ -161,6 +194,8 @@ export async function loadAvailableModelsForCapability(
         .map((model) => ({
           id: model.speech_model_id,
           name: model.codename,
+          pricing: openRouterMediaRates(provider, "speech", model.codename),
+          isDefault: model.is_default,
         }));
     }
     if (capability === "text") {
@@ -170,11 +205,17 @@ export async function loadAvailableModelsForCapability(
       });
       return (models ?? [])
         .filter((m) => typeof m.llm_id === "number")
-        .map((m) => ({
-          id: m.llm_id as number,
-          name: m.llm_codename,
-          description: resolveDescription(m.descriptions, locale) ?? undefined,
-        }));
+        .map((m) => {
+          const pricing = resolveRowPricing(m);
+          return {
+            id: m.llm_id as number,
+            name: m.llm_codename,
+            description: resolveDescription(m.descriptions, locale) ?? undefined,
+            pricing,
+            priceLabel: freeModelPriceLabel(locale, provider, m.is_free, pricing),
+            isDefault: m.is_default,
+          };
+        });
     }
     if (capability === "vision") {
       const models = await llmModelRepo.loadAvailableModelsForProvider(provider, false, {
@@ -183,11 +224,17 @@ export async function loadAvailableModelsForCapability(
       });
       return (models ?? [])
         .filter((m) => typeof m.llm_id === "number" && m.sees_images)
-        .map((m) => ({
-          id: m.llm_id as number,
-          name: m.llm_codename,
-          description: resolveDescription(m.descriptions, locale) ?? undefined,
-        }));
+        .map((m) => {
+          const pricing = resolveRowPricing(m);
+          return {
+            id: m.llm_id as number,
+            name: m.llm_codename,
+            description: resolveDescription(m.descriptions, locale) ?? undefined,
+            pricing,
+            priceLabel: freeModelPriceLabel(locale, provider, m.is_free, pricing),
+            isDefault: m.is_default,
+          };
+        });
     }
     if (capability === "embedding") {
       const models = await llmModelRepo.loadAvailableEmbeddingModels(provider, false, {
@@ -200,6 +247,7 @@ export async function loadAvailableModelsForCapability(
           id: m.embedding_model_id as number,
           name: m.codename,
           description: resolveDescription(m.descriptions, locale) ?? undefined,
+          isDefault: m.is_default,
         }));
     }
     if (capability === "image") {
@@ -213,6 +261,8 @@ export async function loadAvailableModelsForCapability(
           id: m.diffusion_model_id as number,
           name: m.codename,
           description: resolveDescription(m.descriptions, locale) ?? undefined,
+          pricing: openRouterMediaRates(provider, "image", m.codename),
+          isDefault: m.is_default,
         }));
     }
     if (capability === "image_nai") {
@@ -226,6 +276,7 @@ export async function loadAvailableModelsForCapability(
           id: m.diffusion_model_id as number,
           name: m.codename,
           description: resolveDescription(m.descriptions, locale) ?? undefined,
+          isDefault: m.is_default,
         }));
     }
     if (capability === "video") {
@@ -239,6 +290,8 @@ export async function loadAvailableModelsForCapability(
           id: m.video_model_id as number,
           name: m.codename,
           description: resolveDescription(m.descriptions, locale) ?? undefined,
+          pricing: openRouterMediaRates(provider, "video", m.codename),
+          isDefault: m.is_default,
         }));
     }
   } catch (error) {
@@ -306,6 +359,9 @@ export async function loadPersonalModelDisplayInfo(
           },
         );
         modelName = models.find((model) => model.speech_model_id === id)?.codename ?? null;
+      } else if (cap === "transcription" && row.transcription_model_id) {
+        const m = await llmModelRepo.loadTranscriptionModelById(row.transcription_model_id);
+        modelName = m?.codename ?? null;
       } else if (cap === "text" && row.llm_id) {
         const m = await llmModelRepo.loadById(row.llm_id);
         modelName = m?.llm_codename ?? null;
@@ -374,6 +430,18 @@ export async function loadPersonalModelDisplayInfo(
   ]);
 
   const routingRows: Record<PersonalConfigManagedCapability, PersonalConfigRoutingRow> = {
+    transcription: {
+      capability: "transcription",
+      activeModelName: await resolveCapName(
+        getActivePersonalProviderForCapability(savedProviders, "transcription"),
+        "transcription",
+      ),
+      storedProvider: getStoredPersonalProviderForCapability(savedProviders, "transcription")?.provider ?? null,
+      storedModelName: await resolveCapName(
+        getStoredPersonalProviderForCapability(savedProviders, "transcription"),
+        "transcription",
+      ),
+    },
     speech_design: {
       capability: "speech_design",
       activeModelName: await resolveCapName(
@@ -447,6 +515,7 @@ export async function loadPersonalModelDisplayInfo(
   const eligibleProvidersForCapability: Record<PersonalConfigManagedCapability, string[]> = {
     speech_design: (await loadUserSavedProvidersForCapability(userId, "speech_design")).map((row) => row.provider),
     speech_clone: (await loadUserSavedProvidersForCapability(userId, "speech_clone")).map((row) => row.provider),
+    transcription: (await loadUserSavedProvidersForCapability(userId, "transcription")).map((row) => row.provider),
     text: textProviders.map((p) => p.provider),
     vision: visionProviders.map((p) => p.provider),
     embedding: embeddingProviders.map((p) => p.provider),
@@ -508,6 +577,7 @@ export async function loadPersonalModelDisplayInfo(
       "video",
       "speech_design",
       "speech_clone",
+      "transcription",
     ],
     eligibleProvidersForCapability,
     parametersProviders: textProviderNames,

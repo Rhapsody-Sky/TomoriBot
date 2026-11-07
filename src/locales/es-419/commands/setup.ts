@@ -84,8 +84,8 @@ Prueba con {model_text_command} para asignar un modelo funcional, o con {provide
       settings_persona_label: `Persona`,
       settings_persona_description: `Elige la persona que usaré después de la configuración.`,
       settings_persona_placeholder: `Elige un preajuste de persona...`,
-      settings_humanizer_label: `Grado de humanización`,
-      settings_humanizer_description: `¿Qué tan humano debo sonar? Por reglas, no por IA: nunca añade latencia ni costo de tokens.`,
+      settings_humanizer_label: `Preajuste de humanizador`,
+      settings_humanizer_description: `¿Qué tan humano debo sonar? Basado en reglas, sin latencia ni costo. Ajústalo luego en /config.`,
       settings_humanizer_placeholder: `Elige un estilo de respuesta...`,
       settings_timezone_label: `Desfase de zona horaria`,
       settings_timezone_description: `Para recordatorios y conciencia del tiempo. Déjalo en blanco para usar UTC.`,
@@ -186,7 +186,7 @@ Prueba con {model_text_command} para asignar un modelo funcional, o con {provide
 - Usa \`/config\` para ajustar cómo actúo y qué puedo hacer.
 - Usa \`/memories\` para enseñarme cosas sobre ti.`,
       receipt_learn_more:
-        "Lee la [Wiki oficial](https://docs.tomoribot.app/es-419/features/) o abre {help} (luego Funciones) para saber más sobre lo que puedo hacer.\n- [Personas múltiples](https://docs.tomoribot.app/es-419/features/chatting-personality/multiple-personas/) = aspectos, voces y disparadores\n- [Chat y disparadores](https://docs.tomoribot.app/es-419/features/chatting-personality/chatting-and-triggers/) = cuándo y cómo participo\n- [Memoria](https://docs.tomoribot.app/es-419/features/knowledge/memory/) = personas, datos y contexto\n- [Personalización](https://docs.tomoribot.app/es-419/features/knowledge/personalization/) = cómo prefieres que te traten\n- [Generación de medios](https://docs.tomoribot.app/es-419/features/capabilities/media-generation/image-generation/) = imágenes, video y voz\n- [Herramientas y extensiones](https://docs.tomoribot.app/es-419/features/capabilities/tools-and-extensions/built-in-tools/) = búsqueda web y herramientas personalizadas",
+        "Lee la [Wiki oficial](https://docs.tomoribot.app/es-419/features/) o abre {help} (luego Funciones) para saber más sobre lo que puedo hacer.\n- [Personas múltiples](https://docs.tomoribot.app/es-419/features/chatting-personality/multiple-personas/) = aspectos, voces y disparadores\n- [Chat y disparadores](https://docs.tomoribot.app/es-419/features/chatting-personality/chatting-and-triggers/) = cuándo y cómo participo\n- [Memoria](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/) = personas, datos y contexto\n- [Personalización](https://docs.tomoribot.app/es-419/features/knowledge/personalization/) = cómo prefieres que te traten\n- [Generación de medios](https://docs.tomoribot.app/es-419/features/capabilities/media-generation/image-generation/) = imágenes, video y voz\n- [Herramientas y extensiones](https://docs.tomoribot.app/es-419/features/capabilities/tools-and-extensions/built-in-tools/) = búsqueda web y herramientas personalizadas",
       permission_denied: `Debes tener el permiso Administrar servidor para configurar.`,
       env_mismatch: `La configuración del entorno cambió. Por favor reinicia la configuración.`,
       forbidden: `Esta sesión de configuración pertenece a otro usuario o canal.`,

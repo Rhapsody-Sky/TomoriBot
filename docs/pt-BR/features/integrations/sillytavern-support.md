@@ -35,7 +35,7 @@ Se um arquivo carregado for um cartão SillyTavern válido sem metadados TomoriB
 As importações são validadas antes de serem salvas (limites padrão: 5.000 caracteres por campo de texto, 200 atributos, 100 exemplos de diálogos por lado, 100 palavras de gatilho). Para mapeamento de campo e mecânica de conversão, consulte [arquitetura de suporte de cartão](/architecture/integrations/sillytavern/card-support/).
 
 :::tip
-O Character Book de um card se torna o [lorebook](/features/knowledge/lorebooks/) dessa persona. Entradas desativadas permanecem desativadas. Importar o card novamente substitui todo o lorebook da persona, incluindo as entradas que você adicionou.
+O Character Book de um card se torna o [lorebook](/features/knowledge/memory/lorebooks/) dessa persona. Entradas desativadas permanecem desativadas. Importar o card novamente substitui todo o lorebook da persona, incluindo as entradas que você adicionou.
 :::
 
 ## Predefinições de Prompt
@@ -76,7 +76,7 @@ Quando uma predefinição importada está ativa, ela controla totalmente o promp
 ### Notas de Compatibilidade
 
 - Os nós desabilitados em `prompt_order` permanecem inativos até serem habilitados em `/config` > `Plug-ins` > SillyTavern Predefinições. Nós vazios e somente comentários nunca são enviados.
-- A ordem de bloqueio é literal: colocar `chatHistory` à frente de `dialogueExamples` coloca o histórico de bate-papo primeiro no prompt.
+- A ordem dos marcadores é literal: colocar `chatHistory` à frente de `dialogueExamples` coloca o histórico de conversa primeiro. Marcadores de world info posicionam o lore Always On; lore ativado, documentos recuperados, presença e o relógio ficam perto dos quatro turnos de fala mais recentes. A memória de curto prazo recente ou entre canais também fica perto dessas mensagens, ou mais perto se configurada.
 - As injeções pós-histórico se fundem no histórico de conversas existente, em vez de serem enviadas como mensagens independentes.
 - Pós-processamento Regex, parâmetros de amostragem predefinidos (temperatura, top-p) e predefinições em camadas não são suportados. Importação de predefinições legadas de conclusão de texto com blocos somente ST eliminados.
 

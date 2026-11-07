@@ -1,4 +1,9 @@
-import { registerHostedSpeechModelForScope } from "@/utils/provider/openrouterModelRegistry";
+import {
+  registerHostedSpeechModelForScope,
+  registerHostedTranscriptionModelForScope,
+} from "@/utils/provider/openrouterModelRegistry";
+import { getNovelAIModelAccessError } from "@/providers/novelai/modelAccess";
+import { isNovelAITextModel } from "@/providers/novelai/modelProfiles";
 import { supportsSpeechMode } from "@/utils/speech/voiceSourceCapabilities";
 import type {
   CustomEndpointConnectionRow,
@@ -61,13 +66,15 @@ import { isAccountBalanceExhaustedError } from "@/utils/provider/providerErrorCl
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { getStaticProviderInfo } from "@/utils/provider/providerInfoRegistry";
 import { ProviderFactory } from "@/utils/provider/providerFactory";
-import { deleteOptApiKey, encryptApiKey, storeOptApiKey } from "@/utils/security/crypto";
+import { reportModelLookupFailure } from "@/utils/provider/modelCatalogLookup";
+import { decryptApiKey, deleteOptApiKey, encryptApiKey, storeOptApiKey } from "@/utils/security/crypto";
 import {
   buildSavedProviderConfigFromExistingOrDefaults,
   buildUserSavedProviderConfigFromExistingOrDefaults,
 } from "@/utils/provider/savedProviderConfig";
 import {
   activateProviderSpeechDefaults,
+  activateProviderTranscriptionDefault,
   activatePersonalProviderTextModel,
   activateServerTextModelFromSavedConfig,
 } from "@/utils/provider/providerActivation";
@@ -139,6 +146,7 @@ export interface ProviderPanelOperationsDependencies {
 
 export type AddServerProviderResult =
   | { status: "success"; entryId: string; displayName: string; modelName?: string; updated: boolean }
+  | { status: "novelai-unavailable"; descriptionKey: string }
   | {
       status:
         | "invalid-key"
@@ -169,6 +177,7 @@ export interface AddServerProviderDependencies {
   upsertSavedConfig: typeof llmProviderRepo.upsertSavedProviderConfig;
   activateText: typeof activateServerTextModelFromSavedConfig;
   activateSpeechDefaults: typeof activateProviderSpeechDefaults;
+  activateTranscriptionDefault: typeof activateProviderTranscriptionDefault;
   refresh(discordId: string): void | Promise<void>;
 }
 
@@ -237,6 +246,7 @@ export type SaveProviderModelInput = ProviderPanelOwner & {
 export type EditProviderResult =
   | { status: "success"; entryId: string; changed: string[] }
   | { status: "unchanged"; entryId: string }
+  | { status: "novelai-unavailable"; descriptionKey: string }
   | { status: "invalid-key" | "invalid-combination" | "not-found" | "validation-failed" | "write-failed" };
 
 type EditProviderInput = ProviderPanelOwner & {
@@ -299,6 +309,7 @@ const defaultAddDependencies: AddServerProviderDependencies = {
   upsertSavedConfig: (serverId, config) => llmProviderRepo.upsertSavedProviderConfig(serverId, config),
   activateText: activateServerTextModelFromSavedConfig,
   activateSpeechDefaults: activateProviderSpeechDefaults,
+  activateTranscriptionDefault: activateProviderTranscriptionDefault,
   refresh: (discordId) => invalidateTomoriStateCache(discordId),
 };
 
@@ -377,6 +388,7 @@ interface PanelModelContext {
   activeSpeechCloneId: number | null;
   activeSpeechDesignModelId: number | null;
   activeSpeechCloneModelId: number | null;
+  activeTranscriptionModelId: number | null;
   scopeFallbacks: readonly FallbackModelRef[];
 }
 
@@ -393,6 +405,7 @@ function serverModelContext(state: TomoriState): PanelModelContext {
     activeSpeechCloneId: state.config.speech_clone_endpoint_id,
     activeSpeechDesignModelId: state.config.speech_design_model_id,
     activeSpeechCloneModelId: state.config.speech_clone_model_id,
+    activeTranscriptionModelId: state.config.transcription_model_id,
     scopeFallbacks: state.config.fallback_model_refs ?? [],
   };
 }
@@ -421,6 +434,8 @@ function personalModelContext(
       getActivePersonalProviderForCapability(configs, "speech_design")?.speech_design_model_id ?? null,
     activeSpeechCloneModelId:
       getActivePersonalProviderForCapability(configs, "speech_clone")?.speech_clone_model_id ?? null,
+    activeTranscriptionModelId:
+      getActivePersonalProviderForCapability(configs, "transcription")?.transcription_model_id ?? null,
     scopeFallbacks: text ? fallbacks : [],
   };
 }
@@ -461,14 +476,16 @@ async function buildCuratedCapabilities(
     if (option) return optionOwnsCapability(option, savedConfig, context, capability);
     return !findProviderOptionByActiveProvider(provider, optionContextScope(context), capability);
   };
-  const [textRows, imageRows, embeddingRows, videoRows, decisionRows, speechRows] = await Promise.all([
-    llmModelRepo.loadAvailableModelsForProvider(catalogProvider, false, context.scope),
-    llmModelRepo.loadAvailableDiffusionModels(catalogProvider, false, context.scope),
-    llmModelRepo.loadAvailableEmbeddingModels(catalogProvider, false, context.scope),
-    llmModelRepo.loadAvailableVideoGenerationModels(catalogProvider, false, context.scope),
-    llmModelRepo.loadAvailableDecisionModels(catalogProvider, false, context.scope),
-    llmModelRepo.loadAvailableSpeechModels(catalogProvider, context.scope),
-  ]);
+  const [textRows, imageRows, embeddingRows, videoRows, decisionRows, speechRows, transcriptionRows] =
+    await Promise.all([
+      llmModelRepo.loadAvailableModelsForProvider(catalogProvider, false, context.scope),
+      llmModelRepo.loadAvailableDiffusionModels(catalogProvider, false, context.scope),
+      llmModelRepo.loadAvailableEmbeddingModels(catalogProvider, false, context.scope),
+      llmModelRepo.loadAvailableVideoGenerationModels(catalogProvider, false, context.scope),
+      llmModelRepo.loadAvailableDecisionModels(catalogProvider, false, context.scope),
+      llmModelRepo.loadAvailableSpeechModels(catalogProvider, context.scope),
+      option ? Promise.resolve([]) : llmModelRepo.loadAvailableTranscriptionModels(provider, context.scope),
+    ]);
   const workspaceFallbacks = context.scopeFallbacks.filter((ref) => providerOptionFallbackRefServes(ref, provider));
   const providerFallbacks = (
     savedConfig && "fallback_model_refs" in savedConfig ? (savedConfig.fallback_model_refs ?? []) : []
@@ -481,9 +498,17 @@ async function buildCuratedCapabilities(
   const activeSpeechCloneModelId = owns("speech-clone") ? context.activeSpeechCloneModelId : null;
 
   const modelsByCapability: Record<
-    "text" | "image" | "embedding" | "video" | "decision" | "speech",
+    "text" | "image" | "embedding" | "video" | "decision" | "speech" | "transcription",
     ProviderPanelModel[]
   > = {
+    transcription: transcriptionRows.map((row) => ({
+      id: row.transcription_model_id,
+      codeName: row.codename,
+      isWorkspaceActive: row.transcription_model_id === context.activeTranscriptionModelId,
+      isWorkspaceFallback: false,
+      isProviderFallback: false,
+      isCustomRegistration: row.is_scoped_registration,
+    })),
     speech: speechRows.map((row) => ({
       id: row.speech_model_id,
       codeName: row.codename,
@@ -578,7 +603,7 @@ async function buildCuratedCapabilities(
   return CAPABILITIES.map((capability) => {
     if (
       (capability === "speech" && speechRows.length === 0) ||
-      capability === "transcription" ||
+      (capability === "transcription" && transcriptionRows.length === 0) ||
       (capability === "decision" && !getStaticProviderInfo(catalogProvider)?.featureSupport.decisions) ||
       (option && !providerOptionOffersPanelCapability(option, capability))
     ) {
@@ -1047,6 +1072,12 @@ async function addCuratedProvider(
     baseConfig: input.state?.config,
     existingConfig,
   });
+  const accessError = await novelAISavedModelAccessError(
+    provider,
+    [savedConfig.llm_id, input.state.llm.llm_provider === provider ? input.state.llm.llm_id : null],
+    input.apiKey,
+  );
+  if (accessError) return { status: "novelai-unavailable", descriptionKey: accessError };
   if (!(await dependencies.upsertSavedConfig(input.state.server_id, savedConfig))) {
     return { status: "write-failed" };
   }
@@ -1058,7 +1089,11 @@ async function addCuratedProvider(
   });
   if (activation.status === "missing_model") return { status: "missing-model" };
   if (activation.status !== "activated") return { status: "write-failed" };
-  if (!(await dependencies.activateSpeechDefaults({ kind: "server", ownerId: input.state.server_id }, provider))) {
+  const serverScope = { kind: "server" as const, ownerId: input.state.server_id };
+  if (
+    !(await dependencies.activateSpeechDefaults(serverScope, provider)) ||
+    !(await dependencies.activateTranscriptionDefault(serverScope, provider))
+  ) {
     return { status: "write-failed" };
   }
 
@@ -1141,13 +1176,19 @@ async function addPersonalProvider(
     baseConfig: input.state?.config,
     existingConfig,
   });
+  const accessError = await novelAISavedModelAccessError(provider, [savedConfig.llm_id], apiKey);
+  if (accessError) return { status: "novelai-unavailable", descriptionKey: accessError };
   if (!(await llmProviderRepo.upsertUserSavedProviderConfig(userId, savedConfig))) {
     return { status: "write-failed" };
   }
   const activation = await activatePersonalProviderTextModel({ userId, provider, llmId: savedConfig.llm_id });
   if (activation.status === "missing_model") return { status: "missing-model" };
   if (activation.status !== "activated") return { status: "write-failed" };
-  if (!(await activateProviderSpeechDefaults({ kind: "personal", ownerId: userId }, provider))) {
+  const personalScope = { kind: "personal" as const, ownerId: userId };
+  if (
+    !(await activateProviderSpeechDefaults(personalScope, provider)) ||
+    !(await activateProviderTranscriptionDefault(personalScope, provider))
+  ) {
     return { status: "write-failed" };
   }
 
@@ -1370,6 +1411,9 @@ async function registerSharedProviderModel(
   input: SaveProviderModelInput,
   provider: string,
 ): Promise<SaveProviderModelResult> {
+  if (provider === "novelai" && input.capability === "text" && !isNovelAITextModel(input.codeName.trim())) {
+    return { status: "invalid-model" };
+  }
   const option = findProviderOption(provider);
   if (option) {
     if (!providerOptionOffersPanelCapability(option, input.capability)) return { status: "unsupported-capability" };
@@ -1404,7 +1448,20 @@ async function registerSharedProviderModel(
     if (result.status === "write_failed") return { status: "write-failed" };
     return { status: "success", entryId: input.entryId, codeName: result.model.codename };
   }
-  if (input.capability === "transcription") return { status: "unsupported-capability" };
+  if (input.capability === "transcription") {
+    if (option) return { status: "unsupported-capability" };
+    const result = await registerHostedTranscriptionModelForScope(
+      input.scopeKind === "personal"
+        ? { kind: "personal", ownerId: input.ownerId }
+        : { kind: "server", ownerId: input.state.server_id },
+      provider,
+      input.codeName,
+      input.editingModelId,
+    );
+    if (result.status === "invalid_model") return { status: "invalid-model" };
+    if (result.status === "write_failed") return { status: "write-failed" };
+    return { status: "success", entryId: input.entryId, codeName: result.model.codename };
+  }
   if (input.capability === "decision" && provider !== "openrouter" && !option)
     return { status: "unsupported-capability" };
   if (provider === "openrouter" || option) {
@@ -1467,6 +1524,12 @@ async function registerSharedProviderModel(
           ? await llmModelRepo.loadDiffusionModelByProviderAndCodename(provider, codeName)
           : await llmModelRepo.loadVideoGenerationModelByProviderAndCodename(provider, codeName);
   if (existing && !existing.is_scoped_registration) return { status: "already-available" };
+  if (
+    (input.capability === "text" || input.capability === "image") &&
+    (await isModelRejectedByCatalog(input, input.capability, provider, codeName))
+  ) {
+    return { status: "invalid-model" };
+  }
 
   const modelId =
     input.capability === "text"
@@ -1518,6 +1581,36 @@ async function registerSharedProviderModel(
     await removeScopedRegistration(owner, input.capability, input.editingModelId);
   }
   return { status: "success", entryId: `provider:${provider}`, codeName };
+}
+
+/**
+ * Rejects only a codename the provider's own catalog confirmed it does not serve, so a provider
+ * without a lookup, a scope without a saved key, an unreachable catalog, or a failure while
+ * preparing the lookup all leave registration unchecked.
+ */
+async function isModelRejectedByCatalog(
+  input: SaveProviderModelInput,
+  capability: "text" | "image",
+  provider: string,
+  codeName: string,
+): Promise<boolean> {
+  try {
+    const instance = await ProviderFactory.getProviderByName(provider);
+    const checkModel =
+      capability === "text" ? instance.checkTextModel?.bind(instance) : instance.checkImageModel?.bind(instance);
+    if (!checkModel) return false;
+    const saved =
+      input.scopeKind === "personal"
+        ? await llmProviderRepo.loadUserSavedProviderConfig(input.ownerId, provider)
+        : await llmProviderRepo.loadSavedProviderConfig(input.state.server_id, provider);
+    if (!saved?.api_key) return false;
+    // Decryption is itself a database round trip, so a retired pool connection can fail it too.
+    const apiKey = await decryptApiKey(saved.api_key, saved.key_version);
+    return (await checkModel(apiKey, codeName)) === false;
+  } catch (error) {
+    await reportModelLookupFailure(provider, error);
+    return false;
+  }
 }
 
 export async function removeScopedRegistration(
@@ -1733,6 +1826,22 @@ export async function saveProviderModel(input: SaveProviderModelInput): Promise<
   return { status: "not-found" };
 }
 
+async function novelAISavedModelAccessError(
+  provider: string,
+  modelIds: readonly (number | null | undefined)[],
+  apiKey: string,
+): Promise<string | null> {
+  if (provider !== "novelai") return null;
+  for (const modelId of new Set(modelIds)) {
+    if (!modelId) continue;
+    const model = await llmModelRepo.loadLlmById(modelId);
+    if (!model) return "commands.providers.model_not_found";
+    const error = await getNovelAIModelAccessError(model.llm_codename, apiKey, true);
+    if (error) return error;
+  }
+  return null;
+}
+
 async function validateProviderCredential(provider: string, apiKey: string): Promise<boolean> {
   try {
     const instance = await ProviderFactory.getProviderByName(provider);
@@ -1757,6 +1866,8 @@ async function editServerProvider(input: EditProviderInput): Promise<EditProvide
     if (!apiKey) return { status: "unchanged", entryId };
     if (apiKey.length < 10) return { status: "invalid-key" };
     if (!(await validateProviderCredential(provider, apiKey))) return { status: "validation-failed" };
+    const accessError = await novelAISavedModelAccessError(provider, [existing.llm_id], apiKey);
+    if (accessError) return { status: "novelai-unavailable", descriptionKey: accessError };
     const encryption = await encryptApiKey(apiKey);
     const nextConfig = { ...existing, api_key: encryption.encrypted, key_version: encryption.version };
     if (!(await llmProviderRepo.upsertUserSavedProviderConfig(ownerId, nextConfig))) {
@@ -1796,6 +1907,12 @@ async function editServerProvider(input: EditProviderInput): Promise<EditProvide
   const credentials = [apiKey, rotationKey].filter(Boolean);
   for (const credential of credentials) {
     if (!(await validateProviderCredential(provider, credential))) return { status: "validation-failed" };
+    const accessError = await novelAISavedModelAccessError(
+      provider,
+      [existing.llm_id, input.state.llm.llm_provider === provider ? input.state.llm.llm_id : null],
+      credential,
+    );
+    if (accessError) return { status: "novelai-unavailable", descriptionKey: accessError };
   }
 
   const changed: string[] = [];

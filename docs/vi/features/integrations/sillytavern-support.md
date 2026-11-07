@@ -6,7 +6,6 @@ head:
 description: "Nhập thẻ nhân vật và preset prompt SillyTavern vào Discord với TomoriBot. Mang các nhân vật có sẵn vào máy chủ của bạn."
 sidebar:
   order: 2
-aiGenerated: true
 ---
 
 TomoriBot có thể nhập các tài nguyên từ [SillyTavern](https://github.com/SillyTavern/SillyTavern): preset Trình quản lý prompt (điều khiển cấu trúc prompt), thẻ nhân vật (định nghĩa nhân vật) và lorebook (Character Book đính kèm hoặc tệp world info độc lập). Nếu bạn chưa từng sử dụng SillyTavern, bạn có thể yên tâm bỏ qua trang này.
@@ -27,7 +26,7 @@ Nếu tệp đã tải lên là thẻ SillyTavern hợp lệ không có siêu d�
 Quá trình nhập được xác thực trước khi lưu (giới hạn mặc định: 5.000 ký tự cho mỗi trường văn bản, 200 thuộc tính, 100 đoạn hội thoại mẫu mỗi bên, 100 từ kích hoạt). Để biết cơ chế chuyển đổi và ánh xạ trường, hãy xem [kiến trúc hỗ trợ thẻ](/architecture/integrations/sillytavern/card-support/).
 
 :::tip
-Character Book của thẻ sẽ trở thành [lorebook](/features/knowledge/lorebooks/) của persona đó. Các mục đã tắt vẫn sẽ ở trạng thái tắt. Việc nhập lại thẻ sẽ thay thế toàn bộ lorebook của persona, bao gồm cả các mục bạn tự thêm.
+Character Book của thẻ sẽ trở thành [lorebook](/features/knowledge/memory/lorebooks/) của persona đó. Các mục đã tắt vẫn sẽ ở trạng thái tắt. Việc nhập lại thẻ sẽ thay thế toàn bộ lorebook của persona, bao gồm cả các mục bạn tự thêm.
 :::
 
 ## Preset prompt
@@ -112,7 +111,7 @@ Các macro thời gian dùng chung một giá trị đồng hồ cho mỗi promp
 ### Lưu ý về độ tương thích
 
 - Các node bị tắt trong `prompt_order` vẫn không hoạt động cho đến khi được bật trong `/config` > Plugin > SillyTavern Presets. Các node trống và chỉ có nhận xét không bao giờ được gửi.
-- Thứ tự khối theo đúng thứ tự: đặt `chatHistory` trước `dialogueExamples` sẽ đặt lịch sử trò chuyện lên đầu tiên trong prompt.
+- Thứ tự marker là nguyên văn: đặt `chatHistory` trước `dialogueExamples` sẽ đặt lịch sử trò chuyện lên trước. Marker world info định vị lore Luôn bật (Always On); lore được kích hoạt, tài liệu truy xuất, thông tin hiện diện và đồng hồ nằm gần bốn lượt người nói mới nhất. Bộ nhớ ngắn hạn mới hoặc từ kênh khác cũng nằm gần các tin nhắn đó, hoặc gần hơn nếu được cấu hình.
 - Nội dung chèn sau lịch sử sẽ hợp nhất vào lịch sử hội thoại hiện có thay vì gửi dưới dạng tin nhắn độc lập.
 - Không hỗ trợ xử lý hậu kỳ Regex, các tham số lấy mẫu do preset định nghĩa (nhiệt độ, top-p) và preset phân lớp. Nhập các preset hoàn thành văn bản cũ sẽ bị loại bỏ các khối chỉ dành riêng cho ST.
 

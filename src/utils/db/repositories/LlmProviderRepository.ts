@@ -37,6 +37,8 @@ import {
   type VramHandoffBackend,
 } from "@/types/db/schema";
 import type { SQL } from "bun";
+import { clearNovelaiSubscriptionCache, invalidateNovelAISubscription } from "@/utils/cache/novelaiSubscriptionCache";
+import { decryptApiKey } from "@/utils/security/crypto";
 import { cache, invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCacheStore";
 import { DatabaseUnavailableError } from "@/types/errors";
 import { sql, withTransientDbRetry } from "@/utils/db/client";
@@ -100,6 +102,31 @@ async function applyVramHandoffChange(tx: SQL, change: VramHandoffChange | undef
  * scoped_model_registrations, scoped_model_registrations.
  */
 class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
+  private async invalidateNovelaiCredentials(
+    previous: Pick<SavedProviderConfigRow, "api_key" | "key_version"> | null,
+    saved: Pick<SavedProviderConfigRow, "api_key" | "key_version">,
+  ): Promise<void> {
+    if (
+      previous?.api_key &&
+      saved.api_key &&
+      previous.api_key.equals(saved.api_key) &&
+      previous.key_version === saved.key_version
+    ) {
+      return;
+    }
+    try {
+      for (const credential of [previous, saved]) {
+        if (credential?.api_key) {
+          invalidateNovelAISubscription(await decryptApiKey(credential.api_key, credential.key_version));
+        }
+      }
+    } catch {
+      // Corrupt stored ciphertext cannot identify the affected entry after a committed replacement.
+      clearNovelaiSubscriptionCache();
+      log.warn("Could not identify replaced NovelAI credentials; cleared subscription cache.");
+    }
+  }
+
   private invalidateWorkspace(serverId: number): void {
     // A committed deletion must invalidate even if the next database read fails.
     for (const [workspaceId, entry] of cache) {
@@ -2030,6 +2057,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
   ): Promise<boolean> {
     try {
       const provider = config.provider.toLowerCase();
+      const previous = provider === "novelai" ? await this.loadSavedProviderConfig(serverId, provider) : null;
       await cleanupSpeechCredentialBeforeChange({ kind: "server", ownerId: serverId }, provider, config.api_key);
       const fallbackModelRefsJson = JSON.stringify(config.fallback_model_refs ?? []);
       const logitBiasesJson = JSON.stringify(config.llm_logit_biases ?? []);
@@ -2091,6 +2119,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
         }
       }
 
+      if (provider === "novelai") await this.invalidateNovelaiCredentials(previous, config);
       log.info(`Upserted saved provider config for server ${serverId}, provider ${provider}`);
       if (options.serverDiscId) invalidateTomoriStateCache(options.serverDiscId);
       else this.invalidateWorkspace(serverId);
@@ -2135,6 +2164,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
   async upsertUserSavedProviderConfig(userId: number, config: UserSavedProviderConfigUpsert): Promise<boolean> {
     try {
       const provider = config.provider.toLowerCase();
+      const previous = provider === "novelai" ? await this.loadUserSavedProviderConfig(userId, provider) : null;
       await cleanupSpeechCredentialBeforeChange({ kind: "personal", ownerId: userId }, provider, config.api_key);
       const enabledCapabilitiesLiteral = this.toPostgresTextArrayLiteral(config.enabled_capabilities);
       const assignedCapabilitiesLiteral = this.toPostgresTextArrayLiteral(config.assigned_capabilities);
@@ -2145,7 +2175,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
         INSERT INTO user_saved_provider_configs (
           user_id, provider, api_key, key_version,
           llm_id, diffusion_model_id, embedding_model_id,
-          video_model_id, speech_design_model_id, speech_clone_model_id,
+          video_model_id, speech_design_model_id, speech_clone_model_id, transcription_model_id,
           nai_diffusion_model_id, vision_llm_id, nai_preset_name,
           thinking_level, enabled_capabilities, assigned_capabilities,
           llm_temperature, llm_top_p, llm_top_k,
@@ -2155,7 +2185,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
         ) VALUES (
           ${userId}, ${provider}, ${config.api_key}, ${config.key_version},
           ${config.llm_id}, ${config.diffusion_model_id}, ${config.embedding_model_id},
-          ${config.video_model_id ?? null}, ${config.speech_design_model_id ?? null}, ${config.speech_clone_model_id ?? null},
+          ${config.video_model_id ?? null}, ${config.speech_design_model_id ?? null}, ${config.speech_clone_model_id ?? null}, ${config.transcription_model_id ?? null},
           ${config.nai_diffusion_model_id}, ${config.vision_llm_id ?? null}, ${config.nai_preset_name},
           ${config.thinking_level}, ${enabledCapabilitiesLiteral}::text[], ${assignedCapabilitiesLiteral}::text[],
           ${config.llm_temperature ?? null}, ${config.llm_top_p ?? null}, ${config.llm_top_k ?? null},
@@ -2172,6 +2202,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
           video_model_id = EXCLUDED.video_model_id,
           speech_design_model_id = EXCLUDED.speech_design_model_id,
           speech_clone_model_id = EXCLUDED.speech_clone_model_id,
+          transcription_model_id = EXCLUDED.transcription_model_id,
           nai_diffusion_model_id = EXCLUDED.nai_diffusion_model_id,
           vision_llm_id = EXCLUDED.vision_llm_id,
           nai_preset_name = EXCLUDED.nai_preset_name,
@@ -2200,6 +2231,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
         }
       }
 
+      if (provider === "novelai") await this.invalidateNovelaiCredentials(previous, config);
       log.info(`Upserted user saved provider config for user ${userId}, provider ${provider}`);
       return true;
     } catch (error) {
@@ -2733,6 +2765,9 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
             `;
 
       const ok = result.count > 0;
+      if (ok && serverId !== null && params.capability === "transcription") {
+        await sql`UPDATE server_speech_configs SET transcription_model_id = NULL WHERE server_id = ${serverId}`;
+      }
       if (ok && serverId !== null && options.serverDiscId) invalidateTomoriStateCache(options.serverDiscId);
       return ok;
     } catch (error) {

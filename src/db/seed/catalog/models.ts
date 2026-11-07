@@ -11,6 +11,7 @@ import type {
   LlmInput,
   ModelSection,
   SpeechInput,
+  TranscriptionInput,
   VideoInput,
 } from "./types";
 
@@ -238,6 +239,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         maxOutputTokens: 65_536,
         inputPricePerMillion: 0.25,
         outputPricePerMillion: 1.5,
+        isFree: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
@@ -261,19 +263,22 @@ export const llmSections: ModelSection<LlmInput>[] = [
         maxOutputTokens: 65_536,
         inputPricePerMillion: 1.5,
         outputPricePerMillion: 9.0,
+        isFree: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
         seesYoutube: true,
         supportsStructoutput: true,
-        desc: "Fast and efficient Gemini 3.5 Flash model for general-purpose applications",
+        isDeprecated: true,
+        desc: "Fast and efficient Gemini 3.5 Flash model for general-purpose applications (deprecated, use gemini-3.6-flash)",
         i18n: {
-          ja: "汎用アプリケーション向けの高速で効率的なGemini 3.5 Flashモデル",
-          "pt-BR": "Modelo Gemini 3.5 Flash rápido e eficiente para uso geral",
-          "es-419": "Modelo Gemini 3.5 Flash rápido y eficiente para aplicaciones de uso general",
-          "zh-TW": "快速高效、適合一般用途的 Gemini 3.5 Flash 模型",
-          vi: "Model Gemini 3.5 Flash nhanh và hiệu quả cho ứng dụng đa mục đích",
-          "zh-CN": "快速高效、适合通用场景的 Gemini 3.5 Flash 模型",
+          ja: "汎用アプリケーション向けの高速で効率的なGemini 3.5 Flashモデル（非推奨、gemini-3.6-flashを使用）",
+          "pt-BR": "Modelo Gemini 3.5 Flash rápido e eficiente para uso geral (obsoleto, use gemini-3.6-flash)",
+          "es-419":
+            "Modelo Gemini 3.5 Flash rápido y eficiente para aplicaciones de uso general (obsoleto, usa gemini-3.6-flash)",
+          "zh-TW": "快速高效、適合一般用途的 Gemini 3.5 Flash 模型（已淘汰，請改用 gemini-3.6-flash）",
+          vi: "Model Gemini 3.5 Flash nhanh và hiệu quả cho ứng dụng đa mục đích (đã lỗi thời, hãy dùng gemini-3.6-flash)",
+          "zh-CN": "快速高效、适合通用场景的 Gemini 3.5 Flash 模型（已淘汰，请改用 gemini-3.6-flash）",
         },
       },
       {
@@ -283,6 +288,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         maxOutputTokens: 65_536,
         inputPricePerMillion: 0.3,
         outputPricePerMillion: 2.5,
+        isFree: true,
         isDefault: true,
         hasTools: true,
         seesImages: true,
@@ -306,6 +312,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         maxOutputTokens: 65_536,
         inputPricePerMillion: 1.5,
         outputPricePerMillion: 7.5,
+        isFree: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
@@ -331,19 +338,21 @@ export const llmSections: ModelSection<LlmInput>[] = [
         maxOutputTokens: 65_536,
         inputPricePerMillion: 0.75,
         outputPricePerMillion: 3.75,
+        isFree: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
         seesYoutube: true,
         supportsStructoutput: true,
-        desc: "Gemini 3.7 Flash model for general-purpose applications",
+        isDeprecated: true,
+        desc: "Gemini 3.7 Flash model for general-purpose applications (deprecated, use gemini-3.8-flash)",
         i18n: {
-          ja: "汎用アプリケーション向けのGemini 3.7 Flashモデル",
-          "pt-BR": "Modelo Gemini 3.7 Flash para uso geral",
-          "es-419": "Modelo Gemini 3.7 Flash para aplicaciones de uso general",
-          "zh-TW": "適合一般用途的 Gemini 3.7 Flash 模型",
-          vi: "Model Gemini 3.7 Flash cho ứng dụng đa mục đích",
-          "zh-CN": "适合通用场景的 Gemini 3.7 Flash 模型",
+          ja: "汎用アプリケーション向けのGemini 3.7 Flashモデル（非推奨、gemini-3.8-flashを使用）",
+          "pt-BR": "Modelo Gemini 3.7 Flash para uso geral (obsoleto, use gemini-3.8-flash)",
+          "es-419": "Modelo Gemini 3.7 Flash para aplicaciones de uso general (obsoleto, usa gemini-3.8-flash)",
+          "zh-TW": "適合一般用途的 Gemini 3.7 Flash 模型（已淘汰，請改用 gemini-3.8-flash）",
+          vi: "Model Gemini 3.7 Flash cho ứng dụng đa mục đích (đã lỗi thời, hãy dùng gemini-3.8-flash)",
+          "zh-CN": "适合通用场景的 Gemini 3.7 Flash 模型（已淘汰，请改用 gemini-3.8-flash）",
         },
       },
       {
@@ -441,6 +450,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         provider: "google",
         codename: "gemma-4-31b-it",
         contextWindow: 256_000,
+        isFree: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
@@ -459,6 +469,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         provider: "google",
         codename: "gemma-4-26b-a4b-it",
         contextWindow: 256_000,
+        isFree: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
@@ -519,6 +530,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         supportsStructoutput: true,
         inputPricePerMillion: 0.75,
         outputPricePerMillion: 3.75,
+        isFree: true,
         desc: "Fast multimodal Gemini 3.8 model for reasoning and general-purpose tasks",
       },
       {
@@ -1306,7 +1318,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
         codename: "glm-4-6",
         isDefault: true,
         isSmartest: true,
-        hasTools: true,
+        hasTools: false,
         desc: "Latest NovelAI roleplay model with enhanced creativity and character consistency",
         i18n: {
           ja: "創造性とキャラクター一貫性を強化した最新のNovelAIロールプレイモデル",
@@ -1315,6 +1327,20 @@ export const llmSections: ModelSection<LlmInput>[] = [
           "zh-TW": "創造力與角色一致性全面強化的最新 NovelAI 角色扮演模型",
           vi: "Model nhập vai mới nhất của NovelAI với độ sáng tạo và nhất quán nhân vật cao",
           "zh-CN": "创造力和角色一致性全面强化的最新 NovelAI 角色扮演模型",
+        },
+      },
+      {
+        provider: "novelai",
+        codename: "xialong-v1",
+        hasTools: false,
+        desc: "Xialong creative writing and roleplay model, requires an active NovelAI Opus subscription",
+        i18n: {
+          ja: "創作とロールプレイ向けのXialongモデル。有効なNovelAI Opusサブスクリプションが必要です",
+          "pt-BR": "Modelo Xialong para escrita criativa e roleplay, exige uma assinatura NovelAI Opus ativa",
+          "es-419": "Modelo Xialong para escritura creativa y rol, requiere una suscripción activa a NovelAI Opus",
+          "zh-TW": "Xialong 創作與角色扮演模型，需要有效的 NovelAI Opus 訂閱",
+          vi: "Model Xialong cho sáng tác và nhập vai, yêu cầu gói NovelAI Opus đang hoạt động",
+          "zh-CN": "Xialong 创作与角色扮演模型，需要有效的 NovelAI Opus 订阅",
         },
       },
       {
@@ -2325,6 +2351,7 @@ export const llmSections: ModelSection<LlmInput>[] = [
       {
         provider: "openrouter",
         codename: "other-model",
+        isDeprecated: true,
         hasTools: true,
         seesImages: true,
         seesVideos: true,
@@ -4170,12 +4197,27 @@ export const imageSections: ModelSection<ImageInput>[] = [
 
 export const videoSections: ModelSection<VideoInput>[] = [
   {
-    comment: "Google Veo Video Generation Models",
+    comment: "Google Video Generation Models",
     rows: [
       {
         provider: "google",
-        codename: "veo-3.1-generate-preview",
+        codename: "gemini-omni-1.1-flash",
         isDefault: true,
+        desc: "Google Gemini Omni Flash: videos with native audio from text or a starting image, in 16:9 or 9:16",
+        i18n: {
+          ja: "Google Gemini Omni Flash：テキストまたは開始画像から、ネイティブ音声付きの16:9または9:16の動画を生成",
+          "pt-BR": "Google Gemini Omni Flash: vídeos com áudio nativo a partir de texto ou imagem inicial",
+          "es-419":
+            "Google Gemini Omni Flash: videos con audio nativo a partir de texto o una imagen inicial, en 16:9 o 9:16",
+          "zh-TW": "Google Gemini Omni Flash：由文字或起始圖片生成附原生音訊的 16:9 或 9:16 影片",
+          vi: "Google Gemini Omni Flash: tạo video kèm âm thanh gốc từ văn bản hoặc ảnh khởi đầu, tỉ lệ 16:9 hoặc 9:16",
+          "zh-CN": "Google Gemini Omni Flash：由文字或起始图片生成带原生音频的 16:9 或 9:16 视频",
+        },
+      },
+      {
+        provider: "google",
+        codename: "veo-3.1-generate-preview",
+        isDeprecated: true,
         desc: "Google Veo 3.1 — 8-second 720p/1080p/4K videos with native audio generation",
         i18n: {
           ja: "Google Veo 3.1 — ネイティブオーディオ生成付き8秒の720p/1080p/4K動画",
@@ -4189,6 +4231,7 @@ export const videoSections: ModelSection<VideoInput>[] = [
       {
         provider: "google",
         codename: "veo-3.1-fast-generate-preview",
+        isDeprecated: true,
         desc: "Google Veo 3.1 Fast — faster video generation with reduced quality",
         i18n: {
           ja: "Google Veo 3.1 Fast — 品質を抑えた高速動画生成",
@@ -4202,6 +4245,7 @@ export const videoSections: ModelSection<VideoInput>[] = [
       {
         provider: "google",
         codename: "veo-3.1-lite-generate-preview",
+        isDeprecated: true,
         desc: "Google Veo 3.1 Lite — lightweight video generation (no 4K support)",
         i18n: {
           ja: "Google Veo 3.1 Lite — 軽量な動画生成（4K非対応）",
@@ -4465,6 +4509,21 @@ export const embeddingSections: ModelSection<EmbeddingInput>[] = [
         provider: "nvidia",
         codename: "nv-embed-v1",
         family: "nv-embed-v1",
+        isDeprecated: true,
+        desc: "Deprecated embedding model (not selectable)",
+        i18n: {
+          ja: "非推奨の埋め込みモデル（選択不可）",
+          "pt-BR": "Modelo de embedding obsoleto (não selecionável)",
+          "es-419": "Modelo de embeddings obsoleto (no seleccionable)",
+          "zh-TW": "已淘汰的嵌入模型（無法選用）",
+          vi: "Model embedding đã lỗi thời (không thể chọn)",
+          "zh-CN": "已淘汰的嵌入模型（无法选用）",
+        },
+      },
+      {
+        provider: "nvidia",
+        codename: "nvidia/nemotron-3.5-embed-1b",
+        family: "nemotron-3.5-embed-1b",
         isDefault: true,
         desc: "Default NVIDIA NIM embedding model for retrieval and document indexing",
         i18n: {
@@ -4652,6 +4711,35 @@ export const speechSections: ModelSection<SpeechInput>[] = [
         voiceMode: "clone",
         desc: "Free Fish S2.1 Pro voice cloning when available.",
         i18n: { ja: "利用可能な場合に使える無料版 Fish S2.1 Pro の音声クローン。" },
+      },
+    ],
+  },
+];
+
+export const transcriptionSections: ModelSection<TranscriptionInput>[] = [
+  {
+    comment: "Voice message transcription",
+    rows: [
+      {
+        provider: "google",
+        codename: "gemini-3.5-transcribe",
+        isDefault: true,
+        desc: "Voice message transcription with Gemini 3.5 Transcribe.",
+        i18n: { ja: "Gemini 3.5 Transcribe によるボイスメッセージの文字起こし。" },
+      },
+      {
+        provider: "vertex",
+        codename: "gemini-3.5-transcribe",
+        isDefault: true,
+        desc: "Voice message transcription with Vertex Gemini 3.5 Transcribe.",
+        i18n: { ja: "Vertex Gemini 3.5 Transcribe によるボイスメッセージの文字起こし。" },
+      },
+      {
+        provider: "openrouter",
+        codename: "openai/whisper-large-v3-turbo",
+        isDefault: true,
+        desc: "Voice message transcription with Whisper Large v3 Turbo, billed per second of audio.",
+        i18n: { ja: "Whisper Large v3 Turbo によるボイスメッセージの文字起こし。音声1秒ごとに課金。" },
       },
     ],
   },

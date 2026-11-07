@@ -12,6 +12,7 @@ import {
   llmSections,
   videoSections,
   speechSections,
+  transcriptionSections,
 } from "./models";
 import { bool, desc, jsonb, num, str } from "./sql";
 import type {
@@ -21,6 +22,7 @@ import type {
   LlmInput,
   ModelSection,
   SpeechInput,
+  TranscriptionInput,
   VideoInput,
 } from "./types";
 
@@ -262,6 +264,21 @@ const speechSpec: TableSpec<SpeechInput> = {
   sections: speechSections,
 };
 
+const transcriptionSpec: TableSpec<TranscriptionInput> = {
+  table: "transcription_models",
+  columns: "provider, codename, descriptions, is_default, is_deprecated",
+  tuple: (m) =>
+    [str(m.provider), str(m.codename), jsonb(localizedDescriptions(m)), bool(m.isDefault), bool(m.isDeprecated)].join(
+      ", ",
+    ),
+  onConflict: `ON CONFLICT (provider, codename) DO UPDATE SET
+    descriptions = EXCLUDED.descriptions, is_default = EXCLUDED.is_default,
+    is_deprecated = EXCLUDED.is_deprecated, updated_at = CURRENT_TIMESTAMP
+    WHERE COALESCE(transcription_models.is_scoped_registration, false) = false`,
+  hasSmartest: false,
+  sections: transcriptionSections,
+};
+
 function rowsOf<T extends RowLike>(spec: Pick<TableSpec<T>, "sections">): T[] {
   return spec.sections.flatMap((s) => s.rows);
 }
@@ -371,8 +388,8 @@ const PRICING_PENDING_CODENAMES = new Set<string>();
  * `/tool estimate cost`, so this invariant catches the next added model that forgets its catalog price.
  *
  * Excluded: deprecated rows (may predate verified pricing), Gemma codenames (open model, no first-party
- * paid tier), isFree endpoint variants (not billed), and {@link PRICING_PENDING_CODENAMES} (provider has
- * not published a rate yet).
+ * paid tier), and {@link PRICING_PENDING_CODENAMES} (provider has not published a rate yet). A free-tier
+ * row of a metered provider keeps its paid rates for cost reads, so is_free does not exempt it.
  *
  * Pure and exported so the invariant can be unit-tested with crafted rows.
  * @returns A list of violation messages (empty when valid).
@@ -381,7 +398,7 @@ function collectMeteredPriceViolations(rows: LlmInput[]): string[] {
   const errors: string[] = [];
   for (const row of rows) {
     if (!METERED_FIRST_PARTY_PROVIDERS.has(row.provider)) continue;
-    if (row.isDeprecated || row.isFree) continue;
+    if (row.isDeprecated) continue;
     if (row.codename.includes("gemma")) continue;
     if (PRICING_PENDING_CODENAMES.has(row.codename)) continue;
     const hasInput = typeof row.inputPricePerMillion === "number";
@@ -456,6 +473,7 @@ export function validateModels(): string[] {
   validateSpec(embeddingSpec, errors);
   validateSpec(decisionSpec, errors);
   validateSpec(speechSpec, errors);
+  validateSpec(transcriptionSpec, errors);
   for (const model of rowsOf(decisionSpec)) {
     if (
       model.provider !== "openrouter" ||
@@ -540,6 +558,7 @@ export function buildModelSeedStatements(): string[] {
     renderStatement(embeddingSpec),
     renderStatement(decisionSpec),
     renderStatement(speechSpec),
+    renderStatement(transcriptionSpec),
   ];
 }
 
@@ -556,6 +575,7 @@ export async function seedModelsFromCatalog(client: SQL): Promise<void> {
   const speechOwners = await client<Array<{ server_disc_id: string }>>`
     SELECT s.server_disc_id FROM servers s JOIN server_speech_configs c USING (server_id)
     WHERE c.speech_design_model_id IS NOT NULL OR c.speech_clone_model_id IS NOT NULL
+      OR c.transcription_model_id IS NOT NULL
   `;
   for (const statement of buildModelSeedStatements()) {
     await client.unsafe(statement);

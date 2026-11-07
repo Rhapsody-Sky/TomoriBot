@@ -42,6 +42,7 @@ import { formatPanelProse } from "@/utils/discord/ui/panelProse";
 import { moderationOperations, type ModerationScopeData } from "@/utils/moderation/moderationOperations";
 import { initializeLocalizer } from "@/utils/text/localizer";
 import { localizedCopy, localizedProse } from "../../helpers/localeCases";
+import { collectTextDisplays } from "../../helpers/panelLimits";
 
 function serializedPanelProse(markdown: string): string {
   return JSON.stringify(formatPanelProse(markdown)).slice(1, -1);
@@ -1079,6 +1080,32 @@ describe("moderation interaction routes", () => {
     expect(serialized).toContain(localizedCopy("en-US", "commands.moderation.member_access_title"));
   });
 
+  it("opens the Whitelist page named by the page option", async () => {
+    const mockInteraction = {
+      guildId: "guild-1",
+      memberPermissions: { has: () => true },
+    } as unknown as ChatInputCommandInteraction;
+
+    const payload = await buildInitialModerationPanel(
+      mockInteraction,
+      "en-US",
+      { resolveScope: async () => createScopeData() },
+      "whitelist:roles",
+    );
+
+    const selected: unknown[] = [];
+    const visit = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(visit);
+      else if (node && typeof node === "object") {
+        const record = node as Record<string, unknown>;
+        if (record.default === true) selected.push(record.value);
+        Object.values(record).forEach(visit);
+      }
+    };
+    visit(payload);
+    expect(selected).toEqual(["roles"]);
+  });
+
   it("executes moderation command with ephemeral deferReply", async () => {
     const log: string[] = [];
     const mockInteraction = {
@@ -1093,6 +1120,7 @@ describe("moderation interaction routes", () => {
     await executeModerationCommand(
       mockInteraction,
       "en-US",
+      null,
       async () => ({ components: [], flags: MessageFlags.IsComponentsV2 }) as never,
     );
 
@@ -2265,10 +2293,10 @@ describe("moderation interaction routes", () => {
 
       expect(resolveAddCalled).toBe(false);
       expect(replies).toHaveLength(1);
-      expect(replies[0]).toEqual({
-        content: "You need `Manage Server` permission to use this moderation panel.",
-        flags: 64,
-      });
+      expect((replies[0] as { flags: number }).flags).toBe(MessageFlags.Ephemeral | MessageFlags.IsComponentsV2);
+      expect(collectTextDisplays(replies[0]).join("\n")).toMatch(
+        localizedProse("en-US", "commands.moderation.permission_denied"),
+      );
     });
 
     it("opens whitelist channel add modal with nonce on fresh scope", async () => {

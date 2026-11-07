@@ -1,3 +1,4 @@
+import { pickHumanizerSettings } from "@/constants/humanizer";
 import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type {
   AnyThreadChannel,
@@ -56,6 +57,7 @@ import { type ToolStateForContext, getAvailableToolsWithMCP } from "@/tools/tool
 import { applyStreamContextAvailability } from "@/tools/availability";
 import { log } from "@/utils/misc/logger";
 import { toDeepseekApiModelName } from "@/providers/deepseek/deepseekShared";
+import { isListedInOpenAIModelCatalog } from "@/utils/provider/modelCatalogLookup";
 import { buildRuntimeLogitBiasMapForLlm } from "@/utils/provider/logitBiasResolver";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
@@ -63,6 +65,7 @@ import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-flash";
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_BETA_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/beta/chat/completions";
+const DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models";
 
 /**
  * Expressions/emojis classified per structured-output call during `/expressions initialize`.
@@ -82,6 +85,15 @@ export class DeepseekProvider
 {
   getInfo(): ProviderInfo {
     return deepseekProviderInfo;
+  }
+
+  async checkTextModel(apiKey: string, codename: string): Promise<boolean | null> {
+    return await isListedInOpenAIModelCatalog({
+      provider: "deepseek",
+      url: DEEPSEEK_MODELS_URL,
+      modelId: toDeepseekApiModelName(codename),
+      apiKey,
+    });
   }
 
   async validateApiKey(apiKey: string): Promise<ApiKeyValidationResult> {
@@ -308,7 +320,7 @@ export class DeepseekProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         seesImages: tomoriState.llm.sees_images,
         forceReason: streamingContext?.forceReason,

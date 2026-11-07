@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { TomoriState } from "@/types/db/schema";
+import { humanizerSettingsFromDegree } from "@/constants/humanizer";
 import * as keyRotation from "@/utils/security/keyRotation";
 import * as crypto from "@/utils/security/crypto";
 import * as providerFactory from "@/utils/provider/providerFactory";
@@ -18,7 +19,7 @@ function createState(): TomoriState {
       verbatim_tool_calling: true,
     }),
     config: {
-      humanizer_degree: 3,
+      ...humanizerSettingsFromDegree(3),
       send_message_limit: 4,
       tool_use_enabled: true,
       web_search_enabled: true,
@@ -132,7 +133,7 @@ describe("dashboard persona test chat isolation", () => {
     expect(safe.llm.verbatim_tool_calling).toBe(false);
     expect(source.llm.verbatim_tool_calling).toBe(true);
     expect(safe.config).toMatchObject({
-      humanizer_degree: 0,
+      ...humanizerSettingsFromDegree(0),
       send_message_limit: 0,
       tool_use_enabled: false,
       web_search_enabled: false,

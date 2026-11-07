@@ -2,7 +2,6 @@
 title: "提供方与模型"
 sidebar:
   order: 1
-aiGenerated: true
 ---
 
 TomoriBot连接到外部AI提供商，而不是托管内置模型。你可以连接Google Gemini、OpenRouter和NovelAI等托管服务，或将其指向本地自部署端点。你至少需要一位提供商才能开始聊天。
@@ -61,17 +60,20 @@ Brave Search与你的AI提供商分开，并通过图像、视频和新闻结果
 
 面板的标题为`服务器提供方`和`个人提供方`，因此打开时所有权很明确。
 
-在`/config` > `模型` > 交换机模型中，你可以跨八个功能槽分配模型和端点：
+在 `/config` > `模型` > `切换模型` 中，你可以在各个功能槽分配模型与端点：
 
 - **文本**：主要聊天模型。
 - **视觉**：当聊天模型无法读取图像时。
-- **嵌入**：为[文档知识库](/zh-CN/features/knowledge/memory/#document-knowledge-base-rag)提供支持。
+- **嵌入**：为[文档知识库](/features/knowledge/memory/documents/)提供支持。
 - **判定**：已注册的[判定模型](#decision-models)。[Natural Nudges](/features/chatting-personality/natural-nudges/#active-nudges)使用它来决定何时加入对话。
-- **标准图像**：标准图像生成（参见[图像生成](/zh-CN/features/capabilities/media-generation/image-generation/)）。
-- **NovelAI图像**：NovelAI图像生成。
+- **标准图像**：标准图像生成（参见[图像生成](/features/capabilities/media-generation/image-generation/)）。
+- **NovelAI 图像**：[NovelAI 图像生成](/features/integrations/novelai/#image-generation)。
 - **视频**：视频生成。
-- **TTS端点**：文本转语音语音端点。
-- **STT端点**：语音到文本的音频转录端点。
+- **TTS（语音设计）**：使用已保存的语音描述进行朗读。
+- **TTS（声音克隆）**：使用参考样本或提供方语音进行朗读。
+- **语音识别**：通过托管转写模型或自定义端点转写音频附件。先选择提供方，再选择其模型；`- 无模型` 会停止使用服务器密钥进行转写。
+
+模型列表会标出各提供方的默认模型，并以美元显示价格。文本和判定模型显示每 100 万输入和输出 token 的价格。OpenRouter 图像、视频和语音模型显示 OpenRouter 的计费单位：每张图片或每 100 万图片 token、按 TomoriBot 默认分辨率计算的每秒视频，以及每 100 万字符或每秒音频。自己注册的图像模型不显示价格。未列出价格的模型可能不按量计费，或未收录在 TomoriBot 的目录中，在使用前请查看提供方的定价页面。
 
 前六个槽选择模型目录记录。TTS和STT插槽改为选择服务器范围的端点，激活选定的端点而不是编写模型列。在`/providers`中注册并编辑这些端点。`/personal config`保留6个个人模型路由插槽，不包括个人TTS/STT端点选择器。
 
@@ -135,7 +137,7 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) 和OpenCode Zen (`https://opencode
 | Google双子座 | ✅ | ✅ | ✅ | ✅ | 提供免费模型 |
 | OpenRouter | ✅ | ✅ | ✅ | ✅ | 消耗 OpenRouter 积分 |
 | 人择 (API) | ✅ | ✅ | ✅ | - | 不是克劳德·代码 |
-| NovelAI | ✅ | ✅ | - | - | 只有GLM 4.6可以使用工具 |
+| NovelAI | ✅ | - | - | - | 文本模型无法使用工具；参见 [NovelAI](/features/integrations/novelai/) |
 | NVIDIA NIM | ✅ | ✅ | ✅ | ✅ | 提供免费模型 |
 | 深度搜索 | ✅ | ✅ | - | - | - |
 | Z.ai | ✅ | ✅ | ✅ | - | 免费模型； 🟡 ToS = 仅限编码和代理使用 |
@@ -165,12 +167,13 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) 和OpenCode Zen (`https://opencode
 
 ### 语音与音频
 
-| 提供方 | 文字转语音 | 语音转文本 |
+| 提供方 | 文本转语音 | 语音识别 |
 |---|---|---|
 | ElevenLabs | ✅ | ✅ |
-| Google Gemini | 语音设计 | 否 |
-| Vertex AI（标准、全局） | 语音设计 | 否 |
-| OpenRouter Fish | 语音克隆 | 否 |
+| Google Gemini | 语音设计 | ✅ |
+| Vertex AI（标准、全局） | 语音设计 | ✅ |
+| OpenRouter Fish | 声音克隆 | 否 |
 | OpenRouter Seed Audio | 语音设计 | 否 |
+| OpenRouter 转写模型 | 否 | ✅ |
 
 本地语音引擎包含在[自部署](/zh-CN/self-hosting/) 中。对于内置的网络搜索和URL读取，请参阅[工具和扩展](/zh-CN/features/capabilities/tools-and-extensions/#web-search--url-reading)。

@@ -11,7 +11,8 @@ import {
   reportProviderUsage,
   getProviderRequestFailureCopy,
 } from "@/utils/provider/providerUsage";
-import { reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { redactProviderDetail, reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { buildRestrictedErrorDetail } from "@/utils/discord/stream/errorUi";
 import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
 import { providerContentRejectionSchema } from "@/utils/provider/providerErrorClassification";
 /**
@@ -66,7 +67,8 @@ import { safeDownload } from "@/utils/security/safeDownload";
 import { executeAutoImageCommand } from "@/utils/image/autoImageCommand";
 import { prepareGeneratedImage } from "@/utils/image/generatedImageMetadata";
 import { buildImageGenerationInputAttachment } from "@/utils/image/imageGenerationInput";
-import { localizedStatusTitle, statusNote } from "@/utils/discord/ui/statusTitle";
+import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
+import { createStandardEmbed } from "@/utils/discord/embedHelper";
 import { withProviderOptionCopy } from "@/utils/provider/providerOptionRegistry";
 
 const MODAL_CUSTOM_ID = "generate_image_modal";
@@ -689,7 +691,13 @@ export async function execute(
     } else if (imageRoute.kind === "zai") {
       if (referenceImages.length > 0) {
         await modalSubmitInteraction.followUp({
-          content: statusNote("warning", localizer(locale, "commands.generate.image.zai_no_img2img_warning")),
+          embeds: [
+            createStandardEmbed(locale, {
+              titleKey: "commands.generate.image.reference_images_ignored_title",
+              descriptionKey: "commands.generate.image.zai_no_img2img_warning",
+              color: ColorCode.WARN,
+            }),
+          ],
         });
       }
       const { generateZaiNativeImage } = await import("@/providers/zai/zaiImageGeneration");
@@ -705,7 +713,13 @@ export async function execute(
     } else {
       if (referenceImages.length > 0) {
         await modalSubmitInteraction.followUp({
-          content: statusNote("warning", localizer(locale, "commands.generate.image.nvidia_no_img2img_warning")),
+          embeds: [
+            createStandardEmbed(locale, {
+              titleKey: "commands.generate.image.reference_images_ignored_title",
+              descriptionKey: "commands.generate.image.nvidia_no_img2img_warning",
+              color: ColorCode.WARN,
+            }),
+          ],
         });
       }
       const { generateNvidiaNativeImage } = await import("@/providers/nvidia/nvidiaImageGeneration");
@@ -820,7 +834,12 @@ export async function execute(
       return;
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const failureCode = createProviderToolFailure(error, { locale, provider: executionProvider }).failure?.code;
+    const failure = createProviderToolFailure(error, {
+      locale,
+      provider: executionProvider,
+      credentialScope: imageCreds.source,
+    }).failure;
+    const failureCode = failure?.code;
 
     const isBillingRefusal = /\b(?:billing|payment|quota|balance|credits?|402|PERMISSION_DENIED)\b/i.test(errorMessage);
     const isSafetyRefusal =
@@ -893,10 +912,15 @@ export async function execute(
     await replyInfoEmbed(replyTarget, locale, {
       titleKey: "commands.generate.image.error_generation_failed_title",
       descriptionKey: "commands.generate.image.error_generation_failed_description",
-      descriptionVars: { error: errorMessage },
+      descriptionVars: { error: failure?.reason ?? "" },
       color: ColorCode.ERROR,
       flags: MessageFlags.Ephemeral,
       tipKeys,
+      // The modal submit was deferred publicly, so this reply lands in the channel despite its flag.
+      restrictedDetail: buildRestrictedErrorDetail(redactProviderDetail(errorMessage, apiKey), {
+        textCredentialSource: imageCreds.source,
+        triggererDiscId: interaction.user.id,
+      }),
       ...recoveryOptions(),
     });
   } finally {

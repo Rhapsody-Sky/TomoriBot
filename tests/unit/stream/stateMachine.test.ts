@@ -1,9 +1,15 @@
-import { REST } from "discord.js";
+import { stubAllShardOwnership } from "../../helpers/shardOwnership";
+stubAllShardOwnership();
+import {
+  getUserImpersonationGenerationError,
+  UserImpersonationReportedProviderError,
+} from "@/utils/chat/userImpersonationCompletion";
+import { DiscordAPIError, REST } from "discord.js";
 import { ProviderRequestDeniedError, type ProviderUsageContext } from "@/utils/provider/providerUsage";
 import { localizer } from "@/utils/text/localizer";
 import { afterEach, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import type { Client, CommandInteraction, TextChannel, Webhook } from "discord.js";
-import { HumanizerDegree } from "@/types/db/schema";
+import { humanizerSettingsFromDegree } from "@/constants/humanizer";
 import type {
   ProcessedChunk,
   ProviderError,
@@ -21,6 +27,9 @@ import {
 import { createPersona } from "../../helpers/fixtures";
 import { makeFakeInteraction } from "../../helpers/fakeInteraction";
 import { log } from "@/utils/misc/logger";
+import { createChatResponseSink } from "@/utils/chat/responseEmitter";
+import { STREAM_INTERRUPTED_CODE } from "@/utils/provider/providerErrorClassification";
+import type { ChatTurnContext } from "@/utils/chat/types";
 
 const config: StreamConfig = {
   model: "fixture",
@@ -34,7 +43,7 @@ const config: StreamConfig = {
   maxTypingTimeMs: 0,
   minVisibleTypingDurationMs: 0,
   // Must stream because NONE aggregates the reply into one final send that a failed stream never posts.
-  humanizerDegree: HumanizerDegree.LIGHT,
+  humanizer: humanizerSettingsFromDegree(1),
   emojiUsageEnabled: false,
 };
 
@@ -55,7 +64,7 @@ function fixture(steps: Array<ProcessedChunk | (() => void)>, suppressUserErrors
   const context: StreamContext = {
     channel: { id: CHANNEL_ID, send, client: { rest: new REST() }, isThread: () => false } as unknown as TextChannel,
     client: {} as Client,
-    tomoriState: createPersona({ persona_nickname: "Mirri", config: { humanizer_degree: HumanizerDegree.LIGHT } }),
+    tomoriState: createPersona({ persona_nickname: "Mirri", config: { ...humanizerSettingsFromDegree(1) } }),
     contextItems: [],
     currentTurnModelParts: [],
     provider: "fixture",
@@ -142,9 +151,11 @@ describe("StreamOrchestrator failed-stream delivery", () => {
         errors.mockClear();
         warnings.mockClear();
         const retried = fixture([{ type: "error", error: malformed }], true);
-        expect((await new StreamOrchestrator().streamToDiscord(retried.provider, config, retried.context)).status).toBe(
-          "error",
-        );
+        const failed = await new StreamOrchestrator().streamToDiscord(retried.provider, config, retried.context);
+        expect(failed.status).toBe("error");
+        expect(
+          getUserImpersonationGenerationError({ status: "error", streamResults: [failed], personaResponses: [] }),
+        ).toBeInstanceOf(UserImpersonationReportedProviderError);
         expect(retried.send).not.toHaveBeenCalled();
 
         const final = fixture(
@@ -161,6 +172,9 @@ describe("StreamOrchestrator failed-stream delivery", () => {
         expect(incidents[0]?.[2]).toMatchObject({ metadata: { surfaced: false, providerErrorCode: "400" } });
         expect(retained).toHaveLength(finalAttempt === "failure" ? 1 : 0);
         if (finalAttempt === "failure") {
+          expect(
+            getUserImpersonationGenerationError({ status: "error", streamResults: [result], personaResponses: [] }),
+          ).toBeInstanceOf(UserImpersonationReportedProviderError);
           expect(retained[0]?.[2]).toMatchObject({
             metadata: { surfaced: true, providerErrorCode: "PROHIBITED_CONTENT" },
           });
@@ -189,7 +203,7 @@ describe("StreamOrchestrator failed-stream delivery", () => {
       context.tomoriState = createPersona({
         is_alter: true,
         persona_nickname: "Mirri",
-        config: { humanizer_degree: HumanizerDegree.LIGHT },
+        config: { ...humanizerSettingsFromDegree(1) },
       });
       context.personaUsername = "Mirri";
       context.personaAvatarUrl = "https://example.com/mirri.png";
@@ -282,6 +296,51 @@ describe("StreamOrchestrator failed-stream delivery", () => {
     }
   });
 
+  it("withholds only an interrupted stream's error notice when the turn will retry it", async () => {
+    const interruption: ProviderError = {
+      type: "provider_overloaded",
+      message: "Stream interrupted: Incomplete JSON segment at the end",
+      code: STREAM_INTERRUPTED_CODE,
+      retryable: true,
+    };
+    const cases = [
+      { error: interruption, retryStreamInterruption: true, sends: 0 },
+      { error: interruption, retryStreamInterruption: false, sends: 1 },
+      { error: providerError, retryStreamInterruption: true, sends: 1 },
+    ];
+    for (const { error, retryStreamInterruption, sends } of cases) {
+      const { context, provider, send } = fixture([{ type: "error", error }], false);
+      context.retryStreamInterruption = retryStreamInterruption;
+
+      const result = await new StreamOrchestrator().streamToDiscord(provider, config, context);
+
+      expect(result.status).toBe("error");
+      expect({ code: error.code, retryStreamInterruption, sends: send.mock.calls.length }).toEqual({
+        code: error.code,
+        retryStreamInterruption,
+        sends,
+      });
+    }
+  });
+
+  // Regression: sends were joined with no separator, so a continuation retry was shown the posted
+  // lines run together and echoed them back in that form.
+  it("records separately posted lines with the line break between them", async () => {
+    const { context, provider } = fixture(
+      [
+        { type: "text", content: POSTED_LINE },
+        { type: "text", content: "Mirri wrote a second line.\n" },
+        { type: "text", content: UNFINISHED_CLAUSE },
+        { type: "error", error: providerError },
+      ],
+      true,
+    );
+
+    const result = await new StreamOrchestrator().streamToDiscord(provider, config, context);
+
+    expect(result.accumulatedText).toBe(`${POSTED_LINE}Mirri wrote a second line.`);
+  });
+
   it("returns the posted text when the stream is aborted or throws", async () => {
     const abortController = new AbortController();
     const aborted = fixture(
@@ -307,6 +366,42 @@ describe("StreamOrchestrator failed-stream delivery", () => {
       const result = await new StreamOrchestrator().streamToDiscord(provider, config, context);
       expect(result.status).toBe("error");
       expect(result.accumulatedText).toContain(POSTED_LINE.trim());
+    }
+  });
+});
+
+describe("a refused stream send", () => {
+  beforeAll(async () => {
+    await initializeLocalizer();
+  });
+
+  it("is reported at error level once across the send, the orchestrator, and the generation report", async () => {
+    const errors = spyOn(log, "error").mockResolvedValue(undefined);
+    const warnings = spyOn(log, "warn").mockImplementation(() => {});
+    const metrics = spyOn(log, "metric").mockImplementation(() => {});
+    try {
+      const { context, provider, send } = fixture([{ type: "text", content: POSTED_LINE }], true);
+      send.mockRejectedValueOnce(
+        new DiscordAPIError({ code: 50006, message: "Cannot send an empty message" }, 50006, 400, "POST", "/", {}),
+      );
+      const turn = {
+        message: { id: "source_1" },
+        streamingContext: {},
+        isUserImpersonation: false,
+        shouldSurfaceUserErrors: false,
+      } as unknown as ChatTurnContext;
+
+      const result = await new StreamOrchestrator().streamToDiscord(provider, config, context);
+      await createChatResponseSink(turn).emitStreamResult(result);
+
+      expect(result.status).toBe("error");
+      expect(errors).toHaveBeenCalledTimes(1);
+      // Only the send site carries the delivery metadata, so it is the row worth keeping.
+      expect(errors.mock.calls[0]?.[2]).toMatchObject({ metadata: { usingWebhook: false } });
+    } finally {
+      errors.mockRestore();
+      warnings.mockRestore();
+      metrics.mockRestore();
     }
   });
 });

@@ -1,4 +1,5 @@
 import { utcOffsetSchema, type UserRow } from "@/types/db/schema";
+import { findHumanizerDependencyViolation, HUMANIZER_TOGGLES } from "@/constants/humanizer";
 import { resolvePrefillBlocker } from "@/utils/chat/assistantPrefill";
 import { addressingStyleSchema, USER_IDENTITY_FIELD_MAX_LENGTH, USER_NICKNAME_MAX_LENGTH } from "@/types/personaNaming";
 import { z } from "zod";
@@ -198,6 +199,17 @@ export class DashboardSettingsService {
     if (!patch) throw new DashboardServiceError("invalid_settings", 422, "The settings are invalid.");
 
     this.assertDiscordReferences(snapshot, sectionId, patch, validChannelIds);
+    if (
+      sectionId === "chat" &&
+      HUMANIZER_TOGGLES.some((key) => key in patch) &&
+      findHumanizerDependencyViolation({ ...snapshot.config, ...patch })
+    ) {
+      throw new DashboardServiceError(
+        "invalid_humanizer",
+        422,
+        localizer("en-US", "general.dashboard.humanizer_requires_streaming"),
+      );
+    }
     if (sectionId === "chat" && patch.response_prefill) {
       const mainPersona = snapshot.rawPersonas.find((persona) => !persona.is_alter);
       if (!mainPersona || resolvePrefillBlocker(mainPersona) === "model") {

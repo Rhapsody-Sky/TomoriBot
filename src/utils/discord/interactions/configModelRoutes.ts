@@ -1,4 +1,4 @@
-import { MessageFlags, type ModalSubmitInteraction } from "discord.js";
+import type { ModalSubmitInteraction } from "discord.js";
 import type { PanelAction } from "@/constants/panelActions";
 import type { ThinkingLevelValue } from "@/constants/thinkingLevels";
 import type { PanelReceipt, PanelReceiptTone } from "@/types/discord/panel";
@@ -12,22 +12,16 @@ import {
   CONFIG_FALLBACK_SLOT_COUNT,
   computeLogitBiasFingerprint,
   computeStopStringFingerprint,
-  configEndpointWindowSize,
   type ConfigModelCapability,
   CONFIG_MODEL_PAGE_SIZE,
   CONFIG_NAI_PRESET_PAGE_SIZE,
   CONFIG_NAI_PRESET_NEXT_VALUE,
   CONFIG_NAI_PRESET_PREVIOUS_VALUE,
   computeNaiPresetFingerprint,
-  isConfigCatalogModelCapability,
   type ConfigPage,
   type ConfigPanelRoute,
 } from "@/utils/discord/configPanelCatalog";
 import {
-  computeConfigEndpointFingerprint,
-  decodeConfigEndpointPageValue,
-  decodeConfigEndpointSelection,
-  normalizeConfigCapabilityEndpoints,
   decodeConfigProviderPageValue,
   decodeConfigProviderRangeValue,
 } from "@/utils/discord/interactions/configModelLoaders";
@@ -44,11 +38,11 @@ import {
 import {
   repaint,
   staleReceipt,
-  missingScopeMessageKey,
-  outdatedConfigPanelMessage,
   type ConfigRepaintOptions,
   type ConfigRouteDependencies,
   type ConfigScope,
+  missingScopeReceipt,
+  outdatedConfigPanelReceipt,
 } from "@/utils/discord/interactions/configRouteContext";
 import { performPanelAction } from "@/utils/discord/interactions/panelController";
 import type { GlobalRoutableInteraction } from "@/utils/discord/interactions/routeRegistry";
@@ -81,12 +75,14 @@ import {
   buildConfigModelSelectModal,
 } from "@/utils/discord/ui/configModelModals";
 import { NAI_IMAGE_NOISE_SCHEDULES, NAI_IMAGE_SAMPLERS } from "@/utils/image/naiImageParams";
+import { formatImageTagsForConfirmation } from "@/utils/image/tagHelpers";
 import { safeDownload } from "@/utils/security/safeDownload";
 import { log } from "@/utils/misc/logger";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { getProviderOptionFallbackRefOwner } from "@/utils/provider/providerOptionRegistry";
 import { localizer } from "@/utils/text/localizer";
 import { getProviderRequestFailureCopy, type ProviderRequestDeniedError } from "@/utils/provider/providerUsage";
+import { replyPanelReceipt } from "@/utils/discord/ui/panel";
 
 /** Routes that answer with a modal, which is its own acknowledgement and must not be deferred. */
 export const CONFIG_MODEL_MODAL_OPEN_ACTIONS = new Set<ConfigPanelRoute["action"]>([
@@ -100,14 +96,12 @@ export const CONFIG_MODEL_MODAL_OPEN_ACTIONS = new Set<ConfigPanelRoute["action"
   "logit-manage-select",
   "fallback-provider-select",
   "model-provider-select",
-  "endpoint-select",
   "image-tags-default-open",
   "nai-parameters-open",
 ]);
 
 export const CONFIG_MODEL_SELECT_ACTIONS = new Set<ConfigPanelRoute["action"]>([
   "model-provider-select",
-  "endpoint-select",
   "parameters-provider-select",
   "nai-preset-select",
   "fallback-provider-select",
@@ -229,27 +223,22 @@ export async function handleConfigModelModalOpen(
 
   const locale = route.locale;
   if (!isConfigRouteAuthorized(route, actor)) {
-    await interaction.reply({
-      content: localizer(locale, "commands.config.panel.denied_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "error",
+      heading: localizer(locale, "commands.config.panel.denied_heading"),
+      detail: localizer(locale, "commands.config.panel.denied_detail"),
     });
     return true;
   }
 
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {
-    await interaction.reply({
-      content: localizer(locale, missingScopeMessageKey(interaction, dependencies)),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, missingScopeReceipt(locale, interaction, dependencies));
     return true;
   }
   const state = serverStateFromScope(scope);
   if (!state) {
-    await interaction.reply({
-      content: outdatedConfigPanelMessage(locale),
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyPanelReceipt(interaction, outdatedConfigPanelReceipt(locale));
     return true;
   }
 
@@ -260,9 +249,10 @@ export async function handleConfigModelModalOpen(
     // The view falls back to the active provider when the requested one is gone, so an exact match
     // is what stops the modal prefilling from a provider the submit would then refuse to write.
     if (view.selectedProvider?.toLowerCase() !== route.provider.toLowerCase()) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(locale, "commands.config.panel.stale_heading"),
+        detail: localizer(locale, "commands.config.panel.stale_detail"),
       });
       return true;
     }
@@ -285,12 +275,13 @@ export async function handleConfigModelModalOpen(
     // Beyond the modal's checkbox capacity a submission could only ever describe a prefix of the
     // list, and unchecked-means-remove would read the remainder as deselected.
     if (stopStrings.length > CONFIG_STOP_STRING_CAPACITY) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stop_too_many_detail", {
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(locale, "general.panel_notice.limit_heading"),
+        detail: localizer(locale, "commands.config.panel.stop_too_many_detail", {
           count: stopStrings.length,
           max_entries: CONFIG_STOP_STRING_CAPACITY,
         }),
-        flags: MessageFlags.Ephemeral,
       });
       return true;
     }
@@ -351,16 +342,18 @@ export async function handleConfigModelModalOpen(
         : Number.parseInt(interaction.isStringSelectMenu() ? (interaction.values[0] ?? "") : "", 10);
     const entries = state.config.llm_logit_biases ?? [];
     if (entries.length === 0) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.logit_none_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "info",
+        heading: localizer(locale, "general.panel_notice.empty_heading"),
+        detail: localizer(locale, "commands.config.panel.logit_none_detail"),
       });
       return true;
     }
     if (!Number.isInteger(requestedStart) || requestedStart < 0) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(locale, "commands.config.panel.stale_heading"),
+        detail: localizer(locale, "commands.config.panel.stale_detail"),
       });
       return true;
     }
@@ -384,13 +377,6 @@ export async function handleConfigModelModalOpen(
   }
 
   if (route.action === "model-provider-select") {
-    if (!isConfigCatalogModelCapability(route.capability)) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
-      });
-      return true;
-    }
     const capability = route.capability;
     const selected = interaction.isStringSelectMenu() ? (interaction.values[0] ?? null) : null;
 
@@ -418,9 +404,10 @@ export async function handleConfigModelModalOpen(
     const chosenSlice = selected ? decodeConfigProviderPageValue(selected) : null;
     const chosenProvider = chosenSlice?.provider ?? selected;
     if (!chosenProvider) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(locale, "commands.config.panel.stale_heading"),
+        detail: localizer(locale, "commands.config.panel.stale_detail"),
       });
       return true;
     }
@@ -432,9 +419,10 @@ export async function handleConfigModelModalOpen(
     ]);
     const provider = providers.find((candidate) => candidate.toLowerCase() === chosenProvider.toLowerCase());
     if (!provider) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(locale, "commands.config.panel.stale_heading"),
+        detail: localizer(locale, "commands.config.panel.stale_detail"),
       });
       return true;
     }
@@ -444,11 +432,12 @@ export async function handleConfigModelModalOpen(
         ? speculativeModels
         : await dependencies.loadModelChoices(state, capability, provider, locale);
     if (models.length === 0) {
-      await interaction.reply({
-        content: localizer(locale, "commands.model.text.no_models_description", {
+      await replyPanelReceipt(interaction, {
+        tone: "error",
+        heading: localizer(locale, "commands.model.text.no_models_title"),
+        detail: localizer(locale, "commands.model.text.no_models_description", {
           provider: getProviderDisplayName(provider),
         }),
-        flags: MessageFlags.Ephemeral,
       });
       return true;
     }
@@ -478,9 +467,10 @@ export async function handleConfigModelModalOpen(
 
     const sliceStart = chosenSlice?.start ?? 0;
     if (sliceStart % CONFIG_MODEL_PAGE_SIZE !== 0 || sliceStart >= models.length) {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(locale, "commands.config.panel.stale_heading"),
+        detail: localizer(locale, "commands.config.panel.stale_detail"),
       });
       return true;
     }
@@ -499,51 +489,25 @@ export async function handleConfigModelModalOpen(
     return true;
   }
 
-  if (route.action === "endpoint-select") {
-    if (route.capability !== "stt") {
-      await interaction.reply({
-        content: localizer(locale, "commands.config.panel.stale_detail"),
-        flags: MessageFlags.Ephemeral,
-      });
-      return true;
-    }
-    const selected = interaction.isStringSelectMenu() ? (interaction.values[0] ?? "") : "";
-    const start = decodeConfigEndpointPageValue(selected);
-    if (start !== null) {
-      await interaction.deferUpdate();
-      await repaint(interaction, {
-        locale,
-        scope,
-        category: "models",
-        page: "switch",
-        selectedPersonaId: null,
-        endpointPage: { capability: "stt", start },
-        dependencies,
-      });
-      return true;
-    }
-    // Endpoint selections are acknowledged by the post-defer handler so it can re-read the list
-    // and reject a stale position or fingerprint before the canonical write is reached.
-    return false;
-  }
-
   // The fallback provider select opens its modal directly: one option per option-page, so the
   // range is already chosen by the time the five slot selects are built.
   const chosen = interaction.isStringSelectMenu() ? (interaction.values[0] ?? null) : null;
   const decoded = chosen ? decodeConfigProviderPageValue(chosen) : null;
   if (!decoded) {
-    await interaction.reply({
-      content: localizer(locale, "commands.config.panel.stale_detail"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "warning",
+      heading: localizer(locale, "commands.config.panel.stale_heading"),
+      detail: localizer(locale, "commands.config.panel.stale_detail"),
     });
     return true;
   }
 
   const options = await dependencies.loadFallbackOptions(state, decoded.provider, locale);
   if (options.length === 0) {
-    await interaction.reply({
-      content: localizer(locale, "commands.model.fallback.no_models_description"),
-      flags: MessageFlags.Ephemeral,
+    await replyPanelReceipt(interaction, {
+      tone: "info",
+      heading: localizer(locale, "general.panel_notice.empty_heading"),
+      detail: localizer(locale, "commands.model.fallback.no_models_description"),
     });
     return true;
   }
@@ -623,66 +587,8 @@ async function handleSwitchModels(context: ConfigModelRouteContext): Promise<boo
   const locale = route.locale;
   const state = serverStateFromScope(context.scope);
   if (!state) return false;
-  if (
-    route.action !== "model-provider-select" &&
-    route.action !== "model-modal-submit" &&
-    route.action !== "endpoint-select"
-  ) {
+  if (route.action !== "model-provider-select" && route.action !== "model-modal-submit") {
     return false;
-  }
-  if (route.action === "endpoint-select") {
-    if (route.capability !== "stt") {
-      await baseRepaint(context, "switch", { receipt: staleReceipt(locale) });
-      return true;
-    }
-    const selected = context.selectedValue ? decodeConfigEndpointSelection(context.selectedValue) : null;
-    const endpoints = normalizeConfigCapabilityEndpoints(await dependencies.loadCapabilityEndpoints(state));
-    const fingerprint = computeConfigEndpointFingerprint(endpoints);
-    const endpoint =
-      selected && selected.fingerprint === fingerprint && selected.position < endpoints.length
-        ? endpoints[selected.position]
-        : undefined;
-    if (!selected || !endpoint || !Number.isSafeInteger(endpoint.id) || endpoint.id <= 0) {
-      await baseRepaint(context, "switch", { receipt: staleReceipt(locale) });
-      return true;
-    }
-
-    const action = await performPanelAction(
-      () =>
-        dependencies.modelOperations.activateTranscriptionEndpoint({
-          tomoriState: state,
-          serverDiscId: context.scope.serverDiscId,
-          customEndpointId: endpoint.id,
-        }),
-      () => dependencies.resolveScope(context.interaction, true),
-    );
-    context.scope = action.state ?? context.scope;
-    const result = action.result;
-    if (result.status === "success") recordModelAction(context, "server-config.workspace.model.endpoint-select");
-
-    const windowSize = configEndpointWindowSize(endpoints.length);
-    await baseRepaint(context, "switch", {
-      endpointPage: { capability: "stt", start: Math.floor(selected.position / windowSize) * windowSize },
-      receipt:
-        result.status === "success"
-          ? receipt(
-              locale,
-              "success",
-              "commands.config.panel.endpoint_activated_heading",
-              "commands.config.panel.endpoint_activated_detail",
-              { endpoint: result.identity },
-            )
-          : result.status === "already-active"
-            ? noChangesReceipt(locale, "commands.config.panel.endpoint_already_active_detail")
-            : result.status === "not-found"
-              ? staleReceipt(locale)
-              : writeFailedReceipt(locale),
-    });
-    return true;
-  }
-  if (!isConfigCatalogModelCapability(route.capability)) {
-    await baseRepaint(context, "switch", { receipt: staleReceipt(locale) });
-    return true;
   }
   const capability = route.capability;
 
@@ -749,27 +655,29 @@ async function handleSwitchModels(context: ConfigModelRouteContext): Promise<boo
 
   await baseRepaint(context, "switch", {
     receipt:
-      result.status === "provider-denied"
-        ? providerDeniedReceipt(locale, result.denied)
-        : result.status === "already-selected"
-          ? noChangesReceipt(locale, "commands.config.panel.model_already_selected_detail")
-          : result.status === "openrouter-moved"
-            ? receipt(
-                locale,
-                "warning",
-                "commands.config.panel.model_moved_heading",
-                "commands.config.panel.model_moved_detail",
-              )
-            : result.status === "no-models"
+      result.status === "novelai-unavailable"
+        ? receipt(locale, "error", "commands.providers.change_failed", result.descriptionKey)
+        : result.status === "provider-denied"
+          ? providerDeniedReceipt(locale, result.denied)
+          : result.status === "already-selected"
+            ? noChangesReceipt(locale, "commands.config.panel.model_already_selected_detail")
+            : result.status === "openrouter-moved"
               ? receipt(
                   locale,
-                  "error",
-                  "commands.model.text.no_models_title",
-                  "commands.model.text.no_models_description",
+                  "warning",
+                  "commands.config.panel.model_moved_heading",
+                  "commands.config.panel.model_moved_detail",
                 )
-              : result.status === "not-found"
-                ? staleReceipt(locale)
-                : writeFailedReceipt(locale),
+              : result.status === "no-models"
+                ? receipt(
+                    locale,
+                    "error",
+                    "commands.model.text.no_models_title",
+                    "commands.model.text.no_models_description",
+                  )
+                : result.status === "not-found"
+                  ? staleReceipt(locale)
+                  : writeFailedReceipt(locale),
   });
   return true;
 }
@@ -1391,7 +1299,7 @@ async function handleImageGeneration(context: ConfigModelRouteContext): Promise<
               result.reset
                 ? "commands.config.panel.image_tags_reset_detail"
                 : "commands.config.panel.image_tags_updated_detail",
-              { tags: result.tags.join(", ") },
+              { tags: formatImageTagsForConfirmation(result.tags) },
             )
           : result.status === "no-tags"
             ? receipt(

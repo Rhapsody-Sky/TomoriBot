@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { customEndpointSchema, personaSpriteSchema } from "@/types/db/schema";
 import { GenerateVoiceMessageTool } from "@/tools/functionCalls/generateVoiceMessageTool";
 import { ConditioningInteractionTool } from "@/tools/functionCalls/conditioningInteractionTool";
@@ -23,12 +23,12 @@ import type { TextQuotaTriggerState } from "@/utils/chat/textQuotaState";
 // in its own process (per-file isolation in runTests.ts) fails to link exports
 // like `serverScheduleRepository` that the graph imports but the stub omitted.
 import * as realRepositories from "@/utils/db/repositories";
+import * as speechRepository from "@/utils/db/repositories/SpeechRepository";
 // Same link-time capture for every other module mocked below, for the same
 // reason: a partial factory leaks for the rest of the run and breaks files
 // loaded later. Spreading the real namespace keeps each mock full-surface.
 import * as realChannelLlmCache from "@/utils/cache/channelLlmCache";
 import * as realAdmissionGuards from "@/utils/chat/admissionGuards";
-import * as realNovelaiCapabilityCache from "@/utils/cache/novelaiCapabilityCache";
 import * as realNovelaiSubscriptionCache from "@/utils/cache/novelaiSubscriptionCache";
 import * as realOpenrouterCapabilityCache from "@/utils/cache/openrouterCapabilityCache";
 import * as realToolLoop from "@/utils/chat/toolLoop";
@@ -43,6 +43,7 @@ import { createScopedModuleMocker, overrideMembers, stubLogMembers } from "../..
 import { VERBATIM_TOOL_CALLING_NUDGE } from "@/utils/tools/verbatimToolCalling";
 import { computeSafeInputBudget } from "@/utils/text/contextTruncator";
 import { sumTurnUsage } from "@/utils/text/tokenEstimate";
+import { STREAM_INTERRUPTED_CODE } from "@/utils/provider/providerErrorClassification";
 
 const queuedResults: GenerationTurnResult[] = [];
 // Parallel to queuedResults: the delivered-message refs each runToolLoop call should push into the
@@ -52,12 +53,17 @@ const queuedDeliveries: Array<Array<{ messageId: string; channelId: string; webh
   [];
 const toolLoopCalls: Array<{
   model: string;
+  outputPrefill: string | undefined;
   suppressUserErrors: boolean | undefined;
+  retryStreamInterruption: boolean | undefined;
   contextItems: ToolLoopParams["context"]["contextItems"];
   numCtx: number | null | undefined;
   apiKey: string;
   credentialSource: ChatTurnContext["textCredentialSource"];
 }> = [];
+const rotationKeyQueue: realKeyRotation.SelectedKeyResult[] = [];
+const subscriptionLimits = new Map<string, number>();
+const subscriptionReads: string[] = [];
 const providerConfigCalls: Array<{ model: string; apiKey: string }> = [];
 const fallbackNoticeCalls: Array<{
   failures: FallbackNoticeAttempt[];
@@ -106,7 +112,6 @@ type TestStopContext = {
 const scopedMock = createScopedModuleMocker(mock, {
   "@/utils/cache/channelLlmCache": realChannelLlmCache,
   "@/utils/chat/admissionGuards": realAdmissionGuards,
-  "@/utils/cache/novelaiCapabilityCache": realNovelaiCapabilityCache,
   "@/utils/cache/novelaiSubscriptionCache": realNovelaiSubscriptionCache,
   "@/utils/cache/openrouterCapabilityCache": realOpenrouterCapabilityCache,
   "@/utils/db/repositories": realRepositories,
@@ -133,14 +138,12 @@ scopedMock.module("@/utils/cache/channelLlmCache", () => ({
   getCachedChannelLlm: async () => null,
 }));
 
-scopedMock.module("@/utils/cache/novelaiCapabilityCache", () => ({
-  ...realNovelaiCapabilityCache,
-  getNovelAITokenLimits: () => undefined,
-}));
-
 scopedMock.module("@/utils/cache/novelaiSubscriptionCache", () => ({
   ...realNovelaiSubscriptionCache,
-  getCachedContextTokens: () => undefined,
+  getCachedNovelAISubscription: (apiKey: string) => {
+    subscriptionReads.push(apiKey);
+    return { tier: subscriptionLimits.get(apiKey) === 4096 ? 1 : 3, active: true };
+  },
   refreshNovelAISubscription: async () => undefined,
 }));
 
@@ -312,12 +315,13 @@ scopedMock.module("@/utils/security/keyRotation", () => ({
   MAX_KEY_ATTEMPTS: 3,
   hasAvailableRotationKey: async (state: TomoriState, excluded: number[] = []) => {
     rotationChecks.push(state.llm.llm_codename);
-    return rotationEnabled && !excluded.includes(42);
+    return rotationKeyQueue.length > 0 || (rotationEnabled && !excluded.includes(42));
   },
   recordKeyError: async () => undefined,
   recordKeySuccess: async () => undefined,
   selectApiKey: async (state: TomoriState, excluded: number[] = []) => {
     rotationSelections.push(state.llm.llm_codename);
+    if (rotationKeyQueue.length > 0) return rotationKeyQueue.shift() ?? null;
     if (!rotationEnabled) return null;
     const rotationKeyId = excluded.includes(41) ? 42 : 41;
     return { apiKey: `server-pool-${rotationKeyId}`, rotationKeyId, isMainKey: false };
@@ -378,7 +382,9 @@ async function runToolLoopMock(params: ToolLoopParams): Promise<GenerationTurnRe
     params.context.streamingContext.deferredTimeoutNotice = undefined;
     toolLoopCalls.push({
       model: params.tomoriState.llm.llm_codename,
+      outputPrefill: params.context.streamingContext.outputPrefill,
       suppressUserErrors: params.context.streamingContext.suppressUserErrors,
+      retryStreamInterruption: params.context.streamingContext.retryStreamInterruption,
       contextItems: params.context.contextItems,
       numCtx: params.tomoriState.config.custom_num_ctx,
       apiKey: params.providerConfig.apiKey,
@@ -576,6 +582,7 @@ const fakeProvider = {
       apiKey,
       model: tomoriState.llm.llm_codename,
       temperature: tomoriState.config.llm_temperature ?? 0.7,
+      ...(tomoriState.llm.has_tools && { tools: [{ name: "update_short_term_memory" }] }),
     };
   },
   getInfo: () => ({ name: "google" }),
@@ -714,6 +721,26 @@ function partialFailure(status: "error" | "timeout", text: string): GenerationTu
   };
 }
 
+/** An attempt whose stream Google ended partway through after `text` was posted. */
+function interruptedStream(text: string): GenerationTurnResult {
+  return {
+    status: "error",
+    streamResults: [
+      {
+        status: "error",
+        data: {
+          type: "provider_overloaded",
+          code: STREAM_INTERRUPTED_CODE,
+          message: "Stream interrupted: Incomplete JSON segment at the end",
+          retryable: true,
+        },
+        accumulatedText: text,
+      },
+    ],
+    personaResponses: [{ personaName: "Tomori", text, personaId: 10, personaLineageId: 100 }],
+  };
+}
+
 function successfulReply(text = "ok"): GenerationTurnResult {
   return {
     status: "completed",
@@ -794,6 +821,9 @@ describe("runGenerationTurn fallback behavior", () => {
   });
 
   beforeEach(async () => {
+    rotationKeyQueue.length = 0;
+    subscriptionLimits.clear();
+    subscriptionReads.length = 0;
     fetchStub = stubGlobalFetch(() => Response.json({ data: [] }));
     queuedResults.length = 0;
     queuedDeliveries.length = 0;
@@ -827,6 +857,103 @@ describe("runGenerationTurn fallback behavior", () => {
     const { StreamOrchestrator } = await import("@/utils/discord/streamOrchestrator");
     StreamOrchestrator.clearStopRequest("channel_1");
     StreamOrchestrator.getAndClearStopContext("channel_1");
+  });
+
+  it.each([
+    [4096, 8192],
+    [8192, 4096],
+  ])("passes original NovelAI history and one prefill to each rotated credential (%i to %i)", async (firstLimit, nextLimit) => {
+    const model = { ...makeLlm(1, "kayra-v1"), llm_provider: "novelai" };
+    const context = makeContext(model, makeLlm(2, "unused"));
+    context.tomoriState.fallback_chain = [];
+    context.assistantPrefill = { text: "continue this fragment", source: "manual" };
+    context.contextItems = Array.from({ length: 6 }, (_, pair) => [
+      {
+        role: "user" as const,
+        metadataTag: ContextItemTag.DIALOGUE_HISTORY,
+        messageId: `user-${pair}`,
+        parts: [{ type: "text" as const, text: `Mirri: ${"x".repeat(1500)}` }],
+      },
+      {
+        role: "model" as const,
+        metadataTag: ContextItemTag.DIALOGUE_HISTORY,
+        messageId: `model-${pair}`,
+        parts: [{ type: "text" as const, text: `Tomori: ${"y".repeat(1500)}` }],
+      },
+    ]).flat();
+    const originalItems = [...context.contextItems];
+    rotationKeyQueue.push(
+      { apiKey: "first-key", rotationKeyId: 11, isMainKey: false },
+      { apiKey: "next-key", rotationKeyId: 12, isMainKey: false },
+    );
+    subscriptionLimits.set("first-key", firstLimit);
+    subscriptionLimits.set("next-key", nextLimit);
+    queuedResults.push(personalRouteFailure(), successfulReply());
+    const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+    await runGenerationTurn(context, collectingSink());
+    expect(toolLoopCalls.map((call) => call.apiKey)).toEqual(["first-key", "next-key"]);
+    expect(subscriptionReads).toEqual([]);
+    for (const call of toolLoopCalls) expect(call.contextItems.filter((item) => item.messageId)).toEqual(originalItems);
+    for (const call of toolLoopCalls) {
+      expect(call.outputPrefill).toBe("Tomori: continue this fragment");
+      expect(
+        call.contextItems.filter((item) =>
+          item.parts.some((part) => part.type === "text" && part.text.includes("continue this fragment")),
+        ),
+      ).toHaveLength(1);
+      expect(call.contextItems.at(-1)?.role).toBe("model");
+    }
+  });
+
+  it("budgets personal and DM NovelAI turns with the selected personal credential", async () => {
+    const nai = { ...makeLlm(3, "kayra-v1"), llm_provider: "novelai" };
+    for (const isDMChannel of [false, true]) {
+      const context = makePersonalContext(makeLlm(1, "server"), makeLlm(2, "fallback"), nai);
+      context.personalTextProvider = "novelai";
+      context.isDMChannel = isDMChannel;
+      subscriptionLimits.set("personal-key", 4096);
+      queuedResults.push(successfulReply());
+      const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+      await runGenerationTurn(context, collectingSink());
+      expect(toolLoopCalls.at(-1)?.apiKey).toBe("personal-key");
+      expect(subscriptionReads).toEqual([]);
+    }
+    expect(subscriptionReads).not.toContain("server-key");
+  });
+
+  it("selects native context for NovelAI primary, personal, and fallback attempts while preserving preset context for other providers", async () => {
+    const nai = { ...makeLlm(3, "kayra-v1"), llm_provider: "novelai" };
+    const ordinary = makeLlm(1, "ordinary-model");
+    const contexts = [
+      makeContext(nai, ordinary),
+      makeContext(ordinary, nai),
+      makePersonalContext(ordinary, ordinary, nai),
+    ];
+    const presetItem = {
+      role: "user" as const,
+      metadataTag: ContextItemTag.DIALOGUE_HISTORY,
+      parts: [{ type: "text" as const, text: "preset-marker" }],
+    };
+    const nativeItem = {
+      role: "user" as const,
+      metadataTag: ContextItemTag.DIALOGUE_HISTORY,
+      messageId: "trigger",
+      completionText: "Mirri: native-marker",
+      parts: [{ type: "text" as const, text: "Mirri: native-marker" }],
+    };
+    for (const [index, context] of contexts.entries()) {
+      const firstCall = toolLoopCalls.length;
+      context.contextItems = [presetItem];
+      context.nativeContextItems = [nativeItem];
+      if (index === 2) context.personalTextProvider = "novelai";
+      queuedResults.push(personalRouteFailure(), successfulReply());
+      const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+      await runGenerationTurn(context, collectingSink());
+      for (const call of toolLoopCalls.slice(firstCall)) {
+        expect(call.contextItems).toContainEqual(call.model === "kayra-v1" ? nativeItem : presetItem);
+        expect(call.contextItems).not.toContainEqual(call.model === "kayra-v1" ? presetItem : nativeItem);
+      }
+    }
   });
 
   it("suppresses primary errors and posts compact fallback notice when a fallback succeeds", async () => {
@@ -890,6 +1017,45 @@ describe("runGenerationTurn fallback behavior", () => {
     expect(fallbackNoticeCalls[0]?.successModel.llm_codename).toBe("fallback-model");
     expect(context.streamingContext.suppressUserErrors).toBe(false);
     expect(context.streamingContext.forceModelFallback).toBe(false);
+  });
+
+  it("retries an interrupted stream once on the same key, continuing the posted text", async () => {
+    const context = makeContext(makeLlm(1, "primary-model"), makeLlm(2, "unused"));
+    context.tomoriState.fallback_chain = [];
+    queuedResults.push(interruptedStream("First half."), successfulReply("second half."));
+
+    const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+    const result = await runGenerationTurn(context, collectingSink());
+
+    expect(result.status).toBe("completed");
+    expect(result.personaResponses[0]?.text).toBe("First half.\nsecond half.");
+    expect(toolLoopCalls.map(({ apiKey, retryStreamInterruption }) => ({ apiKey, retryStreamInterruption }))).toEqual([
+      { apiKey: "server-key", retryStreamInterruption: true },
+      { apiKey: "server-key", retryStreamInterruption: false },
+    ]);
+    const continuationText = (call: (typeof toolLoopCalls)[number] | undefined) =>
+      call?.contextItems
+        .at(-1)
+        ?.parts.map((part) => (part.type === "text" ? part.text : ""))
+        .join("") ?? "";
+    expect(continuationText(toolLoopCalls[0])).not.toContain("First half.");
+    expect(continuationText(toolLoopCalls[1])).toContain("First half.");
+    expect(context.streamingContext.retryStreamInterruption).toBe(false);
+  });
+
+  it("surfaces a second interruption instead of retrying it again", async () => {
+    const context = makeContext(makeLlm(1, "primary-model"), makeLlm(2, "unused"));
+    context.tomoriState.fallback_chain = [];
+    const second = interruptedStream("");
+    queuedResults.push(interruptedStream(""), second);
+
+    const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+    const result = await runGenerationTurn(context, collectingSink());
+
+    expect(result.status).toBe("error");
+    expect(result.streamResults.at(-1)).toBe(second.streamResults[0]);
+    expect(toolLoopCalls).toHaveLength(2);
+    expect(toolLoopCalls[1]?.retryStreamInterruption).toBe(false);
   });
 
   it("does not rotate keys, try another model, or emit a notice after uncertain delivery", async () => {
@@ -1209,6 +1375,30 @@ describe("runGenerationTurn fallback behavior", () => {
     await runGenerationTurn(context, sink);
 
     expect(toolLoopCalls.map((call) => call.model)).toEqual(["personal-primary", "server-primary"]);
+  });
+
+  it("reads the billed owner's opt-out, not the anchor author's, on a borrowed-trigger turn", async () => {
+    const context = makePersonalContext(
+      makeLlm(1, "server-primary"),
+      makeLlm(2, "server-fallback"),
+      makeLlm(3, "personal-primary"),
+    );
+    context.personalRoutingUserId = 77;
+    const policy = spyOn(speechRepository, "loadSpeechRoutingPolicy").mockResolvedValue({
+      serverAllowed: true,
+      fallbackEnabled: false,
+    });
+    queuedResults.push(personalRouteFailure());
+    try {
+      const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+      const result = await runGenerationTurn(context, collectingSink());
+
+      expect(policy.mock.calls[0]?.[1]).toBe(77);
+      expect(toolLoopCalls.map((call) => call.model)).toEqual(["personal-primary"]);
+      expect(result.status).toBe("error");
+    } finally {
+      policy.mockRestore();
+    }
   });
 
   it("refuses the server model fallback when the server's text quota is exhausted", async () => {
@@ -1685,7 +1875,8 @@ describe("runGenerationTurn fallback behavior", () => {
     ]);
     const retryContext = toolLoopCalls[1]?.contextItems ?? [];
     expect(retryContext.some((item) => item.role === "model")).toBe(false);
-    expect(JSON.stringify(retryContext.at(-1)?.parts)).toContain("Tomori: First half.");
+    expect(JSON.stringify(retryContext.at(-1)?.parts)).toContain("First half.");
+    expect(JSON.stringify(retryContext.at(-1)?.parts)).not.toContain("Tomori: First half.");
     expect(context.streamingContext.outputPrefill).toBe("Tomori: First half.");
     expect(sink.emittedErrors).toHaveLength(0);
     expect(result.personaResponses[0]?.text).toBe("First half.\nsecond half.");
@@ -2159,6 +2350,40 @@ describe("runGenerationTurn fallback behavior", () => {
       expect(
         fallbackItems.some((item) => item.metadataTag === ContextItemTag.KNOWLEDGE_VERBATIM_TOOL_DEFINITIONS),
       ).toBe(true);
+    });
+
+    it("drops the same-channel STM block and nudge on an attempt that sends no tools", async () => {
+      const context = makeContext(
+        { ...makeLlm(1, "primary-model"), has_tools: true } as LlmRow,
+        makeLlm(2, "toolless-fallback"),
+      );
+      context.contextItems = [
+        {
+          role: "user",
+          parts: [{ type: "text", text: "other channel" }],
+          metadataTag: ContextItemTag.KNOWLEDGE_SHORT_TERM_MEMORY,
+        },
+        {
+          role: "user",
+          parts: [{ type: "text", text: "this channel" }],
+          metadataTag: ContextItemTag.KNOWLEDGE_SHORT_TERM_MEMORY,
+          requiresToolCalling: true,
+        },
+        { role: "user", parts: [{ type: "text", text: "hello" }], metadataTag: ContextItemTag.DIALOGUE_HISTORY },
+      ];
+      enqueuePrimaryFailure();
+      queuedResults.push(fallbackSuccess);
+
+      const { runGenerationTurn } = await import("@/utils/chat/generationTurn");
+      await runGenerationTurn(context, okSink);
+
+      expect(
+        toolLoopCalls.map((call) =>
+          call.contextItems
+            .filter((item) => item.metadataTag === ContextItemTag.KNOWLEDGE_SHORT_TERM_MEMORY)
+            .map(contextItemText),
+        ),
+      ).toEqual([["other channel", "this channel"], ["other channel"]]);
     });
   });
 });

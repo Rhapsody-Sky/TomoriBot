@@ -43,8 +43,11 @@ import {
 } from "@/providers/custom/customImageDiagnostics";
 import { buildCustomHeaders } from "@/providers/custom/customOpenAICompatibleUtils";
 import { log } from "@/utils/misc/logger";
+import { readProviderErrorBody } from "@/utils/provider/providerErrorMetrics";
+import { ConfiguredModelUnavailableError } from "@/utils/provider/providerToolFailure";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { getEndpointRemotePolicy } from "@/utils/security/remoteUrlSecurity";
 
 type ComfyUiGenerationMode = "image" | "video";
 type ComfyUiOutpaintStrategy = "edge_extend" | "zoom_out" | "full_canvas";
@@ -109,6 +112,9 @@ interface ComfyUiGenerationOptions {
 
 type WorkflowPlaceholderValue = string | number | boolean | null | Record<string, unknown> | Array<unknown>;
 type ComfyUiWorkflow = Record<string, unknown>;
+
+// Only plain model filenames qualify, which excludes sampler or scheduler choices and any value carrying markup.
+const COMFYUI_MODEL_FILE = /^[\w .()+/-]{1,160}\.(?:safetensors|ckpt|pt|pth|bin|gguf|sft|onnx)$/i;
 type ComfyUiAsset = {
   filename: string;
   subfolder?: string;
@@ -244,14 +250,18 @@ async function unloadComfyUiModelsAfterSuccessfulGeneration(
   }
 
   try {
-    const response = await fetchUserRemoteUrl(`${endpoint.endpoint_url.replace(/\/+$/, "")}/free`, {
-      method: "POST",
-      headers: buildCustomHeaders(apiKey),
-      body: JSON.stringify({
-        unload_models: true,
-        free_memory: true,
-      }),
-    });
+    const response = await fetchUserRemoteUrl(
+      `${endpoint.endpoint_url.replace(/\/+$/, "")}/free`,
+      {
+        method: "POST",
+        headers: buildCustomHeaders(apiKey),
+        body: JSON.stringify({
+          unload_models: true,
+          free_memory: true,
+        }),
+      },
+      getEndpointRemotePolicy(),
+    );
 
     if (!response.ok) {
       log.warn(
@@ -1217,8 +1227,12 @@ function resolveComfyUiEffectiveDenoise(options: ComfyUiGenerationOptions, inpai
   return 1;
 }
 
+// Discord interaction tokens expire 15 minutes after the defer, so `/generate` needs time left after
+// setup and polling to send its failure reply; chat tool calls end sooner under the tool timeout.
+const COMFYUI_DEFAULT_POLL_TIMEOUT_MS = 13 * 60 * 1000;
+
 function getComfyUiTimeoutMs(): number {
-  const defaultTimeoutMs = 900000;
+  const defaultTimeoutMs = COMFYUI_DEFAULT_POLL_TIMEOUT_MS;
   const parsed = Number.parseInt(process.env.COMFYUI_POLL_TIMEOUT_MS ?? `${defaultTimeoutMs}`, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultTimeoutMs;
 }
@@ -1590,11 +1604,15 @@ async function uploadComfyUiReferenceImage(
 
   const headers = buildCustomHeaders(apiKey);
   delete headers["Content-Type"];
-  const response = await fetchUserRemoteUrl(`${endpoint.endpoint_url.replace(/\/+$/, "")}/upload/image`, {
-    method: "POST",
-    headers,
-    body: formData,
-  });
+  const response = await fetchUserRemoteUrl(
+    `${endpoint.endpoint_url.replace(/\/+$/, "")}/upload/image`,
+    {
+      method: "POST",
+      headers,
+      body: formData,
+    },
+    getEndpointRemotePolicy(),
+  );
 
   if (!response.ok) {
     throw new Error(`ComfyUI reference image upload failed: ${response.status} ${response.statusText}`);
@@ -2695,11 +2713,56 @@ function describeComfyUiNodeErrors(nodeErrors: unknown): string[] {
   return Object.entries(nodeErrors).map(([nodeId, nodeError]) => {
     const classType = isRecord(nodeError) && typeof nodeError.class_type === "string" ? nodeError.class_type : "node";
     const errors = isRecord(nodeError) && Array.isArray(nodeError.errors) ? nodeError.errors : [];
-    const reasons = errors
-      .filter(isRecord)
-      .map((error) => [error.message, error.details].filter((part) => typeof part === "string" && part).join(": "));
+    const reasons = errors.filter(isRecord).map((error) => {
+      const rejected = describeRejectedComfyUiInput(error);
+      // ComfyUI's `details` for a rejected value lists every installed file, so naming the input and value keeps the cause from being buried.
+      const details = rejected ? `${rejected.inputName} '${rejected.value}'` : error.details;
+      return [error.message, details].filter((part) => typeof part === "string" && part).join(": ");
+    });
     return `${classType} ${nodeId}${reasons.length > 0 ? `: ${reasons.join("; ")}` : ""}`;
   });
+}
+
+function parseComfyUiNodeErrors(body: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return isRecord(parsed) ? parsed.node_errors : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function describeRejectedComfyUiInput(error: Record<string, unknown>): { inputName: string; value: string } | null {
+  const extra = error.extra_info;
+  if (!isRecord(extra) || typeof extra.input_name !== "string" || typeof extra.received_value !== "string") {
+    return null;
+  }
+  return { inputName: extra.input_name, value: extra.received_value };
+}
+
+/**
+ * Model files a rejected prompt could not find, kept only when the workflow sent that exact value to
+ * that node input, so a tool result never repeats a string the endpoint supplied.
+ */
+function findMissingComfyUiModelFiles(nodeErrors: unknown, workflow: ComfyUiWorkflow): string[] {
+  if (!isRecord(nodeErrors)) {
+    return [];
+  }
+
+  const missing = new Set<string>();
+  for (const [nodeId, nodeError] of Object.entries(nodeErrors)) {
+    const node = workflow[nodeId];
+    if (!isRecord(nodeError) || !Array.isArray(nodeError.errors) || !isRecord(node) || !isRecord(node.inputs)) {
+      continue;
+    }
+    for (const error of nodeError.errors.filter(isRecord)) {
+      const rejected = error.type === "value_not_in_list" ? describeRejectedComfyUiInput(error) : null;
+      if (rejected && node.inputs[rejected.inputName] === rejected.value && COMFYUI_MODEL_FILE.test(rejected.value)) {
+        missing.add(rejected.value);
+      }
+    }
+  }
+  return [...missing];
 }
 
 function describeComfyUiExecutionError(messages: unknown): string | null {
@@ -2863,19 +2926,31 @@ async function generateWithComfyUi(
   delete getHeaders["Content-Type"];
   const clientId = `tomoribot-${Date.now()}`;
 
-  const promptResponse = await fetchUserRemoteUrl(`${endpoint.endpoint_url.replace(/\/+$/, "")}/prompt`, {
-    method: "POST",
-    headers: postHeaders,
-    body: JSON.stringify({
-      prompt: preparedWorkflow,
-      client_id: clientId,
-    }),
-  });
+  const promptResponse = await fetchUserRemoteUrl(
+    `${endpoint.endpoint_url.replace(/\/+$/, "")}/prompt`,
+    {
+      method: "POST",
+      headers: postHeaders,
+      body: JSON.stringify({
+        prompt: preparedWorkflow,
+        client_id: clientId,
+      }),
+    },
+    getEndpointRemotePolicy(),
+  );
 
   if (!promptResponse.ok) {
-    const errorBody = await promptResponse.text().catch(() => "");
-    const errorDetail = errorBody.trim() ? `: ${errorBody.trim().slice(0, 2000)}` : "";
-    throw new Error(`ComfyUI prompt failed: ${promptResponse.status} ${promptResponse.statusText}${errorDetail}`);
+    const errorBody = (await readProviderErrorBody(promptResponse, apiKey)).trim();
+    const nodeErrors = parseComfyUiNodeErrors(errorBody);
+    const rejectedNodes = describeComfyUiNodeErrors(nodeErrors);
+    const errorDetail = rejectedNodes.length > 0 ? rejectedNodes.join("; ") : errorBody.slice(0, 2000);
+    const message = `ComfyUI prompt failed: ${promptResponse.status} ${promptResponse.statusText}${
+      errorDetail ? `: ${errorDetail}` : ""
+    }`;
+    const missingModels = findMissingComfyUiModelFiles(nodeErrors, preparedWorkflow);
+    throw missingModels.length > 0
+      ? new ConfiguredModelUnavailableError(message, missingModels, promptResponse.status)
+      : Object.assign(new Error(message), { status: promptResponse.status });
   }
 
   const promptPayload = (await promptResponse.json()) as { prompt_id?: string; node_errors?: unknown };
@@ -2909,6 +2984,7 @@ async function generateWithComfyUi(
       const historyResponse = await fetchUserRemoteUrl(
         `${endpoint.endpoint_url.replace(/\/+$/, "")}/history/${encodeURIComponent(promptPayload.prompt_id)}`,
         { headers: getHeaders, signal: options.abortSignal },
+        getEndpointRemotePolicy(),
       );
 
       if (historyResponse.ok) {
@@ -3011,11 +3087,15 @@ export async function cancelComfyUiPrompt(
   const headers = buildCustomHeaders(apiKey);
   const request = async (path: string, init: RequestInit = {}): Promise<Response | null> => {
     try {
-      return await fetchUserRemoteUrl(`${baseUrl}${path}`, {
-        ...init,
-        headers,
-        signal: AbortSignal.timeout(COMFYUI_CANCEL_REQUEST_TIMEOUT_MS),
-      });
+      return await fetchUserRemoteUrl(
+        `${baseUrl}${path}`,
+        {
+          ...init,
+          headers,
+          signal: AbortSignal.timeout(COMFYUI_CANCEL_REQUEST_TIMEOUT_MS),
+        },
+        getEndpointRemotePolicy(),
+      );
     } catch {
       return null;
     }
@@ -3064,7 +3144,7 @@ async function downloadComfyUiAsset(endpoint: CustomEndpointRow, apiKey: string,
   const headers = { ...buildCustomHeaders(apiKey) };
   delete headers["Content-Type"];
 
-  const response = await fetchUserRemoteUrl(url.toString(), { headers });
+  const response = await fetchUserRemoteUrl(url.toString(), { headers }, getEndpointRemotePolicy());
   if (!response.ok) {
     throw new Error(`ComfyUI asset download failed: ${response.status} ${response.statusText}`);
   }

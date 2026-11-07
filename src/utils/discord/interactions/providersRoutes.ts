@@ -1,4 +1,4 @@
-import { withProviderOptionCopy, type ProviderOptionCopyContext } from "@/utils/provider/providerOptionRegistry";
+import { withProviderOptionCopy } from "@/utils/provider/providerOptionRegistry";
 import {
   ComponentType,
   MessageFlags,
@@ -59,7 +59,7 @@ import {
   providerOptionActionOption,
   type ProviderOptionScope,
 } from "@/utils/provider/providerOptionRegistry";
-import { buildPanelContainer } from "@/utils/discord/ui/panel";
+import { buildPanelContainer, replyPanelReceipt } from "@/utils/discord/ui/panel";
 import { getDefaultImageEndpointSupports } from "@/utils/provider/customImageEndpointSupport";
 import { getDefaultSpeechEndpointSettings } from "@/utils/provider/customSpeechEndpointSettings";
 import { resolveCuratedImageSupports } from "@/utils/provider/providerImageCapabilities";
@@ -169,6 +169,18 @@ function terminalPayload(locale: string, key: string): InteractionEditReplyOptio
   );
 }
 
+async function replyProvidersUnavailable(interaction: GlobalRoutableInteraction, locale: string): Promise<void> {
+  if (interaction.deferred || interaction.replied) {
+    await interaction.editReply(terminalPayload(locale, "commands.providers.unavailable"));
+    return;
+  }
+  await replyPanelReceipt(interaction, {
+    tone: "warning",
+    heading: localizer(locale, "general.panel_notice.unavailable_heading"),
+    detail: localizer(locale, "commands.providers.unavailable"),
+  });
+}
+
 function providersNotSetupKey(interaction: {
   guildId: string | null;
 }): "commands.providers.not_setup" | "commands.providers.not_setup_dm" {
@@ -241,7 +253,7 @@ function addReceipt(locale: string, result: AddServerProviderResult, scopeKind: 
       }),
     };
   }
-  const detailKey: Record<Exclude<AddServerProviderResult["status"], "success">, string> = {
+  const detailKey: Record<Exclude<AddServerProviderResult["status"], "success" | "novelai-unavailable">, string> = {
     "invalid-key": "commands.providers.invalid_key",
     "unsupported-provider": "commands.providers.unsupported_provider",
     "validation-failed": "commands.providers.validation_failed",
@@ -252,7 +264,10 @@ function addReceipt(locale: string, result: AddServerProviderResult, scopeKind: 
   return {
     tone: "error",
     heading: localizer(locale, "commands.providers.add_provider_failed"),
-    detail: localizer(locale, detailKey[result.status]),
+    detail: localizer(
+      locale,
+      result.status === "novelai-unavailable" ? result.descriptionKey : detailKey[result.status],
+    ),
     // The operation status is already the machine-readable cause, so the metric key can name it
     // exactly instead of falling back to the route namespace.
     reason: `provider_add_${result.status}`,
@@ -362,7 +377,7 @@ function providerEditReceipt(
       detail: localizer(locale, "commands.providers.provider_edit_unchanged_detail"),
     };
   }
-  const keys: Record<Exclude<EditProviderResult["status"], "success" | "unchanged">, string> = {
+  const keys: Record<Exclude<EditProviderResult["status"], "success" | "unchanged" | "novelai-unavailable">, string> = {
     "invalid-key": "commands.providers.invalid_key",
     "invalid-combination": "commands.providers.provider_edit_invalid_combination",
     "not-found": "commands.providers.model_not_found",
@@ -372,7 +387,7 @@ function providerEditReceipt(
   return {
     tone: "error",
     heading: localizer(locale, "commands.providers.change_failed"),
-    detail: localizer(locale, keys[result.status]),
+    detail: localizer(locale, result.status === "novelai-unavailable" ? result.descriptionKey : keys[result.status]),
     reason: `provider_edit_${result.status}`,
     action: resolveProviderPanelAction(scopeKind, "provider.edit"),
   };
@@ -540,17 +555,16 @@ function providerOptionScope(
 
 const REGISTRATION_FAILURE_STATUSES: ReadonlySet<string> = new Set(["validation-failed", "no-balance", "unreachable"]);
 
-async function addCompletionCopy(
+async function addRegistrationFailureCopy(
   receipt: PanelReceipt,
   interaction: GlobalRoutableInteraction,
   locale: string,
   scope: LoadedProviderPanelScope,
   eligible: boolean,
-  surface: ProviderOptionCopyContext["surface"] = "completion",
 ): Promise<PanelReceipt> {
   if (!eligible) return receipt;
   const keys = await withProviderOptionCopy([], {
-    surface,
+    surface: "registration_failed",
     managedProvider: null,
     userDiscId: interaction.user.id,
     serverId: scope.state?.server_id,
@@ -558,9 +572,7 @@ async function addCompletionCopy(
   });
   if (!keys.length) return receipt;
   const copy = keys.map((key) => localizer(locale, key));
-  return surface === "registration_failed"
-    ? { ...receipt, metadata: [receipt.metadata, ...copy].filter(Boolean).join(" ") }
-    : { ...receipt, detail: [receipt.detail, ...copy].join("\n") };
+  return { ...receipt, metadata: [receipt.metadata, ...copy].filter(Boolean).join(" ") };
 }
 
 function repaint(
@@ -709,9 +721,10 @@ export function createProvidersInteractionRoute(
         const selectedValue = (interaction as StringSelectMenuInteraction).values[0];
         if (selectedValue === PROVIDERS_ADD_PROVIDER_VALUE) {
           if (!configuration.authorize(interaction)) {
-            await interaction.reply({
-              content: localizer(route.locale, "general.errors.permission_denied_description"),
-              flags: MessageFlags.Ephemeral,
+            await replyPanelReceipt(interaction, {
+              tone: "error",
+              heading: localizer(route.locale, "general.errors.permission_denied_title"),
+              detail: localizer(route.locale, "general.errors.permission_denied_description"),
             });
             return;
           }
@@ -721,9 +734,10 @@ export function createProvidersInteractionRoute(
         }
         if (selectedValue === PROVIDERS_ADD_ENDPOINT_VALUE) {
           if (!configuration.authorize(interaction)) {
-            await interaction.reply({
-              content: localizer(route.locale, "general.errors.permission_denied_description"),
-              flags: MessageFlags.Ephemeral,
+            await replyPanelReceipt(interaction, {
+              tone: "error",
+              heading: localizer(route.locale, "general.errors.permission_denied_title"),
+              detail: localizer(route.locale, "general.errors.permission_denied_description"),
             });
             return;
           }
@@ -734,9 +748,10 @@ export function createProvidersInteractionRoute(
         const optionAction = providerOptionActionOption(selectedValue);
         if (optionAction) {
           if (!configuration.authorize(interaction)) {
-            await interaction.reply({
-              content: localizer(route.locale, "general.errors.permission_denied_description"),
-              flags: MessageFlags.Ephemeral,
+            await replyPanelReceipt(interaction, {
+              tone: "error",
+              heading: localizer(route.locale, "general.errors.permission_denied_title"),
+              detail: localizer(route.locale, "general.errors.permission_denied_description"),
             });
             return;
           }
@@ -750,18 +765,17 @@ export function createProvidersInteractionRoute(
             canManageServer: canManageServer(interaction),
           });
           if (handled) return;
-          const content = localizer(route.locale, "commands.providers.unavailable");
-          if (interaction.deferred || interaction.replied) await interaction.editReply({ content });
-          else await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+          await replyProvidersUnavailable(interaction, route.locale);
           return;
         }
       }
 
       if (route.action === "edit-provider-open") {
         if (!configuration.authorize(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "general.errors.permission_denied_description"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.permission_denied_title"),
+            detail: localizer(route.locale, "general.errors.permission_denied_description"),
           });
           return;
         }
@@ -780,9 +794,7 @@ export function createProvidersInteractionRoute(
             canManageServer: canManageServer(interaction),
           });
           if (handled) return;
-          const content = localizer(route.locale, "commands.providers.unavailable");
-          if (interaction.deferred || interaction.replied) await interaction.editReply({ content });
-          else await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+          await replyProvidersUnavailable(interaction, route.locale);
           return;
         }
         const nonce = dependencies.createNonce();
@@ -798,18 +810,20 @@ export function createProvidersInteractionRoute(
 
       if (route.action === "edit-endpoint-open") {
         if (!configuration.authorize(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "general.errors.permission_denied_description"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.permission_denied_title"),
+            detail: localizer(route.locale, "general.errors.permission_denied_description"),
           });
           return;
         }
         const scope = await dependencies.resolveScope(interaction, false);
         const context = scope ? endpointEditContext(scope, route.connectionId) : null;
         if (!scope || scope.data.readStatus !== "fresh" || !context) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.providers.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.providers.unavailable"),
           });
           return;
         }
@@ -820,9 +834,10 @@ export function createProvidersInteractionRoute(
 
       if (route.action === "model-select") {
         if (!configuration.authorize(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "general.errors.permission_denied_description"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.permission_denied_title"),
+            detail: localizer(route.locale, "general.errors.permission_denied_description"),
           });
           return;
         }
@@ -847,9 +862,10 @@ export function createProvidersInteractionRoute(
               )
             : undefined;
         if (!modelScope || modelScope.data.readStatus !== "fresh" || !section) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.providers.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.providers.unavailable"),
           });
           return;
         }
@@ -979,13 +995,12 @@ export function createProvidersInteractionRoute(
           nextScope,
           action.result.status === "success" ? { kind: "entry", entryId: action.result.entryId } : { kind: "entry" },
           action.result.status === "success" ? rangeForEntry(nextScope, action.result.entryId) : 0,
-          await addCompletionCopy(
+          await addRegistrationFailureCopy(
             addReceipt(route.locale, action.result, scope.scopeKind),
             interaction,
             route.locale,
             scope,
-            (action.result.status === "success" || keyRejected) && selectedProvider !== "brave",
-            keyRejected ? "registration_failed" : "completion",
+            keyRejected && selectedProvider !== "brave",
           ),
         );
         return;
@@ -1075,13 +1090,12 @@ export function createProvidersInteractionRoute(
           nextScope,
           action.result.status === "success" ? { kind: "entry", entryId: action.result.entryId } : { kind: "entry" },
           action.result.status === "success" ? rangeForEntry(nextScope, action.result.entryId) : 0,
-          await addCompletionCopy(
+          await addRegistrationFailureCopy(
             addEndpointReceipt(route.locale, action.result, scope.scopeKind),
             interaction,
             route.locale,
             scope,
             REGISTRATION_FAILURE_STATUSES.has(action.result.status),
-            "registration_failed",
           ),
         );
         return;
@@ -1122,13 +1136,12 @@ export function createProvidersInteractionRoute(
           nextScope,
           { kind: "entry", entryId },
           rangeForEntry(nextScope, entryId),
-          await addCompletionCopy(
+          await addRegistrationFailureCopy(
             providerEditReceipt(route.locale, action.result, scope.scopeKind),
             interaction,
             route.locale,
             scope,
             REGISTRATION_FAILURE_STATUSES.has(action.result.status) && route.provider !== "brave",
-            "registration_failed",
           ),
         );
         return;
@@ -1177,13 +1190,12 @@ export function createProvidersInteractionRoute(
           nextScope,
           { kind: "entry", entryId },
           rangeForEntry(nextScope, entryId),
-          await addCompletionCopy(
+          await addRegistrationFailureCopy(
             endpointEditReceipt(route.locale, action.result, scope.scopeKind),
             interaction,
             route.locale,
             scope,
             REGISTRATION_FAILURE_STATUSES.has(action.result.status),
-            "registration_failed",
           ),
         );
         return;
@@ -1264,13 +1276,7 @@ export function createProvidersInteractionRoute(
           nextScope,
           { kind: "entry", entryId },
           rangeForEntry(nextScope, entryId),
-          await addCompletionCopy(
-            modelReceipt(route.locale, action.result, scope.scopeKind),
-            interaction,
-            route.locale,
-            scope,
-            action.result.status === "success" && !action.result.removed && !findProviderOption(route.entryKey),
-          ),
+          modelReceipt(route.locale, action.result, scope.scopeKind),
         );
         return;
       }

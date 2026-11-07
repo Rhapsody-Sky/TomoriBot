@@ -1,3 +1,5 @@
+import { stubAllShardOwnership } from "../../helpers/shardOwnership";
+stubAllShardOwnership();
 import { REST } from "discord.js";
 import { RESPONSE_REVIEW_ITEM_VALUES } from "@/constants/responseReview";
 import type { z } from "zod";
@@ -57,6 +59,7 @@ let toolExecuteCalls: Array<{
   name: string;
   args: Record<string, unknown>;
   usageContext?: ToolContext["usageContext"];
+  memoryEmbeddingResolved?: boolean;
 }> = [];
 let toolExecuteQueue: ToolResult[] = [];
 let requiresFollowUp = false;
@@ -174,7 +177,14 @@ scopedMock.module("@/tools/toolRegistry", () => ({
   // than spread or the remaining registry methods vanish for later files.
   ToolRegistry: overrideMembers(realToolRegistry.ToolRegistry, {
     executeTool: async (name: string, args: Record<string, unknown>, context: ToolContext) => {
-      toolExecuteCalls.push({ name, args, usageContext: context.usageContext });
+      toolExecuteCalls.push({
+        name,
+        args,
+        usageContext: context.usageContext,
+        ...(context.memoryEmbeddingResolved === undefined
+          ? {}
+          : { memoryEmbeddingResolved: context.memoryEmbeddingResolved }),
+      });
       const next = toolExecuteQueue.shift();
       return next ?? { success: true, data: { result: "ok" } };
     },
@@ -416,7 +426,7 @@ function makeReviewContext(): ChatTurnContext & { responseReview: ResponseReview
       role: "user",
       metadataTag: ContextItemTag.DIALOGUE_HISTORY,
       messageId: context.message.id,
-      sender: { name: "Juno", type: "user" },
+      sender: { id: "fixture-juno", name: "Juno", type: "user" },
       parts: [{ type: "text", text: "Juno: Stay here with me." }],
     },
     {
@@ -493,6 +503,19 @@ describe("runToolLoop — contract tests", () => {
 
     const context = makeContext();
     context.usageContext = { credentialProvider: "test-option", credentialScope: "personal" };
+    context.memoryRecall = {
+      outcome: "provider_error",
+      embeddingResolved: true,
+      totalMs: 0,
+      candidateCount: 1,
+      scored: [],
+      reinforced: [],
+      recalled: [],
+      missing: [],
+      queryTimings: { queryTokens: 1 },
+      dormantTokens: 1,
+      recalledTokens: 0,
+    };
     const result = await runToolLoop(makeParams(context, provider));
 
     expect(result.status).toBe("completed");
@@ -503,6 +526,7 @@ describe("runToolLoop — contract tests", () => {
     expect(toolExecuteCalls[0]?.name).toBe("echo_tool");
     expect(toolExecuteCalls[0]?.args).toEqual({ text: "hello" });
     expect(toolExecuteCalls[0]?.usageContext).toBe(context.usageContext);
+    expect(toolExecuteCalls[0]?.memoryEmbeddingResolved).toBe(true);
 
     expect(capturedHistories).toHaveLength(2);
 
@@ -1052,12 +1076,6 @@ describe("runToolLoop — contract tests", () => {
         needsFollowUp: false,
         expected: "empty_response",
       },
-      {
-        label: "held NovelAI fragment",
-        empty: { status: "empty_response", naiContinuationPrefill: "and then" },
-        needsFollowUp: false,
-        expected: "empty_response",
-      },
     ];
 
     const failures: string[] = [];
@@ -1075,13 +1093,21 @@ describe("runToolLoop — contract tests", () => {
     expect(failures).toEqual([]);
   });
 
-  it("an empty first stream is still reported as empty so the turn retries", async () => {
+  it("an exhausted NovelAI continuation surfaces a provider error without tool execution", async () => {
     const { runToolLoop } = await import("@/utils/chat/toolLoop");
-    const { provider } = makeProvider([{ status: "empty_response" }]);
+    const { provider } = makeProvider([{ status: "error", data: { code: "continuation_exhausted" } }], "novelai");
+    const context = makeContext();
+    context.tomoriState.llm = {
+      ...context.tomoriState.llm,
+      llm_provider: "novelai",
+      llm_codename: "glm-4-6",
+      has_tools: false,
+    };
+    const result = await runToolLoop(makeParams(context, provider));
 
-    const result = await runToolLoop(makeParams(makeContext(), provider));
-
-    expect(result.status).toBe("empty_response");
+    expect(result.status).toBe("error");
+    expect(result.streamResults.at(-1)?.data).toMatchObject({ code: "continuation_exhausted" });
+    expect(toolExecuteCalls).toHaveLength(0);
   });
 
   it("sends a resolved sticker at invocation, after pre-tool text and before continuing text", async () => {
@@ -1158,87 +1184,6 @@ describe("runToolLoop — contract tests", () => {
     expect(stopChecks).toBeGreaterThanOrEqual(3);
     expect(result.status).toBe("stopped_by_user");
     expect(events).not.toContain("send");
-  });
-
-  it("NovelAI continues after pre-tool text when the successful tool requires follow-up", async () => {
-    const { runToolLoop } = await import("@/utils/chat/toolLoop");
-    requiresFollowUp = true;
-    const { provider, capturedHistories } = makeProvider(
-      [
-        makeFunctionCallResult("web_search", { query: "news" }, "Let me check."),
-        { status: "completed", accumulatedText: "Here is what I found." },
-      ],
-      "novelai",
-    );
-    toolExecuteQueue.push({ success: true, data: { results: ["result"] } });
-
-    const context = makeContext();
-    context.streamingContext.suppressTextOutput = true;
-    const result = await runToolLoop(makeParams(context, provider));
-
-    expect(result.status).toBe("completed");
-    expect(capturedHistories).toHaveLength(2);
-    expect(result.personaResponses[0]?.text).toBe("Here is what I found.");
-    expect(context.streamingContext.suppressTextOutput).toBe(false);
-    expect(requiresFollowUpCalls).toEqual([{ name: "web_search", serverId: 1 }]);
-  });
-
-  it("NovelAI ends after pre-tool text when the successful tool does not require follow-up", async () => {
-    const { runToolLoop } = await import("@/utils/chat/toolLoop");
-    const { provider, capturedHistories } = makeProvider(
-      [makeFunctionCallResult("non_follow_up_tool", {}, "That is done.")],
-      "novelai",
-    );
-    toolExecuteQueue.push({ success: true, data: { ok: true } });
-
-    const result = await runToolLoop(makeParams(makeContext(), provider));
-
-    expect(result.status).toBe("completed");
-    expect(capturedHistories).toHaveLength(1);
-    expect(result.personaResponses[0]?.text).toBe("That is done.");
-    expect(requiresFollowUpCalls).toEqual([{ name: "non_follow_up_tool", serverId: 1 }]);
-  });
-
-  it("NovelAI suppresses repeated text and retries a tool failure after pre-tool text", async () => {
-    const { runToolLoop } = await import("@/utils/chat/toolLoop");
-    const { provider, capturedHistories } = makeProvider(
-      [
-        makeFunctionCallResult("web_search", {}, "Let me try that."),
-        { status: "completed", accumulatedText: "Recovered." },
-      ],
-      "novelai",
-    );
-    toolExecuteQueue.push({ success: false, error: "temporary failure" });
-
-    const context = makeContext();
-    const result = await runToolLoop(makeParams(context, provider));
-
-    expect(result.status).toBe("completed");
-    expect(capturedHistories).toHaveLength(2);
-    expect(context.streamingContext.suppressTextOutput).toBe(true);
-    expect(standardEmbedCalls).toHaveLength(0);
-  });
-
-  it("NovelAI ends with the localized retry-exhausted embed at the configured threshold", async () => {
-    const { runToolLoop, NAI_TOOL_FAILURE_RETRY_THRESHOLD } = await import("@/utils/chat/toolLoop");
-    const { provider, capturedHistories } = makeProvider(
-      Array.from({ length: 4 }, () => makeFunctionCallResult("web_search", {}, "Still trying.")),
-      "novelai",
-    );
-    for (let i = 0; i < 4; i++) {
-      toolExecuteQueue.push({ success: false, error: "always fails" });
-    }
-
-    const result = await runToolLoop(makeParams(makeContext(), provider));
-
-    expect(result.status).toBe("completed");
-    expect(capturedHistories).toHaveLength(NAI_TOOL_FAILURE_RETRY_THRESHOLD);
-    expect(toolExecuteCalls).toHaveLength(NAI_TOOL_FAILURE_RETRY_THRESHOLD);
-    expect(standardEmbedCalls).toContainEqual({
-      titleKey: "genai.nai_tool_retry_exhausted_title",
-      descriptionKey: "genai.nai_tool_retry_exhausted_description",
-      color: "#E74C3C",
-    });
   });
 
   it("successful STM update without pre-tool text disables further STM calls and continues", async () => {

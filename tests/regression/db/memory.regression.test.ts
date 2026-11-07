@@ -138,6 +138,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Memory — regression", () => {
       "admin-scoped update",
     );
     expect(adminUpdate?.content).toBe("admin-scoped update");
+    expect(adminUpdate?.manually_written).toBe(true);
     expect(adminUpdate?.channel_disc_ids).toEqual(["123456789012345678"]);
     expect(adminUpdate?.tags).toEqual(["legacy"]);
 
@@ -190,6 +191,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Memory — regression", () => {
     );
     expect(updated?.content).toBe("owner-scoped update");
     expect(updated?.tags).toEqual(["verified"]);
+    expect(updated?.manually_written).toBe(true);
 
     expect(await personalMemoryRepository.removeOwned(memoryId, altUserId, refs.personaLineageId + 1)).toBe(false);
     expect(await personalMemoryRepository.removeOwned(memoryId, altUserId, refs.personaLineageId)).toBe(true);

@@ -1,6 +1,8 @@
 export default {
   general: {
     dashboard: {
+      humanizer_requires_streaming:
+        "Turn on Live Streaming to use pacing, sentence splitting, or punctuation splitting.",
       interface_channel_settings: "Channel settings",
       interface_channel_single_hint:
         "Edit this channel's settings. Use default removes a channel override and restores Tomori's normal configuration.",
@@ -518,6 +520,7 @@ export default {
         memory_update: "Confirmations when server or personal memories are saved, edited, or deleted.",
         task_update: "Confirmations when scheduled tasks or reminders are created, edited, or deleted.",
         user_info_update: "Confirmations when Tomori updates a user's stored profile.",
+        user_block: "Confirmations when Tomori blocks a user.",
         danbooru_tags: "The list of tags found by a Danbooru character or tag lookup.",
       },
       interface_my_settings: "My settings",
@@ -726,6 +729,19 @@ export default {
         "Chooses compact or detailed tool notices. Important attribution and fallback notices retain their full details.",
       notice_minimal: "Minimal",
       notice_verbose: "Verbose",
+    },
+    restarting_title: `Restarting`,
+    restarting: `TomoriBot is restarting. Please try again shortly.`,
+    panel_notice: {
+      outdated_heading: `Panel Out Of Date`,
+      unavailable_heading: `Unavailable`,
+      empty_heading: `Nothing Here`,
+      no_changes_heading: `No Changes`,
+      limit_heading: `Limit Reached`,
+      not_available_heading: `Not Available`,
+      invalid_heading: `Invalid Choice`,
+      page_not_found_detail: `No page you can open here matches that name, so the panel opened on its first page.`,
+      persona_not_found_detail: `No persona here has exactly that name, so the panel opened on the main persona.`,
     },
     oauth: {
       invalid_callback: `This sign-in link is invalid or expired. Start sign-in again from TomoriBot.`,

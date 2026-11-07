@@ -278,6 +278,8 @@ async function runLane(
     const childEnv = { ...process.env, ...extraEnv };
     if (omitDatabaseEnv) {
       for (const key of DATABASE_ENV_KEYS) delete childEnv[key];
+      // Unit processes have no database credentials, so telemetry must not arm background writes.
+      childEnv.STAT_TRACKING_ENABLED = "false";
     }
 
     // The wrapper owns environment loading and database selection. Prevent a child from loading a
@@ -351,14 +353,17 @@ async function main(): Promise<void> {
   process.env.RUN_ENV = "development";
   delete process.env.TEST_PRODUCTION;
 
-  const requestedFiles = process.argv.slice(2).filter((argument) => !argument.startsWith("--"));
+  const requestedFiles = process.argv
+    .slice(2)
+    .filter((argument) => !argument.startsWith("--"))
+    .map((file) => file.replaceAll("\\", "/"));
   const testFiles = requestedFiles.length > 0 ? requestedFiles : await discoverTestFiles();
   if (requestedFiles.length > 0) process.env.TOMORI_TEST_STREAM_OUTPUT = "true";
   if (testFiles.length === 0) {
     console.error("[test-runner] No test files found under tests/.");
     process.exit(1);
   }
-  if (testFiles.some((file) => !file.replaceAll("\\", "/").startsWith("tests/") || !file.endsWith(".test.ts"))) {
+  if (testFiles.some((file) => !file.startsWith("tests/") || !file.endsWith(".test.ts"))) {
     console.error("[test-runner] Focused test paths must be .test.ts files under tests/.");
     process.exit(1);
   }

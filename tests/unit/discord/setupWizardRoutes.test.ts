@@ -82,6 +82,7 @@ import * as stickerLazySync from "@/utils/cache/stickerLazySync";
 import * as panelActionMetrics from "@/utils/stats/panelActionMetrics";
 import { createRouteInteraction } from "../../helpers/routeInteraction";
 import { localizedCopy, localizedProse } from "../../helpers/localeCases";
+import { collectTextDisplays } from "../../helpers/panelLimits";
 import { useEnvSandbox } from "../../helpers/env";
 import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
 import { ColorCode } from "@/utils/misc/logger";
@@ -406,8 +407,8 @@ describe("setupWizardRoutes", () => {
     });
 
     expect(interaction.deferred).toBe(true);
-    expect((interaction.edits[0] as { content?: string } | undefined)?.content).toBe(
-      localizer("en-US", "commands.setup.wizard.permission_denied"),
+    expect(collectTextDisplays(interaction.edits[0]).join("\n")).toMatch(
+      localizedProse("en-US", "commands.setup.wizard.permission_denied"),
     );
     expect(mockStore).not.toHaveBeenCalled();
   });
@@ -528,8 +529,9 @@ describe("setupWizardRoutes", () => {
     await dispatchGlobalInteraction({} as Client, lostAuthInteraction);
 
     expect(lostAuthInteraction.replyCalls.length).toBe(1);
-    const call = lostAuthInteraction.replyCalls[0] as { content: string };
-    expect(call.content).toBe(localizer("en-US", "commands.setup.wizard.permission_denied"));
+    expect(collectTextDisplays(lostAuthInteraction.replyCalls[0]).join("\n")).toMatch(
+      localizedProse("en-US", "commands.setup.wizard.permission_denied"),
+    );
 
     const check = readSetupDraft(nonce, "actor-1", "guild-1", "guild");
     expect(check.status).toBe("ok");
@@ -545,8 +547,9 @@ describe("setupWizardRoutes", () => {
     await dispatchGlobalInteraction({} as Client, interaction);
 
     expect(interaction.replyCalls.length).toBe(1);
-    const call = interaction.replyCalls[0] as { content: string };
-    expect(call.content).toBe(localizer("en-US", "commands.setup.wizard.finish_incomplete"));
+    expect(collectTextDisplays(interaction.replyCalls[0]).join("\n")).toMatch(
+      localizedProse("en-US", "commands.setup.wizard.finish_incomplete"),
+    );
   });
 
   it("consumes draft exactly once on Cancel and repaints terminal cancelled state", async () => {
@@ -805,8 +808,9 @@ describe("setupWizardRoutes", () => {
 
       expect(modalOpened).toBe(false);
       expect(interaction.replyCalls.length).toBe(1);
-      const replyJson = JSON.stringify(interaction.replyCalls[0]);
-      expect(replyJson).toContain(localizer("en-US", "commands.setup.wizard.provider_byok_guild_only"));
+      expect(collectTextDisplays(interaction.replyCalls[0]).join("\n")).toMatch(
+        localizedProse("en-US", "commands.setup.wizard.provider_byok_guild_only"),
+      );
 
       const check = readSetupDraft(nonce, "actor-1", "actor-1", "dm");
       expect(check.status).toBe("ok");
@@ -2150,8 +2154,8 @@ describe("setupWizardRoutes", () => {
       expect(interaction.editReplyCalls.length).toBe(0);
       expect(interaction.updateCalls.length).toBe(0);
       expect(interaction.replyCalls.length).toBe(1);
-      expect((interaction.replyCalls[0] as { content: string }).content).toBe(
-        localizer("en-US", "commands.setup.wizard.env_mismatch"),
+      expect(collectTextDisplays(interaction.replyCalls[0]).join("\n")).toMatch(
+        localizedProse("en-US", "commands.setup.wizard.env_mismatch"),
       );
     } finally {
       checkboxSpy.mockRestore();
@@ -3030,35 +3034,22 @@ describe("setupWizardFinish", () => {
     }
   });
 
-  it("adds completion copy after acknowledgement and preserves a completed setup without contributions", async () => {
+  it("keeps contributed copy off the completed setup receipt", async () => {
     const stubs = stubCommitDependencies();
     const key = "genai.tips.wait_and_retry";
-    let acknowledged = false;
-    let received: providerOptionRegistry.ProviderOptionCopyContext | undefined;
-    const copy = spyOn(providerOptionRegistry, "withProviderOptionCopy");
+    const copy = spyOn(providerOptionRegistry, "withProviderOptionCopy").mockImplementation(async (keys) => [
+      ...keys,
+      key,
+    ]);
     try {
-      for (const contributes of [true, false]) {
-        storeSetupDraft(COMMIT_NONCE, makeCompleteDraft());
-        const customId = buildSetupFinishRouteId({ locale: "en-US", nonce: COMMIT_NONCE });
-        const interaction = makeMockInteraction({ customId, guild: COMMIT_GUILD });
-        copy.mockImplementation(async (keys, context) => {
-          acknowledged = interaction.deferred;
-          received = context;
-          return contributes ? [...keys, key] : keys;
-        });
-        await dispatchGlobalInteraction({} as Client, interaction);
-        expect(acknowledged).toBe(true);
-        expect(received).toEqual({
-          surface: "completion",
-          userDiscId: "actor-1",
-          serverId: 42,
-          credentialScope: "server",
-          managedProvider: null,
-        });
-        const receipt = JSON.stringify(interaction.editReplyCalls.at(-1));
-        expect(receipt).toContain(localizedCopy("en-US", "commands.setup.wizard.receipt_title"));
-        expect(receipt.includes(localizedCopy("en-US", key))).toBe(contributes);
-      }
+      storeSetupDraft(COMMIT_NONCE, makeCompleteDraft());
+      const customId = buildSetupFinishRouteId({ locale: "en-US", nonce: COMMIT_NONCE });
+      const interaction = makeMockInteraction({ customId, guild: COMMIT_GUILD });
+      await dispatchGlobalInteraction({} as Client, interaction);
+      expect(copy).not.toHaveBeenCalled();
+      const receipt = JSON.stringify(interaction.editReplyCalls.at(-1));
+      expect(receipt).toContain(localizedCopy("en-US", "commands.setup.wizard.receipt_title"));
+      expect(receipt.includes(localizedCopy("en-US", key))).toBe(false);
     } finally {
       copy.mockRestore();
       stubs.restore();

@@ -1,3 +1,7 @@
+import { createMemoryRecall, type MemoryRecallOutcome } from "@/utils/text/context/memoryRecall";
+import { startQueryRetrieval } from "@/utils/text/context/queryRetrieval";
+import { isMemoryDecayEnabled } from "@/utils/memory/memoryDecay";
+import { orderNativePromptBlocks, STM_TAIL_SLOT, type PromptLayoutItem } from "@/utils/text/context/promptLayout";
 import { personaRepository } from "@/utils/db/repositories";
 import { log } from "@/utils/misc/logger";
 import { hasExplicitLongTermMemoryIntent } from "@/utils/memory/explicitLongTermMemoryIntent";
@@ -8,7 +12,7 @@ import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context
 import { appendDialogueHistoryContext, DOCUMENT_HINT_TEMPLATE } from "./dialogueHistory";
 import { convertMentions as convertMentionsBase, type MentionMemo } from "./mentionNormalizer";
 import { buildServerMemoryContextItem, buildShortTermMemoryContext } from "./memories";
-import { buildParticipantContextItem } from "./participants";
+import { buildParticipantContextItems } from "./participants";
 import { buildPersonaUserBlocksContextItem } from "./personaUserBlocks";
 import { buildPersonaSpriteContextItem } from "./personaSprites";
 import { buildServerDocumentContextItem } from "./rag";
@@ -25,21 +29,18 @@ import type { BuildContextParams } from "./types";
 import { SPACER_TEMPLATE } from "./timeAwareness";
 
 export type NativeBuildContextResult = {
+  memoryRecall?: MemoryRecallOutcome;
   contextItems: StructuredContextItem[];
   tailDirectives: string[];
   lowerPriorityTailDirectives: string[];
   uncensorDirective?: string;
   /** Unified STM nudge, injected positionally by the pipeline at `nudgeInjectionDepth`. */
   nudgeItem?: StructuredContextItem;
-  /** Dialogue depth at which to inject `nudgeItem` (0 = tail). */
+  /** Saved dialogue-item depth preserves spacer and directive counting (0 = tail). */
   nudgeInjectionDepth?: number;
-  /**
-   * STM content block deferred for positional injection. Populated only when the
-   * server set a content depth >= 0; when -1 (default) the block is pushed inline
-   * into `contextItems` here and this stays undefined.
-   */
+  /** Fresh STM and saved non-negative depths bypass preset buckets for downstream positional insertion. */
   memoryInjectionItems?: StructuredContextItem[];
-  /** Dialogue depth at which to inject `memoryInjectionItems` (0 = tail). */
+  /** Saved dialogue-item depth is compared with the tail slot after history assembly. */
   memoryInjectionDepth?: number;
 };
 
@@ -139,13 +140,18 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     sanitizeEnabled: tomoriConfig.uncensor_sanitize_enabled,
   };
   const tomoriState = snapshot?.tomoriState ?? (await personaRepository.loadState(guildId));
-  // Retrieval makes an embedding round trip plus a database query, so it starts here and is awaited at
-  // its insertion point to overlap the rest of assembly; the catch only stops a rejection becoming an
-  // unhandled rejection if assembly exits before that point.
+  const memoryDemand = Promise.withResolvers<boolean>();
+  const retrieval = startQueryRetrieval(
+    { tomoriState, simplifiedMessageHistory, triggererUserId },
+    {
+      enabled: isMemoryDecayEnabled(),
+      demand: memoryDemand.promise,
+    },
+  );
+  const memoryRecall = createMemoryRecall(retrieval, memoryDemand.resolve);
   const documentItemPromise = buildServerDocumentContextItem({
+    retrieval,
     tomoriState,
-    simplifiedMessageHistory,
-    triggererUserId,
     channelId,
     parentChannelId,
   }).catch((error: unknown) => {
@@ -154,7 +160,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
   });
   const toolPromptMacroResolver = createToolPromptMacroResolver({
     provider: tomoriState?.llm?.llm_provider,
-    capabilities: resolvePromptCapabilityValues(tomoriConfig),
+    capabilities: resolvePromptCapabilityValues(tomoriConfig, Boolean(tomoriState?.llm?.has_tools)),
     deliberateToolAllowedNames,
     stateForContext:
       tomoriState?.server_id && tomoriState.llm
@@ -247,6 +253,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
 
   if (!isUserImpersonation) {
     const serverMemoryItem = await buildServerMemoryContextItem({
+      memoryRecall,
       tomoriState,
       guildId,
       serverName,
@@ -308,9 +315,9 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       convertMentions,
     }),
   );
-  await appendOptionalItem(
-    contextItems,
-    buildParticipantContextItem({
+  contextItems.push(
+    ...(await buildParticipantContextItems({
+      memoryRecall,
       client,
       guildId,
       channelName,
@@ -337,7 +344,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       conversationCorpus,
       snapshot,
       convertMentions,
-    }),
+    })),
   );
 
   try {
@@ -368,14 +375,10 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       nudgeItem = stmResult.nudgeItem;
       nudgeInjectionDepth = stmResult.nudgeInjectionDepth;
       memoryInjectionDepth = stmResult.memoryInjectionDepth;
-      if (memoryInjectionDepth >= 0) {
-        // Depth >= 0: defer the block out-of-band so it can be spliced at a dialogue
-        // depth downstream (after history is assembled), the same way the nudge is.
-        // Keeping it OUT of contextItems also means preset reassembly won't anchor it
-        // at the chatHistory flush point: the positional injection owns placement.
+      if (memoryInjectionDepth >= 0 || stmResult.memoryItems.some((item: PromptLayoutItem) => item[STM_TAIL_SLOT])) {
+        // Deferred content bypasses preset buckets so the tail slot and saved item depth can be compared after history assembly.
         memoryInjectionItems = stmResult.memoryItems;
       } else {
-        // Default (-1): anchor the block near the top as ambient knowledge (legacy).
         contextItems.push(...stmResult.memoryItems);
       }
     }
@@ -383,10 +386,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     log.warn("Failed to build short-term memory context", error);
   }
 
-  // Verbatim tool-calling: when the model opted in, embed the resolved tool
-  // schemas as JSON in-band so endpoints that ignore the native `tools` field
-  // still expose them to the model. Placed in the stable reference zone (right
-  // before server documents) to stay inside the prompt-cache-friendly prefix.
+  // Verbatim schemas stay above history because their contents follow tool configuration.
   await appendOptionalItem(
     contextItems,
     buildVerbatimToolDefinitionsContextItem({
@@ -396,8 +396,10 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       isUserImpersonation,
     }),
   );
+  const recallPromise = memoryRecall.finish();
   await appendOptionalItem(contextItems, documentItemPromise);
-  // Activated lore changes from turn to turn, so it stays after documents and outside the cache-stable prefix.
+  const recall = await recallPromise;
+  if (recall.item) contextItems.push(recall.item);
   contextItems.push(
     ...(await buildLorebookContextItems({
       tomoriState,
@@ -477,8 +479,11 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     if (strippedText) uncensorDirective = strippedText;
   }
 
+  orderNativePromptBlocks(contextItems);
+
   log.info(`Built ${contextItems.length} structured context items for guild ${guildId}.`);
   return {
+    memoryRecall: recall.outcome,
     contextItems,
     tailDirectives,
     lowerPriorityTailDirectives,

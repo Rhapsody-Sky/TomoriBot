@@ -75,7 +75,8 @@ import { dispatchGlobalInteraction } from "@/utils/discord/interactions/router";
 import { getRegisterableLocales, initializeLocalizer, localizer } from "@/utils/text/localizer";
 import { loadCommandData } from "@/utils/discord/commandLoader";
 import type { UserPersonaNamingPreference } from "@/types/personaNaming";
-import { localizedProse, localizedCopy } from "../../helpers/localeCases";
+import { localizedProse, localizedCopy, expectForEveryLocale } from "../../helpers/localeCases";
+import { expectSafePanelPayload, collectTextDisplays } from "../../helpers/panelLimits";
 import { createPersona, createUserRow } from "../../helpers/fixtures";
 import {
   createRouteInteraction,
@@ -245,6 +246,7 @@ function makeSpotlight(
 const EMPTY_ROUTING_ROWS: Record<PersonalConfigManagedCapability, PersonalConfigRoutingRow> = {
   speech_design: { capability: "speech_design", activeModelName: null, storedProvider: null, storedModelName: null },
   speech_clone: { capability: "speech_clone", activeModelName: null, storedProvider: null, storedModelName: null },
+  transcription: { capability: "transcription", activeModelName: null, storedProvider: null, storedModelName: null },
   text: { capability: "text", activeModelName: null, storedProvider: null, storedModelName: null },
   vision: { capability: "vision", activeModelName: null, storedProvider: null, storedModelName: null },
   embedding: { capability: "embedding", activeModelName: null, storedProvider: null, storedModelName: null },
@@ -256,6 +258,7 @@ const EMPTY_ROUTING_ROWS: Record<PersonalConfigManagedCapability, PersonalConfig
 const EMPTY_CAPABILITY_PROVIDERS: Record<PersonalConfigManagedCapability, string[]> = {
   speech_design: [],
   speech_clone: [],
+  transcription: [],
   text: [],
   vision: [],
   embedding: [],
@@ -491,6 +494,12 @@ function makeDependencies(
           storedProvider: null,
           storedModelName: null,
         },
+        transcription: {
+          capability: "transcription",
+          activeModelName: null,
+          storedProvider: null,
+          storedModelName: null,
+        },
         text: {
           capability: "text",
           activeModelName: "Claude 3.5 Sonnet",
@@ -532,6 +541,7 @@ function makeDependencies(
       eligibleProvidersForCapability: {
         speech_design: [],
         speech_clone: [],
+        transcription: [],
         text: ["openrouter"],
         vision: ["openrouter"],
         embedding: ["openrouter"],
@@ -789,10 +799,6 @@ describe("personalConfigPanelCatalog", () => {
       { action: "language-submit", locale: "en-US", nonce: "nonce1234567" },
     ],
     [
-      "personal-config:v2:language-only-submit:en-US:nonce1234567",
-      { action: "language-only-submit", locale: "en-US", nonce: "nonce1234567" },
-    ],
-    [
       "personal-config:v2:timezone-submit:en-US:nonce1234567",
       { action: "timezone-submit", locale: "en-US", nonce: "nonce1234567" },
     ],
@@ -1043,7 +1049,7 @@ describe("personalConfigPanelCatalog", () => {
     // The codec table's mapped type requires one key per member of the action union, so its keys
     // are the declared actions without reading the union's source text.
     const declared = Object.keys(PERSONAL_CONFIG_ROUTE_CODECS);
-    expect(declared.length).toBe(67);
+    expect(declared.length).toBe(66);
     expect(declared.filter((action) => !pinned.has(action))).toEqual([]);
   });
 
@@ -1129,7 +1135,6 @@ describe("personalConfigPanelCatalog", () => {
       case "spotlight-remove-cancel":
         return [{ action, locale }];
       case "language-submit":
-      case "language-only-submit":
       case "timezone-submit":
       case "naming-submit":
       case "about-submit":
@@ -1207,7 +1212,7 @@ describe("personalConfigPanelCatalog", () => {
 
   it("round-trips every action in the codec table", () => {
     const actions = Object.keys(PERSONAL_CONFIG_ROUTE_CODECS) as PersonalConfigAction[];
-    expect(actions.length).toBe(67);
+    expect(actions.length).toBe(66);
 
     for (const action of actions) {
       const routes = buildRoutesForAction(action, false);
@@ -1243,7 +1248,7 @@ describe("personalConfigPanelCatalog", () => {
     // - page: "response-modes" (14 chars) is the longest PersonalConfigPage.
     // - mode: "follow" (6 chars) is the longest deliberate trigger/tool mode.
     const actions = Object.keys(PERSONAL_CONFIG_ROUTE_CODECS) as PersonalConfigAction[];
-    expect(actions.length).toBe(67);
+    expect(actions.length).toBe(66);
 
     for (const action of actions) {
       const routes = buildRoutesForAction(action, true);
@@ -1266,15 +1271,15 @@ describe("personalConfigPanelCatalog", () => {
       handlerSources.flatMap((source) => [...source.matchAll(/route\.action === "([a-z0-9-]+)"/g)].map((m) => m[1])),
     );
 
-    expect(tableActions.size).toBe(67);
-    expect(handlerActions.size).toBe(67);
+    expect(tableActions.size).toBe(66);
+    expect(handlerActions.size).toBe(66);
     expect([...tableActions].filter((a) => !handlerActions.has(a))).toEqual([]);
     expect([...handlerActions].filter((a) => !tableActions.has(a))).toEqual([]);
   });
 
   it("fails closed when dropping or appending a segment for every action in the table", () => {
     const actions = Object.keys(PERSONAL_CONFIG_ROUTE_CODECS) as PersonalConfigAction[];
-    expect(actions.length).toBe(67);
+    expect(actions.length).toBe(66);
 
     for (const action of actions) {
       const routes = buildRoutesForAction(action, false);
@@ -1547,9 +1552,11 @@ describe("personalConfigRoutes interaction handling and telemetry", () => {
 
     const handled = await dispatchGlobalInteraction({} as Client, staleInteraction);
     expect(handled).toBe(true);
-    const replyPayload = staleInteraction.replies.at(-1) as unknown as { content: string };
+    const replyPayload = staleInteraction.replies.at(-1);
     expect(replyPayload).toBeDefined();
-    expect(replyPayload.content).toContain("/personal config");
+    expect(collectTextDisplays(replyPayload).join("\n")).toMatch(
+      localizedProse("en-US", "commands.personal.config.outdated_panel", { command: "/personal config" }),
+    );
   });
 });
 
@@ -2188,6 +2195,46 @@ describe("personal config Appearance character reference", () => {
 });
 
 describe("Models panel rendering", () => {
+  it("shows the NovelAI context guide for personal text overrides without treating image generation as text", () => {
+    expectForEveryLocale((locale) => {
+      for (const textProvider of ["novelai", "openrouter", null]) {
+        const payload = buildPersonalConfigPanelPayload({
+          locale,
+          category: "models",
+          page: "switch",
+          user: makeUser(),
+          resolvedNickname: "Juno",
+          personas: [],
+          guildId: "guild-123",
+          memoryCount: 0,
+          stmCount: 0,
+          readStatus: "fresh",
+          modelDisplayInfo: makeModelDisplayInfo({
+            routingRows: {
+              text: {
+                capability: "text",
+                storedProvider: textProvider,
+                activeModelName: textProvider ? "text-model" : null,
+                storedModelName: textProvider ? "text-model" : null,
+              },
+              image_nai: {
+                capability: "image_nai",
+                storedProvider: "novelai",
+                activeModelName: "image-model",
+                storedModelName: "image-model",
+              },
+            },
+          }),
+        });
+        expectSafePanelPayload(payload, `${locale} text=${textProvider}`);
+        const text = collectTextDisplays(payload).join("\n");
+        const note = localizedProse(locale, "commands.config.panel.novelai_context_note");
+        if (textProvider === "novelai") expect(text).toMatch(note);
+        else expect(text).not.toMatch(note);
+      }
+    });
+  });
+
   it("renders independent routing controls with bounded placeholders and no cursor or duplicate buttons", () => {
     const user = makeUser();
     const payload = buildPersonalConfigPanelPayload({
@@ -2211,6 +2258,12 @@ describe("Models panel rendering", () => {
           },
           speech_clone: {
             capability: "speech_clone",
+            activeModelName: null,
+            storedProvider: null,
+            storedModelName: null,
+          },
+          transcription: {
+            capability: "transcription",
             activeModelName: null,
             storedProvider: null,
             storedModelName: null,
@@ -2256,6 +2309,7 @@ describe("Models panel rendering", () => {
         eligibleProvidersForCapability: {
           speech_design: [],
           speech_clone: [],
+          transcription: [],
           text: ["openrouter"],
           vision: ["openrouter"],
           embedding: ["openrouter"],
@@ -2277,7 +2331,7 @@ describe("Models panel rendering", () => {
     const routingControls = components.filter((component) =>
       component.customId?.includes(":model-provider-select:en-US:"),
     );
-    expect(routingControls).toHaveLength(8);
+    expect(routingControls).toHaveLength(9);
     expect(routingControls.map((component) => component.customId?.split(":").at(-1))).toEqual([
       "text",
       "vision",
@@ -2287,6 +2341,7 @@ describe("Models panel rendering", () => {
       "video",
       "speech_design",
       "speech_clone",
+      "transcription",
     ]);
     expect(routingControls.map((component) => component.placeholder)).toEqual([
       "Text: Claude 3.5 Sonnet (OpenRouter)",
@@ -2297,6 +2352,7 @@ describe("Models panel rendering", () => {
       "Video: Using Server Default",
       `${localizedCopy("en-US", "commands.config.panel.capability_tts_design")}: ${localizedCopy("en-US", "commands.personal.config.override_status_server_default")}`,
       `${localizedCopy("en-US", "commands.config.panel.capability_tts_clone")}: ${localizedCopy("en-US", "commands.personal.config.override_status_server_default")}`,
+      `${localizedCopy("en-US", "commands.config.panel.capability_stt")}: ${localizedCopy("en-US", "commands.personal.config.override_status_server_default")}`,
     ]);
     expect(routingControls.every((component) => component.placeholder && component.placeholder.length <= 150)).toBe(
       true,
@@ -2345,11 +2401,18 @@ describe("Models panel rendering", () => {
             storedProvider: null,
             storedModelName: null,
           },
+          transcription: {
+            capability: "transcription",
+            activeModelName: null,
+            storedProvider: null,
+            storedModelName: null,
+          },
         } as unknown as Record<PersonalConfigManagedCapability, PersonalConfigRoutingRow>,
         availableCapabilities: ["text"],
         eligibleProvidersForCapability: {
           speech_design: [],
           speech_clone: [],
+          transcription: [],
           text: ["openrouter"],
         } as unknown as Record<PersonalConfigManagedCapability, string[]>,
         parametersProviders: ["openrouter"],
@@ -2564,11 +2627,18 @@ describe("Models panel rendering", () => {
             storedProvider: null,
             storedModelName: null,
           },
+          transcription: {
+            capability: "transcription",
+            activeModelName: null,
+            storedProvider: null,
+            storedModelName: null,
+          },
         } as unknown as Record<PersonalConfigManagedCapability, PersonalConfigRoutingRow>,
         availableCapabilities: ["text"],
         eligibleProvidersForCapability: {
           speech_design: [],
           speech_clone: [],
+          transcription: [],
           text: ["openrouter"],
         } as unknown as Record<PersonalConfigManagedCapability, string[]>,
         parametersProviders: ["openrouter"],
@@ -2612,6 +2682,35 @@ describe("Models panel rendering", () => {
 });
 
 describe("Model assignment writes on modal submit", () => {
+  it("renders a rejected personal Xialong selection by locale key", async () => {
+    const { dependencies } = makeDependencies([]);
+    const loadProviders = dependencies.loadUserSavedProviders;
+    dependencies.loadUserSavedProviders = async (userId) =>
+      (await loadProviders(userId)).map((row) => ({ ...row, provider: "novelai" }));
+    dependencies.loadAvailableModelsForCapability = async () => [{ id: 102, name: "xialong-v1" }];
+    dependencies.operations.setCapabilityModel = async () => ({
+      status: "novelai-unavailable",
+      descriptionKey: "genai.novelai.xialong_opus",
+    });
+    const route = createPersonalConfigInteractionRoute(dependencies);
+    const customId = buildPersonalConfigRouteId({
+      action: "model-modal-submit",
+      locale: "en-US",
+      capability: "text",
+      provider: "novelai",
+      nonce: "nonce123456",
+    });
+    const interaction = makePersonalInteraction({ kind: "modal", customId });
+    const modalsModule = await import("@/utils/discord/ui/modals");
+    const take = spyOn(modalsModule, "takeRawModalSelectValue").mockReturnValue("102");
+    try {
+      await route.execute({} as Client, interaction, requireRoute(customId));
+      expect(JSON.stringify(interaction.edits.at(-1))).toMatch(localizedProse("en-US", "genai.novelai.xialong_opus"));
+    } finally {
+      take.mockRestore();
+    }
+  });
+
   it("writes on submit even when the assignment newly activates a cross-server override", async () => {
     const calls: string[] = [];
 
@@ -2660,40 +2759,6 @@ describe("Model assignment writes on modal submit", () => {
     const json = JSON.stringify(interaction.edits.at(-1));
     expect(json).not.toContain("model-act-confirm");
     expect(json).toContain("Text now routes to OpenRouter using Claude 3 Opus");
-  });
-
-  it("answers the standalone language submit with a reply instead of repainting a panel", async () => {
-    const calls: string[] = [];
-
-    const { dependencies, telemetry } = makeDependencies(calls);
-    const route = createPersonalConfigInteractionRoute(dependencies);
-    const customId = buildPersonalConfigRouteId({
-      action: "language-only-submit",
-      locale: "en-US",
-      nonce: "nonce123456",
-    });
-
-    const interaction = makePersonalInteraction({
-      kind: "modal",
-      customId,
-      overrides: { id: "modal-lang-1" },
-    });
-
-    const modalsModule = await import("@/utils/discord/ui/modals");
-    const takeSpy = spyOn(modalsModule, "takeRawModalSelectValue").mockReturnValue("ja");
-
-    await route.execute({} as Client, interaction, requireRoute(customId));
-
-    takeSpy.mockRestore();
-
-    expect(calls).toContain("setLanguage:ja");
-    expect(telemetry).toContain("personal-config.personal.language.set");
-    // A slash-command modal has no message, so deferring an update would fail outright and the
-    // repaint the panel route ends with would have nothing to edit.
-    expect(interaction.calls.filter((call) => call.method === "deferUpdate")).toHaveLength(0);
-    const replied = interaction.replies.at(-1) as { content?: string } | undefined;
-    expect(replied).not.toBeNull();
-    expect(replied?.content).toContain("日本語");
   });
 
   it("writes immediately without confirmation when capability is already an active override", async () => {
@@ -2947,6 +3012,12 @@ describe("Range pagination workflow", () => {
             },
             speech_clone: {
               capability: "speech_clone",
+              activeModelName: null,
+              storedProvider: null,
+              storedModelName: null,
+            },
+            transcription: {
+              capability: "transcription",
               activeModelName: null,
               storedProvider: null,
               storedModelName: null,
@@ -3574,8 +3645,8 @@ describe("Quick-Toggle modal structure and routing copy", () => {
     const component = modal.components[0]?.component;
     expect(component?.type).toBe(22);
     expect(component?.min_values).toBe(0);
-    expect(component?.max_values).toBe(8);
-    expect(component?.options).toHaveLength(8);
+    expect(component?.max_values).toBe(9);
+    expect(component?.options).toHaveLength(9);
 
     const values = component?.options.map((opt: { value: string }) => opt.value);
     expect(values).toEqual([
@@ -3587,6 +3658,7 @@ describe("Quick-Toggle modal structure and routing copy", () => {
       "video",
       "speech_design",
       "speech_clone",
+      "transcription",
     ]);
 
     const labels = component?.options.map((opt: { label: string }) => opt.label);
@@ -3600,6 +3672,7 @@ describe("Quick-Toggle modal structure and routing copy", () => {
         "commands.personal.config.routing_video",
         "commands.config.panel.capability_tts_design",
         "commands.config.panel.capability_tts_clone",
+        "commands.config.panel.capability_stt",
       ].map((key) => localizedCopy("en-US", key)),
     );
 
@@ -4448,6 +4521,12 @@ describe("personalConfigRoutes Advanced interactions and telemetry", () => {
             storedProvider: null,
             storedModelName: null,
           },
+          transcription: {
+            capability: "transcription",
+            activeModelName: null,
+            storedProvider: null,
+            storedModelName: null,
+          },
           text: {
             capability: "text",
             activeModelName: "Claude 3.5 Sonnet",
@@ -4464,6 +4543,7 @@ describe("personalConfigRoutes Advanced interactions and telemetry", () => {
         eligibleProvidersForCapability: {
           speech_design: [],
           speech_clone: [],
+          transcription: [],
           text: ["openrouter"],
           vision: [],
           embedding: [],

@@ -1,3 +1,5 @@
+import { initializeShardTopology } from "@/utils/discord/shardOwnership";
+
 /**
  * Pins the run environment for every test process.
  *
@@ -11,3 +13,9 @@
  * only moves the baseline they capture.
  */
 process.env.RUN_ENV = "development";
+
+// Pinned to what a local-model install chooses, because a workstation's .env would otherwise flip SSRF fixtures.
+process.env.ALLOW_PRIVATE_NETWORK = "true";
+delete process.env.FETCH_URL_ALLOW_PRIVATE_NETWORK;
+
+initializeShardTopology({});

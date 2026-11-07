@@ -20,6 +20,7 @@ import {
   type PersonalConfigRoutingRow,
   type PersonalConfigSpotlightDisplayInfo,
 } from "@/utils/discord/ui/personalConfigPanel";
+import { MAX_TAGS, TAGS_MODAL_MAX_LENGTH } from "@/utils/image/tagHelpers";
 import { initializeLocalizer } from "@/utils/text/localizer";
 import { createPersona, createUserRow, type UserFixtureOverrides } from "../../helpers/fixtures";
 import { RUNTIME_LOCALES } from "../../helpers/localeCases";
@@ -64,6 +65,7 @@ function makeModelDisplayInfo(fallbackCount = 2, providerCount = 1): PersonalCon
   const routingRows = {
     speech_design: { capability: "speech_design", activeModelName: null, storedProvider: null, storedModelName: null },
     speech_clone: { capability: "speech_clone", activeModelName: null, storedProvider: null, storedModelName: null },
+    transcription: { capability: "transcription", activeModelName: null, storedProvider: null, storedModelName: null },
     text: { ...routingRow, capability: "text" as const },
     vision: { ...routingRow, capability: "vision" as const, activeModelName: "GPT-4o" },
     embedding: { ...routingRow, capability: "embedding" as const, activeModelName: "text-embedding-3" },
@@ -86,6 +88,7 @@ function makeModelDisplayInfo(fallbackCount = 2, providerCount = 1): PersonalCon
     eligibleProvidersForCapability: {
       speech_design: [],
       speech_clone: [],
+      transcription: [],
       text: makeProviders("provider_text"),
       vision: makeProviders("provider_vision"),
       embedding: makeProviders("provider_embedding"),
@@ -274,6 +277,33 @@ describe("PersonalConfigPanel Limits & Boundary Sweeps", () => {
             );
           }
         }
+      }
+    }
+  });
+
+  it("previews appearance tags at the modal maximum within Discord limits across locales and receipts", () => {
+    const tagLength = Math.floor((TAGS_MODAL_MAX_LENGTH + 2) / MAX_TAGS) - 2;
+    const user = createUserRow({
+      ...USER_OVERRIDES,
+      physical_appearance_tags: Array.from({ length: MAX_TAGS }, (_, index) => String(index).padStart(tagLength, "t")),
+    });
+    for (const locale of RUNTIME_LOCALES) {
+      for (const receipt of [undefined, REALISTIC_RECEIPT]) {
+        const payload = buildPersonalConfigPanelPayload({
+          locale,
+          category: "profile",
+          page: "appearance",
+          user,
+          resolvedNickname: "Tester",
+          personas: [MAIN_PERSONA],
+          guildId: "guild-123",
+          memoryCount: 0,
+          stmCount: 0,
+          readStatus: "fresh",
+          receipt,
+        });
+        expectSafePanelPayload(payload, `PersonalConfig appearance max tags/${locale}/receipt=${Boolean(receipt)}`);
+        expect(collectTextDisplays(payload).join("\n")).toContain("<!-- ");
       }
     }
   });

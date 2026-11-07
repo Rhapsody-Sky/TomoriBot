@@ -83,8 +83,8 @@ export default {
       settings_persona_label: `ペルソナ`,
       settings_persona_description: `セットアップ後に使うペルソナを選択してください。`,
       settings_persona_placeholder: `ペルソナプリセットを選択...`,
-      settings_humanizer_label: `ヒューマナイザー度`,
-      settings_humanizer_description: `どれくらい人間らしく返信するかの設定です。ルールに基づく処理でAIは判断せず、レイテンシやトークンコストは増えません。`,
+      settings_humanizer_label: `ヒューマナイザープリセット`,
+      settings_humanizer_description: `どれくらい人間らしく返信しますか？ルールに基づく処理のため、レイテンシやコストは増加しません。後から /config で細かく調整できます。`,
       settings_humanizer_placeholder: `返信スタイルを選択...`,
       settings_timezone_label: `タイムゾーンのオフセット`,
       settings_timezone_description: `リマインダーや時間認識に使用します。空欄の場合はUTCを使用します。`,
@@ -185,7 +185,7 @@ export default {
 - \`/config\` で私の振る舞いやできることを調整できます。
 - \`/memories\` であなたについて教えてください。`,
       receipt_learn_more:
-        "詳しくは[公式Wiki](https://docs.tomoribot.app/ja/features/)を読むか、{help} （「機能」）を開いてください。\n- [複数ペルソナ](https://docs.tomoribot.app/ja/features/chatting-personality/multiple-personas/) = 見た目、声、トリガー\n- [チャットとトリガー](https://docs.tomoribot.app/ja/features/chatting-personality/chatting-and-triggers/) = いつどのように会話に参加するか\n- [記憶](https://docs.tomoribot.app/ja/features/knowledge/memory/) = 人物、事実、文脈\n- [パーソナライズ](https://docs.tomoribot.app/ja/features/knowledge/personalization/) = あなたへの接し方の好み\n- [メディア生成](https://docs.tomoribot.app/ja/features/capabilities/media-generation/image-generation/) = 画像、動画、音声\n- [ツールと拡張機能](https://docs.tomoribot.app/ja/features/capabilities/tools-and-extensions/built-in-tools/) = Web検索とカスタムツール",
+        "詳しくは[公式Wiki](https://docs.tomoribot.app/ja/features/)を読むか、{help} （「機能」）を開いてください。\n- [複数ペルソナ](https://docs.tomoribot.app/ja/features/chatting-personality/multiple-personas/) = 見た目、声、トリガー\n- [チャットとトリガー](https://docs.tomoribot.app/ja/features/chatting-personality/chatting-and-triggers/) = いつどのように会話に参加するか\n- [記憶](https://docs.tomoribot.app/ja/features/knowledge/memory/long-term-memory/) = 人物、事実、文脈\n- [パーソナライズ](https://docs.tomoribot.app/ja/features/knowledge/personalization/) = あなたへの接し方の好み\n- [メディア生成](https://docs.tomoribot.app/ja/features/capabilities/media-generation/image-generation/) = 画像、動画、音声\n- [ツールと拡張機能](https://docs.tomoribot.app/ja/features/capabilities/tools-and-extensions/built-in-tools/) = Web検索とカスタムツール",
       permission_denied: `セットアップを行うには「サーバー管理」権限が必要です。`,
       env_mismatch: `環境設定が変更されました。セットアップをやり直してください。`,
       forbidden: `このセットアップセッションは別のユーザーまたはチャンネルのものです。`,

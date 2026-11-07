@@ -1,3 +1,6 @@
+import { humanizerSettingsFromDegree } from "@/constants/humanizer";
+import { stubAllShardOwnership } from "../../helpers/shardOwnership";
+stubAllShardOwnership();
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { Client, Message } from "discord.js";
 import { tomoriChat } from "@/events/messageCreate/tomoriChat";
@@ -38,6 +41,11 @@ const fields = [
   "provider_ttfb_ms",
   "first_message_ms",
   "history_fetch_ms",
+  "assets_ms",
+  "history_build_ms",
+  "participant_ms",
+  "naming_ms",
+  "reunion_ms",
   "native_ms",
   "reaction_fetches",
   "reply_fetches",
@@ -86,7 +94,7 @@ describe("chat turn latency", () => {
       spyOn(emitter, "createChatResponseSink").mockReturnValue({} as never),
       spyOn(generation, "runGenerationTurn").mockImplementation(async (context) => {
         if (context.turn.personaIndex === 0) {
-          recordChatTurnConfiguration("custom:42", 2);
+          recordChatTurnConfiguration("custom:42", humanizerSettingsFromDegree(2));
           const firstChunk = recordChatProviderDispatch("custom:42");
           firstChunk();
           firstChunk();
@@ -174,7 +182,10 @@ describe("chat turn latency", () => {
     });
     await runWithChatTurnLatency(invocation, 1, 2, async () => {
       recordChatTurnFetch("reaction");
-      recordChatTurnConfiguration("private-provider", 0);
+      recordChatTurnConfiguration("private-provider", {
+        ...humanizerSettingsFromDegree(1),
+        humanizer_lowercase_enabled: true,
+      });
     });
     await first;
     gate.resolve();
@@ -185,6 +196,7 @@ describe("chat turn latency", () => {
       reaction_fetches: 1,
       image_fetches: 0,
       provider: "unknown",
+      humanizer: "custom",
       native_ms: -1,
     });
     expect(metric.mock.calls[1][1]).toMatchObject({

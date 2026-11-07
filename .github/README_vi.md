@@ -128,7 +128,7 @@ Hoặc nhắn tin trực tiếp (DM) cho TomoriBot và nói lời chào!
 - `/config` và `/personal config` - Nhiều cách để tùy biến TomoriBot trong máy chủ Discord hiện tại hoặc cho riêng bạn
 - `/providers` và `/personal providers` - Thêm các endpoint model hoặc nhà cung cấp đám mây
 - `/persona` - Tạo tính cách hoặc thêm nhân vật mới (xem [Nhiều persona](https://docs.tomoribot.app/vi/features/chatting-personality/multiple-personas/))
-- `/memories` - Dạy bot ghi nhớ thông tin qua các cuộc trò chuyện (xem [Bộ nhớ](https://docs.tomoribot.app/vi/features/knowledge/memory/))
+- `/memories` - Dạy bot ghi nhớ thông tin qua các cuộc trò chuyện (xem [Bộ nhớ](https://docs.tomoribot.app/vi/features/knowledge/memory/long-term-memory/))
 
 Xem [danh mục lệnh](https://docs.tomoribot.app/vi/features/command-reference/) đầy đủ để biết mọi lệnh slash.
 
@@ -186,15 +186,8 @@ Dự án này được cấp phép theo [AGPLv3](../LICENSE).
 Nếu bạn thấy TomoriBot hữu ích (hoặc thú vị), hãy cân nhắc tặng ⭐ cho repo hoặc ủng hộ sự phát triển của dự án qua Ko-fi hoặc Patreon!
 
 <p align="left">
-
-  &nbsp;
-  <a href="https://ko-fi.com/bredrumb">
-    <img src="https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
-  </a>
-  &nbsp;
-  <a href="https://www.patreon.com/cw/tomoribot">
-    <img src="https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon">
-  </a>
+  <a href="https://ko-fi.com/bredrumb"><img src="https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
+  <a href="https://www.patreon.com/cw/tomoribot"><img src="https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon"></a>
 </p>
 
 

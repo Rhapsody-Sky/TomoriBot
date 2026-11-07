@@ -1,3 +1,4 @@
+import { applyPromptLayoutInserts, type PromptLayoutInsert } from "@/utils/text/context/promptLayout";
 import type { Client } from "discord.js";
 import {
   ContextItemTag,
@@ -5,17 +6,13 @@ import {
   type MediaDescriptor,
   type StructuredContextItem,
 } from "@/types/misc/context";
-import { HumanizerDegree, type AssembledServerConfig, type TomoriState } from "@/types/db/schema";
+import type { AssembledServerConfig, TomoriState } from "@/types/db/schema";
 import { normalizeMessageFetchLimit } from "@/utils/discord/messageFetchLimit";
 import { log } from "@/utils/misc/logger";
 import { memoryGuard } from "@/utils/security/rateLimiter";
-import { humanizeString } from "@/utils/text/processors/formatters";
+import { applyStableHumanizer } from "@/utils/text/processors/formatters";
 import { applyUncensorInputTransforms } from "@/utils/text/uncensor";
-import {
-  VERBATIM_TOOL_CALLING_CONTEXT_DEPTH,
-  VERBATIM_TOOL_CALLING_NUDGE,
-  shouldInjectVerbatimToolCallingNudge,
-} from "@/utils/tools/verbatimToolCalling";
+import { VERBATIM_TOOL_CALLING_NUDGE, shouldInjectVerbatimToolCallingNudge } from "@/utils/tools/verbatimToolCalling";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
 import {
   buildMediaAttributionText,
@@ -29,7 +26,7 @@ import {
 import { normalizeCustomEmojisForLlm, splitLeadingSystemBlocks } from "./mentionNormalizer";
 import type { MentionConverter } from "./templates";
 import type { SimplifiedMessageForContext } from "./types";
-import { buildDateSpacer, TIME_AWARENESS_NOTE_DEPTH } from "./timeAwareness";
+import { buildDateSpacer } from "./timeAwareness";
 
 /**
  * Expanded by the caller's tool macro resolver before use, so the `read_file` instruction appears only
@@ -82,40 +79,44 @@ export async function appendDialogueHistoryContext(params: {
   const personaNoteText = params.tomoriState?.context_note?.trim() || null;
   const channelNoteText = params.channelContextNote?.note?.trim() || null;
 
-  const activeNotes: Array<{ text: string; targetIndex: number; emitted: boolean }> = [];
+  const activeNotes: PromptLayoutInsert[] = [];
+  const noteInsert = (tag: PromptLayoutInsert["tag"], text: string, depth?: number): PromptLayoutInsert => ({
+    tag,
+    depth,
+    items: [
+      {
+        role: "user",
+        parts: [{ type: "text", text: `[System: ${text}]` }],
+        metadataTag: ContextItemTag.CONTEXT_NOTE_INJECTION,
+        messageId: "context_note_injection",
+      },
+    ],
+  });
 
   if (personaNoteText) {
     const depth = params.tomoriState?.context_note_depth ?? 0;
-    activeNotes.push({ text: personaNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
+    activeNotes.push(noteInsert("persona_note", personaNoteText, depth));
   }
   if (channelNoteText) {
     const depth = params.channelContextNote?.depth ?? 0;
-    activeNotes.push({ text: channelNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
+    activeNotes.push(noteInsert("channel_note", channelNoteText, depth));
   }
   if (activeNotes.length === 0) {
     const globalNoteText = params.tomoriConfig.context_note?.trim() || null;
     if (globalNoteText) {
       const depth = params.tomoriConfig.context_note_depth ?? 0;
-      activeNotes.push({ text: globalNoteText, targetIndex: Math.max(0, totalMessages - depth), emitted: false });
+      activeNotes.push(noteInsert("global_note", globalNoteText, depth));
     }
   }
   if (shouldInjectVerbatimToolCallingNudge(params.tomoriState)) {
-    activeNotes.push({
-      text: VERBATIM_TOOL_CALLING_NUDGE,
-      targetIndex: Math.max(0, totalMessages - VERBATIM_TOOL_CALLING_CONTEXT_DEPTH),
-      emitted: false,
-    });
+    activeNotes.push(noteInsert("verbatim_nudge", VERBATIM_TOOL_CALLING_NUDGE));
   }
   // The reunion note sits above the newest messages rather than directly against
   // the triggering prompt, so it reads as background awareness instead of an
   // instruction that outranks whatever the user actually asked for.
   const reunionNoteText = params.reunionNote?.trim();
   if (reunionNoteText) {
-    activeNotes.push({
-      text: reunionNoteText,
-      targetIndex: Math.max(0, totalMessages - TIME_AWARENESS_NOTE_DEPTH),
-      emitted: false,
-    });
+    activeNotes.push(noteInsert("reunion_note", reunionNoteText));
   }
 
   const botNameLower = params.botName.toLowerCase();
@@ -129,10 +130,13 @@ export async function appendDialogueHistoryContext(params: {
         : params.isUserImpersonation || !isCurrentPersonaMessage
           ? "user"
           : "model";
-    const sender: StructuredContextItem["sender"] = {
-      name: msg.personaName ?? msg.authorName,
-      type: msg.authorType,
-    };
+    const sender: StructuredContextItem["sender"] = msg.isSystemNotice
+      ? undefined
+      : {
+          id: String(msg.authorPersonaId ?? msg.authorId),
+          name: msg.personaName ?? msg.authorName,
+          type: msg.authorType,
+        };
 
     if (params.dateSpacerTemplate && previousCreatedAt !== undefined && msg.createdAt !== undefined) {
       const spacer = buildDateSpacer(
@@ -152,20 +156,10 @@ export async function appendDialogueHistoryContext(params: {
     }
     if (msg.createdAt !== undefined) previousCreatedAt = msg.createdAt;
 
-    for (const note of activeNotes) {
-      if (!note.emitted && index === note.targetIndex) {
-        pushDialogueHistoryContextItem(
-          params.contextItems,
-          "user",
-          [{ type: "text", text: `[System: ${note.text}]` }],
-          "context_note_injection",
-          ContextItemTag.CONTEXT_NOTE_INJECTION,
-        );
-        note.emitted = true;
-      }
-    }
+    applyPromptLayoutInserts(params.contextItems, activeNotes, { index, total: totalMessages });
 
     const parts: ContextPart[] = [];
+    const completionParts: ContextPart[] = [];
     const detachedSystemParts: ContextPart[] = [];
     const mediaDescriptors: MediaDescriptor[] = [];
     const isWithinMediaWindow = index >= mediaWindowCutoff;
@@ -198,10 +192,12 @@ export async function appendDialogueHistoryContext(params: {
       role,
       parts,
       detachedSystemParts,
+      completionParts,
       hasMediaDescriptors: mediaDescriptors.length > 0,
       mediaAttributionHint,
     });
     appendDocumentHintParts({ ...params, msg, parts });
+    const firstItemIndex = params.contextItems.length;
 
     if (role === "user" && (parts.length > 0 || detachedSystemParts.length > 0 || mediaDescriptors.length > 0)) {
       pushDialogueHistoryContextItem(
@@ -236,19 +232,18 @@ export async function appendDialogueHistoryContext(params: {
         msg.combinedMessageIds,
       );
     }
-  }
-
-  for (const note of activeNotes) {
-    if (!note.emitted) {
-      pushDialogueHistoryContextItem(
-        params.contextItems,
-        "user",
-        [{ type: "text", text: `[System: ${note.text}]` }],
-        "context_note_injection",
-        ContextItemTag.CONTEXT_NOTE_INJECTION,
-      );
+    for (const item of params.contextItems.slice(firstItemIndex)) {
+      if (item.parts === parts || item.role === role) {
+        item.completionText = completionParts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+      }
     }
   }
+
+  applyPromptLayoutInserts(params.contextItems, activeNotes, {
+    index: totalMessages,
+    total: totalMessages,
+    flush: true,
+  });
 }
 
 function appendDocumentHintParts(params: {
@@ -461,6 +456,7 @@ async function appendTextParts(
     role: "user" | "model";
     parts: ContextPart[];
     detachedSystemParts: ContextPart[];
+    completionParts: ContextPart[];
     hasMediaDescriptors: boolean;
     mediaAttributionHint: string | null;
   },
@@ -475,8 +471,12 @@ async function appendTextParts(
 
   if (params.msg.content) {
     let normalizedContent = normalizeCustomEmojisForLlm(params.msg.content);
+    let completionContent = normalizeCustomEmojisForLlm(params.msg.completionContent ?? params.msg.content);
     if (params.msg.authorPersonaLineageId != null && params.historyPersonaMentionLabels) {
       normalizedContent = normalizedContent.replace(/<@!?(\d+)>/gu, (mention, targetId: string) => {
+        return params.historyPersonaMentionLabels?.get(`${params.msg.authorPersonaLineageId}:${targetId}`) ?? mention;
+      });
+      completionContent = completionContent.replace(/<@!?(\d+)>/gu, (mention, targetId: string) => {
         return params.historyPersonaMentionLabels?.get(`${params.msg.authorPersonaLineageId}:${targetId}`) ?? mention;
       });
     }
@@ -506,13 +506,13 @@ async function appendTextParts(
       processedContent = `${resolvedAuthorLabel}: ${normalizedContent}`;
     }
 
-    if (params.tomoriConfig.humanizer_degree >= HumanizerDegree.HEAVY && params.role === "model") {
+    if (params.role === "model") {
       // content is already real, previously-delivered text, so re-rolling the same randomized
       // comma/emphasis noise on every context build would just re-randomize already-final output
       // and, since it never lands on the same result twice, defeat provider prompt-prefix caching
-      // for every turn after this one. suppressPunctuationNoise keeps only the deterministic
+      // for every turn after this one. The stable humanizer keeps only the deterministic
       // casing/semicolon normalization, so a rebuilt prompt's history prefix stays byte-stable.
-      [processedContent] = humanizeString(processedContent, { suppressPunctuationNoise: true });
+      processedContent = applyStableHumanizer(processedContent, params.tomoriConfig);
     }
     // Mentions, channel links, and roles still resolve here. Only the identity macros stay
     //    literal: this string carries a real Discord message body, so rewriting "{bot}"/"{char}"
@@ -531,6 +531,21 @@ async function appendTextParts(
     if (!processedContent.startsWith("[System:")) {
       processedContent = applyUncensorInputTransforms(processedContent, params.uncensorInputOptions);
     }
+    const completionText = await params.convertMentions(
+      completionContent
+        ? params.msg.completionSpeaker === false
+          ? completionContent
+          : `${resolvedAuthorLabel}: ${completionContent}`
+        : "",
+      params.client,
+      params.guildId,
+      params.msg.authorName,
+      params.botName,
+      params.tomoriConfig.personal_memories_enabled,
+      undefined,
+      "preserve",
+    );
+    params.completionParts.push({ type: "text", text: completionText });
     if (params.mediaAttributionHint) processedContent += `\n${params.mediaAttributionHint}`;
     params.parts.push({ type: "text", text: processedContent });
     if (params.includeTimestamps && params.msg.createdAt) {

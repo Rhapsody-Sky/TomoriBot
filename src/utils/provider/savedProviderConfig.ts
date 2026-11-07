@@ -35,7 +35,8 @@ export type SavedProviderCapability =
   | "video"
   | "vision"
   | "speech_design"
-  | "speech_clone";
+  | "speech_clone"
+  | "transcription";
 
 interface ProviderDefaultSelectionIds {
   llm_id: number | null;
@@ -263,6 +264,7 @@ export async function buildUserSavedProviderConfigFromExistingOrDefaults(params:
     video_model_id: existingConfig?.video_model_id ?? defaults?.video_model_id ?? null,
     speech_design_model_id: existingConfig?.speech_design_model_id ?? null,
     speech_clone_model_id: existingConfig?.speech_clone_model_id ?? null,
+    transcription_model_id: existingConfig?.transcription_model_id ?? null,
     vision_llm_id: existingConfig ? (existingConfig.vision_llm_id ?? null) : (defaults?.vision_llm_id ?? null),
     nai_preset_name: existingConfig?.nai_preset_name ?? null,
     llm_temperature: existingConfig?.llm_temperature ?? params.baseConfig?.llm_temperature ?? null,
@@ -417,6 +419,19 @@ async function filterSavedProvidersByCapability<
     );
     return availableConfigs.filter((_config, index) => servesMode[index]);
   }
+  if (capability === "transcription") {
+    // Provider options do not offer transcription, so only a built-in provider's own key qualifies.
+    const served = await Promise.all(
+      availableConfigs.map(
+        async (config) =>
+          !isCustomProvider(config.provider) &&
+          !findProviderOption(config.provider) &&
+          config.api_key !== null &&
+          (await llmModelRepo.loadAvailableTranscriptionModels(config.provider, owner)).length > 0,
+      ),
+    );
+    return availableConfigs.filter((_config, index) => served[index]);
+  }
 
   const registeredVisibility = await Promise.all(
     availableConfigs.map(async (config) => {
@@ -473,15 +488,22 @@ export function withSavedProviderConfig(
             | "thinking_level"
             | "llm_disabled_params"
             | "llm_logit_biases"
+            | "provider"
+            | "llm_id"
+            | "nai_preset_name"
           >
         >)
     | null,
 ): TomoriState {
   const { config } = tomoriState;
+  const isNovelAI = (savedConfig?.provider ?? tomoriState.llm.llm_provider).toLowerCase() === "novelai";
+  const presetName = savedConfig?.nai_preset_name ?? null;
   return {
     ...tomoriState,
+    ...(isNovelAI && tomoriState.nai_preset?.preset_name !== presetName ? { nai_preset: undefined } : {}),
     config: {
       ...config,
+      ...(isNovelAI ? { nai_preset_name: presetName, llm_id: savedConfig?.llm_id ?? config.llm_id } : {}),
       api_key: savedConfig?.api_key ?? null,
       key_version: savedConfig?.key_version ?? 1,
       llm_temperature: savedConfig?.llm_temperature ?? config.llm_temperature,

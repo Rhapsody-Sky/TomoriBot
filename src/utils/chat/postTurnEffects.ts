@@ -1,3 +1,4 @@
+import { persistMemoryRecall } from "@/utils/text/context/memoryRecall";
 import { buildChatPersonaPostContext } from "@/utils/chat/responseEmitter";
 import { PrivacyLevel } from "@/types/db/schema";
 import { ContextItemTag } from "@/types/misc/context";
@@ -50,6 +51,7 @@ const EMPTY_RESPONSE_RETRY_DELAY_MS = 1000;
  * Runs side effects that must happen after a generation attempt finishes.
  */
 export async function runPostTurnEffects(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
+  if (context.memoryRecall) void persistMemoryRecall(context.memoryRecall);
   // Empty-response retries rebuild context recursively, so release or commit the
   // claim before that retry tries to acquire it again.
   await recordReunionPresence(context.reunionPresence, result);
@@ -475,7 +477,6 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
     textQuotaUserDiscId: incoming.textQuotaUserDiscId,
     manualSystemPrompt: incoming.manualSystemPrompt,
     manualPrefill: incoming.manualPrefill,
-    naiContinuationPrefill: lastStreamResult?.naiContinuationPrefill,
     emptyResponseFinishReason: streamResultData?.finishReason === "length" ? "length" : undefined,
     shouldSurfaceUserErrors: context.shouldSurfaceUserErrors,
     injectedContextItems: retryInjectedContextItems,

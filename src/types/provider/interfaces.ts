@@ -101,6 +101,7 @@ export interface StreamResult {
     | "empty_response"
     | "follow_up_interrupt";
   data?: unknown | Error; // Function call data or error details
+  providerFailureReported?: boolean;
   pendingResponse?: import("@/types/stream/pendingResponse").PendingStreamResponse;
   accumulatedText?: string; // Text sent to Discord (for short-term memory storage)
   /** Discord ID of the first message this segment delivered. */
@@ -109,8 +110,6 @@ export interface StreamResult {
   detailsContent?: string;
   stopReason?: StreamStopReason; // Specific stop source for debugging/logging
   thoughtLog?: ThoughtLogPayload; // Reasoning/thought text captured separately from visible output
-  /** NAI GLM-4.6: incomplete trailing sentence dropped by sentenceTrailingBuffer, available for prompt continuation on retry */
-  naiContinuationPrefill?: string;
   /**
    * Sprite labels delivered during this stream segment, in render order (one entry
    * per delivered sprite message, so repeats are kept). Surfaced from StreamState so
@@ -171,6 +170,7 @@ export interface ProviderInfo {
  * Function call representation (provider-agnostic)
  */
 export interface FunctionCall {
+  id?: string;
   name: string;
   args?: Record<string, unknown>;
   /**
@@ -234,6 +234,16 @@ export interface LLMProvider {
    * @returns Promise<ApiKeyValidationResult> - Validation result with detailed error info if failed
    */
   validateApiKey(apiKey: string): Promise<ApiKeyValidationResult>;
+
+  /**
+   * Looks a text model up in the provider's own catalog before it is registered.
+   * @returns False only when the provider answered that it does not serve `codename`; null when
+   *          the lookup could not answer, which registration treats as unchecked.
+   */
+  checkTextModel?(apiKey: string, codename: string): Promise<boolean | null>;
+
+  /** {@link checkTextModel} for an image model, offered only where the same catalog serves image models. */
+  checkImageModel?(apiKey: string, codename: string): Promise<boolean | null>;
 
   /**
    * Create a localized provider-specific error description for user-facing embeds.

@@ -5,6 +5,8 @@
  * only observe the canonical methods the handler should call, which keeps the authorization and
  * acknowledgement assertions on the actual wiring.
  */
+import { humanizerSettingsFromDegree, pickHumanizerSettings } from "@/constants/humanizer";
+import { type HumanizerCheckboxGroup, humanizerCheckboxFieldName } from "@/utils/discord/humanizerOptions";
 import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { ChannelType, ComponentType, type Client } from "discord.js";
 import type { RandomTriggerRow, TomoriState } from "@/types/db/schema";
@@ -55,6 +57,7 @@ import {
 import { initializeLocalizer, localizer } from "@/utils/text/localizer";
 import { TOOL_NOTICE_DEFINITIONS } from "@/constants/toolNotices";
 import { localizedCopy, localizedProse } from "../../helpers/localeCases";
+import { collectTextDisplays } from "../../helpers/panelLimits";
 import {
   createInteractionRecorder,
   createRouteInteraction,
@@ -82,7 +85,7 @@ function makeState(): TomoriState {
       system_prompt: "Old prompt",
       context_note: null,
       context_note_depth: 0,
-      humanizer_degree: 1,
+      ...humanizerSettingsFromDegree(1),
       message_fetch_limit: 80,
       timezone_offset: 0,
       cascade_limit: 3,
@@ -125,6 +128,8 @@ interface Harness {
   telemetry: string[];
   /** Values the intercepted modal store holds, keyed by interaction id then field id. */
   selectValues: Map<string, Map<string, string>>;
+  /** Checkbox payloads by interaction id; an interaction with none set reads every group as empty. */
+  checkboxValues: Map<string, Map<string, string[]>>;
   /** Files the newest interaction's arrays behind the running `edits`/`replies` views. */
   record: (interaction: RouteInteraction) => void;
 }
@@ -153,6 +158,7 @@ function makeHarness(inGuild = true): Harness {
     deferredAtWrite: [],
     telemetry: [],
     selectValues: new Map(),
+    checkboxValues: new Map(),
     dependencies: {
       resolveScope: async () => scope,
       getPersonaAvatarData: async () => ({ url: null, files: [] }),
@@ -162,7 +168,10 @@ function makeHarness(inGuild = true): Harness {
       },
       takeFileUpload: () => undefined,
       takeAvatarUpload: () => undefined,
-      takeCheckboxValues: () => [],
+      takeCheckboxValues: (interactionId: string, fieldId: string) => {
+        const stored = harness.checkboxValues.get(interactionId);
+        return stored ? stored.get(fieldId) : [];
+      },
       takeSelectValue: (interactionId: string, fieldId: string) =>
         harness.selectValues.get(interactionId)?.get(fieldId),
       recordAction: ({ action }) => {
@@ -176,7 +185,7 @@ function makeHarness(inGuild = true): Harness {
           systemPrompt: current.config.system_prompt ?? null,
           contextNote: current.config.context_note ?? null,
           contextNoteDepth: current.config.context_note_depth ?? 0,
-          humanizerDegree: current.config.humanizer_degree ?? 1,
+          humanizer: pickHumanizerSettings(current.config),
           messageFetchLimit: current.config.message_fetch_limit ?? 80,
           timezoneOffset: current.config.timezone_offset ?? 0,
         },
@@ -210,6 +219,8 @@ function makeInteraction(
     componentTypes?: Record<string, number>;
     /** Values the reader should find in the intercepted store, keyed by field id. */
     selectValues?: Record<string, string>;
+    /** Checkbox payloads keyed by field id; a field left out reads as never submitted. */
+    checkboxValues?: Record<string, string[]>;
     values?: string[];
     isManager?: boolean;
     inGuild?: boolean;
@@ -219,6 +230,11 @@ function makeInteraction(
   const kind = options.kind ?? "button";
   const interactionId = "interaction-1";
   harness.selectValues.set(interactionId, new Map(Object.entries(options.selectValues ?? {})));
+  if (options.checkboxValues) {
+    harness.checkboxValues.set(interactionId, new Map(Object.entries(options.checkboxValues)));
+  } else {
+    harness.checkboxValues.delete(interactionId);
+  }
 
   const interaction = createRouteInteraction({
     customId,
@@ -378,7 +394,9 @@ describe("config Behavior routes", () => {
     await dispatchGlobalInteraction(CLIENT, staleInteraction as unknown as GlobalRoutableInteraction);
 
     expect(harness.replies).toHaveLength(1);
-    expect((harness.replies[0] as { content?: string }).content).toContain("out of date");
+    expect(collectTextDisplays(harness.replies[0]).join("\n")).toMatch(
+      localizedProse("en-US", "commands.config.panel.outdated_panel", { command: "/config" }),
+    );
   });
 
   it("writes Self-Debug through the real route and repaints Context Additions", async () => {
@@ -528,17 +546,23 @@ describe("config Behavior routes", () => {
     // `getTextInputValue` finds the id, fails the type check, and throws out of the route. Pinning
     // the types makes a builder change that breaks that pairing fail in CI rather than in a guild.
     const nonce = "nonce1234567";
-    const humanizerFields = collectModalFieldTypes(buildBehaviorHumanizerModal("en-US", nonce, 1));
+    const humanizerFields = collectModalFieldTypes(
+      buildBehaviorHumanizerModal("en-US", nonce, humanizerSettingsFromDegree(1)),
+    );
     const cooldownFields = collectModalFieldTypes(buildBehaviorCooldownModal("en-US", nonce, 0, 5));
 
-    expect(humanizerFields.get(buildConfigModalFieldId(BEHAVIOR_HUMANIZER_FIELD, nonce))).toBe(21);
+    expect(
+      humanizerFields.get(
+        buildConfigModalFieldId(humanizerCheckboxFieldName(BEHAVIOR_HUMANIZER_FIELD, "streaming"), nonce),
+      ),
+    ).toBe(22);
     expect(cooldownFields.get(buildConfigModalFieldId(BEHAVIOR_COOLDOWN_TYPE_FIELD, nonce))).toBe(21);
     expect(cooldownFields.get(buildConfigModalFieldId(BEHAVIOR_COOLDOWN_LENGTH_FIELD, nonce))).toBe(4);
   });
 
   it("emits literal raw modal component types for Behavior inputs", () => {
     const addModal = buildBehaviorRandomAddModal("en-US", "nonce1234567", [makeState()]);
-    const humanizerModal = buildBehaviorHumanizerModal("en-US", "nonce1234567", 1);
+    const humanizerModal = buildBehaviorHumanizerModal("en-US", "nonce1234567", humanizerSettingsFromDegree(1));
     const removeModal = buildBehaviorRandomRemoveModal("en-US", "nonce1234567", "abcd1234", 0, [makeRandomTrigger()]);
     const addTypes = collectRawComponentTypes(addModal);
     const humanizerTypes = collectRawComponentTypes(humanizerModal);
@@ -557,7 +581,7 @@ describe("config Behavior routes", () => {
     expect(addTypes).toContain(22); // Checkbox Group
     expect(addTypes).toContain(4); // Text Input
     expect(humanizerTypes).toContain(18); // Label
-    expect(humanizerTypes).toContain(21); // Radio Group
+    expect(humanizerTypes).toContain(22); // Checkbox Group
     expect(removeTypes).toContain(18); // Label
     expect(removeTypes).toContain(22); // Checkbox Group
     expect(experimentalTypes).toContain(4); // Text Input
@@ -646,8 +670,8 @@ describe("config Behavior routes", () => {
     for (const action of ["behavior-prompt-open", "behavior-preset-open"] as const) {
       const interaction = makeInteraction(harness, buildConfigRouteId({ action, locale: "en-US" }));
       await dispatch(harness, interaction);
-      expect(JSON.stringify(harness.replies.at(-1))).toContain(
-        localizedCopy("en-US", "commands.config.panel.system_prompt_st_preset_locked_detail"),
+      expect(collectTextDisplays(harness.replies.at(-1)).join("\n")).toMatch(
+        localizedProse("en-US", "commands.config.panel.system_prompt_st_preset_locked_detail"),
       );
     }
     await dispatch(
@@ -715,10 +739,9 @@ describe("config Behavior routes", () => {
     updateTrigger.mockRestore();
   });
 
-  it("reads the humanizer degree from the store, not from the modal text fields", async () => {
-    // The degree is rendered as a radio group, so it never arrives as text. Carrying the value as
-    // a text field must therefore leave the setting untouched: the reader is looking somewhere
-    // else, and reading it as text is what threw the route out of the interaction entirely.
+  it("reads the humanizer toggles from the checkbox store, not from the modal text fields", async () => {
+    // The toggles are rendered as a checkbox group, so they never arrive as text. Carrying a value
+    // as a text field must therefore leave the setting untouched rather than read as "all off".
     const harness = makeHarness(false);
     const update = spyOn(configRepository, "updateChatConfig").mockResolvedValue(true);
     const field = buildConfigModalFieldId(BEHAVIOR_HUMANIZER_FIELD, "nonce1234567");
@@ -727,7 +750,7 @@ describe("config Behavior routes", () => {
       makeInteraction(
         harness,
         buildConfigRouteId({ action: "behavior-humanizer-submit", locale: "en-US", nonce: "nonce1234567" }),
-        { kind: "modal", inGuild: false, fields: { [field]: "3" } },
+        { kind: "modal", inGuild: false, fields: { [field]: "3" }, checkboxValues: {} },
       ),
     );
     expect(update).not.toHaveBeenCalled();
@@ -735,20 +758,55 @@ describe("config Behavior routes", () => {
     update.mockRestore();
   });
 
-  it("writes the chosen humanizer degree and reports it", async () => {
+  it("writes the checked humanizer toggles and reports them", async () => {
     const harness = makeHarness(false);
     const update = spyOn(configRepository, "updateChatConfig").mockResolvedValue(true);
-    const field = buildConfigModalFieldId(BEHAVIOR_HUMANIZER_FIELD, "nonce1234567");
+    const field = (group: HumanizerCheckboxGroup) =>
+      buildConfigModalFieldId(humanizerCheckboxFieldName(BEHAVIOR_HUMANIZER_FIELD, group), "nonce1234567");
     await dispatch(
       harness,
       makeInteraction(
         harness,
         buildConfigRouteId({ action: "behavior-humanizer-submit", locale: "en-US", nonce: "nonce1234567" }),
-        { kind: "modal", inGuild: false, selectValues: { [field]: "3" } },
+        {
+          kind: "modal",
+          inGuild: false,
+          checkboxValues: {
+            [field("streaming")]: ["humanizer_streaming_enabled"],
+            [field("requires_streaming")]: [],
+            [field("other")]: ["humanizer_lowercase_enabled"],
+          },
+        },
       ),
     );
-    expect(update).toHaveBeenCalledWith(9, { humanizer_degree: 3 });
+    expect(update).toHaveBeenCalledWith(9, { ...humanizerSettingsFromDegree(1), humanizer_lowercase_enabled: true });
     expect(harness.telemetry).toContain("server-config.workspace.humanizer.set");
+    update.mockRestore();
+  });
+
+  it("rejects a dependent humanizer toggle whose parent is unchecked", async () => {
+    const harness = makeHarness(false);
+    const update = spyOn(configRepository, "updateChatConfig").mockResolvedValue(true);
+    const field = (group: HumanizerCheckboxGroup) =>
+      buildConfigModalFieldId(humanizerCheckboxFieldName(BEHAVIOR_HUMANIZER_FIELD, group), "nonce1234567");
+    await dispatch(
+      harness,
+      makeInteraction(
+        harness,
+        buildConfigRouteId({ action: "behavior-humanizer-submit", locale: "en-US", nonce: "nonce1234567" }),
+        {
+          kind: "modal",
+          inGuild: false,
+          checkboxValues: {
+            [field("streaming")]: [],
+            [field("requires_streaming")]: ["humanizer_pacing_enabled"],
+            [field("other")]: [],
+          },
+        },
+      ),
+    );
+    expect(update).not.toHaveBeenCalled();
+    expect(harness.telemetry).not.toContain("server-config.workspace.humanizer.set");
     update.mockRestore();
   });
 
@@ -834,7 +892,7 @@ describe("config Behavior routes", () => {
       makeInteraction(
         harness,
         buildConfigRouteId({ action: "behavior-humanizer-submit", locale: "en-US", nonce: "nonce1234567" }),
-        { kind: "modal", inGuild: false },
+        { kind: "modal", inGuild: false, checkboxValues: {} },
       ),
     );
     expect(update).not.toHaveBeenCalled();
@@ -1174,7 +1232,7 @@ describe("config Behavior routes", () => {
         systemPrompt: current.config.system_prompt ?? null,
         contextNote: current.config.context_note ?? null,
         contextNoteDepth: current.config.context_note_depth ?? 0,
-        humanizerDegree: current.config.humanizer_degree ?? 1,
+        humanizer: pickHumanizerSettings(current.config),
         messageFetchLimit: current.config.message_fetch_limit ?? 80,
         timezoneOffset: current.config.timezone_offset ?? 0,
       },
@@ -1276,7 +1334,7 @@ describe("config Behavior routes", () => {
         systemPrompt: current.config.system_prompt ?? null,
         contextNote: current.config.context_note ?? null,
         contextNoteDepth: current.config.context_note_depth ?? 0,
-        humanizerDegree: current.config.humanizer_degree ?? 1,
+        humanizer: pickHumanizerSettings(current.config),
         messageFetchLimit: current.config.message_fetch_limit ?? 80,
         timezoneOffset: current.config.timezone_offset ?? 0,
       },
@@ -1315,7 +1373,7 @@ describe("config Behavior routes", () => {
           systemPrompt: current.config.system_prompt ?? null,
           contextNote: current.config.context_note ?? null,
           contextNoteDepth: current.config.context_note_depth ?? 0,
-          humanizerDegree: current.config.humanizer_degree ?? 1,
+          humanizer: pickHumanizerSettings(current.config),
           messageFetchLimit: current.config.message_fetch_limit ?? 80,
           timezoneOffset: current.config.timezone_offset ?? 0,
         },
@@ -1364,7 +1422,7 @@ describe("config Behavior routes", () => {
         systemPrompt: current.config.system_prompt ?? null,
         contextNote: current.config.context_note ?? null,
         contextNoteDepth: current.config.context_note_depth ?? 0,
-        humanizerDegree: current.config.humanizer_degree ?? 1,
+        humanizer: pickHumanizerSettings(current.config),
         messageFetchLimit: current.config.message_fetch_limit ?? 80,
         timezoneOffset: current.config.timezone_offset ?? 0,
       },
@@ -1403,7 +1461,7 @@ describe("config Behavior routes", () => {
         systemPrompt: current.config.system_prompt ?? null,
         contextNote: current.config.context_note ?? null,
         contextNoteDepth: current.config.context_note_depth ?? 0,
-        humanizerDegree: current.config.humanizer_degree ?? 1,
+        humanizer: pickHumanizerSettings(current.config),
         messageFetchLimit: current.config.message_fetch_limit ?? 80,
         timezoneOffset: current.config.timezone_offset ?? 0,
       },
@@ -1440,7 +1498,7 @@ describe("config Behavior routes", () => {
         systemPrompt: current.config.system_prompt ?? null,
         contextNote: current.config.context_note ?? null,
         contextNoteDepth: current.config.context_note_depth ?? 0,
-        humanizerDegree: current.config.humanizer_degree ?? 1,
+        humanizer: pickHumanizerSettings(current.config),
         messageFetchLimit: current.config.message_fetch_limit ?? 80,
         timezoneOffset: current.config.timezone_offset ?? 0,
       },
@@ -1488,7 +1546,7 @@ describe("config Behavior routes", () => {
         systemPrompt: current.config.system_prompt ?? null,
         contextNote: current.config.context_note ?? null,
         contextNoteDepth: current.config.context_note_depth ?? 0,
-        humanizerDegree: current.config.humanizer_degree ?? 1,
+        humanizer: pickHumanizerSettings(current.config),
         messageFetchLimit: current.config.message_fetch_limit ?? 80,
         timezoneOffset: current.config.timezone_offset ?? 0,
       },

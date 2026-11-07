@@ -2,6 +2,8 @@ export default {
   status: {
     prompt_hidden: `提示词文本已隐藏。成员需要拥有「管理服务器」权限或启用了提示词查看才能查看它。`,
     description: `查看当前个人、服务器或人格状态。`,
+    page_description: `仪表盘打开时显示的分类。`,
+    persona_description: `要在「人格」页面显示的人格。`,
     scope_choice_behavior: `行为`,
     scope_choice_models: `模型`,
     scope_choice_access: `权限`,
@@ -52,7 +54,7 @@ export default {
     field_frequency_penalty: `频率惩罚`,
     field_presence_penalty: `存在惩罚`,
     field_omitted_params: `已禁用参数`,
-    field_humanizer: `回复自然度等级`,
+    field_humanizer: `回复自然度`,
     field_thinking_level: `思考等级`,
     field_timezone: `服务器时区`,
     field_message_fetch_limit: `消息读取上限`,

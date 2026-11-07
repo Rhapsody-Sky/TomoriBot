@@ -1,6 +1,7 @@
 export default {
   genai: {
     tool_failure: {
+      endpoint_blocked: `Este host no permite solicitudes a la dirección de este punto final.`,
       content_blocked: `El proveedor rechazó esta solicitud de herramienta mediante su filtro de contenido.`,
       authentication: `El proveedor rechazó las credenciales utilizadas para esta solicitud de herramienta.`,
       quota: `El proveedor rechazó esta solicitud de herramienta porque se alcanzó una cuota o límite de facturación.`,
@@ -15,6 +16,8 @@ export default {
       script_too_long: `El guión de voz supera el límite de longitud del modelo de voz seleccionado.`,
       cancelled: `Se canceló esta solicitud de herramienta.`,
       model_error: `El proveedor rechazó el modelo seleccionado para esta solicitud de herramienta.`,
+      model_files_missing: `El servidor de generación no tiene instalados estos archivos de modelo configurados: {models}.`,
+      not_configured: `No hay ningún proveedor utilizable configurado para esta herramienta.`,
       balance_exhausted: `La cuenta del proveedor utilizada para esta solicitud de herramienta se ha quedado sin saldo.`,
       credit_limit: `La cuenta del proveedor no puede cubrir la longitud de salida solicitada.`,
       context_length: `Esta solicitud de herramienta supera el límite de contexto del modelo seleccionado.`,
@@ -29,8 +32,6 @@ export default {
     max_iterations_streaming_description: `Me quedé atascado en un bucle de pensamiento y no pude completar la solicitud, usa \`/refresh\` si este problema persiste.`,
     still_working_title: `Sigo trabajando...`,
     still_working_description: `Esta tarea está tomando más pasos de lo habitual. Usa \`/kill\` si crees que estoy atascado.`,
-    nai_tool_retry_exhausted_title: `Error de herramienta`,
-    nai_tool_retry_exhausted_description: `Una herramienta falló varias veces y no pudo completar la solicitud. Por favor, inténtalo de nuevo o usa \`/refresh\` si este problema persiste.`,
     tool_error_loop_title: `Bucle de error de herramienta`,
     tool_error_loop_description: `Seguí encontrando errores de herramientas y no pude completar la solicitud. Intenta reformular o usa \`/refresh\` si este problema persiste.`,
     fallback_used_title: `Modelo de respaldo utilizado`,
@@ -41,6 +42,7 @@ export default {
     fallback_used_personal_opt_out_footer: `Evita que el modelo del servidor cubra las fallas de tu proveedor personal en \`/personal config\` > Modelos > Alternativas`,
     markdown_table: {
       show_button: `Mostrar Markdown`,
+      source_expired_title: `Origen de la tabla expirado`,
       source_expired: `El markdown de esa tabla ya no está en caché, así que ya no puedo mostrar la fuente.`,
       source_attached: `Esta tabla es demasiado larga para mostrarse en línea, así que aquí está como archivo:`,
     },
@@ -98,6 +100,7 @@ export default {
       context_length_title: `🔴 Mensaje demasiado largo para este modelo`,
       credit_limit_title: `🔴 Sin suficientes créditos de proveedor`,
       balance_exhausted_title: `🔴 Cuenta de proveedor sin crédito`,
+      endpoint_blocked_title: `Punto final no permitido`,
       flush_limit_title: `🟡️ Límite de longitud de respuesta alcanzado`,
       flush_limit_description: `Esta respuesta ha alcanzado el límite de longitud máxima del mensaje y se ha detenido. Puedes usar \`/respond\` para continuar manualmente la respuesta si es necesario.`,
       inactivity_timeout_title: `🟡️ Tiempo de espera de respuesta agotado`,
@@ -128,9 +131,13 @@ export default {
       choose_supported_model_personal: `Elige una identificación de modelo compatible con \`/personal config\` o tu configuración de punto final personalizado.`,
       verify_api_key: `Verifica la clave de API de este servidor y luego inténtalo de nuevo.`,
       verify_api_key_personal: `Verifica tu clave de API personal con \`/personal providers\` y luego inténtalo de nuevo.`,
+      endpoint_not_allowed: `Cambia a un punto final HTTPS público con \`/providers\`, o pregunta a quien administre este host si se puede permitir un servidor local.`,
+      endpoint_not_allowed_personal: `Cambia a un punto final HTTPS público con \`/personal providers\`, o pregunta a quien administre este host si se puede permitir un servidor local.`,
       verify_api_key_expiry: `Las claves de NVIDIA NIM caducan, y NVIDIA rechaza una clave caducada con el mismo error que una escrita incorrectamente. Revisa su fecha de vencimiento en [build.nvidia.com](https://build.nvidia.com) y genera una clave nueva si ya venció.`,
       nvidia_register_free_model: `NVIDIA retira modelos alojados con frecuencia. Elige uno que sirva actualmente en los [puntos finales gratuitos de NVIDIA](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview), copia su ID de modelo (como \`deepseek-ai/deepseek-v4.1-flash\`) y luego añádelo en \`/providers\` > NVIDIA NIM > **+ Añadir nuevo modelo de texto**.`,
       nvidia_register_free_model_personal: `NVIDIA retira modelos alojados con frecuencia. Elige uno que sirva actualmente en los [puntos finales gratuitos de NVIDIA](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview), copia su ID de modelo (como \`deepseek-ai/deepseek-v4.1-flash\`) y luego añádelo en \`/personal providers\` > NVIDIA NIM > **+ Añadir nuevo modelo de texto**.`,
+      google_free_tier_daily: `Esta clave de API agotó las solicitudes gratuitas de Gemini para hoy. Se restablecen a la medianoche, hora del Pacífico.`,
+      google_free_tier_minute: `Esta clave de API está enviando solicitudes más rápido de lo que permite el plan gratuito de Gemini. Espera un minuto e intenta de nuevo.`,
       google_credential_type: `Esto parece un token de OAuth o de cuenta de servicio. El proveedor \`google\` necesita una clave de API normal de [Google AI Studio](https://aistudio.google.com/apikey); usa el proveedor \`vertex\` para credenciales completas de Google Cloud.`,
       openrouter_privacy_settings: `Ajusta tus ajustes de "Política de datos" en [Ajustes de privacidad de OpenRouter](https://openrouter.ai/settings/privacy) para permitir este modelo, o elige un modelo diferente.`,
       openrouter_fund_account: `Agrega al menos 10 créditos a tu cuenta de OpenRouter para desbloquear 1000 solicitudes de modelos gratuitos por día.`,
@@ -174,6 +181,20 @@ export default {
       "403_predict_permission_message": `Esta clave no puede llamar a los modelos Vertex AI Express. Usa una clave de modo Express, o usa el proveedor \`vertex\` por separado para proyectos completos de Google Cloud.`,
     },
     novelai: {
+      tokenizer_setup:
+        "Los tokenizadores de NovelAI faltan o no son válidos. Pídele al host del bot que ejecute `bun run setup:tokenizers` y reinicie TomoriBot.",
+      input_complexity:
+        "Este prompt contiene demasiado texto o una palabra continua inusualmente larga. Acórtalo e inténtalo de nuevo.",
+      context_overflow:
+        "La persona, los ejemplos mínimos y la conversación reciente exceden la ventana de contexto de este modelo. Acórtalos o elige un modelo con una ventana más grande.",
+      subscription_unavailable:
+        "No se pudo cargar la información de la suscripción de NovelAI. Inténtalo de nuevo en breve.",
+      subscription_inactive: "Esta clave de NovelAI no tiene una suscripción activa.",
+      model_tier: "Esta suscripción de NovelAI no incluye el modelo de texto seleccionado.",
+      xialong_opus:
+        "Xialong requiere una suscripción activa a NovelAI Opus. Usa una clave de Opus o selecciona otro modelo de texto.",
+      continuation_exhausted:
+        "NovelAI terminó antes de producir una respuesta completa dentro del límite de salida. Inténtalo de nuevo o aumenta la longitud de salida configurada.",
       "400_default_message": `Formato o parámetros de solicitud inválidos. Por favor, asegúrate de que introdujiste la clave de API correcta.`,
       "400_trial_message": `Tu cuenta de prueba requiere verificación de recaptcha para generaciones. El acceso a la API requiere una suscripción paga de NovelAI. Por favor, mejora tu cuenta en https://novelai.net/`,
       "401_default_message": `Tu clave de API de NovelAI es inválida o expiró`,
@@ -212,6 +233,7 @@ El modelo seleccionado requiere permitir datos para el entrenamiento del modelo 
     },
     custom: {
       "402_default_message": `Tu cuenta con este punto final no tiene saldo suficiente`,
+      PRIVATE_NETWORK_BLOCKED_default_message: `Este host no permite solicitudes a la dirección de este punto final.`,
       REDIRECT_CREDENTIALS_WITHHELD_default_message: `Este endpoint redirigió a una dirección diferente, por lo que TomoriBot no envió su clave de API allí. Quien administre este endpoint en \`/providers\` puede solucionarlo cambiando su URL a la dirección final a la que redirige el servidor.`,
       unknown_default_message: `Ocurrió un error inesperado`,
     },
@@ -233,33 +255,42 @@ El modelo seleccionado requiere permitir datos para el entrenamiento del modelo 
       unknown_default_message: `Ocurrió un error inesperado`,
     },
     self_teach: {
+      memory_forgotten_description: `Olvidó una memoria en reposo para hacer espacio:
+\`\`\`
+{forgotten_content}
+\`\`\``,
+      memory_saved_with_eviction_content: `Guardado:
+{memory_content}
+
+Olvidado:
+{forgotten_content}`,
       server_memory_learned_title: `🧠 ¡{persona_nickname} aprendió algo nuevo!`,
-      server_memory_learned_description: `Se ha guardado una **[Memoria del servidor](https://docs.tomoribot.app/es-419/features/knowledge/memory/#long-term-memory)**:
+      server_memory_learned_description: `Se ha guardado una **[Memoria del servidor](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/)**:
 \`\`\`
 {memory_content}
 \`\`\``,
       server_memory_updated_title: `📝 ¡{persona_nickname} actualizó una memoria!`,
-      server_memory_updated_description: `Se ha actualizado una **[Memoria del servidor](https://docs.tomoribot.app/es-419/features/knowledge/memory/#long-term-memory)**:
+      server_memory_updated_description: `Se ha actualizado una **[Memoria del servidor](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/)**:
 \`\`\`
 {memory_content}
 \`\`\``,
       server_memory_deleted_title: `🗑️ ¡{persona_nickname} eliminó una memoria!`,
-      server_memory_deleted_description: `Se ha eliminado una **[Memoria del servidor](https://docs.tomoribot.app/es-419/features/knowledge/memory/#long-term-memory)**:
+      server_memory_deleted_description: `Se ha eliminado una **[Memoria del servidor](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/)**:
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_learned_title: `💡 ¡{persona_nickname} aprendió algo nuevo sobre {user_nickname}!`,
-      personal_memory_learned_description: `Se ha guardado una **[Memoria personal](https://docs.tomoribot.app/es-419/features/knowledge/memory/#long-term-memory)** sobre {user_nickname}:
+      personal_memory_learned_description: `Se ha guardado una **[Memoria personal](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/)** sobre {user_nickname}:
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_updated_title: `📝 ¡{persona_nickname} actualizó una memoria sobre {user_nickname}!`,
-      personal_memory_updated_description: `Se ha actualizado una **[Memoria personal](https://docs.tomoribot.app/es-419/features/knowledge/memory/#long-term-memory)** sobre {user_nickname}:
+      personal_memory_updated_description: `Se ha actualizado una **[Memoria personal](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/)** sobre {user_nickname}:
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_deleted_title: `🗑️ ¡{persona_nickname} eliminó una memoria sobre {user_nickname}!`,
-      personal_memory_deleted_description: `Se ha eliminado una **[Memoria personal](https://docs.tomoribot.app/es-419/features/knowledge/memory/#long-term-memory)** sobre {user_nickname}:
+      personal_memory_deleted_description: `Se ha eliminado una **[Memoria personal](https://docs.tomoribot.app/es-419/features/knowledge/memory/long-term-memory/)** sobre {user_nickname}:
 \`\`\`
 {memory_content}
 \`\`\``,

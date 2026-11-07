@@ -6,8 +6,16 @@ import { buildFallbackModelPersistence } from "@/utils/provider/fallbackModelIde
 import { setPersonalTextPrimary } from "@/utils/provider/personalProviderHelpers";
 import { resolveLogitBiasEntriesForLlm } from "@/utils/provider/logitBiasResolver";
 import type { OpenRouterModelScope } from "@/utils/db/repositories/LlmModelRepository";
-import { hasSpeechDesignSelection, setHostedSpeechSelection } from "@/utils/db/repositories/SpeechRepository";
+import {
+  hasSpeechDesignSelection,
+  hasTranscriptionSelection,
+  setHostedSpeechSelection,
+  setHostedTranscriptionSelection,
+} from "@/utils/db/repositories/SpeechRepository";
 import { validateOpenRouterSpeechModel } from "@/utils/cache/openrouterSpeechModelCache";
+import { validateOpenRouterTranscriptionModel } from "@/utils/cache/openrouterTranscriptionModelCache";
+import { log } from "@/utils/misc/logger";
+import { getNovelAIProfile } from "@/providers/novelai/modelProfiles";
 
 /**
  * Selects the provider's default model for each voice mode it seeds.
@@ -25,6 +33,29 @@ export async function activateProviderSpeechDefaults(scope: OpenRouterModelScope
     if (!(await setHostedSpeechSelection(scope, model.speech_model_id, mode))) return false;
   }
   return true;
+}
+
+/**
+ * Fills an empty transcription slot with the provider's default model.
+ *
+ * An owner who already transcribes through any target keeps it, so adding or re-keying a provider
+ * never replaces a transcription choice.
+ */
+export async function activateProviderTranscriptionDefault(
+  scope: OpenRouterModelScope,
+  provider: string,
+): Promise<boolean> {
+  const model = (await llmModelRepo.loadAvailableTranscriptionModels(provider, scope)).find(
+    (entry) => entry.is_default,
+  );
+  if (!model || (await hasTranscriptionSelection(scope))) return true;
+  if (provider === "openrouter" && !(await validateOpenRouterTranscriptionModel(model.codename))) {
+    log.warn("Skipped the OpenRouter transcription default missing from the live catalogue", undefined, {
+      metadata: { scope, codename: model.codename },
+    });
+    return true;
+  }
+  return setHostedTranscriptionSelection(scope, model.transcription_model_id);
 }
 
 type ActivationStatus = "activated" | "missing_model" | "missing_provider" | "update_failed";
@@ -54,6 +85,11 @@ export async function activateServerTextModelFromSavedConfig(params: {
 
   const promotedLlmId = selectedModel.llm_id;
   const normalizedProvider = params.savedConfig.provider.toLowerCase();
+  const resetNovelAI = normalizedProvider === "novelai" && params.tomoriState.llm.llm_id !== selectedModel.llm_id;
+  const preset = resetNovelAI ? await configRepository.resolveNaiPreset(selectedModel.llm_codename) : undefined;
+  if (resetNovelAI && getNovelAIProfile(selectedModel.llm_codename).samplingPresetTarget && !preset) {
+    return { status: "update_failed" };
+  }
   const customEndpoints = isCustomProvider(normalizedProvider)
     ? await llmProviderRepo.loadCustomEndpointsForServer(params.tomoriState.server_id)
     : [];
@@ -97,6 +133,17 @@ export async function activateServerTextModelFromSavedConfig(params: {
 
   if (updatedModel || updatedChat) invalidateTomoriStateCache(params.serverDiscId);
   if (!updatedModel || !updatedChat) {
+    return { status: "update_failed" };
+  }
+  if (
+    resetNovelAI &&
+    !(await configRepository.applyNaiPreset(
+      params.tomoriState.server_id,
+      preset ?? null,
+      selectedModel,
+      params.serverDiscId,
+    ))
+  ) {
     return { status: "update_failed" };
   }
   return { status: "activated", modelName: selectedModel.llm_codename };

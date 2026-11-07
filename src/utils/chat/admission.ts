@@ -1,4 +1,5 @@
 import type { AnyThreadChannel, Guild } from "discord.js";
+import { isDraining } from "@/utils/misc/shutdownState";
 import { BaseGuildTextChannel, ChannelType, DMChannel, EmbedBuilder, MessageReferenceType } from "discord.js";
 import type { TomoriState } from "@/types/db/schema";
 import { PrivacyLevel } from "@/types/db/schema";
@@ -22,6 +23,7 @@ import { getCachedImpersonatedUserIdForWebhook } from "@/utils/chat/webhookIdent
 import { escapeRegExp, isUnspacedScriptText, wrapWithWordBoundary } from "@/utils/text/processors/regexUtils";
 import {
   interruptNudgeScene,
+  getChannelTurnAbortSignal,
   isActiveNaturalStopTurn,
   isNudgeOutputActive,
   selfReplySuppressionUntil,
@@ -103,7 +105,6 @@ export function normalizeChatInvocation(input: TomoriChatInput): ChatIncoming {
     textQuotaUserDiscId: input.textQuotaUserDiscId,
     manualSystemPrompt: input.manualSystemPrompt,
     manualPrefill: input.manualPrefill,
-    naiContinuationPrefill: input.naiContinuationPrefill,
     emptyResponseFinishReason: input.emptyResponseFinishReason,
     shouldSurfaceUserErrors: input.shouldSurfaceUserErrors,
     injectedContextItems: input.injectedContextItems,
@@ -131,6 +132,12 @@ const BASE_TRIGGER_WORDS = process.env.BASE_TRIGGER_WORDS?.split(",").map((word)
 const audioTranscriptionHandledMessages = new WeakSet<Message>();
 
 export async function evaluateChatAdmission(incoming: ChatIncoming): Promise<ChatAdmission> {
+  if (isDraining()) {
+    const signal = incoming.skipLock ? getChannelTurnAbortSignal(incoming.message.channelId) : undefined;
+    if (!signal || signal.aborted) {
+      return { incoming, disposition: "ignore", locale: "en-US", reason: "shutdown" };
+    }
+  }
   cleanupTextQuotaTriggerStates();
 
   const { client, message } = incoming;
@@ -576,7 +583,12 @@ async function evaluateAudioTranscriptionAdmission(args: {
     return null;
   }
 
-  const transcriptionResult = await transcribeMessageAudioAttachment(message, earlyTomoriState.server_id);
+  const sender = await getCachedUserRow(message.author.id);
+  const transcriptionResult = await transcribeMessageAudioAttachment(
+    message,
+    earlyTomoriState.server_id,
+    sender?.user_id ?? undefined,
+  );
   if (!transcriptionResult.hasAudio) {
     return null;
   }

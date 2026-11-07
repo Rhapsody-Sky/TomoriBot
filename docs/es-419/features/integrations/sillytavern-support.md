@@ -27,7 +27,7 @@ Si un archivo cargado es una tarjeta SillyTavern válida sin metadatos TomoriBot
 Las importaciones se validan antes de guardar (límites predeterminados: 5000 caracteres por campo de texto, 200 atributos, 100 diálogos de muestra por lado, 100 palabras de activación). Para conocer la mecánica de conversión y mapeo de campos, consulte la [arquitectura de soporte de tarjeta](/en/architecture/integrations/sillytavern/card-support/).
 
 :::tip
-El Character Book de una tarjeta se convierte en el [lorebook](/features/knowledge/lorebooks/) de esa persona. Las entradas desactivadas permanecen desactivadas. Reimportar la tarjeta reemplaza todo el lorebook de la persona, incluidas las entradas que hayas agregado tú.
+El Character Book de una tarjeta se convierte en el [lorebook](/features/knowledge/memory/lorebooks/) de esa persona. Las entradas desactivadas permanecen desactivadas. Reimportar la tarjeta reemplaza todo el lorebook de la persona, incluidas las entradas que hayas agregado tú.
 :::
 
 ## Preajustes de prompt
@@ -68,7 +68,7 @@ Cuando un preajuste importado está activo, este controla por completo el prompt
 ### Notas de compatibilidad
 
 - Los nodos deshabilitados en `prompt_order` permanecen inactivos hasta que se habilitan en `/config` > `Plugins` > SillyTavern Presets. Los nodos vacíos y de solo comentarios nunca se envían.
-- El orden de los bloques es literal: colocar `chatHistory` delante de `dialogueExamples` coloca el historial de chat primero en el mensaje.
+- El orden de los marcadores es literal: colocar `chatHistory` delante de `dialogueExamples` coloca el historial de chat primero. Los marcadores de world info posicionan el lore de Always On; el lore activado, los documentos recuperados, la presencia y el reloj permanecen cerca de los cuatro turnos de diálogo más recientes. La memoria a corto plazo reciente o entre canales también permanece cerca de esos mensajes, o más cerca si está configurado.
 - Las inyecciones posteriores al historial se fusionan con el historial de conversaciones existente en lugar de enviarse como mensajes independientes.
 - No se admiten el posprocesamiento de expresiones regulares, los parámetros de muestreo predefinidos (temperatura, top-p) ni los ajustes preestablecidos en capas. Los ajustes preestablecidos de finalización de texto heredados se importan con bloques solo ST eliminados.
 

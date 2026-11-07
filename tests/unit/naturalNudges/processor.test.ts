@@ -25,6 +25,7 @@ import {
   MAX_PLANNER_NUDGES,
   PLANNER_RECENT_TOPICS,
 } from "@/modules/natural-nudges/runtime/tuning";
+import * as leases from "@/utils/cluster/shardLeases";
 import * as personaCache from "@/utils/cache/tomoriStateCache";
 import { statRepository } from "@/utils/db/repositories";
 import { whitelistRepository } from "@/utils/db/repositories/WhitelistRepository";
@@ -45,6 +46,7 @@ afterEach(() => {
 });
 
 function fixture(category: NaturalNudgeCategory = "start_topic") {
+  spies.push(spyOn(leases, "isPrimaryProcess").mockReturnValue(true));
   const enabled = new Set([
     "ping_user.check_in",
     "revive_topic.pick_up_thread",
@@ -106,7 +108,7 @@ function fixture(category: NaturalNudgeCategory = "start_topic") {
   const readMessages = spyOn(channelsModule, "fetchRecentMessages").mockImplementation(async (channel) =>
     channel.id === CHANNEL_IDS[0] ? messages : [],
   );
-  const tools = spyOn(toolsModule, "loadAvailableToolNames").mockResolvedValue(new Set(["generate_image"]));
+  const tools = spyOn(toolsModule, "loadChannelAvailableToolNames").mockResolvedValue(new Set(["generate_image"]));
   const customs = spyOn(naturalNudgeRepository, "listCustomIdleNudges").mockResolvedValue([]);
   const scopes = spyOn(naturalNudgeRepository, "loadPersonaScopes").mockResolvedValue(new Map());
   const run = spyOn(runnerModule, "runIdleNudgeAttempt").mockResolvedValue("aborted");
@@ -201,6 +203,23 @@ function fixture(category: NaturalNudgeCategory = "start_topic") {
     history,
   };
 }
+
+describe("global nudge pruning", () => {
+  it("prunes only while primary and still evaluates owned work", async () => {
+    const { processor, run } = fixture("play_scene");
+    let primary = false;
+    spies.push(spyOn(leases, "isPrimaryProcess").mockImplementation(() => primary));
+    await processor.processDueIdleNudges();
+    expect(naturalNudgeRepository.pruneBefore).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalled();
+    primary = true;
+    await processor.processDueIdleNudges();
+    expect(naturalNudgeRepository.pruneBefore).toHaveBeenCalledTimes(1);
+    primary = false;
+    await processor.processDueIdleNudges();
+    expect(naturalNudgeRepository.pruneBefore).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("idle nudge shortlist", () => {
   it("loads only the drawn lead's recent topics, including for scenes", async () => {

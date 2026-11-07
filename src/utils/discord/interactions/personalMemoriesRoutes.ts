@@ -40,6 +40,8 @@ import {
   parsePersonalMemoryTags,
 } from "@/utils/discord/ui/personalMemoriesPanel";
 import { personaRepresentativeForLineage } from "@/utils/persona/lineage";
+import { resolveSelectedPersona } from "@/utils/persona/personaOptionValue";
+import { panelPersonaNotFoundReceipt } from "@/utils/discord/autocomplete/panelPageAutocomplete";
 import {
   type PersonaPanelAvatarData,
   resolveInvokerAvatarUrl,
@@ -47,7 +49,7 @@ import {
   withPersonaPanelAvatar,
 } from "@/utils/discord/personaPanelAvatar";
 import { showRoutedRawModal, takeRawModalFileUpload } from "@/utils/discord/ui/modals";
-import { buildPanelContainer } from "@/utils/discord/ui/panel";
+import { buildPanelContainer, replyPanelReceipt } from "@/utils/discord/ui/panel";
 import { getMemoryLimits, validateMemoryContent } from "@/utils/misc/memoryLimits";
 import {
   dedupeCaseInsensitive,
@@ -209,7 +211,9 @@ export const personalMemoriesOperations: PersonalMemoriesOperations = {
     if (!limitCheck.isValid) {
       return { status: "limit-reached" };
     }
-    const inserted = await personalMemoryRepository.add(userId, personaLineageId, trimmed, tags);
+    const inserted = await personalMemoryRepository.add(userId, personaLineageId, trimmed, tags, {
+      manuallyWritten: true,
+    });
     if (!inserted) {
       return { status: "write-failed" };
     }
@@ -248,7 +252,9 @@ export const personalMemoriesOperations: PersonalMemoriesOperations = {
       return { status: "batch-limit-reached", available, requested: toInsert.length };
     }
 
-    const inserted = await personalMemoryRepository.addBatch(userId, personaLineageId, toInsert, tags);
+    const inserted = await personalMemoryRepository.addBatch(userId, personaLineageId, toInsert, tags, {
+      manuallyWritten: true,
+    });
     if (!inserted) {
       return { status: "write-failed" };
     }
@@ -277,15 +283,15 @@ export const personalMemoriesOperations: PersonalMemoriesOperations = {
     }
     const existingTags = target.tags ?? [];
     const tagsUnchanged = tags.length === existingTags.length && tags.every((t, i) => t === existingTags[i]);
-    if (trimmed === target.content.trim() && tagsUnchanged) {
+    if (trimmed === target.content.trim() && tagsUnchanged && target.manually_written) {
       return { status: "unchanged", row: target };
     }
-    const ok = await personalMemoryRepository.edit(memoryId, trimmed, tags);
+    const ok = await personalMemoryRepository.edit(memoryId, trimmed, tags, { manuallyWritten: true });
     if (!ok) {
       return { status: "write-failed" };
     }
     invalidateUserCache(userDiscId);
-    return { status: "success", row: { ...target, content: trimmed, tags } };
+    return { status: "success", row: { ...target, content: trimmed, tags, manually_written: true } };
   },
 
   async remove({ userId, userDiscId, personaLineageId, memoryId }) {
@@ -609,9 +615,10 @@ export function createPersonalMemoriesInteractionRoute(
         if (selectedValue === "action:add") {
           const cachedScope = await dependencies.resolveScope(interaction, false);
           if (cachedScope && cachedScope.privacyLevel === PrivacyLevel.FULL) {
-            await interaction.reply({
-              content: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
-              flags: MessageFlags.Ephemeral,
+            await replyPanelReceipt(interaction, {
+              tone: "error",
+              heading: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_heading"),
+              detail: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
             });
             return;
           }
@@ -627,16 +634,18 @@ export function createPersonalMemoriesInteractionRoute(
         }
         const cachedScope = await dependencies.resolveScope(interaction, false);
         if (cachedScope && cachedScope.privacyLevel === PrivacyLevel.FULL) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_heading"),
+            detail: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
           });
           return;
         }
         if (!cachedScope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.personal.memories.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.personal.memories.unavailable"),
           });
           return;
         }
@@ -1170,18 +1179,20 @@ export const identityMemoriesInteractionRoute: GlobalInteractionRoute = {
     const managedRoute = parseManagedIdentityRoute(parsed, PERSONAL_MEMORIES_ROUTE_VERSION);
     const route = managedRoute && parsePersonalMemoriesPanelRoute(managedRoute.original);
     if (!managedRoute || !route || route.action === "stm-clear") {
-      await interaction.reply({
-        content: localizer(interaction.locale, "commands.personal.memories.unavailable"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(interaction.locale, "general.panel_notice.unavailable_heading"),
+        detail: localizer(interaction.locale, "commands.personal.memories.unavailable"),
       });
       return;
     }
     const identityId = managedRoute.identityId;
     const managed = await messageProxyRepository.getManagedIdentity(interaction.user.id, identityId);
     if (!managed) {
-      await interaction.reply({
-        content: localizer(interaction.locale, "commands.personal.memories.unavailable"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "warning",
+        heading: localizer(interaction.locale, "general.panel_notice.unavailable_heading"),
+        detail: localizer(interaction.locale, "commands.personal.memories.unavailable"),
       });
       return;
     }
@@ -1189,9 +1200,10 @@ export const identityMemoriesInteractionRoute: GlobalInteractionRoute = {
       (route.action === "add-submit" || route.action === "edit-submit") &&
       (await userRepository.getPrivacyLevel(interaction.user.id)) === PrivacyLevel.FULL
     ) {
-      await interaction.reply({
-        content: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
-        flags: MessageFlags.Ephemeral,
+      await replyPanelReceipt(interaction, {
+        tone: "error",
+        heading: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_heading"),
+        detail: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
       });
       return;
     }
@@ -1233,12 +1245,17 @@ export type PersonalMemoriesPanelPayloadOrTerminal =
   | ReturnType<typeof buildPersonalMemoriesPanelPayload>
   | InteractionEditReplyOptions;
 
+/**
+ * @param requestedLineageId - Lineage another panel links to; a `rawPersona` that resolves takes precedence
+ * @param rawPersona - Untrusted `persona` slash option; with none, the panel opens on Global memories
+ */
 export async function buildInitialPersonalMemoriesPanel(
   interaction: GlobalRoutableInteraction | ChatInputCommandInteraction,
   locale: string,
   dependenciesOverride?: Partial<PersonalMemoriesRouteDependencies>,
   requestedLineageId?: number,
   identityId?: number,
+  rawPersona: string | null = null,
 ): Promise<PersonalMemoriesPanelPayloadOrTerminal> {
   const dependencies: PersonalMemoriesRouteDependencies = {
     ...defaultDependencies,
@@ -1250,10 +1267,12 @@ export async function buildInitialPersonalMemoriesPanel(
   if (!scope) {
     return terminalPayload(locale, "commands.personal.memories.unavailable") as PersonalMemoriesPanelPayloadOrTerminal;
   }
+  const optionPersona = rawPersona ? resolveSelectedPersona(scope.personas, rawPersona) : null;
   const selectedPersona =
-    requestedLineageId === undefined
+    optionPersona ??
+    (requestedLineageId === undefined
       ? undefined
-      : scope.personas.find((persona) => persona.persona_lineage_id === requestedLineageId);
+      : scope.personas.find((persona) => persona.persona_lineage_id === requestedLineageId));
   const selectedLineageId = selectedPersona?.persona_lineage_id ?? 0;
   const memories = await dependencies.loadMemories(scope.userId, selectedLineageId);
   const stmCount = selectedLineageId === 0 && !scope.identityId ? await dependencies.getStmCount(scope.userDiscId) : 0;
@@ -1284,6 +1303,7 @@ export async function buildInitialPersonalMemoriesPanel(
         privacyLevel: scope.privacyLevel,
         readStatus: scope.readStatus,
         page: { kind: "main" },
+        receipt: rawPersona && !optionPersona ? panelPersonaNotFoundReceipt(locale) : undefined,
       },
       scope,
     ),

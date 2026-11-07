@@ -43,6 +43,7 @@ import {
   type MemoryItem,
   type ExportResult,
   normalizeMemoryItem,
+  resolveImportedHumanizer,
 } from "@/types/db/dataExport";
 import { getMemoryLimits, validateMemoryContent } from "@/utils/misc/memoryLimits";
 import { validateTomoriConfigFields } from "@/utils/db/sqlSecurity";
@@ -165,7 +166,11 @@ const WORKSPACE_SECTION_TABLES: Record<WorkspaceConfigSection, readonly SectionT
         "llm_logit_biases",
         "llm_stop_strings",
         "llm_stop_speaker_pattern_enabled",
-        "humanizer_degree",
+        "humanizer_streaming_enabled",
+        "humanizer_pacing_enabled",
+        "humanizer_sentence_split_enabled",
+        "humanizer_lowercase_enabled",
+        "humanizer_punctuation_split_enabled",
         "timezone_offset",
         "message_fetch_limit",
         "system_prompt",
@@ -277,6 +282,7 @@ const WORKSPACE_SECTION_TABLES: Record<WorkspaceConfigSection, readonly SectionT
         "speech_clone_endpoint_id",
         "speech_design_model_id",
         "speech_clone_model_id",
+        "transcription_model_id",
         "voice_transcript_chat_mode",
         "chatterbox_turbo_enabled",
         "chatterbox_cfg_weight",
@@ -371,6 +377,14 @@ function buildTablePatches(
     const patch = getDefinedPatch(source, definition.fields);
     return Object.keys(patch).length > 0 ? [{ tableName: definition.tableName, idColumn, id, patch }] : [];
   });
+}
+
+function normalizeImportedChatSection(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const { humanizer_degree: _legacyDegree, ...rest } = value;
+  const humanizer = resolveImportedHumanizer(value);
+  if (humanizer === null) return null;
+  return humanizer ? { ...rest, ...humanizer } : rest;
 }
 
 function getStmCategories(value: unknown): Array<{ position: number; label: string; description: string }> | undefined {
@@ -476,12 +490,11 @@ class ImportRepository {
       if (!sectionValidation.success) return { success: false, error: "commands.data.import.error_invalid_config" };
       if (!selected.includes(section)) continue;
 
-      const sectionPatches = buildTablePatches(
-        sectionValidation.data,
-        WORKSPACE_SECTION_TABLES[section],
-        "server_id",
-        0,
-      );
+      const sectionData =
+        section === "chat" ? normalizeImportedChatSection(sectionValidation.data) : sectionValidation.data;
+      if (sectionData === null) return { success: false, error: "commands.data.import.error_invalid_config" };
+
+      const sectionPatches = buildTablePatches(sectionData, WORKSPACE_SECTION_TABLES[section], "server_id", 0);
       tablePatches.push(...sectionPatches);
       configFieldsCount += sectionPatches.reduce(
         (count, tablePatch) => count + Object.keys(tablePatch.patch).length,
@@ -996,7 +1009,12 @@ class ImportRepository {
       // STM customization travels as nested keys (stm_config / stm_categories) that are
       // restored via shortTermMemoryRepository.fromExportShape, NOT the dynamic flat-config
       // SQL writer: so exclude them from the column-name allowlist validation below.
-      const configFields = Object.keys(config).filter((f) => f !== "stm_config" && f !== "stm_categories");
+      // humanizer_degree is legacy input that resolveImportedHumanizer maps onto the toggle columns, not a column name.
+      const configFields = Object.keys(config).filter(
+        (f) => f !== "stm_config" && f !== "stm_categories" && f !== "humanizer_degree",
+      );
+      const humanizer = resolveImportedHumanizer(config);
+      if (humanizer === null) return { success: false, error: "commands.data.import.error_invalid_config" };
       try {
         validateTomoriConfigFields(configFields);
       } catch (error) {
@@ -1021,7 +1039,13 @@ class ImportRepository {
         llm_logit_biases: config.llm_logit_biases,
         llm_stop_strings: config.llm_stop_strings,
         llm_stop_speaker_pattern_enabled: config.llm_stop_speaker_pattern_enabled ?? false,
-        humanizer_degree: config.humanizer_degree as ServerChatConfigRow["humanizer_degree"],
+        ...(humanizer && {
+          humanizer_streaming_enabled: humanizer.humanizer_streaming_enabled,
+          humanizer_pacing_enabled: humanizer.humanizer_pacing_enabled,
+          humanizer_sentence_split_enabled: humanizer.humanizer_sentence_split_enabled,
+          humanizer_lowercase_enabled: humanizer.humanizer_lowercase_enabled,
+          humanizer_punctuation_split_enabled: humanizer.humanizer_punctuation_split_enabled,
+        }),
         timezone_offset: config.timezone_offset,
         message_fetch_limit: config.message_fetch_limit,
         system_prompt: config.system_prompt ?? null,
@@ -1128,6 +1152,7 @@ class ImportRepository {
         config.speech_clone_endpoint_id !== undefined ||
         config.speech_design_model_id !== undefined ||
         config.speech_clone_model_id !== undefined ||
+        config.transcription_model_id !== undefined ||
         config.voice_transcript_chat_mode !== undefined ||
         config.chatterbox_turbo_enabled !== undefined ||
         config.chatterbox_cfg_weight !== undefined ||
@@ -1144,6 +1169,9 @@ class ImportRepository {
               }),
               ...(config.speech_clone_model_id !== undefined && {
                 speech_clone_model_id: config.speech_clone_model_id,
+              }),
+              ...(config.transcription_model_id !== undefined && {
+                transcription_model_id: config.transcription_model_id,
               }),
               ...(config.voice_transcript_chat_mode !== undefined && {
                 voice_transcript_chat_mode: config.voice_transcript_chat_mode,

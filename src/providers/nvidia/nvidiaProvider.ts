@@ -1,3 +1,4 @@
+import { pickHumanizerSettings } from "@/constants/humanizer";
 import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type {
   AnyThreadChannel,
@@ -20,7 +21,9 @@ import {
   NVIDIA_DEFAULT_TEXT_MODEL,
   NVIDIA_EMBEDDINGS_URL,
   NVIDIA_MIN_P_UNSUPPORTED_MODELS,
+  NVIDIA_MODELS_URL,
 } from "@/providers/nvidia/nvidiaConstants";
+import { isListedInOpenAIModelCatalog } from "@/utils/provider/modelCatalogLookup";
 import {
   createOpenAICompatibleHttpError,
   reportOpenAICompatibleKeyValidationFailure,
@@ -175,6 +178,10 @@ export class NvidiaProvider
     return nvidiaProviderInfo;
   }
 
+  async checkTextModel(_apiKey: string, codename: string): Promise<boolean | null> {
+    return await isListedInOpenAIModelCatalog({ provider: "nvidia", url: NVIDIA_MODELS_URL, modelId: codename });
+  }
+
   /**
    * Validates a key with a one-token completion rather than `/v1/models`, which NIM serves without
    * authentication and so accepted any string, including mistyped and expired keys.
@@ -235,7 +242,7 @@ export class NvidiaProvider
   }
 
   supportsEmbeddingTaskType(): boolean {
-    return false;
+    return true;
   }
 
   async generateEmbeddings(request: EmbeddingRequest): Promise<number[][]> {
@@ -253,6 +260,8 @@ export class NvidiaProvider
       body: JSON.stringify({
         model: request.model || NVIDIA_DEFAULT_EMBEDDING_MODEL,
         input: request.inputs,
+        // NIM answers 400 when an asymmetric embedder such as Nemotron Embed gets no input_type.
+        input_type: request.taskType === "RETRIEVAL_QUERY" ? "query" : "passage",
       }),
     });
 
@@ -446,7 +455,7 @@ export class NvidiaProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         seesImages: tomoriState.llm.sees_images,
         forceReason: streamingContext?.forceReason,

@@ -2,10 +2,9 @@
 title: "行为调整"
 sidebar:
   order: 3
-aiGenerated: true
 ---
 
-你可以在`/config`中调整TomoriBot能执行哪些操作，以及如何生成回复，包括权限设置。人格设置请见[多个人格](/zh-CN/features/chatting-personality/multiple-personas/)，知识设置请见[记忆](/zh-CN/features/knowledge/memory/)。这一页介绍常用的行为设置。
+你可以在`/config`中调整TomoriBot能执行哪些操作，以及如何生成回复，包括权限设置。人格设置请见[多个人格](/zh-CN/features/chatting-personality/multiple-personas/)，知识设置请见[记忆](/zh-CN/features/knowledge/memory/long-term-memory/)。这一页介绍常用的行为设置。
 
 ## 功能开关：她被允许做什么
 <!-- anchor: capabilities-what-shes-allowed-to-do -->
@@ -72,9 +71,9 @@ aiGenerated: true
 ## 生成调校
 <!-- anchor: generation-tuning -->
 
-- `/config` > `模型` > `文本采样器与参数`：采样参数，例如温度和top-p。温度越高，品种越多。
-- `/config` > `行为` > `常规行为`：反应回复自然度程度。调整她发短信的随意程度。默认情况下，该设置适用于服务器范围，或适用于个人人格。
-- `/config` > `行为` > `常规行为`：消息历史记录限制。提高它以获得更深入的对话上下文，或降低它以节省令牌。
+- `/config` > `模型` > `文本采样器与参数`：采样参数，例如温度和 top-p。温度越高，回复越多样。
+- `/config` > `行为` > `常规行为`：回复自然度。节奏感消息会在流式传输的各条消息之间加入延迟与停顿。节奏感消息与两种分割选项都需要开启实时流式传输；强制小写在未开启流式传输时也可生效（对中文无效果）。这些设置默认全服务器生效，也可单独配置给某个人格。`/setup` 以四种现成预设集的形式提供了相同的习惯选项。
+- `/config` > `行为` > `常规行为`：消息历史读取上限。调高可获取更深入的对话上下文，调低可节省词元。这是一个上限：近期历史在增长后会按批次丢弃较旧的消息。有关窗口与放置规则，请参阅[深入提示词](/features/knowledge/inside-the-prompt/)。
 
 ## 系统提示词
 <!-- anchor: system-prompt -->
@@ -85,7 +84,7 @@ aiGenerated: true
 - `/config` > `行为` > `常规行为`：从系统提示词预设集中选择。`Default + Image Generation Expert` 会在默认提示词基础上增加关于准确动漫标签与角色服装的指导（参见 [标签查询](/features/capabilities/media-generation/image-generation/#tag-lookup)）。
 - `/config` > `行为` > `常规行为`：重置为默认值。确认会显示之前的提示，因此如果意外清除，你可以恢复它。
 
-当 [SillyTavern预设](/zh-CN/features/integrations/sillytavern-support/) 处于活动状态时，内置回退系统提示将被替换，但仍会发送你在此处设置的自定义提示。
+当 [SillyTavern 预设集](/features/integrations/sillytavern-support/) 处于活动状态时，它会控制系统提示词。关闭该预设集即可再次编辑已保存的服务器提示词。
 
 ## 不做内容过滤
 <!-- anchor: uncensored-output -->

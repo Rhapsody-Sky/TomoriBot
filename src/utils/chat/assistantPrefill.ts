@@ -112,6 +112,9 @@ export function resolvePrefillMode(source: PrefillSource, blocker: PrefillBlocke
   return source === "server" ? "skip" : "instruction";
 }
 
+const TRAILING_OWN_MESSAGE_DIRECTIVE =
+  "Your own message above is the latest one in the chat and has already been sent. Write your next message without repeating it.";
+
 /**
  * Applies the turn prefill to one attempt's context. Runs per attempt because a fallback model can
  * differ from the primary: a prefill baked into the shared base would 400 when a model that
@@ -120,6 +123,10 @@ export function resolvePrefillMode(source: PrefillSource, blocker: PrefillBlocke
  * `outputPrefill` is the exact `{bot}: {text}` string the trailing turn carries. The segment
  * processor strips an echo of it, and the prefix-completion adapters only stamp `prefix: true`
  * when the trailing assistant content equals it.
+ *
+ * A context that still ends on the persona's own delivered message gets a trailing user directive,
+ * because no chat backend accepts that turn as intended: Gemini rejects it, DeepSeek rejects it
+ * without `prefix: true`, and a backend that continues it splices onto text already in the channel.
  */
 export async function applyAssistantPrefill(args: {
   contextItems: StructuredContextItem[];
@@ -127,6 +134,24 @@ export async function applyAssistantPrefill(args: {
   tomoriState: TomoriState;
   forceReason?: boolean;
 }): Promise<{ contextItems: StructuredContextItem[]; outputPrefill: string | undefined }> {
+  const applied = await applyTurnPrefill(args);
+  if (
+    args.tomoriState.llm.llm_provider === "novelai" ||
+    applied.contextItems.at(-1)?.role !== "model" ||
+    endsWithNativePrefill(applied.contextItems, applied.outputPrefill)
+  ) {
+    return applied;
+  }
+
+  const { buildTailDirectiveMessage } = await import("@/utils/chat/contextAnnotations");
+  const directive = buildTailDirectiveMessage(TRAILING_OWN_MESSAGE_DIRECTIVE);
+  return directive ? { ...applied, contextItems: [...applied.contextItems, directive] } : applied;
+}
+
+async function applyTurnPrefill(args: Parameters<typeof applyAssistantPrefill>[0]): Promise<{
+  contextItems: StructuredContextItem[];
+  outputPrefill: string | undefined;
+}> {
   if (!args.prefill) return { contextItems: args.contextItems, outputPrefill: undefined };
 
   const llm = args.tomoriState.llm;
@@ -163,14 +188,23 @@ export async function applyAssistantPrefill(args: {
     return {
       contextItems: [
         ...args.contextItems,
-        { role: "model", parts: [{ type: "text", text: outputPrefill }], metadataTag: ContextItemTag.DIALOGUE_HISTORY },
+        {
+          role: "model",
+          completionText: outputPrefill,
+          parts: [{ type: "text", text: outputPrefill }],
+          metadataTag: ContextItemTag.DIALOGUE_HISTORY,
+        },
       ],
       outputPrefill,
     };
   }
 
+  // A continuation is already in the channel, so the model is not asked to echo it: the echo strip
+  // matches character by character, and one divergence in a long echo reposts the whole reply.
   const directive = buildTailDirectiveMessage(
-    `Begin your next reply with: "${outputPrefill}". Continue directly after it without repeating the prefix.`,
+    args.prefill.source === "continuation"
+      ? `Your reply was cut off after you had already sent this part: "${text}". That part is already in the chat, so write only what comes after it and do not repeat any of it.`
+      : `Begin your next reply with: "${outputPrefill}". Continue directly after it without repeating the prefix.`,
   );
   return { contextItems: directive ? [...args.contextItems, directive] : args.contextItems, outputPrefill };
 }

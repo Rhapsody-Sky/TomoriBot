@@ -5,9 +5,15 @@ import {
   type ProviderRequestDeniedError,
 } from "@/utils/provider/providerUsage";
 import { loadDecisionModelsForScope } from "@/providers/utils/providerFeatureExecutors";
-import { loadProviderModelChoices } from "@/utils/provider/modelCatalog";
+import { loadProviderModelChoices, type ProviderModelChoice } from "@/utils/provider/modelCatalog";
 import { validateOpenRouterSpeechModel } from "@/utils/cache/openrouterSpeechModelCache";
-import { setHostedSpeechSelection, setSpeechEndpointSelection } from "@/utils/db/repositories/SpeechRepository";
+import { validateOpenRouterTranscriptionModel } from "@/utils/cache/openrouterTranscriptionModelCache";
+import {
+  setHostedSpeechSelection,
+  hasTranscriptionSelection,
+  setHostedTranscriptionSelection,
+  setSpeechEndpointSelection,
+} from "@/utils/db/repositories/SpeechRepository";
 import { supportsSpeechMode, type VoiceSourceMode } from "@/utils/speech/voiceSourceCapabilities";
 import type {
   CustomEndpointRow,
@@ -40,16 +46,10 @@ import {
   serverMemoryRepository,
 } from "@/utils/db/repositories";
 import { isRagAvailable } from "@/utils/db/ragAvailability";
-import {
-  CONFIG_FALLBACK_SLOT_COUNT,
-  isConfigCatalogModelCapability,
-  type ConfigCatalogModelCapability,
-  type ConfigModelCapability,
-} from "@/utils/discord/configPanelCatalog";
+import { CONFIG_FALLBACK_SLOT_COUNT, type ConfigModelCapability } from "@/utils/discord/configPanelCatalog";
 import { DEFAULT_IMAGE_NEGATIVE_TAGS, DEFAULT_IMAGE_POSITIVE_TAGS } from "@/utils/image/tagDefaults";
 import { parseAndValidateImageTags } from "@/utils/image/tagHelpers";
 import { NAI_IMAGE_NOISE_SCHEDULES, NAI_IMAGE_SAMPLERS } from "@/utils/image/naiImageParams";
-import { log } from "@/utils/misc/logger";
 import { resolveCapabilityCredentials } from "@/utils/provider/credentialResolver";
 import { buildCustomProviderName, isCustomProvider, parseCustomProvider } from "@/utils/provider/customProviderUtils";
 import {
@@ -72,11 +72,11 @@ import {
   type ProviderOptionScope,
 } from "@/utils/provider/providerOptionRegistry";
 import { getStaticProviderInfo } from "@/utils/provider/providerInfoRegistry";
+import { getNovelAIModelAccessError } from "@/providers/novelai/modelAccess";
+import { getNovelAIProfile } from "@/providers/novelai/modelProfiles";
+import { decryptApiKey } from "@/utils/security/crypto";
 import { loadSavedProvidersForCapability, type SavedProviderCapability } from "@/utils/provider/savedProviderConfig";
-import {
-  providerPanelOperations,
-  type ActivateWorkspaceEndpointResult,
-} from "@/utils/provider/providerPanelOperations";
+import { providerPanelOperations } from "@/utils/provider/providerPanelOperations";
 import {
   MAX_STOP_STRINGS_PER_SERVER,
   MAX_STOP_STRING_LENGTH,
@@ -90,18 +90,13 @@ export const CONFIG_FALLBACK_CLEAR_VALUE = "__none__";
 /** Distinguishes a custom-endpoint fallback pick from an LLM codename in a slot select value. */
 export const CONFIG_FALLBACK_ENDPOINT_PREFIX = "ce:";
 
-const NAI_PRESET_MODEL_TARGETS: Record<string, "kayra" | "erato"> = {
-  "kayra-v1": "kayra",
-  "llama-3-erato-v1": "erato",
-};
-
-export function resolveNaiPresetTarget(state: TomoriState): "kayra" | "erato" | null {
+export function resolveNaiPresetTarget(state: TomoriState): "kayra" | "erato" | "xialong" | null {
   if (state.llm.llm_provider.toLowerCase() !== "novelai") return null;
-  return NAI_PRESET_MODEL_TARGETS[state.llm.llm_codename] ?? null;
+  return getNovelAIProfile(state.llm.llm_codename).samplingPresetTarget;
 }
 
 /** Capability slot to the saved-provider capability whose eligibility list backs it. */
-const SAVED_PROVIDER_CAPABILITY: Record<Exclude<ConfigCatalogModelCapability, "decision">, SavedProviderCapability> = {
+const SAVED_PROVIDER_CAPABILITY: Record<Exclude<ConfigModelCapability, "decision">, SavedProviderCapability> = {
   text: "text",
   vision: "vision",
   embedding: "embedding",
@@ -110,12 +105,20 @@ const SAVED_PROVIDER_CAPABILITY: Record<Exclude<ConfigCatalogModelCapability, "d
   video: "video",
   "tts-design": "speech_design",
   "tts-clone": "speech_clone",
+  stt: "transcription",
 };
 
-type ConfigSpeechCapability = Extract<ConfigCatalogModelCapability, "tts-design" | "tts-clone">;
+type ConfigSpeechCapability = Extract<ConfigModelCapability, "tts-design" | "tts-clone">;
 
 function isConfigSpeechCapability(capability: ConfigModelCapability): capability is ConfigSpeechCapability {
   return capability === "tts-design" || capability === "tts-clone";
+}
+
+/** Server transcription endpoints, the connections the STT slot lists as `custom:<id>` providers. */
+async function loadServerTranscriptionEndpoints(serverId: number): Promise<CustomEndpointRow[]> {
+  return (await llmProviderRepo.loadCustomEndpointsForServer(serverId)).filter(
+    (endpoint) => endpoint.capability === "transcription" && endpoint.custom_endpoint_id !== undefined,
+  );
 }
 
 function speechModeForCapability(capability: ConfigSpeechCapability): VoiceSourceMode {
@@ -148,7 +151,7 @@ function serverOptionScope(state: TomoriState): ProviderOptionScope {
   return { kind: "server", ownerId: state.server_id, state };
 }
 
-function optionCapabilityFor(capability: ConfigCatalogModelCapability): ProviderOptionCapability | null {
+function optionCapabilityFor(capability: ConfigModelCapability): ProviderOptionCapability | null {
   return providerOptionCapabilityForModelView(capability as ProviderOptionModelViewCapability);
 }
 
@@ -165,11 +168,7 @@ async function filterEligibleProviderOptions(
   return eligible;
 }
 
-function savedProviderOwnsSlot(
-  state: TomoriState,
-  provider: string,
-  capability: ConfigCatalogModelCapability,
-): boolean {
+function savedProviderOwnsSlot(state: TomoriState, provider: string, capability: ConfigModelCapability): boolean {
   const canonical = optionCapabilityFor(capability);
   if (!canonical) return true;
   const scope = serverOptionScope(state);
@@ -179,7 +178,7 @@ function savedProviderOwnsSlot(
 }
 
 export function filterProvidersForCapability(
-  capability: ConfigCatalogModelCapability,
+  capability: ConfigModelCapability,
   providers: readonly SavedProviderConfigRow[],
 ): SavedProviderConfigRow[] {
   const offered = providers.filter((row) => {
@@ -193,7 +192,7 @@ export function filterProvidersForCapability(
 
 async function loadEligibleSavedProviders(
   serverId: number,
-  capability: Exclude<ConfigCatalogModelCapability, ConfigSpeechCapability>,
+  capability: Exclude<ConfigModelCapability, ConfigSpeechCapability | "stt">,
 ): Promise<SavedProviderConfigRow[]> {
   if (capability === "decision") return loadDecisionModelProviders(serverId);
   const providers = await loadSavedProvidersForCapability(serverId, SAVED_PROVIDER_CAPABILITY[capability]);
@@ -201,7 +200,16 @@ async function loadEligibleSavedProviders(
 }
 
 export async function loadConfigModelProviders(serverId: number, capability: ConfigModelCapability): Promise<string[]> {
-  if (!isConfigCatalogModelCapability(capability)) return [];
+  if (capability === "stt") {
+    const [hosted, endpoints] = await Promise.all([
+      loadSavedProvidersForCapability(serverId, "transcription"),
+      loadServerTranscriptionEndpoints(serverId),
+    ]);
+    return [
+      ...hosted.map((row) => row.provider),
+      ...new Set(endpoints.map((endpoint) => buildCustomProviderName(endpoint.connection_id))),
+    ];
+  }
   if (!isConfigSpeechCapability(capability)) {
     return (await loadEligibleSavedProviders(serverId, capability)).map((row) => row.provider);
   }
@@ -230,12 +238,7 @@ async function loadDecisionModelProviders(serverId: number): Promise<SavedProvid
 }
 
 /** One selectable model in a capability slot, flattened so the renderer needs no per-slot branch. */
-export interface ConfigModelChoice {
-  /** Primary key of the row this slot writes, which is what the route carries. */
-  id: number;
-  name: string;
-  description: string | null;
-}
+export type ConfigModelChoice = ProviderModelChoice;
 
 /** Text models one provider offers that can answer with structured output, grouped by provider. */
 export interface StructuredOutputModelGroup {
@@ -272,7 +275,7 @@ export async function loadStructuredOutputModelGroups(
 
 export async function loadConfigModelChoices(
   serverId: number,
-  capability: ConfigCatalogModelCapability,
+  capability: ConfigModelCapability,
   provider: string,
   locale = "en-US",
   textModelFilter?: (model: LlmRow) => boolean,
@@ -285,6 +288,7 @@ type ConfigModelSetResult =
   | { status: "already-selected"; modelName: string }
   | { status: "openrouter-moved" }
   | { status: "provider-denied"; denied: ProviderRequestDeniedError }
+  | { status: "novelai-unavailable"; descriptionKey: string }
   | { status: "not-found" | "no-models" | "write-failed" };
 
 type ConfigModelClearResult =
@@ -377,11 +381,6 @@ export interface ConfigModelOperations {
     serverDiscId: string;
     capability: ConfigModelCapability;
   }): Promise<ConfigModelClearResult>;
-  activateTranscriptionEndpoint(input: {
-    tomoriState: TomoriState;
-    serverDiscId: string;
-    customEndpointId: number;
-  }): Promise<ActivateWorkspaceEndpointResult>;
   setProviderParameters(input: {
     tomoriState: TomoriState;
     serverDiscId: string;
@@ -476,9 +475,47 @@ export function currentModelIdForCapability(
         ? state.config.speech_clone_endpoint_id
         : state.config.speech_clone_model_id;
     case "stt":
-      // Endpoint activation identity lives in custom_endpoints, not in a model id column.
-      return null;
+      // Custom activation lives on its endpoint row, so a config model ID cannot identify the active endpoint.
+      return provider && isCustomProvider(provider) ? null : state.config.transcription_model_id;
   }
+}
+
+async function setServerTranscriptionTarget(
+  state: TomoriState,
+  serverDiscId: string,
+  provider: string,
+  targetId: number,
+): Promise<ConfigModelSetResult> {
+  const eligible = (await loadConfigModelProviders(state.server_id, "stt")).find(
+    (candidate) => candidate.toLowerCase() === provider.toLowerCase(),
+  );
+  if (!eligible) return { status: "not-found" };
+  const choices = await loadConfigModelChoices(state.server_id, "stt", eligible);
+  if (choices.length === 0) return { status: "no-models" };
+  const choice = choices.find((candidate) => candidate.id === targetId);
+  if (!choice) return { status: "not-found" };
+
+  if (isCustomProvider(eligible)) {
+    const result = await providerPanelOperations.activateWorkspaceEndpoint({
+      serverDiscId,
+      state,
+      capability: "transcription",
+      customEndpointId: choice.id,
+    });
+    if (result.status === "success") {
+      return { status: "success", modelName: choice.name, reembedded: false, sourceChanged: result.sourceChanged };
+    }
+    return result.status === "already-active" ? { status: "already-selected", modelName: choice.name } : result;
+  }
+
+  if (choice.id === state.config.transcription_model_id) return { status: "already-selected", modelName: choice.name };
+  // The OpenRouter catalogue can drop a seeded model, so the live listing is rechecked before the write.
+  if (eligible === "openrouter" && !(await validateOpenRouterTranscriptionModel(choice.name))) {
+    return { status: "not-found" };
+  }
+  return (await setHostedTranscriptionSelection({ kind: "server", ownerId: state.server_id }, choice.id))
+    ? { status: "success", modelName: choice.name, reembedded: false }
+    : { status: "write-failed" };
 }
 
 async function setServerSpeechTarget(
@@ -556,6 +593,9 @@ async function promoteTextModel(
   model: LlmRow & { llm_id: number },
   savedConfig: SavedProviderConfigRow | null,
 ): Promise<boolean> {
+  const resetNovelAI = provider === "novelai" && tomoriState.llm.llm_id !== model.llm_id;
+  const preset = resetNovelAI ? await configRepository.resolveNaiPreset(model.llm_codename) : undefined;
+  if (resetNovelAI && getNovelAIProfile(model.llm_codename).samplingPresetTarget && !preset) return false;
   const resolvedLogitBiases = resolveLogitBiasEntriesForLlm(
     savedConfig?.llm_logit_biases ?? tomoriState.config.llm_logit_biases ?? [],
     model,
@@ -600,35 +640,8 @@ async function promoteTextModel(
     return false;
   }
 
-  const naiDefaultPresets: Record<string, { name: string; target: "kayra" | "erato" }> = {
-    "kayra-v1": { name: "Carefree-Kayra", target: "kayra" },
-    "llama-3-erato-v1": { name: "Erato-Shosetsu", target: "erato" },
-  };
-  const defaultPresetEntry = naiDefaultPresets[model.llm_codename];
-  if (!defaultPresetEntry) return true;
-
-  const naiPresets = await configRepository.loadNaiPresets(defaultPresetEntry.target);
-  const defaultPreset = naiPresets.find((preset) => preset.preset_name === defaultPresetEntry.name);
-  if (!defaultPreset) {
-    log.warn(
-      `Default NAI preset "${defaultPresetEntry.name}" not found in DB. Was the seed catalog loaded? Skipping auto-apply.`,
-    );
-    return true;
-  }
-
-  const applied = await configRepository.applyNaiPreset(
-    tomoriState.server_id,
-    defaultPreset,
-    model.llm_codename,
-    serverDiscId,
-  );
-  if (!applied) {
-    // The preset spans three non-transactional writes, so any sub-write that committed must not
-    // stay hidden behind the cache.
-    invalidateTomoriStateCache(serverDiscId);
-    return false;
-  }
-  return true;
+  if (!resetNovelAI) return true;
+  return await configRepository.applyNaiPreset(tomoriState.server_id, preset ?? null, model, serverDiscId);
 }
 
 function parseBoundedInteger(raw: string, min: number, max: number): number | null | "invalid" {
@@ -649,7 +662,7 @@ function parseBoundedFloat(raw: string, min: number, max: number): number | null
 
 export const configModelOperations: ConfigModelOperations = {
   async setCapabilityModel({ tomoriState, serverDiscId, capability, provider, modelId }) {
-    if (capability === "stt") return { status: "not-found" };
+    if (capability === "stt") return setServerTranscriptionTarget(tomoriState, serverDiscId, provider, modelId);
     if (isConfigSpeechCapability(capability)) {
       return setServerSpeechTarget(tomoriState, serverDiscId, capability, provider, modelId);
     }
@@ -677,6 +690,13 @@ export const configModelOperations: ConfigModelOperations = {
       }
 
       if (capability === "text") {
+        if (model.llm_provider === "novelai" && model.llm_codename === "xialong-v1") {
+          const descriptionKey = await getNovelAIModelAccessError(
+            model.llm_codename,
+            savedConfig.api_key ? await decryptApiKey(savedConfig.api_key, savedConfig.key_version) : null,
+          );
+          if (descriptionKey) return { status: "novelai-unavailable", descriptionKey };
+        }
         const promoted = await promoteTextModel(
           tomoriState,
           serverDiscId,
@@ -820,7 +840,11 @@ export const configModelOperations: ConfigModelOperations = {
       }
       return { status: "success" };
     }
-    if (capability === "stt") return { status: "not-clearable" };
+    if (capability === "stt") {
+      const scope = { kind: "server" as const, ownerId: tomoriState.server_id };
+      if (!(await hasTranscriptionSelection(scope))) return { status: "already-clear" };
+      return (await setHostedTranscriptionSelection(scope, null)) ? { status: "success" } : { status: "write-failed" };
+    }
     if (capability === "text" || capability === "embedding" || capability === "video") {
       return { status: "not-clearable" };
     }
@@ -847,15 +871,6 @@ export const configModelOperations: ConfigModelOperations = {
       return { status: "write-failed" };
     }
     return { status: "success" };
-  },
-
-  activateTranscriptionEndpoint({ tomoriState, serverDiscId, customEndpointId }) {
-    return providerPanelOperations.activateWorkspaceEndpoint({
-      serverDiscId,
-      state: tomoriState,
-      capability: "transcription",
-      customEndpointId,
-    });
   },
 
   async setProviderParameters({ tomoriState, serverDiscId, provider, patch }) {
@@ -942,12 +957,7 @@ export const configModelOperations: ConfigModelOperations = {
     const target = resolveNaiPresetTarget(tomoriState);
     if (!target || preset.model_target !== target) return { status: "not-found" };
 
-    const applied = await configRepository.applyNaiPreset(
-      tomoriState.server_id,
-      preset,
-      tomoriState.llm.llm_codename,
-      serverDiscId,
-    );
+    const applied = await configRepository.applyNaiPreset(tomoriState.server_id, preset, tomoriState.llm, serverDiscId);
     return applied ? { status: "success" } : { status: "write-failed" };
   },
 

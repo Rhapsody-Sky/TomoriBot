@@ -2,6 +2,8 @@ export default {
   status: {
     prompt_hidden: `El texto del prompt está oculto. Los miembros necesitan el permiso de Administrar servidor o tener habilitada la inspección de prompts para verlo.`,
     description: `Muestra el estado personal, del servidor o de una persona.`,
+    page_description: `Categoría en la que se abre el panel.`,
+    persona_description: `Persona que se muestra en las páginas de Persona.`,
     scope_choice_behavior: `Comportamiento`,
     scope_choice_models: `Modelos`,
     scope_choice_access: `Acceso`,
@@ -52,7 +54,7 @@ export default {
     field_frequency_penalty: `Penalización de Frecuencia`,
     field_presence_penalty: `Penalización de Presencia`,
     field_omitted_params: `Parámetros Deshabilitados`,
-    field_humanizer: `Nivel de Humanizador`,
+    field_humanizer: `Humanizador`,
     field_thinking_level: `Nivel de Razonamiento`,
     field_timezone: `Zona Horaria del Servidor`,
     field_message_fetch_limit: `Límite de Mensajes Obtenidos`,

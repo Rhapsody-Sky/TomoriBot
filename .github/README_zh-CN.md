@@ -128,7 +128,7 @@ TomoriBot 是一套免费开源的 Discord 个人 AI 助理与角色扮演系统
 - `/config` 与 `/personal config` - 在当前 Discord 服务器或为你个人调整 TomoriBot 的多种方式
 - `/providers` 与 `/personal providers` - 添加更多模型端点或云端提供方
 - `/persona` - 为她赋予性格或添加新角色（参见[多个人格](https://docs.tomoribot.app/zh-CN/features/chatting-personality/multiple-personas/)）
-- `/memories` - 跨对话教导她记住事实（参见[记忆](https://docs.tomoribot.app/zh-CN/features/knowledge/memory/)）
+- `/memories` - 跨对话教导她记住事实（参见[记忆](https://docs.tomoribot.app/zh-CN/features/knowledge/memory/long-term-memory/)）
 
 查看完整的[指令参考](https://docs.tomoribot.app/zh-CN/features/command-reference/)以了解所有斜杠指令。
 
@@ -186,15 +186,8 @@ TomoriBot 是一套免费开源的 Discord 个人 AI 助理与角色扮演系统
 如果你觉得 TomoriBot 实用（或有趣），欢迎在 GitHub 上点个 ⭐，或者通过 Ko-fi 或 Patreon 支持后续开发！
 
 <p align="left">
-
-  &nbsp;
-  <a href="https://ko-fi.com/bredrumb">
-    <img src="https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
-  </a>
-  &nbsp;
-  <a href="https://www.patreon.com/cw/tomoribot">
-    <img src="https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon">
-  </a>
+  <a href="https://ko-fi.com/bredrumb"><img src="https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi"></a>
+  <a href="https://www.patreon.com/cw/tomoribot"><img src="https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon"></a>
 </p>
 
 

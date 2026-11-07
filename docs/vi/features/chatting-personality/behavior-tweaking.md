@@ -2,10 +2,9 @@
 title: "Tinh chỉnh hành vi"
 sidebar:
   order: 3
-aiGenerated: true
 ---
 
-Bạn có thể điều chỉnh các hành động TomoriBot được phép thực hiện và cách bot tạo câu trả lời trong `/config`, bao gồm trang quyền hạn. Xem [Nhiều persona](/vi/features/chatting-personality/multiple-personas/) để chỉnh tính cách và [Bộ nhớ](/vi/features/knowledge/memory/) để chỉnh kiến thức. Trang này giới thiệu các cài đặt thường dùng.
+Bạn có thể điều chỉnh các hành động TomoriBot được phép thực hiện và cách bot tạo câu trả lời trong `/config`, bao gồm trang quyền hạn. Xem [Nhiều persona](/vi/features/chatting-personality/multiple-personas/) để chỉnh tính cách và [Bộ nhớ](/vi/features/knowledge/memory/long-term-memory/) để chỉnh kiến thức. Trang này giới thiệu các cài đặt thường dùng.
 
 ## Tính năng: Những gì bot được phép làm
 <!-- anchor: capabilities-what-shes-allowed-to-do -->
@@ -72,8 +71,8 @@ Các kênh nhập vai sẽ loại bỏ các thông báo về biểu tượng c�
 <!-- anchor: generation-tuning -->
 
 - `/config` > `Model` > `Bộ lấy mẫu & Tham số văn bản`: các thông số lấy mẫu như nhiệt độ và top-p. Nhiệt độ cao hơn mang lại sự đa dạng hơn.
-- `/config` > `Hành vi` > `Hành vi chung`: mức độ đáp ứng nhân bản. Điều chỉnh cách cô ấy nhắn tin ngẫu nhiên. Cài đặt này áp dụng trên toàn máy chủ theo mặc định hoặc cho một cá nhân.
-- `/config` > `Hành vi` > `Hành vi chung`: giới hạn lịch sử tin nhắn. Tăng nó để có bối cảnh hội thoại sâu hơn hoặc hạ thấp nó để tiết kiệm mã thông báo.
+- `/config` > `Hành vi` > `Hành vi chung`: humanizer phản hồi. Tin nhắn theo nhịp thêm độ trễ và tạm dừng giữa các tin nhắn truyền phát. Cả chế độ theo nhịp lẫn hai tùy chọn tách câu/dấu câu đều yêu cầu truyền phát trực tiếp; buộc viết thường cũng hoạt động mà không cần truyền phát. Các cài đặt này áp dụng trên toàn máy chủ theo mặc định, hoặc cho từng persona riêng lẻ. `/setup` cung cấp các thói quen này dưới dạng bốn preset có sẵn.
+- `/config` > `Hành vi` > `Hành vi chung`: giới hạn lịch sử tin nhắn. Tăng giới hạn để có ngữ cảnh trò chuyện sâu hơn, hoặc giảm bớt để tiết kiệm token. Đây là mức tối đa: lịch sử gần đây tăng dần, sau đó loại bỏ các tin nhắn cũ hơn theo từng đợt. Xem [Bên trong prompt](/features/knowledge/inside-the-prompt/) để biết về cửa sổ và quy tắc vị trí.
 
 ## Prompt hệ thống
 <!-- anchor: system-prompt -->
@@ -84,7 +83,7 @@ Lời nhắc hệ thống nằm phía trên cá tính và định hình hành vi
 - `/config` > `Hành vi` > `Hành vi chung`: chọn từ các preset chỉ dẫn hệ thống. `Default + Image Generation Expert` bổ sung hướng dẫn về thẻ anime và trang phục nhân vật chính xác vào prompt mặc định (xem [Tra cứu thẻ](/features/capabilities/media-generation/image-generation/#tag-lookup)).
 - `/config` > `Hành vi` > `Hành vi chung`: đặt lại về mặc định. Xác nhận hiển thị lời nhắc trước đó để bạn có thể khôi phục nó nếu vô tình xóa.
 
-Khi [SillyTavern cài sẵn](/vi/features/integrations/sillytavern-support/) hoạt động, lời nhắc hệ thống dự phòng tích hợp sẽ được thay thế, nhưng lời nhắc tùy chỉnh bạn đặt ở đây vẫn được gửi.
+Khi [preset SillyTavern](/features/integrations/sillytavern-support/) đang hoạt động, nó sẽ điều khiển prompt hệ thống. Hãy tắt preset để chỉnh sửa lại prompt máy chủ đã lưu.
 
 ## Đầu ra không kiểm duyệt
 <!-- anchor: uncensored-output -->

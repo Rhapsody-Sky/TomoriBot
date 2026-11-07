@@ -30,6 +30,8 @@ import {
   MODERATION_ROUTE_VERSION,
   parseModerationPanelRoute,
   parseWhitelistPage,
+  MODERATION_CATEGORIES,
+  WHITELIST_PAGES,
   type ModerationCategory,
   type ModerationRemovalList,
   type QuotaType,
@@ -48,8 +50,15 @@ import {
   buildWhitelistRoleAddModal,
   listModerationRemovalPage,
   listModerationRemovalValues,
+  MODERATION_CATEGORY_LOCALE_KEYS,
+  MODERATION_WHITELIST_PAGE_LOCALE_KEYS,
   type ModerationRemovalOption,
 } from "@/utils/discord/ui/moderationPanel";
+import {
+  panelPageNotFoundReceipt,
+  resolvePanelPage,
+  type PanelPageDestination,
+} from "@/utils/discord/autocomplete/panelPageAutocomplete";
 import {
   showRoutedRawModal,
   takeRawModalChannelSelectValues,
@@ -58,7 +67,7 @@ import {
   takeRawModalUserSelectValue,
   takeRawModalRoleSelectValue,
 } from "@/utils/discord/ui/modals";
-import { buildPanelContainer } from "@/utils/discord/ui/panel";
+import { buildPanelContainer, replyPanelReceipt } from "@/utils/discord/ui/panel";
 import {
   loadModerationMemberAccessData,
   loadModerationScopeData,
@@ -466,26 +475,29 @@ export function createModerationInteractionRoute(
 
       if (route.action === "member-access-open") {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
 
         const scope = await dependencies.resolveMemberAccess(interaction);
         if (!scope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.not_setup"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+            detail: localizer(route.locale, "commands.moderation.not_setup"),
           });
           return;
         }
 
         if (scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.moderation.unavailable"),
           });
           return;
         }
@@ -502,26 +514,29 @@ export function createModerationInteractionRoute(
 
       if (route.action === "user-blacklist-add-open") {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
 
         const scope = await dependencies.resolveUserBlacklistAdd(interaction);
         if (!scope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.not_setup"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+            detail: localizer(route.locale, "commands.moderation.not_setup"),
           });
           return;
         }
 
         if (scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.moderation.unavailable"),
           });
           return;
         }
@@ -802,21 +817,29 @@ export function createModerationInteractionRoute(
         route.action === "persona-channel-remove-open"
       ) {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
         const scope = await dependencies.resolveScope(interaction, false);
         if (!scope || scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(
-              route.locale,
-              scope ? "commands.moderation.unavailable" : "commands.moderation.not_setup",
-            ),
-            flags: MessageFlags.Ephemeral,
-          });
+          await replyPanelReceipt(
+            interaction,
+            scope
+              ? {
+                  tone: "warning",
+                  heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+                  detail: localizer(route.locale, "commands.moderation.unavailable"),
+                }
+              : {
+                  tone: "error",
+                  heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+                  detail: localizer(route.locale, "commands.moderation.not_setup"),
+                },
+          );
           return;
         }
         const list = REMOVAL_OPEN_LISTS[route.action];
@@ -824,9 +847,10 @@ export function createModerationInteractionRoute(
         // the snapshot below still limits removal to what the modal presented.
         const presented = listModerationRemovalPage(scope, list, route.rangeIndex);
         if (presented.length === 0) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.remove_nothing_changed_detail"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "info",
+            heading: localizer(route.locale, "general.panel_notice.no_changes_heading"),
+            detail: localizer(route.locale, "commands.moderation.remove_nothing_changed_detail"),
           });
           return;
         }
@@ -1111,26 +1135,29 @@ export function createModerationInteractionRoute(
 
       if (route.action === "whitelist-channel-add-open") {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
 
         const scope = await dependencies.resolveWhitelistChannelAdd(interaction);
         if (!scope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.not_setup"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+            detail: localizer(route.locale, "commands.moderation.not_setup"),
           });
           return;
         }
 
         if (scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.moderation.unavailable"),
           });
           return;
         }
@@ -1565,25 +1592,28 @@ export function createModerationInteractionRoute(
 
       if (route.action === "whitelist-role-add-open") {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
 
         const scope = await dependencies.resolveWhitelistRoleAdd(interaction);
         if (!scope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.not_setup"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+            detail: localizer(route.locale, "commands.moderation.not_setup"),
           });
           return;
         }
         if (scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.moderation.unavailable"),
           });
           return;
         }
@@ -1920,21 +1950,29 @@ export function createModerationInteractionRoute(
 
       if (route.action === "persona-channel-add-open") {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
         const scope = await dependencies.resolveScope(interaction, false);
         if (!scope || scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(
-              route.locale,
-              scope ? "commands.moderation.unavailable" : "commands.moderation.not_setup",
-            ),
-            flags: MessageFlags.Ephemeral,
-          });
+          await replyPanelReceipt(
+            interaction,
+            scope
+              ? {
+                  tone: "warning",
+                  heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+                  detail: localizer(route.locale, "commands.moderation.unavailable"),
+                }
+              : {
+                  tone: "error",
+                  heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+                  detail: localizer(route.locale, "commands.moderation.not_setup"),
+                },
+          );
           return;
         }
         await dependencies.showPersonaChannelAddModal(
@@ -2102,26 +2140,29 @@ export function createModerationInteractionRoute(
 
       if (route.action === "quota-edit-open") {
         if (!isAuthorized(interaction)) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.permission_denied"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "commands.config.panel.denied_heading"),
+            detail: localizer(route.locale, "commands.moderation.permission_denied"),
           });
           return;
         }
 
         const scope = await dependencies.resolveScope(interaction, false);
         if (!scope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.not_setup"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "error",
+            heading: localizer(route.locale, "general.errors.tomori_not_setup_title"),
+            detail: localizer(route.locale, "commands.moderation.not_setup"),
           });
           return;
         }
 
         if (scope.readStatus !== "fresh") {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.moderation.unavailable"),
-            flags: MessageFlags.Ephemeral,
+          await replyPanelReceipt(interaction, {
+            tone: "warning",
+            heading: localizer(route.locale, "general.panel_notice.unavailable_heading"),
+            detail: localizer(route.locale, "commands.moderation.unavailable"),
           });
           return;
         }
@@ -2355,10 +2396,27 @@ export type ModerationPanelPayloadOrTerminal =
   | ReturnType<typeof buildModerationPanelPayload>
   | InteractionEditReplyOptions;
 
+/** Destinations for `/moderation page:`; the command is manager-only, so every one is open to its invoker. */
+export function listModerationPageDestinations(
+  locale: string,
+): PanelPageDestination<ModerationCategory, WhitelistPage | null>[] {
+  return MODERATION_CATEGORIES.flatMap((category): PanelPageDestination<ModerationCategory, WhitelistPage | null>[] => {
+    const categoryLabel = localizer(locale, MODERATION_CATEGORY_LOCALE_KEYS[category]);
+    if (category !== "whitelist") return [{ category, page: null, categoryLabel, pageLabel: null }];
+    return WHITELIST_PAGES.map((page) => ({
+      category,
+      page,
+      categoryLabel,
+      pageLabel: localizer(locale, MODERATION_WHITELIST_PAGE_LOCALE_KEYS[page]),
+    }));
+  });
+}
+
 export async function buildInitialModerationPanel(
   interaction: ChatInputCommandInteraction,
   locale: string,
   deps: Pick<ModerationRouteDependencies, "resolveScope"> = { resolveScope: defaultResolveScope },
+  requestedPage: string | null = null,
 ): Promise<ModerationPanelPayloadOrTerminal> {
   if (!interaction.guildId) {
     return terminalPayload(locale, "commands.moderation.guild_only") as ModerationPanelPayloadOrTerminal;
@@ -2373,20 +2431,23 @@ export async function buildInitialModerationPanel(
     return terminalPayload(locale, "commands.moderation.not_setup") as ModerationPanelPayloadOrTerminal;
   }
 
+  const destination = requestedPage ? resolvePanelPage(listModerationPageDestinations(locale), requestedPage) : null;
   return buildModerationPanelPayload({
     locale,
-    category: "member-access",
-    whitelistPage: "channels",
+    category: destination?.category ?? "member-access",
+    whitelistPage: destination?.page ?? "channels",
     rangeIndex: 0,
     data: scope,
+    receipt: requestedPage && !destination ? panelPageNotFoundReceipt(locale) : undefined,
   });
 }
 
 export async function executeModerationCommand(
   interaction: ChatInputCommandInteraction,
   locale: string,
+  requestedPage: string | null,
   buildPanel: typeof buildInitialModerationPanel = buildInitialModerationPanel,
 ): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  await deliverGuardedPanel(interaction, await buildPanel(interaction, locale), { locale });
+  await deliverGuardedPanel(interaction, await buildPanel(interaction, locale, undefined, requestedPage), { locale });
 }

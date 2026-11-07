@@ -1,6 +1,6 @@
 /**
  * OpenRouter Catalog Refresher
- * Keeps the four OpenRouter model catalogs from serving a boot-time snapshot for the life
+ * Keeps the OpenRouter model catalogs and media prices from serving a boot-time snapshot for the life
  * of a deployment.
  */
 
@@ -10,6 +10,7 @@ import { refreshOpenRouterEmbeddingModelCacheIfStale } from "@/utils/cache/openr
 import { refreshOpenRouterImageModelCacheIfStale } from "@/utils/cache/openrouterImageModelCache";
 import { refreshOpenRouterVideoModelCacheIfStale } from "@/utils/cache/openrouterVideoModelCache";
 import { log } from "@/utils/misc/logger";
+import { warmOpenRouterMediaPricing } from "@/utils/provider/openrouterMediaPricing";
 
 /**
  * Registration reaches the network on a cache miss, so it self-heals without this timer.
@@ -17,7 +18,7 @@ import { log } from "@/utils/misc/logger";
  * parameters are consulted per turn and would keep answering from the boot snapshot for
  * weeks. This exists for them.
  */
-export class OpenRouterCatalogRefresher {
+class OpenRouterCatalogRefresher {
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning = false;
   private readonly intervalMs: number;
@@ -61,6 +62,7 @@ export class OpenRouterCatalogRefresher {
         refreshOpenRouterEmbeddingModelCacheIfStale(),
         refreshOpenRouterImageModelCacheIfStale(),
         refreshOpenRouterVideoModelCacheIfStale(),
+        warmOpenRouterMediaPricing(),
       ]);
     } catch (error) {
       log.error("Error during scheduled OpenRouter catalog refresh:", error);
@@ -74,6 +76,7 @@ export class OpenRouterCatalogRefresher {
 
 let refresherInstance: OpenRouterCatalogRefresher | null = null;
 
+/** @public Dynamically loaded by `src/init/timers.ts` on main and release. */
 export function initializeOpenRouterCatalogRefresher(intervalMs?: number): void {
   if (refresherInstance) {
     log.warn("OpenRouter catalog refresher already initialized");
@@ -88,6 +91,7 @@ export function initializeOpenRouterCatalogRefresher(intervalMs?: number): void 
   refresherInstance.start();
 }
 
+/** @public Dynamically loaded by `src/init/timers.ts` on main and release. */
 export function stopOpenRouterCatalogRefresher(): void {
   if (refresherInstance) {
     refresherInstance.stop();

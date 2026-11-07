@@ -83,8 +83,8 @@ Try {model_text_command} to assign a working model, or {provider_add_command} to
       settings_persona_label: `Persona`,
       settings_persona_description: `Choose the persona I'll use after setup.`,
       settings_persona_placeholder: `Choose a persona preset...`,
-      settings_humanizer_label: `Humanizer Degree`,
-      settings_humanizer_description: `How human-like should I reply? Rule-based, not AI-decided, so it never adds latency or token cost.`,
+      settings_humanizer_label: `Humanizer Preset`,
+      settings_humanizer_description: `How human-like should I reply? Rule-based, so no added latency or cost. Fine-tune later in /config.`,
       settings_humanizer_placeholder: `Choose a reply style...`,
       settings_timezone_label: `Timezone Offset`,
       settings_timezone_description: `For reminders and time awareness. Leave blank to use UTC.`,
@@ -185,7 +185,7 @@ Try {model_text_command} to assign a working model, or {provider_add_command} to
 - Use \`/config\` to adjust how I act and what I can do.
 - Use \`/memories\` to teach me things about you.`,
       receipt_learn_more:
-        "Read the [Official Wiki](https://docs.tomoribot.app/en/features/) or open {help} (then Features) for more on what I can do.\n- [Multiple Personas](https://docs.tomoribot.app/en/features/chatting-personality/multiple-personas/) = looks, voices, and triggers\n- [Chatting & Triggers](https://docs.tomoribot.app/en/features/chatting-personality/chatting-and-triggers/) = when and how I join in\n- [Memory](https://docs.tomoribot.app/en/features/knowledge/memory/) = people, facts, and context\n- [Personalization](https://docs.tomoribot.app/en/features/knowledge/personalization/) = how you like to be treated\n- [Media Generation](https://docs.tomoribot.app/en/features/capabilities/media-generation/image-generation/) = images, video, and voice\n- [Tools & Extensions](https://docs.tomoribot.app/en/features/capabilities/tools-and-extensions/built-in-tools/) = web search and custom tools",
+        "Read the [Official Wiki](https://docs.tomoribot.app/en/features/) or open {help} (then Features) for more on what I can do.\n- [Multiple Personas](https://docs.tomoribot.app/en/features/chatting-personality/multiple-personas/) = looks, voices, and triggers\n- [Chatting & Triggers](https://docs.tomoribot.app/en/features/chatting-personality/chatting-and-triggers/) = when and how I join in\n- [Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/) = people, facts, and context\n- [Personalization](https://docs.tomoribot.app/en/features/knowledge/personalization/) = how you like to be treated\n- [Media Generation](https://docs.tomoribot.app/en/features/capabilities/media-generation/image-generation/) = images, video, and voice\n- [Tools & Extensions](https://docs.tomoribot.app/en/features/capabilities/tools-and-extensions/built-in-tools/) = web search and custom tools",
       permission_denied: `You must have the Manage Server permission to set up.`,
       env_mismatch: `Environment configuration changed. Please restart setup.`,
       forbidden: `This setup session belongs to another user or channel.`,

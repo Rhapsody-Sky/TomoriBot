@@ -4,6 +4,7 @@ import { ColorCode } from "@/utils/misc/logger";
 import {
   isAccountBalanceExhaustedError,
   isContextLengthError,
+  getGeminiFreeTierQuotaWindow,
   isCreditAffordabilityError,
   isNvidiaCredentialRejected,
   isProviderModelError,
@@ -20,6 +21,7 @@ const PERSONAL_TIP_KEYS = {
   "genai.tips.reduce_output_tokens": "genai.tips.reduce_output_tokens_personal",
   "genai.tips.switch_model_provider": "genai.tips.switch_model_provider_personal",
   "genai.tips.verify_api_key": "genai.tips.verify_api_key_personal",
+  "genai.tips.endpoint_not_allowed": "genai.tips.endpoint_not_allowed_personal",
 };
 
 export function resolveProviderErrorPresentation(
@@ -70,6 +72,14 @@ export function resolveProviderErrorPresentation(
     return {
       titleKey: "genai.stream.api_error_title",
       tipKeys: [scoped("genai.tips.adjust_parameters"), scoped("genai.tips.switch_model_provider")],
+      color: ColorCode.ERROR,
+    };
+  }
+
+  if (providerError.code === "PRIVATE_NETWORK_BLOCKED") {
+    return {
+      titleKey: "genai.stream.endpoint_blocked_title",
+      tipKeys: [scoped("genai.tips.endpoint_not_allowed"), ...disableOverrideTip],
       color: ColorCode.ERROR,
     };
   }
@@ -128,13 +138,18 @@ export function resolveProviderErrorPresentation(
   }
 
   switch (providerError.type) {
-    case "rate_limit":
+    case "rate_limit": {
+      const freeTierWindow = getGeminiFreeTierQuotaWindow(providerError);
       return {
         titleKey: context.rotationKeyRetriesUsed
           ? "genai.stream.rate_limit_title_all_rotation_keys"
           : "genai.stream.rate_limit_title",
         tipKeys: [
-          "genai.tips.wait_and_retry",
+          freeTierWindow === "day"
+            ? "genai.tips.google_free_tier_daily"
+            : freeTierWindow === "minute"
+              ? "genai.tips.google_free_tier_minute"
+              : "genai.tips.wait_and_retry",
           ...(isPersonal ? [] : ["genai.tips.api_key_rotation"]),
           ...modelFallbackTip,
           ...(isOpenRouter ? [scoped("genai.tips.openrouter_free_models")] : []),
@@ -145,6 +160,7 @@ export function resolveProviderErrorPresentation(
         ],
         color: ColorCode.WARN,
       };
+    }
     case "content_blocked":
       return {
         titleKey: "genai.stream.content_blocked_title",

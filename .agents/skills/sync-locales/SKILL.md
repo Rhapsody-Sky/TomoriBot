@@ -28,6 +28,21 @@ bun run find-stale-translations --reason=unfollowed --base=origin/main
 Limit the work to what the branch touched. Pre-existing gaps belong to their own change;
 `bun run find-stale-translations --scope=docs` lists the whole-tree backlog when asked for it.
 
+## Delegate per locale
+
+Spawn one subagent per behind locale in parallel so each subagent owns a disjoint set of target
+files (`src/locales/<locale>/`, `docs/<locale>/`, and `.github/README_<locale>.md`). Pass each
+subagent its locale code, the English diffs or missing keys to translate, and a pointer to this
+skill and `references/glossary-<locale>.md`.
+
+Select the smallest latest model family for the active harness (for example, Luna on Codex, Gemini
+Flash (`flash`) on Antigravity, or Claude Haiku on Claude Code), with `low` or `medium` reasoning
+effort when the harness supports setting it (`low` for isolated locale keys, `medium` for longer
+docs pages or persona-voiced strings).
+
+After every locale subagent finishes, run `bun run generate-command-reference` once in the parent
+session when command descriptions changed, then run the verification steps below.
+
 ## Translate locale keys
 
 The authored trees are the directories under `src/locales/` other than `en-US`. Each mirrors the
@@ -38,6 +53,9 @@ English file layout, so a key lives at the same path in every tree.
 - A page at `docs/en/<path>` translates to `docs/<locale>/<path>` for every locale with a published
   docs tree (`docsTree: true` in `src/constants/docsLocales.ts`). `README.md` translates to
   `.github/README_<locale>.md`.
+- `README_ja.md` shows Japanese screenshots from `assets/img/scs/ja/`; keep those paths. When
+  English adds or renames a screenshot, keep the English image there and report that it has no
+  Japanese version yet.
 - `architecture/`, `contributing/`, and `wiki/` stay English. Never translate or create them; the
   command already leaves them out.
 - `features/command-reference.md` is generated in every locale from the command description keys.
@@ -50,7 +68,7 @@ English file layout, so a key lives at the same path in every tree.
   field marks substantive content nobody has reviewed. AI translation alone does not change that
   status or certify translation quality. Keep every other field as the translated
   file already has it.
-- Links: keep the English source's unprefixed route (`/features/knowledge/memory/`). The build adds
+- Links: keep the English source's unprefixed route (`/features/knowledge/memory/long-term-memory/`). The build adds
   the locale prefix, or `/en/` for an untranslated page; a hand-written prefix stays fixed after the
   target gets translated.
 - Keep every `<!-- anchor: english-slug -->` (in MDX, `{/* anchor: english-slug */}`) comment under

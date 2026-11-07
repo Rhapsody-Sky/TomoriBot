@@ -6,7 +6,9 @@
  * and GoogleStreamAdapter for better code organization and maintainability.
  */
 
-import { GoogleGenAI, type HarmBlockThreshold, type HarmCategory } from "@google/genai";
+import { pickHumanizerSettings } from "@/constants/humanizer";
+import { ApiError, GoogleGenAI, type HarmBlockThreshold, type HarmCategory } from "@google/genai";
+import { MODEL_LOOKUP_TIMEOUT_MS, reportModelLookupFailure } from "@/utils/provider/modelCatalogLookup";
 import type {
   BaseGuildTextChannel,
   BaseGuildVoiceChannel,
@@ -233,6 +235,32 @@ export class GoogleProvider
    */
   getInfo(): ProviderInfo {
     return googleProviderInfo;
+  }
+
+  async checkTextModel(apiKey: string, codename: string): Promise<boolean | null> {
+    return await this.lookUpModel(apiKey, codename);
+  }
+
+  async checkImageModel(apiKey: string, codename: string): Promise<boolean | null> {
+    return await this.lookUpModel(apiKey, codename);
+  }
+
+  private async lookUpModel(apiKey: string, codename: string): Promise<boolean | null> {
+    try {
+      await new GoogleGenAI({ apiKey, httpOptions: { timeout: MODEL_LOOKUP_TIMEOUT_MS } }).models.get({
+        model: codename,
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return false;
+      // Google answers a malformed name and an invalid key with the same 400 INVALID_ARGUMENT, so
+      // only the name-format message proves the model is absent.
+      if (error instanceof ApiError && error.status === 400 && error.message.includes("unexpected model name format")) {
+        return false;
+      }
+      await reportModelLookupFailure("google", error, apiKey);
+      return null;
+    }
   }
 
   /**
@@ -602,7 +630,7 @@ export class GoogleProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         safetySettings: safetySettings.map((setting) => ({
           category: setting.category as HarmCategory,

@@ -35,6 +35,19 @@ export const PERSONAL_CONFIG_PAGES_BY_CATEGORY: Record<PersonalConfigCategory, r
   advanced: ["response-modes", "impersonation", "spotlight"],
 };
 
+/** A managed identity edits only its profile; the other categories hold the invoker's own account state. */
+export function visiblePersonalConfigCategories(identityMode: boolean): readonly PersonalConfigCategory[] {
+  return identityMode ? ["profile"] : PERSONAL_CONFIG_CATEGORIES;
+}
+
+/** Spotlights limit personas in guild channels, so a DM workspace has no Spotlight page. */
+export function visiblePersonalConfigPages(
+  category: PersonalConfigCategory,
+  guildId: string | null,
+): PersonalConfigPage[] {
+  return PERSONAL_CONFIG_PAGES_BY_CATEGORY[category].filter((page) => page !== "spotlight" || guildId !== null);
+}
+
 export const DEFAULT_PAGE_FOR_CATEGORY: Record<PersonalConfigCategory, PersonalConfigPage> = {
   profile: "general",
   privacy: "controls",
@@ -50,7 +63,8 @@ export type PersonalConfigManagedCapability =
   | "image_nai"
   | "video"
   | "speech_design"
-  | "speech_clone";
+  | "speech_clone"
+  | "transcription";
 
 export const QUICK_TOGGLE_CAPABILITIES: readonly PersonalConfigManagedCapability[] = [
   "text",
@@ -61,6 +75,7 @@ export const QUICK_TOGGLE_CAPABILITIES: readonly PersonalConfigManagedCapability
   "video",
   "speech_design",
   "speech_clone",
+  "transcription",
 ] as const;
 
 /**
@@ -76,6 +91,7 @@ export const ROUTING_CAPABILITY_LOCALE_KEYS: Record<PersonalProviderCapability, 
   video: "commands.personal.config.routing_video",
   speech_design: "commands.config.panel.capability_tts_design",
   speech_clone: "commands.config.panel.capability_tts_clone",
+  transcription: "commands.config.panel.capability_stt",
 };
 
 /**
@@ -231,9 +247,6 @@ export type PersonalConfigPanelRoute =
   | { action: "persona-page"; locale: string; lineageId: number; chooserPage: number }
   | { action: "language-open"; locale: string }
   | { action: "language-submit"; locale: string; nonce: string }
-  // Submitted by the modal `/personal language` shows directly. The panel's own submit repaints a
-  // message this one does not have, so the two actions cannot share a handler.
-  | { action: "language-only-submit"; locale: string; nonce: string }
   | { action: "timezone-open"; locale: string }
   | { action: "timezone-submit"; locale: string; nonce: string }
   | { action: "timezone-server"; locale: string }
@@ -422,7 +435,8 @@ function parseManagedCapability(value: string | undefined): PersonalConfigManage
     value === "image_nai" ||
     value === "video" ||
     value === "speech_design" ||
-    value === "speech_clone"
+    value === "speech_clone" ||
+    value === "transcription"
   ) {
     return value;
   }
@@ -588,10 +602,6 @@ export const PERSONAL_CONFIG_ROUTE_CODECS: PersonalConfigRouteCodecs = {
   },
   "language-submit": {
     wireToken: "language-submit",
-    fields: [nonceField],
-  },
-  "language-only-submit": {
-    wireToken: "language-only-submit",
     fields: [nonceField],
   },
   "timezone-open": {

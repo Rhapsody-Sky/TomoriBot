@@ -1,3 +1,4 @@
+import { pickHumanizerSettings } from "@/constants/humanizer";
 import type {
   AssembledServerConfig,
   CustomEndpointApiStyle,
@@ -22,6 +23,7 @@ import type {
   ServerTriggerBehaviorConfigRow,
   ServerMemoryRow,
   ServerStmConfigRow,
+  TomoriState,
   UserSavedProviderConfigRow,
   UserRow,
 } from "@/types/db/schema";
@@ -875,17 +877,24 @@ export class TomoriDashboardCore {
         contextNote: persona.context_note ?? null,
         contextNoteDepth: persona.context_note_depth ?? 0,
         physicalAppearanceTags: persona.physical_appearance_tags ?? [],
-        humanizerOverride: persona.humanizer_degree_override ?? null,
+        humanizerOverride: persona.humanizer_override,
       };
     });
 
+    const config = await this.serverDefaults(first);
     return {
       serverId: first.server_id,
       serverDiscordId,
-      config: first.config,
+      config,
       personas,
       rawPersonas,
     };
+  }
+
+  private async serverDefaults(state: TomoriState): Promise<AssembledServerConfig> {
+    if (!state.humanizer_override) return state.config;
+    const chat = await configRepository.getChatConfig(state.server_id);
+    return chat ? { ...state.config, ...pickHumanizerSettings(chat) } : state.config;
   }
 
   async loadPersonaAvatar(serverDiscordId: string, personaId: number): Promise<Buffer | null> {
@@ -906,7 +915,7 @@ export class TomoriDashboardCore {
     tags: string[],
     userDiscordId: string,
   ): Promise<PersonalMemoryRow | null> {
-    const created = await personalMemoryRepository.add(userId, lineageId, content, tags);
+    const created = await personalMemoryRepository.add(userId, lineageId, content, tags, { manuallyWritten: true });
     if (created) invalidateUserCache(userDiscordId);
     return created;
   }
@@ -957,6 +966,8 @@ export class TomoriDashboardCore {
       taughtByUserId,
       content,
       snapshot.serverDiscordId,
+      [],
+      { manuallyWritten: true },
     );
   }
 
@@ -1111,8 +1122,8 @@ export class TomoriDashboardCore {
     if (!updated) return null;
 
     invalidateTomoriStateCache(snapshot.serverDiscordId);
-    const config = (await personaRepository.loadState(snapshot.serverDiscordId))?.config;
-    return config ? { ...config, ...(await this.loadStmSettings(snapshot.serverId)) } : null;
+    const state = await personaRepository.loadState(snapshot.serverDiscordId);
+    return state ? { ...(await this.serverDefaults(state)), ...(await this.loadStmSettings(snapshot.serverId)) } : null;
   }
 
   async updatePersonaIdentity(

@@ -2,6 +2,8 @@ export default {
   status: {
     prompt_hidden: `Prompt text is hidden. Members need Manage Server permission or enabled prompt inspection to view it.`,
     description: `Show current personal, server, or persona status.`,
+    page_description: `Category to open the dashboard on.`,
+    persona_description: `Persona to show on the Persona pages.`,
     scope_choice_behavior: `Behavior`,
     scope_choice_models: `Models`,
     scope_choice_access: `Access`,
@@ -52,7 +54,7 @@ export default {
     field_frequency_penalty: `Frequency Penalty`,
     field_presence_penalty: `Presence Penalty`,
     field_omitted_params: `Disabled Params`,
-    field_humanizer: `Humanizer Level`,
+    field_humanizer: `Humanizer`,
     field_thinking_level: `Thinking Level`,
     field_timezone: `Server Timezone`,
     field_message_fetch_limit: `Message Fetch Limit`,

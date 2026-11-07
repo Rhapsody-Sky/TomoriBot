@@ -10,10 +10,13 @@ import {
   isProviderModelError,
   isProviderTimeoutMessage,
 } from "@/utils/provider/providerErrorClassification";
+import { CredentialUnavailableError } from "@/utils/provider/credentialResolver";
 import { resolveProviderErrorPresentation } from "@/utils/provider/providerErrorPresentation";
+import { isPrivateNetworkRefusal } from "@/utils/security/userRemoteFetch";
 import { localizer } from "@/utils/text/localizer";
 
 const TOOL_FAILURE_REASON_KEYS = {
+  endpoint_blocked: "genai.tool_failure.endpoint_blocked",
   content_blocked: "genai.tool_failure.content_blocked",
   authentication: "genai.tool_failure.authentication",
   quota: "genai.tool_failure.quota",
@@ -28,6 +31,7 @@ const TOOL_FAILURE_REASON_KEYS = {
   script_too_long: "genai.tool_failure.script_too_long",
   cancelled: "genai.tool_failure.cancelled",
   model_error: "genai.tool_failure.model_error",
+  not_configured: "genai.tool_failure.not_configured",
   balance_exhausted: "genai.tool_failure.balance_exhausted",
   credit_limit: "genai.tool_failure.credit_limit",
   context_length: "genai.tool_failure.context_length",
@@ -59,7 +63,33 @@ type FailureKind =
   | "missing_sample"
   | "sample_read_failed"
   | "invalid_response"
-  | "missing_api_key";
+  | "missing_api_key"
+  | "not_configured"
+  | "endpoint_blocked";
+
+/** Kinds that only say the request failed, so the provider's message may name a sharper cause. */
+const GENERIC_KINDS = new Set<FailureKind>([
+  "provider_error",
+  "request_failed",
+  "api_error",
+  "unknown",
+  "invalid_request",
+]);
+
+/**
+ * A provider refused model files that the stored configuration names. `models` holds only values
+ * TomoriBot sent, so a tool result may repeat them where it may not repeat provider text.
+ */
+export class ConfiguredModelUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly models: string[],
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ConfiguredModelUnavailableError";
+  }
+}
 
 export interface ProviderToolFailureContext {
   locale: string;
@@ -95,9 +125,18 @@ export function createProviderToolFailure(error: unknown, context: ProviderToolF
   if (kind === "invalid_response") kind = "malformed_response";
   if (kind === "missing_api_key") kind = "authentication";
   if (kind === "quota" && status === "429") kind = "rate_limit";
+  if (error instanceof CredentialUnavailableError) kind = "not_configured";
+  else if (error instanceof ConfiguredModelUnavailableError) kind = "model_error";
+  else if (isPrivateNetworkRefusal(error)) kind = "endpoint_blocked";
+  else if (GENERIC_KINDS.has(kind) && /\b(?:safety|blocked|content filter)\b/i.test(message)) kind = "content_blocked";
+  // Google and Z.ai answer an exhausted balance with 429, so the status alone would advise waiting on a limit that never resets.
+  else if (
+    (GENERIC_KINDS.has(kind) || kind === "rate_limit") &&
+    isAccountBalanceExhaustedError({ type: "api_error", message, retryable: false })
+  )
+    kind = "quota";
   if (kind === "provider_error" || kind === "request_failed" || kind === "api_error" || kind === "unknown") {
-    if (/\b(?:safety|blocked|content filter)\b/i.test(message)) kind = "content_blocked";
-    else if (
+    if (
       status === "401" ||
       status === "403" ||
       /\b(?:authentication|unauthorized|invalid_api_key)\b/i.test(`${suppliedCode ?? ""} ${message}`)
@@ -110,7 +149,7 @@ export function createProviderToolFailure(error: unknown, context: ProviderToolF
     else if (status === "400" || status === "422") kind = "invalid_request";
     else kind = "provider_error";
   }
-  const code = suppliedCode ?? kind;
+  const code = kind === "endpoint_blocked" ? "PRIVATE_NETWORK_BLOCKED" : (suppliedCode ?? kind);
   const providerError: ProviderError = {
     type:
       kind === "content_blocked" ||
@@ -142,22 +181,35 @@ export function createProviderToolFailure(error: unknown, context: ProviderToolF
         "genai.tips.model_fallback_personal",
         "genai.tips.disable_personal_text_override",
         "genai.tips.api_key_rotation",
+        "genai.tips.reduce_output_tokens",
+        "genai.tips.reduce_output_tokens_personal",
       ].includes(key),
   );
   if (reasonKey === "content_blocked" || reasonKey === "invalid_request") tipKeys = ["genai.tips.revise_tool_request"];
+  else if (kind === "endpoint_blocked")
+    tipKeys = [
+      context.credentialScope === "personal"
+        ? "genai.tips.endpoint_not_allowed_personal"
+        : "genai.tips.endpoint_not_allowed",
+    ];
   else if (kind === "authentication")
     tipKeys = [
       context.credentialScope === "personal" ? "genai.tips.verify_api_key_personal" : "genai.tips.verify_api_key",
     ];
   else if (kind === "quota" && reasonKey === "quota") tipKeys = ["genai.tips.check_provider_quota"];
   else if (kind === "cancelled") tipKeys = [];
-  else if (["missing_voice", "missing_sample", "sample_read_failed", "model_error"].includes(reasonKey))
+  else if (
+    ["missing_voice", "missing_sample", "sample_read_failed", "model_error", "not_configured"].includes(reasonKey)
+  )
     tipKeys = ["genai.tips.check_tool_configuration"];
   else if (kind === "script_too_long") tipKeys = ["genai.tips.shorten_message"];
   else if (["malformed_response", "provider_error"].includes(reasonKey)) tipKeys = ["genai.tips.wait_and_retry"];
   const failure: ToolFailure = {
     code: formatProviderErrorCodeForDisplay(code),
-    reason: localizer(context.locale, TOOL_FAILURE_REASON_KEYS[reasonKey]),
+    reason:
+      error instanceof ConfiguredModelUnavailableError
+        ? localizer(context.locale, "genai.tool_failure.model_files_missing", { models: error.models.join(", ") })
+        : localizer(context.locale, TOOL_FAILURE_REASON_KEYS[reasonKey]),
     suggestedActions: tipKeys.map((key) => localizer(context.locale, key)),
   };
   return { success: false, error: failure.reason, failure };

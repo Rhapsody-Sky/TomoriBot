@@ -2,10 +2,9 @@
 title: "Ajuste de Comportamento"
 sidebar:
   order: 3
-aiGenerated: true
 ---
 
-Você pode ajustar o que a TomoriBot pode fazer e como ela gera respostas em `/config`, incluindo a página de permissões. Para personalidade, veja [Múltiplas personas](/pt-BR/features/chatting-personality/multiple-personas/); para conhecimento, veja [Memória](/pt-BR/features/knowledge/memory/). Esta página cobre as configurações mais comuns.
+Você pode ajustar o que a TomoriBot pode fazer e como ela gera respostas em `/config`, incluindo a página de permissões. Para personalidade, veja [Múltiplas personas](/pt-BR/features/chatting-personality/multiple-personas/); para conhecimento, veja [Memória](/pt-BR/features/knowledge/memory/long-term-memory/). Esta página cobre as configurações mais comuns.
 
 ## Capacidades: O Que Ela Tem Permissão para Fazer
 <!-- anchor: capabilities-what-shes-allowed-to-do -->
@@ -72,8 +71,8 @@ Configure canais de roleplay em `/config` > `Canais` > Regras de Canal.
 <!-- anchor: generation-tuning -->
 
 - `/config` > `Modelos` > `Samplers de Texto e Parâmetros`: parâmetros de amostragem como temperatura e top-p. Temperatura mais alta produz mais variedade.
-- `/config` > `Comportamento` > `Comportamento Geral`: grau humanizador de resposta. Ajuste a casualidade com que ela envia mensagens de texto. A configuração se aplica a todo o servidor por padrão ou a uma pessoa individual.
-- `/config` > `Comportamento` > `Comportamento Geral`: limite de histórico de mensagens. Aumente-o para um contexto de conversação mais profundo ou diminua-o para economizar tokens.
+- `/config` > `Comportamento` > `Comportamento Geral`: humanizador de resposta. Mensagens Ritmo adiciona atrasos e pausas entre mensagens transmitidas. Ritmo e ambas as opções de divisão exigem streaming ao vivo; forçar minúsculas também funciona sem streaming. Estas configurações se aplicam a todo o servidor por padrão ou a uma persona individual. O `/setup` oferece os mesmos hábitos como quatro predefinições prontas.
+- `/config` > `Comportamento` > `Comportamento Geral`: limite de histórico de mensagens. Aumente-o para um contexto de conversa mais profundo ou diminua-o para economizar tokens. Este é um limite máximo: o histórico recente cresce e depois descarta mensagens mais antigas em lotes. Veja [Por Dentro do Prompt](/features/knowledge/inside-the-prompt/) para as regras de janela e posicionamento.
 
 ## Prompt de Sistema
 <!-- anchor: system-prompt -->
@@ -84,7 +83,7 @@ O prompt do sistema fica acima da persona e molda o `Comportamento Geral`:
 - `/config` > `Comportamento` > `Comportamento Geral`: escolha entre as predefinições de prompt do sistema. `Default + Image Generation Expert` adiciona orientações para tags de anime e trajes de personagens precisos ao prompt padrão (consulte [Busca de Tags](/features/capabilities/media-generation/image-generation/#tag-lookup)).
 - `/config` > `Comportamento` > `Comportamento Geral`: redefinir para o padrão. A confirmação mostra o prompt anterior para que você possa restaurá-lo se for apagado acidentalmente.
 
-Quando uma [predefinição SillyTavern](/pt-BR/features/integrations/sillytavern-support/) está ativa, o prompt do sistema substituto integrado é substituído, mas um prompt personalizado definido aqui ainda é enviado.
+Quando uma [predefinição do SillyTavern](/features/integrations/sillytavern-support/) está ativa, ela controla o prompt do sistema. Desative a predefinição para editar novamente o prompt salvo do servidor.
 
 ## Saída Sem Censura
 <!-- anchor: uncensored-output -->

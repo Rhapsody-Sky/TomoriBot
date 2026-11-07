@@ -1,3 +1,4 @@
+import type { HumanizerSettings } from "@/constants/humanizer";
 import type {
   AssembledServerConfig,
   PersonalMemoryRow,
@@ -63,7 +64,7 @@ export interface DashboardPersona {
   contextNote: string | null;
   contextNoteDepth: number;
   physicalAppearanceTags: string[];
-  humanizerOverride: number | null;
+  humanizerOverride: HumanizerSettings | null;
 }
 
 export interface DashboardGuildSnapshot {

@@ -5,8 +5,9 @@ import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context
 import type { LLMProvider, ProviderConfig, StreamResult } from "@/types/provider/interfaces";
 import type { ProviderError } from "@/types/stream/interfaces";
 import type { ToolContext } from "@/types/tool/interfaces";
-import { resolveServerTextModel } from "@/utils/provider/textModelSelection";
-import { llmModelRepo, llmProviderRepo } from "@/utils/db/repositories";
+import { resolveRouteTextModel } from "@/utils/provider/textModelSelection";
+import { llmProviderRepo } from "@/utils/db/repositories";
+import { loadSpeechRoutingPolicy } from "@/utils/db/repositories/SpeechRepository";
 import { type FallbackNoticeAttempt, sendFallbackModelUsageNotice } from "@/utils/discord/fallbackModelNotice";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
 import type { sendStandardEmbed } from "@/utils/discord/embedHelper";
@@ -14,9 +15,8 @@ import { classifySendFailure } from "@/utils/discord/stream/sendFailureCache";
 import { log } from "@/utils/misc/logger";
 import { buildCustomProviderName } from "@/utils/provider/customProviderUtils";
 import { getProviderForTomori, ProviderFactory } from "@/utils/provider/providerFactory";
-import { formatProviderErrorCodeForDisplay } from "@/utils/provider/providerErrorClassification";
+import { formatProviderErrorCodeForDisplay, isStreamInterruption } from "@/utils/provider/providerErrorClassification";
 import { applyProviderContextTruncation } from "@/utils/provider/contextBudget";
-import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
 import { withSavedProviderConfig } from "@/utils/provider/savedProviderConfig";
 import { decryptApiKey } from "@/utils/security/crypto";
 import { resolveMediaForModel } from "@/utils/text/context/mediaResolver";
@@ -137,6 +137,7 @@ async function runGenerationAttempts(
     // Index the server route's attempts start at, null until that route contributes any. Only the
     // receipt needs it: a success on the server route of a personal turn has an opt-out to name.
     let serverRouteStartIndex: number | null = null;
+    let streamInterruptionRetried = false;
 
     for (let index = 0; index < attempts.length; index++) {
       const attempt = attempts[index];
@@ -153,11 +154,14 @@ async function runGenerationAttempts(
       const hasPendingModelFallback = index < attempts.length - 1 || plan.extendWithServerRoute !== null;
       context.tomoriState = attempt.tomoriState;
       const attemptContextItems = await prepareProviderContextItems({
-        contextItems: baseContextItems,
+        contextItems: providerIsApiFamily(attempt.tomoriState.llm.llm_provider, "novelai")
+          ? (context.nativeContextItems ?? baseContextItems)
+          : baseContextItems,
         isUserImpersonation: context.isUserImpersonation,
         userId: context.streamingContext.triggererUserId,
         tomoriState: attempt.tomoriState,
         deliberateToolAllowedNames: context.streamingContext.deliberateToolAllowedNames,
+        sendsTools: (attempt.providerConfig.tools?.length ?? 0) > 0,
       });
 
       // Key rotation inner loop: try multiple keys for this attempt before giving up.
@@ -180,6 +184,10 @@ async function runGenerationAttempts(
           (await hasAvailableRotationKey(attempt.tomoriState, retryExcludedKeyIds));
         setStreamUserErrorSuppression(context, hasFallbackKey || hasPendingModelFallback);
         context.streamingContext.forceModelFallback = hasPendingModelFallback;
+        // The state machine withholds an interruption's error on this flag, so the retry below must
+        // read the same value: one held back with no retry left would leave the user with silence.
+        context.streamingContext.retryStreamInterruption =
+          !streamInterruptionRetried && keyAttemptCount < MAX_KEY_ATTEMPTS;
 
         if (context.responseReview) {
           context.responseReview.pending = [];
@@ -201,7 +209,6 @@ async function runGenerationAttempts(
             contextItems: attemptContextItems,
             reservedTailItems: prefillItems,
             tomoriState: attempt.tomoriState,
-            serverDiscId: context.serverDiscId,
             emptyResponseFinishReason: context.turn.lockedTurn.admission.incoming.emptyResponseFinishReason,
             retryCount: context.turn.lockedTurn.admission.incoming.retryCount,
           })),
@@ -235,6 +242,16 @@ async function runGenerationAttempts(
           // Don't credit a timed-out key as successful : a timeout is not a clean completion.
           if (result.status !== "timeout" && rotationKeyId != null) await recordKeySuccess(rotationKeyId);
           break;
+        }
+
+        // Stays on the same key because rotating would record a backend fault against a healthy key.
+        if (
+          context.streamingContext.retryStreamInterruption &&
+          isStreamInterruption(result.streamResults.at(-1)?.data)
+        ) {
+          streamInterruptionRetried = true;
+          log.warn(`Stream interrupted: retrying ${attempt.label} once on the same key.`);
+          continue;
         }
 
         if (!hasFallbackKey) break;
@@ -311,6 +328,7 @@ async function runGenerationAttempts(
         }
         setStreamUserErrorSuppression(context, false);
         context.streamingContext.forceModelFallback = false;
+        context.streamingContext.retryStreamInterruption = false;
 
         // A timeout notice is normally sent while its attempt is still running, and it is held back
         // when a later model may still answer. If the server route then contributed nothing, this is
@@ -344,12 +362,14 @@ async function runGenerationAttempts(
     };
     setStreamUserErrorSuppression(context, false);
     context.streamingContext.forceModelFallback = false;
+    context.streamingContext.retryStreamInterruption = false;
     if (context.responseReview) skipped.usageEntries = context.responseReview.usage;
     await responseSink.finalize(skipped);
     return skipped;
   } catch (error) {
     setStreamUserErrorSuppression(context, false);
     context.streamingContext.forceModelFallback = false;
+    context.streamingContext.retryStreamInterruption = false;
     await responseSink.emitError(error);
     const result: GenerationTurnResult = {
       status: "error",
@@ -369,7 +389,7 @@ function setStreamUserErrorSuppression(context: ChatTurnContext, temporarySuppre
 async function buildGenerationPlan(context: ChatTurnContext): Promise<GenerationPlan> {
   return {
     attempts: await buildPlannedRouteAttempts(context),
-    extendWithServerRoute: resolveServerRouteExtension(context),
+    extendWithServerRoute: await resolveServerRouteExtension(context),
   };
 }
 
@@ -381,9 +401,9 @@ async function buildGenerationPlan(context: ChatTurnContext): Promise<Generation
  * outright: a server that requires members to bring their own provider never lends its models to a
  * member-triggered turn, and the account-wide setting below is the user's own refusal.
  */
-function resolveServerRouteExtension(
+async function resolveServerRouteExtension(
   context: ChatTurnContext,
-): ((startIndex: number) => Promise<GenerationAttempt[]>) | null {
+): Promise<((startIndex: number) => Promise<GenerationAttempt[]>) | null> {
   if (
     context.turn.lockedTurn.admission.incoming.sceneTurn?.modelSelection ||
     context.textCredentialSource !== "personal" ||
@@ -400,8 +420,14 @@ function resolveServerRouteExtension(
   // Only an explicit opt-out withholds the route. The column is NOT NULL DEFAULT true and the
   // projection reports that default for an account with no personalization row yet, so an account
   // that never touched the setting keeps the fallback it already had.
-  if (context.turn.userRow.personal_server_fallback_enabled === false) {
-    log.info(`Skipping the server model fallback for user ${context.userDiscId}: disabled in their personal config.`);
+  // A borrowed-trigger turn bills someone other than the anchor message's author, so the opt-out is theirs.
+  const routingUserId = context.personalRoutingUserId;
+  const fallbackEnabled =
+    routingUserId == null || routingUserId === context.turn.userRow.user_id
+      ? context.turn.userRow.personal_server_fallback_enabled !== false
+      : (await loadSpeechRoutingPolicy(context.currentPersona.server_id, routingUserId)).fallbackEnabled;
+  if (!fallbackEnabled) {
+    log.info(`Skipping the server model fallback for user_id ${routingUserId}: disabled in their personal config.`);
     return null;
   }
   return (startIndex) => buildServerRouteAttempts(context, startIndex);
@@ -645,11 +671,7 @@ function isUnreachableDestinationResult(result: GenerationTurnResult): boolean {
 function isRetryableEmptyResponse(result: GenerationTurnResult): boolean {
   const streamResult = result.streamResults.at(-1);
   const data = streamResult?.data as { finishReason?: unknown; emptyResponseReason?: unknown } | undefined;
-  return (
-    Boolean(streamResult?.naiContinuationPrefill) ||
-    data?.finishReason === "length" ||
-    data?.emptyResponseReason === "speaker_guard"
-  );
+  return data?.finishReason === "length" || data?.emptyResponseReason === "speaker_guard";
 }
 
 async function emitStreamErrors(responseSink: ChatResponseSink, streamResults: StreamResult[]): Promise<void> {
@@ -745,32 +767,18 @@ function shouldSendFallbackNotice(context: ChatTurnContext, result: GenerationTu
   return false;
 }
 
-/**
- * Which routing rules a resolved state should draw on.
- *
- * `planned` is the route the turn was planned on: a personal text route applies the
- * personal-provider overlay and ignores the channel override, and every other turn resolves the
- * server route exactly as `server` does. `server` is the route a personal turn falls back to, which
- * never applies the overlay.
- */
-type TextRoute = "planned" | "server";
-
-async function resolveTomoriStateForRoute(context: ChatTurnContext, route: TextRoute): Promise<TomoriState> {
+async function resolveTomoriStateForRoute(context: ChatTurnContext, route: "planned" | "server"): Promise<TomoriState> {
   const incoming = context.turn.lockedTurn.admission.incoming;
-  if (incoming.sceneTurn?.modelSelection) return context.currentPersona;
-  const usePersonalRoute = route === "planned" && context.textCredentialSource === "personal";
-  const base = usePersonalRoute
-    ? (await applyPersonalProviderSelectionsToTomoriState(context.currentPersona, context.personalRoutingUserId))
-        .tomoriState
-    : context.currentPersona;
-  const overriddenLlm = usePersonalRoute
-    ? incoming.llmOverrideCodename
-      ? ((await llmModelRepo.loadByProviderAndCodename(base.llm.llm_provider, incoming.llmOverrideCodename)) ?? {
-          ...base.llm,
-          llm_codename: incoming.llmOverrideCodename,
-        })
-      : base.llm
-    : await resolveServerTextModel(base, context.channel, context.isUserImpersonation, incoming.llmOverrideCodename);
+  const { base, llm: overriddenLlm } = await resolveRouteTextModel({
+    state: context.currentPersona,
+    route,
+    textCredentialSource: context.textCredentialSource,
+    personalRoutingUserId: context.personalRoutingUserId,
+    channel: context.channel,
+    isUserImpersonation: context.isUserImpersonation,
+    hasSceneModelSelection: Boolean(incoming.sceneTurn?.modelSelection),
+    llmOverrideCodename: incoming.llmOverrideCodename,
+  });
   let state: TomoriState = { ...base, llm: overriddenLlm };
 
   if (overriddenLlm.llm_provider.toLowerCase() !== base.llm.llm_provider.toLowerCase()) {
@@ -971,8 +979,13 @@ async function prepareProviderContextItems(args: {
   isUserImpersonation: boolean;
   tomoriState: TomoriState;
   deliberateToolAllowedNames: string[] | undefined;
+  /** Read from the built provider config, because a provider's live capability catalog can withdraw tools the state still allows. */
+  sendsTools: boolean;
 }): Promise<StructuredContextItem[]> {
   let contextItems = await resolveMediaForModel(args.contextItems, args.tomoriState, args.deliberateToolAllowedNames);
+  if (!args.sendsTools) {
+    contextItems = contextItems.filter((item) => !item.requiresToolCalling);
+  }
 
   // Verbatim prompt scaffolding is decided once, against the primary model, but every attempt
   // carries its own provider and parser. Adapt the shared base per attempt so a fallback in either
@@ -1019,16 +1032,10 @@ async function fitProviderContextBudget(args: {
   contextItems: StructuredContextItem[];
   reservedTailItems: StructuredContextItem[];
   tomoriState: TomoriState;
-  serverDiscId: string;
   emptyResponseFinishReason: string | null | undefined;
   retryCount: number;
 }): Promise<StructuredContextItem[]> {
-  let contextItems = await applyProviderContextTruncation(
-    args.contextItems,
-    args.tomoriState,
-    args.serverDiscId,
-    args.reservedTailItems,
-  );
+  let contextItems = await applyProviderContextTruncation(args.contextItems, args.tomoriState, args.reservedTailItems);
   if (
     shouldApplyLengthEmptyRetryTrim(args.tomoriState.llm.llm_provider, args.emptyResponseFinishReason, args.retryCount)
   ) {

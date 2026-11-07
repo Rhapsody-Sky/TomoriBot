@@ -28,13 +28,21 @@ simplifiedMessageHistory
 
 - **Role mapping**: Messages from the active persona map to `model`. During user impersonation, messages from the impersonated user ID map to `model`. All other messages map to `user`.
 - **Blocked users**: Messages from users with an active persona-scoped block (`block_type = 'block'`) are replaced in history by a single `[System: ...]` notice, and reply quote annotations targeting them are suppressed.
+- **Reply quotes**: Referenced message text includes recognized notices and embed previews, even when the message is outside the history window. Diagnostic embeds and unshared dice rolls stay excluded.
 - **Text formatting**: Lines format as `${authorName}: ${content}`. Author names resolve macros (`identityMacroMode: "resolve"`), whereas message bodies preserve `{bot}` and `{user}` literals (`identityMacroMode: "preserve"`). This prevents template drafts typed by users from collapsing into persona names.
 - **File hints**: each `documentAttachments` entry adds a `[System: ...]` part built from
   `DOCUMENT_HINT_TEMPLATE`. The native builder expands the template once with the turn's tool macro
   resolver, so the instruction to call `read_file` appears only when the turn exposes it; otherwise the
   hint says the contents are unavailable. The filename and media ID are filled in after expansion, so a
   filename is never parsed as a macro.
-- **Deterministic humanization**: At `humanizer_degree >= HumanizerDegree.HEAVY`, model-role historical turns pass through `humanizeString` with `suppressPunctuationNoise: true`. This applies casing normalization and semicolon stripping without randomized comma noise, preserving prefix stability for provider prompt caching.
+- **Deterministic humanization**: When the Force Lowercase or Punctuation Splits toggle is on, model-role historical turns pass through `applyStableHumanizer`. It applies only the deterministic casing and semicolon normalization those toggles imply, never the randomized comma noise, preserving prefix stability for provider prompt caching.
+
+NovelAI reads the item's `completionText` projection. History simplification preserves original
+message prose in `completionContent` before adding reply references, reactions, and media hints.
+Generated notices supply semantic prose or an empty string; `completionSpeaker: false` keeps
+narration free of a speaker label. Merging carries this projection alongside ordinary `content`.
+Other providers continue to use the annotated parts. NovelAI's fitter polishes and counts the
+projection separately; see [NovelAI limitations](/architecture/integrations/novelai/limitations/).
 
 ### Media descriptor emission
 
@@ -47,7 +55,7 @@ Instead of adapting media to a specific model's vision capabilities during conte
 
 ### Context note and spacer injection
 
-Notes are injected at calculated depths measured from the end of history (`totalMessages - depth`):
+The registry applies note ordering at depths measured from the end of simplified history (`totalMessages - depth`), after each message's date spacer. These saved depths count items, independently of speaker-turn counting for the tail slot:
 
 - **Persona and channel notes**: Persona notes and channel notes are additive; both inject when configured. The global server context note is a fallback used only when neither persona nor channel configures a note.
 - **Verbatim tool-calling nudge**: When `shouldInjectVerbatimToolCallingNudge(tomoriState)` is true, injects `VERBATIM_TOOL_CALLING_NUDGE` at depth 3 to guide custom endpoint models on verbatim tool syntax.
@@ -59,7 +67,7 @@ Verified proxy history uses the persisted message index to recover the stable me
 ## Constraints and rationale
 
 - **Capability-neutral history**: Decoupling media descriptors from provider vision capabilities allows the same assembled context to be evaluated across fallback models without rebuilding history.
-- **Prompt cache preservation**: Bypassing randomized punctuation noise keeps history formatting deterministic. Participant state, memory updates, and changing history windows can still alter the prompt prefix.
+- **Prompt cache preservation**: Bypassing randomized punctuation noise keeps history deterministic. A context note deeper than the tail slot moves relative to history each chat turn and reduces cache reuse. Relative date-spacer wording such as "yesterday" changes at server-day boundaries. Anchored selection and budget truncation are owned upstream by [Build Context](/architecture/pipelines/chat/06-per-turn/01-build-context/).
 - **Hints follow the tool list**: a hint that tells the model to call a tool wraps that instruction in `{{if tool:...}}`, because history is simplified before the Deliberate Tool Mode allowlist exists. A hint written into message text at simplification time would name tools the turn never exposes.
 - **Macro preservation**: Preserving identity macros in user message bodies prevents corruption when users ask personas to draft or edit prompts containing `{user}` or `{bot}`.
 - **Preset reassembly**: Dialogue items are tagged `DIALOGUE_HISTORY` and `CONTEXT_NOTE_INJECTION`, which SillyTavern preset reassembly maps to the `chatHistory` marker.

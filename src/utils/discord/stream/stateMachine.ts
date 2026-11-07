@@ -21,7 +21,7 @@ import {
 import { StreamBufferFlusher } from "@/utils/discord/stream/bufferFlusher";
 import { StreamErrorUi } from "@/utils/discord/stream/errorUi";
 import { StreamMessageDelivery } from "@/utils/discord/stream/messageDelivery";
-import { classifySendFailure } from "@/utils/discord/stream/sendFailureCache";
+import { classifySendFailure, wasSendFailureLogged } from "@/utils/discord/stream/sendFailureCache";
 import { StreamSegmentProcessor } from "@/utils/discord/stream/segmentProcessor";
 import {
   cleanupOldStopRequests,
@@ -44,6 +44,7 @@ import { normalizeProviderUsage } from "@/utils/text/tokenEstimate";
 import { appendChunkThoughts, buildThoughtLogPayload, wasEmptyStreamResponse } from "@/utils/discord/stream/thoughtLog";
 import { log } from "@/utils/misc/logger";
 import { reportStreamProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { isStreamInterruption } from "@/utils/provider/providerErrorClassification";
 
 /**
  * Coordinates provider streaming as a state machine while delegating buffer, stop, UI, and error responsibilities.
@@ -135,7 +136,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
     const metrics = createDefaultStreamMetrics();
     const state = createDefaultStreamState();
     const textConfig = createStreamTextProcessingConfig(config, context);
-    const typingConfig = createTypingSimulationConfig(config.humanizerDegree);
+    const typingConfig = createTypingSimulationConfig(config.humanizer);
     let terminalDoneMetadata: Record<string, unknown> | undefined;
     let lastError: Error | undefined;
 
@@ -231,7 +232,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
           ...(sendFailureReason ? { sendFailureReason } : {}),
         },
       };
-      if (sendFailureReason) {
+      if (sendFailureReason || wasSendFailureLogged(lastError)) {
         log.warn(`Stream orchestrator failed: ${lastError.message}`, lastError, orchestratorMetadata, {
           redactValues: [config.apiKey],
         });
@@ -317,7 +318,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
       await this.bufferFlusher.flushPendingBuffer(
         state,
         createStreamTextProcessingConfig(config, context),
-        createTypingSimulationConfig(config.humanizerDegree),
+        createTypingSimulationConfig(config.humanizer),
         context,
       );
     } else if (
@@ -345,7 +346,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
     return {
       status: completesHeldPrefix ? "completed" : "stopped_by_user",
       pendingResponse: completesHeldPrefix
-        ? this.collectPendingResponse(state, textConfig, context, createTypingSimulationConfig(config.humanizerDegree))
+        ? this.collectPendingResponse(state, textConfig, context, createTypingSimulationConfig(config.humanizer))
         : undefined,
       stopReason,
       accumulatedText: state.accumulatedText,
@@ -433,9 +434,12 @@ export class StreamOrchestrator implements IStreamOrchestrator {
       return { status: "continue" };
     }
 
+    const suppressed =
+      context.suppressUserErrors === true ||
+      (context.retryStreamInterruption === true && isStreamInterruption(chunk.error));
     // A suppressed error may be retried by an attempt that continues the delivered text, so flushing
     // an unfinished clause here would post a fragment the continuation then repeats.
-    if (!context.suppressUserErrors && (state.buffer.length > 0 || this.delivery.hasPendingAggregatedText(state))) {
+    if (!suppressed && (state.buffer.length > 0 || this.delivery.hasPendingAggregatedText(state))) {
       log.info(
         `Stream: Flushing ${state.buffer.length} chars of buffered text before error handling` +
           `${this.delivery.hasPendingAggregatedText(state) ? ` (queued aggregate: ${state.pendingAggregatedText.length})` : ""}`,
@@ -450,7 +454,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
     }
 
     const denied = findProviderRequestDeniedError(chunk.error, context.usageContext);
-    const surfaced = !context.suppressUserErrors && !denied?.deferNotice && !isUserImpersonationStreamContext(context);
+    const surfaced = !suppressed && !denied?.deferNotice && !isUserImpersonationStreamContext(context);
     // Not awaited: an incident record persists to the database, and an unacknowledged
     // initialInteraction must still be replied to within Discord's window.
     void reportStreamProviderFailure({
@@ -464,7 +468,7 @@ export class StreamOrchestrator implements IStreamOrchestrator {
     if (surfaced) {
       await this.errorUi.handleProviderError(chunk.error, provider, context, config.apiKey);
     }
-    return { status: "error", data: chunk.error, ...this.collectDeliveredOutput(state) };
+    return { status: "error", data: chunk.error, providerFailureReported: true, ...this.collectDeliveredOutput(state) };
   }
 
   /** What a failed stream already posted, which the next attempt continues instead of regenerating. */

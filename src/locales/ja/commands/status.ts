@@ -2,6 +2,8 @@ export default {
   status: {
     prompt_hidden: `プロンプトのテキストは非表示です。閲覧するには「サーバーの管理」権限または有効化されたプロンプト確認設定が必要です。`,
     description: `現在の個人、サーバー、またはペルソナのステータスを表示します。`,
+    page_description: `ダッシュボードを開くときのカテゴリ。`,
+    persona_description: `「ペルソナ」ページに表示するペルソナ。`,
     scope_choice_behavior: `動作`,
     scope_choice_models: `モデル`,
     scope_choice_access: `アクセス`,
@@ -54,7 +56,7 @@ export default {
     field_frequency_penalty: `頻度ペナルティ`,
     field_presence_penalty: `存在ペナルティ`,
     field_omitted_params: `無効化したパラメーター`,
-    field_humanizer: `ヒューマナイザーレベル`,
+    field_humanizer: `ヒューマナイザー`,
     field_thinking_level: `思考レベル`,
     field_timezone: `サーバータイムゾーン`,
     field_message_fetch_limit: `メッセージ取得上限`,

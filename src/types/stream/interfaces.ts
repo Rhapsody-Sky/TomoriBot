@@ -1,3 +1,4 @@
+import type { HumanizerSettings } from "@/constants/humanizer";
 import type { ProviderUsageContext } from "@/utils/provider/providerUsage";
 import type { PersonaDeliveryMode, PersonaDeliveryReceipt } from "@/utils/discord/webhook/personaPost";
 /**
@@ -71,7 +72,7 @@ export interface StreamConfig extends ProviderConfig {
   maxTypingTimeMs: number;
   minVisibleTypingDurationMs: number;
 
-  humanizerDegree: number;
+  humanizer: HumanizerSettings;
   emojiUsageEnabled: boolean;
 
   modelOverride?: string;
@@ -131,6 +132,8 @@ export interface StreamContext {
   /** Whose credentials answered this turn; selects server- or personal-scoped provider error tips. */
   textCredentialSource?: "server" | "personal";
   rotationKeyRetriesUsed?: boolean; // True if one or more rotation-key retries were attempted
+  /** The generation turn will retry an interrupted stream on the same key, so its error stays unsurfaced. */
+  retryStreamInterruption?: boolean;
   replyNoticeState?: { attempted: boolean; sent: boolean }; // Tracks the standalone alter reply notice across tool-call stream retries
 
   disableYouTubeProcessing?: boolean; // Temporarily disable YouTube function during enhanced context restart
@@ -150,14 +153,11 @@ export interface StreamContext {
 
   /** The attempt's `{bot}: {text}` prefill: stripped when the model echoes it, never shown. */
   outputPrefill?: string;
+  triggerMessageId?: string;
 
   holdResponseText?: boolean;
   pendingResponseLimit?: import("@/types/stream/pendingResponse").PendingResponseLimit;
   suppressTextOutput?: boolean;
-
-  // NAI GLM-4.6 prompt continuation: incomplete trailing fragment from previous stream, appended to the
-  // assembled prompt so the model continues mid-sentence rather than starting a new response
-  naiContinuationPrefill?: string;
 
   abortSignal?: AbortSignal;
 

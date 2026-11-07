@@ -173,7 +173,11 @@
             {
               section: "chat",
               fields: [
-                "humanizer_degree",
+                "humanizer_streaming_enabled",
+                "humanizer_pacing_enabled",
+                "humanizer_sentence_split_enabled",
+                "humanizer_lowercase_enabled",
+                "humanizer_punctuation_split_enabled",
                 "send_message_limit",
                 "response_prefill",
                 "response_reviewer_prompt",

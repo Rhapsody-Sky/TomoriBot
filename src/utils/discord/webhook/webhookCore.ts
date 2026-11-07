@@ -1,22 +1,10 @@
 import { createHash } from "node:crypto";
-import {
-  type AnyThreadChannel,
-  type APIMessage,
-  type BaseGuildTextChannel,
-  type TextChannel,
-  type Webhook,
-  type Message,
-  type Guild,
-  type WebhookMessageCreateOptions,
-  type WebhookType,
-  MessagePayload,
-  makeURLSearchParams,
-  RateLimitError,
-  REST,
-  Routes,
-} from "discord.js";
+import type { AnyThreadChannel, BaseGuildTextChannel, TextChannel, Webhook, Message, Guild } from "discord.js";
 import type { TomoriState } from "@/types/db/schema";
 import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
+import { getShardTopology } from "@/utils/discord/shardOwnership";
+import { getOwnerWorkSignal, hasShardLeaseOwnership } from "@/utils/cluster/shardLeases";
+import { isDraining } from "@/utils/misc/shutdownState";
 import {
   MANAGED_WEBHOOK_KIND_SHARED_CHANNEL,
   MANAGED_WEBHOOK_KINDS,
@@ -83,6 +71,24 @@ export const GENERIC_WEBHOOK_AVATAR_URL = "https://cdn.discordapp.com/embed/avat
 const DISCORD_WEBHOOK_LIMIT = 15;
 const RESERVED_WEBHOOK_SLOTS = 2;
 const IS_PRODUCTION = process.env.RUN_ENV === "production";
+
+export function captureDiscordOwnership(serverDiscId: string | null | undefined, isDm = false): () => void {
+  const topology = getShardTopology();
+  const assertOwned = () => {
+    if (
+      !hasShardLeaseOwnership() ||
+      (!topology.ownsAllShards() && (!serverDiscId || !topology.ownsServer(serverDiscId, isDm)))
+    ) {
+      throw new DiscordDeliveryError("pre_dispatch", new DOMException("Discord owner is unavailable", "AbortError"));
+    }
+  };
+  assertOwned();
+  const signal = topology.ownsAllShards() ? undefined : getOwnerWorkSignal();
+  return () => {
+    if (signal?.aborted) throw new DiscordDeliveryError("pre_dispatch", signal.reason);
+    assertOwned();
+  };
+}
 
 export type WebhookCreateErrorReason = "missing_permissions" | "max_webhooks" | "unknown";
 
@@ -456,12 +462,15 @@ async function persistSharedChannelWebhook(
 async function restoreStoredManagedWebhook(
   channel: TextChannel | BaseGuildTextChannel,
   storedRow: ManagedDiscordWebhookRow,
+  assertOwned: () => void,
 ): Promise<Webhook | null> {
   if (storedRow.guild_disc_id !== channel.guildId || storedRow.channel_disc_id !== channel.id) return null;
   return await withWebhookMutationLock(
     storedRow.webhook_disc_id,
     async () => {
+      assertOwned();
       const forgetStoredSlot = async () => {
+        assertOwned();
         await serverRepository.deleteManagedWebhook(channel.id, storedRow.webhook_disc_id, storedRow.kind);
         invalidateWebhookCache(channel.id, storedRow.webhook_disc_id);
       };
@@ -472,6 +481,7 @@ async function restoreStoredManagedWebhook(
       }
       try {
         const webhook = await channel.client.fetchWebhook(storedRow.webhook_disc_id, decryptedToken);
+        assertOwned();
         if (
           webhook.id !== storedRow.webhook_disc_id ||
           webhook.channelId !== channel.id ||
@@ -508,6 +518,7 @@ async function restoreStoredManagedWebhook(
         persistedManagedWebhookIds.add(webhook.id);
         return webhook;
       } catch (error) {
+        assertOwned();
         if (isInvalidWebhookError(error)) await forgetStoredSlot();
         log.warn("[Webhook Manager] Failed to restore stored webhook", {
           channelId: channel.id,
@@ -594,16 +605,24 @@ export async function resolveAuthoringWebhook(
   suppliedWebhook?: Webhook,
 ): Promise<Webhook | null> {
   if (!webhookId) return null;
-  if (suppliedWebhook?.id === webhookId && suppliedWebhook.token) return suppliedWebhook;
+  if (suppliedWebhook?.id === webhookId && suppliedWebhook.token) {
+    captureDiscordOwnership(suppliedWebhook.guildId)();
+    return suppliedWebhook;
+  }
   const parent = resolveWebhookParentChannel(channel) ?? resolveWebhookParentChannel(suppliedWebhook?.channel);
   return parent ? await resolveManagedWebhookForChannel(parent, webhookId) : null;
 }
 
 export async function getOrCreateWebhook(channel: TextChannel | BaseGuildTextChannel): Promise<WebhookCreateResult> {
-  return await withWebhookMutationLock(channel.id, () => getOrCreateWebhookInternal(channel), "lifecycle");
+  const assertOwned = captureDiscordOwnership(channel.guildId);
+  return await withWebhookMutationLock(channel.id, () => getOrCreateWebhookInternal(channel, assertOwned), "lifecycle");
 }
 
-async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextChannel): Promise<WebhookCreateResult> {
+async function getOrCreateWebhookInternal(
+  channel: TextChannel | BaseGuildTextChannel,
+  assertOwned: () => void,
+): Promise<WebhookCreateResult> {
+  assertOwned();
   const cachedFailure = webhookFailureCache.get(channel.id);
   if (cachedFailure) {
     if (cachedFailure.expiresAt > Date.now()) {
@@ -628,6 +647,7 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
         try {
           // Verify webhook still exists remotely; cached objects may survive manual deletes.
           const liveWebhooks = await channel.fetchWebhooks();
+          assertOwned();
           if (liveWebhooks.has(cachedWebhook.id)) {
             await persistSharedChannelWebhook(channel, cachedWebhook);
             return { webhook: cachedWebhook };
@@ -636,6 +656,7 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
           await serverRepository.deleteManagedWebhook(channelId, cachedWebhook.id, MANAGED_WEBHOOK_KIND_SHARED_CHANNEL);
           invalidateWebhookCache(channelId, cachedWebhook.id);
         } catch (fetchError) {
+          assertOwned();
           log.warn(
             `[Webhook Manager] Cached webhook fetch failed for channel ${channelId}, invalidating cache`,
             fetchError,
@@ -653,7 +674,8 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
       return { webhook: null, errorReason: "unknown" };
     }
     const primaryRow = storedSlots.find((row) => row.kind === MANAGED_WEBHOOK_KIND_SHARED_CHANNEL);
-    const restoredWebhook = primaryRow ? await restoreStoredManagedWebhook(channel, primaryRow) : null;
+    assertOwned();
+    const restoredWebhook = primaryRow ? await restoreStoredManagedWebhook(channel, primaryRow, assertOwned) : null;
     if (restoredWebhook) {
       log.info(`[Webhook Manager] Restored shared webhook for channel ${channelId} from stored credentials`);
       return { webhook: restoredWebhook };
@@ -661,6 +683,7 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
 
     log.info(`[Webhook Manager] Cache MISS for channel ${channelId}, fetching webhooks`);
     const webhooks = await channel.fetchWebhooks();
+    assertOwned();
     const poolIds = new Set(
       storedSlots.filter((row) => row.kind !== MANAGED_WEBHOOK_KIND_SHARED_CHANNEL).map((row) => row.webhook_disc_id),
     );
@@ -678,6 +701,7 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
 
     let created = false;
     if (!webhook) {
+      assertOwned();
       log.info(`[Webhook Manager] No webhook found for channel ${channelId}, creating new one`);
       webhook = await channel.createWebhook({
         name: WEBHOOK_NAME,
@@ -687,9 +711,11 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
       log.success(`[Webhook Manager] Created webhook for channel ${channelId} (${channel.name})`);
     }
 
+    assertOwned();
     if (!(await persistSharedChannelWebhook(channel, webhook))) {
       if (created) {
         try {
+          assertOwned();
           await webhook.delete("Unused webhook could not be persisted");
         } catch (error) {
           log.warn("[Webhook Manager] Failed to remove unpersisted webhook", {
@@ -705,6 +731,7 @@ async function getOrCreateWebhookInternal(channel: TextChannel | BaseGuildTextCh
     webhookFailureCache.delete(channelId);
     return { webhook };
   } catch (error) {
+    assertOwned();
     const errorReason = getWebhookErrorReason(error);
     webhookFailureCache.set(channel.id, {
       reason: errorReason,
@@ -761,16 +788,19 @@ export async function resolveManagedWebhookForChannel(
   if (!channel.id || !webhookId) {
     return null;
   }
+  const assertOwned = captureDiscordOwnership(channel.guildId);
 
   const cached = getCachedManagedWebhookForChannel(channel.id, webhookId);
   if (cached) return cached;
   return await withWebhookMutationLock(
     channel.id,
     async () => {
+      assertOwned();
       const cachedWebhook = getCachedManagedWebhookForChannel(channel.id, webhookId);
       if (cachedWebhook) return cachedWebhook;
       const row = await serverRepository.loadManagedWebhookByChannelAndWebhookId(channel.id, webhookId);
-      return row ? await restoreStoredManagedWebhook(channel, row) : null;
+      assertOwned();
+      return row ? await restoreStoredManagedWebhook(channel, row, assertOwned) : null;
     },
     "lifecycle",
   );
@@ -798,15 +828,21 @@ async function editWebhookAvatar(
   webhook: Webhook,
   edit: { avatar: string | null; reason: string },
   deferOnRateLimit: boolean,
+  assertOwned: () => void,
 ): Promise<void> {
   // Restoration and avatar PATCHes share a webhook lock so a stale fetch cannot republish an earlier assignment.
   return await withWebhookMutationLock(
     webhook.id,
     async () => {
       try {
+        assertOwned();
         const updated = deferOnRateLimit
-          ? await runDeferrableWebhookAvatarEdit(webhook.id, () => webhook.edit(edit))
+          ? await runDeferrableWebhookAvatarEdit(webhook.id, () => {
+              assertOwned();
+              return webhook.edit(edit);
+            })
           : await webhook.edit(edit);
+        assertOwned();
         await persistWebhookAvatarAssignment(updated, edit.avatar);
       } catch (error) {
         if (!(error instanceof WebhookAvatarEditDeferredError)) {
@@ -849,7 +885,9 @@ async function ensureWebhookAvatarState(
   webhook: Webhook,
   identity: ResolvedWebhookIdentity | undefined,
   deferOnRateLimit: boolean,
+  assertOwned: () => void,
 ): Promise<void> {
+  assertOwned();
   if (identity?.avatarDataUri) {
     const cachedAvatar = webhookAvatarStateCache.get(webhook.id);
     const slot = managedWebhookSlots.get(webhook.id);
@@ -860,6 +898,7 @@ async function ensureWebhookAvatarState(
         webhook,
         { avatar: identity.avatarDataUri, reason: "TomoriBot persona identity update" },
         deferOnRateLimit,
+        assertOwned,
       );
       webhookAvatarStateCache.set(webhook.id, identity.avatarDataUri);
     }
@@ -867,7 +906,12 @@ async function ensureWebhookAvatarState(
   }
 
   if (shouldResetWebhookAvatar(webhook, identity)) {
-    await editWebhookAvatar(webhook, { avatar: null, reason: "TomoriBot persona identity reset" }, deferOnRateLimit);
+    await editWebhookAvatar(
+      webhook,
+      { avatar: null, reason: "TomoriBot persona identity reset" },
+      deferOnRateLimit,
+      assertOwned,
+    );
     webhookAvatarStateCache.delete(webhook.id);
   }
 }
@@ -878,8 +922,10 @@ export async function runWithWebhookIdentity<T>(
   identity: ResolvedWebhookIdentity | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
+  const assertOwned = captureDiscordOwnership(webhook.guildId);
   const run = async (): Promise<T> => {
-    await ensureWebhookAvatarState(webhook, identity, false);
+    await ensureWebhookAvatarState(webhook, identity, false, assertOwned);
+    assertOwned();
     const result = await operation();
     recordManagedWebhookUse(webhook);
     return result;
@@ -911,7 +957,9 @@ function recordManagedWebhookUse(webhook: Webhook): void {
 async function selectManagedWebhookIdentity(
   initialWebhook: Webhook,
   identity: ResolvedWebhookIdentity,
+  assertOwned: () => void,
 ): Promise<WebhookIdentitySelection> {
+  assertOwned();
   const initialSlot = managedWebhookSlots.get(initialWebhook.id);
   if (!initialSlot) throw new Error("Managed webhook slot is unavailable");
   const { channel } = initialSlot;
@@ -941,7 +989,8 @@ async function selectManagedWebhookIdentity(
     return generic(initialSlot.webhook);
   }
   for (const row of rows) {
-    if (!managedWebhookSlots.has(row.webhook_disc_id)) await restoreStoredManagedWebhook(channel, row);
+    assertOwned();
+    if (!managedWebhookSlots.has(row.webhook_disc_id)) await restoreStoredManagedWebhook(channel, row, assertOwned);
   }
   const slots = [...managedWebhookSlots.values()]
     .filter(
@@ -963,9 +1012,10 @@ async function selectManagedWebhookIdentity(
   if (!oldest) throw new Error("No usable managed webhook slot");
   let deferral: WebhookAvatarEditDeferredError | undefined;
   try {
-    await ensureWebhookAvatarState(oldest.webhook, identity, true);
+    await ensureWebhookAvatarState(oldest.webhook, identity, true, assertOwned);
     return { webhook: oldest.webhook, webhookId: oldest.webhook.id, identity };
   } catch (error) {
+    assertOwned();
     if (error instanceof WebhookAvatarEditDeferredError) {
       deferral = error;
     } else {
@@ -992,6 +1042,7 @@ async function selectManagedWebhookIdentity(
     if (unusedKind && rows.length < MANAGED_WEBHOOK_KINDS.length) {
       creationOutcome = "count_unavailable";
       const liveWebhooks = await channel.fetchWebhooks();
+      assertOwned();
       creationOutcome = "channel_full";
       if (liveWebhooks.size < DISCORD_WEBHOOK_LIMIT - RESERVED_WEBHOOK_SLOTS) {
         creationOutcome = "create_failed";
@@ -1003,6 +1054,7 @@ async function selectManagedWebhookIdentity(
         if (!created.token || created.channelId !== channel.id || created.guildId !== channel.guildId) {
           throw new Error("Created webhook has invalid credentials or channel");
         }
+        assertOwned();
         const stored = await serverRepository.upsertManagedWebhook({
           guildDiscId: channel.guildId,
           channelDiscId: channel.id,
@@ -1036,6 +1088,7 @@ async function selectManagedWebhookIdentity(
       }
     }
   } catch {
+    assertOwned();
     if (created) {
       try {
         await created.delete("Unused avatar pool webhook could not be persisted");
@@ -1064,6 +1117,7 @@ export async function dispatchWebhookWithIdentity<T>(
   identity: ResolvedWebhookIdentity | undefined,
   operation: (selection: WebhookIdentitySelection) => Promise<T>,
 ): Promise<WebhookIdentityDelivery<T>> {
+  const assertOwned = captureDiscordOwnership(webhook.guildId);
   let operationStarted = false;
   if (!managedWebhookSlots.has(webhook.id)) {
     try {
@@ -1079,13 +1133,15 @@ export async function dispatchWebhookWithIdentity<T>(
     }
   }
   const run = async () => {
+    assertOwned();
     let selection: WebhookIdentitySelection;
     try {
-      selection = await selectManagedWebhookIdentity(webhook, identity ?? {});
+      selection = await selectManagedWebhookIdentity(webhook, identity ?? {}, assertOwned);
     } catch (error) {
       throw new DiscordDeliveryError("pre_dispatch", error);
     }
     try {
+      assertOwned();
       const result = await operation(selection);
       recordManagedWebhookUse(selection.webhook);
       return { ...selection, result };
@@ -1101,6 +1157,7 @@ export async function sendSelectedWebhookMessage(
   selection: WebhookIdentitySelection,
   payload: WebhookSendPayload,
 ): Promise<Message> {
+  captureDiscordOwnership(selection.webhook.guildId)();
   return await selection.webhook.send(buildIdentityPayload(payload, selection.identity));
 }
 
@@ -1114,7 +1171,10 @@ export async function sendWebhookMessageWithIdentityDelivery(
   );
 }
 
-function buildIdentityPayload(payload: WebhookSendPayload, identity?: ResolvedWebhookIdentity): WebhookSendPayload {
+export function buildIdentityPayload(
+  payload: WebhookSendPayload,
+  identity?: ResolvedWebhookIdentity,
+): WebhookSendPayload {
   const finalPayload = buildWebhookSendPayload(payload, identity);
   if (identity?.avatarDataUri && "avatarURL" in finalPayload) {
     delete finalPayload.avatarURL;
@@ -1127,93 +1187,14 @@ async function sendWebhookMessagesInternal(
   payloads: WebhookSendPayload[],
   identity?: ResolvedWebhookIdentity,
 ): Promise<Message[]> {
+  const assertOwned = captureDiscordOwnership(webhook.guildId);
   const messages: Message[] = [];
   for (const payload of payloads) {
+    assertOwned();
     messages.push(await webhook.send(buildIdentityPayload(payload, identity)));
   }
 
   return messages;
-}
-
-/**
- * The shared client retries a timed-out, reset, or 5xx request, and webhook execution accepts no
- * nonce, so a retry after a lost response can post a second copy. This client makes one attempt.
- * It also rejects every rate limit instead of sleeping inside the request, so the caller waits and
- * can observe a stop before posting again.
- */
-let singleAttemptRest: REST | null = null;
-const EXPRESSION_RATE_LIMIT_BUDGET_MS = 30_000;
-const EXPRESSION_STOP_CHECK_INTERVAL_MS = 100;
-
-/** @public Release-only `src/utils/chat/expressionDelivery.ts` imports this error, which marks exhausted rate-limited POSTs as definite non-delivery. */
-export class WebhookExpressionRateLimitTimeoutError extends DiscordDeliveryError {
-  constructor() {
-    super("definite_refusal", new Error("Webhook expression rate-limit budget exhausted"));
-    this.name = "WebhookExpressionRateLimitTimeoutError";
-  }
-}
-
-export function getSingleAttemptWebhookRest(): REST {
-  singleAttemptRest ??= new REST({ retries: 0, rejectOnRateLimit: () => true });
-  return singleAttemptRest;
-}
-
-/**
- * Executes one webhook message without transport retries, for sends where a duplicate is worse
- * than an unconfirmed outcome. Applies the same identity and avatar handling as
- * {@link sendWebhookMessageWithIdentity}.
- *
- * A rate limit is waited out here and the POST retried, which cannot duplicate: Discord refused the
- * limited request, or the client refused to send it.
- *
- * @param beforePost - Runs after the avatar is settled and immediately before every POST attempt;
- *   throwing from it cancels the send with nothing posted
- * @returns The created message's id and webhook id
- */
-export async function sendWebhookMessageOnce(
-  webhook: Webhook,
-  payload: WebhookMessageCreateOptions,
-  identity: ResolvedWebhookIdentity | undefined,
-  beforePost: () => void,
-): Promise<{ id: string; channelId?: string; webhookId: string; identity: ResolvedWebhookIdentity }> {
-  const delivery = await dispatchWebhookWithIdentity(webhook, identity, async (selected) => {
-    const token = selected.webhook.token;
-    if (!token) throw new Error(`Webhook ${selected.webhookId} has no token.`);
-    const finalPayload = buildIdentityPayload(payload, selected.identity) as WebhookMessageCreateOptions;
-    // Only an incoming webhook has the token checked above, which is what execution requires.
-    const target = selected.webhook as Webhook<WebhookType.Incoming>;
-    const { body, files } = await MessagePayload.create(target, finalPayload).resolveBody().resolveFiles();
-    const deadline = Date.now() + EXPRESSION_RATE_LIMIT_BUDGET_MS;
-    for (;;) {
-      beforePost();
-      if (Date.now() >= deadline) throw new WebhookExpressionRateLimitTimeoutError();
-      try {
-        const created = (await getSingleAttemptWebhookRest().post(Routes.webhook(selected.webhookId, token), {
-          body,
-          files: files ?? undefined,
-          query: makeURLSearchParams({ wait: true, thread_id: finalPayload.threadId }),
-          auth: false,
-        })) as APIMessage;
-        if (!created || typeof created.id !== "string" || !created.id)
-          throw new DiscordDeliveryError("unconfirmed", new Error("Discord expression response has no message ID"));
-        return { id: created.id, channelId: created.channel_id };
-      } catch (error) {
-        if (!(error instanceof RateLimitError)) throw error;
-        // A 429 reports the bucket reset in `timeToReset` and Discord's Retry-After in `retryAfter`.
-        beforePost();
-        const retryAt = Date.now() + Math.max(error.timeToReset, error.retryAfter);
-        if (retryAt >= deadline) throw new WebhookExpressionRateLimitTimeoutError();
-        // The phase holds a watchdog exemption, so repeated refusals need their own deadline.
-        while (Date.now() < retryAt) {
-          beforePost();
-          await new Promise((resolve) =>
-            setTimeout(resolve, Math.min(EXPRESSION_STOP_CHECK_INTERVAL_MS, retryAt - Date.now())),
-          );
-        }
-      }
-    }
-  });
-  return { ...delivery.result, webhookId: delivery.webhookId, identity: delivery.identity };
 }
 
 export async function sendWebhookMessagesWithIdentity(
@@ -1246,6 +1227,7 @@ export async function updatePersonaWebhooksAvatar(
   personaId: number,
   avatar?: Buffer | string | null,
 ): Promise<number> {
+  const assertOwned = captureDiscordOwnership(guild.id);
   if (IS_PRODUCTION) {
     return 0;
   }
@@ -1273,6 +1255,7 @@ export async function updatePersonaWebhooksAvatar(
       const matching = webhooks.filter((wh) => wh.name === personaWebhookName);
 
       for (const webhook of matching.values()) {
+        assertOwned();
         await webhook.edit({
           avatar: avatarData,
           reason: "TomoriBot persona avatar updated",
@@ -1305,6 +1288,7 @@ export async function updatePersonaWebhooksAvatar(
         }
       }
     } catch (error) {
+      assertOwned();
       log.warn(`[Webhook Manager] Failed to update persona webhook in channel ${channel.id}`, error);
     }
   }
@@ -1352,6 +1336,8 @@ export async function sendUserTranscriptViaWebhook(
   avatarUrl: string,
   transcript: string,
 ): Promise<Message | null> {
+  if (isDraining()) return null;
+  const assertOwned = captureDiscordOwnership(channel.guildId);
   // Threads cannot own webhooks, so use the parent channel for creation/lookup
   const isThread = channel.isThread();
   const webhookTargetChannel = isThread ? (channel.parent as BaseGuildTextChannel | null) : channel;
@@ -1367,6 +1353,7 @@ export async function sendUserTranscriptViaWebhook(
 
   // Reuse the shared TomoriBot Multi-Persona webhook for this channel
   const webhookResult = await getOrCreateWebhook(webhookTargetChannel);
+  assertOwned();
   if (!webhookResult.webhook) {
     log.warn(
       `[Webhook Manager] Could not get webhook for transcript posting in channel ${channel.id}: ${webhookResult.errorReason}`,
@@ -1537,6 +1524,7 @@ export function getWebhookCacheStats(): {
  *
  */
 export async function deletePersonaWebhooks(guild: Guild, personaId: number): Promise<number> {
+  const assertOwned = captureDiscordOwnership(guild.id);
   const personaWebhookName = getPersonaWebhookName(personaId);
   let deletedCount = 0;
 
@@ -1556,6 +1544,7 @@ export async function deletePersonaWebhooks(guild: Guild, personaId: number): Pr
       const matching = webhooks.filter((wh) => wh.name === personaWebhookName);
 
       for (const webhook of matching.values()) {
+        assertOwned();
         await webhook.delete("Persona removed");
         deletedCount++;
       }
@@ -1563,6 +1552,7 @@ export async function deletePersonaWebhooks(guild: Guild, personaId: number): Pr
       const cacheKey = getPersonaWebhookCacheKey(channel.id, personaId);
       personaWebhookCache.delete(cacheKey);
     } catch (error) {
+      assertOwned();
       log.warn(`[Webhook Manager] Failed to delete persona webhook in channel ${channel.id}`, error);
     }
   }

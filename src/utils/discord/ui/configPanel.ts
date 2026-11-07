@@ -68,7 +68,8 @@ import {
   type ConfigActor,
 } from "@/utils/discord/interactions/configPermissionPolicy";
 import { CHECKLIST_CHANNELS_PER_PAGE } from "@/utils/discord/channelChecklistManager";
-import { getHumanizerLabel, HUMANIZER_DEFAULT } from "@/utils/discord/humanizerOptions";
+import { DEFAULT_HUMANIZER_SETTINGS, type HumanizerSettings } from "@/constants/humanizer";
+import { formatHumanizerSummary } from "@/utils/discord/humanizerOptions";
 import type {
   ConfigChannelsView,
   ConfigChannelsOverridesView,
@@ -128,7 +129,7 @@ import { DEFAULT_SYSTEM_PROMPT } from "@/utils/text/contextBuilder";
 import { formatUTCOffset } from "@/utils/text/timezoneHelper";
 import { getCapabilitiesManagePermissionDefinitions } from "@/utils/discord/manageConfigMapping";
 import { buildDocsUrl, DOCS_PATHS } from "@/utils/discord/docsLinks";
-import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
+import { getProviderDisplayName, providerUsesApiFamily } from "@/utils/provider/providerInfoRegistry";
 import { commandRegistry } from "@/utils/discord/commandRegistry";
 import {
   buildConfigVoiceBody,
@@ -277,7 +278,7 @@ export interface ConfigPanelRenderInput {
   receipt?: PanelReceipt;
   view?: ConfigPanelView;
   personaMemoryView?: ConfigPersonaMemoryView;
-  serverHumanizerDegree?: number | null;
+  serverHumanizer?: HumanizerSettings | null;
   personaSprites?: PersonaSpriteRow[];
   spritePageStart?: number;
   selectedSpriteIndex?: number;
@@ -1186,10 +1187,6 @@ ${localizer(input.locale, "commands.config.panel.character_reference_clear_descr
   ];
 }
 
-function renderHumanizerDegree(locale: string, value: number | null | undefined): string {
-  return getHumanizerLabel(locale, value ?? HUMANIZER_DEFAULT);
-}
-
 function buildPersonaAppearanceBody(input: ConfigPanelRenderInput): ComponentInContainerData[] {
   const { locale, actor, personas, selectedPersonaId, readStatus } = input;
   const persona = personas.find((candidate) => candidate.persona_id === selectedPersonaId) ?? null;
@@ -1555,15 +1552,15 @@ ${localizer(locale, "commands.config.panel.overrides_description")}`,
   const actionState = (action: Parameters<typeof resolvePersonaOverridesActionState>[0]) =>
     resolvePersonaOverridesActionState(action, actor);
   const humanizerState = actionState("humanizer");
-  const humanizerValue = persona.humanizer_degree_override ?? null;
+  const humanizerValue = persona.humanizer_override ?? null;
   const humanizerTextDisplay: ComponentInContainerData | undefined =
     humanizerState !== "omitted"
       ? {
           type: ComponentType.TextDisplay,
           content: `**${localizer(locale, "commands.config.panel.response_style_title")}**
 ${localizer(locale, "commands.config.panel.response_style_description")}
-> ${localizer(locale, "commands.config.panel.persona_override_label")}: ${getHumanizerLabel(locale, humanizerValue)}
-> ${localizer(locale, "commands.config.panel.server_default_label")}: ${renderHumanizerDegree(locale, input.serverHumanizerDegree)}`,
+> ${localizer(locale, "commands.config.panel.persona_override_label")}: ${formatHumanizerSummary(locale, humanizerValue)}
+> ${localizer(locale, "commands.config.panel.server_default_label")}: ${formatHumanizerSummary(locale, input.serverHumanizer ?? DEFAULT_HUMANIZER_SETTINGS)}`,
         }
       : undefined;
 
@@ -2309,13 +2306,15 @@ function buildBehaviorGeneralBody(input: ConfigPanelRenderInput): ComponentInCon
   const { locale } = input;
   const view = input.behaviorView?.general;
   const writesDisabled = input.readStatus !== "fresh";
-  const components: ComponentInContainerData[] = [
-    behaviorHeading(
-      locale,
-      "commands.config.panel.behavior_general_title",
-      "commands.config.panel.behavior_general_description",
-    ),
-  ];
+  const textModel = input.personas[0]?.llm;
+  const isNovelAI = textModel && providerUsesApiFamily(textModel.llm_provider, "novelai");
+  const heading = behaviorHeading(
+    locale,
+    "commands.config.panel.behavior_general_title",
+    "commands.config.panel.behavior_general_description",
+    isNovelAI ? `\n\n> ${localizer(locale, "commands.config.panel.behavior_novelai_notice")}` : "",
+  );
+  const components: ComponentInContainerData[] = [heading];
 
   if (input.actor.workspaceKind === "guild" && !input.actor.isManager) {
     components.push({
@@ -2330,9 +2329,15 @@ function buildBehaviorGeneralBody(input: ConfigPanelRenderInput): ComponentInCon
   const promptLocked = Boolean(stPresetName);
   const prompt = view.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT.trim();
   const promptLockNotice = stPresetName
-    ? `> ${localizer(locale, "commands.config.panel.system_prompt_st_preset_active", {
-        preset: escapeDiscordMarkdown(stPresetName),
-      })}`
+    ? `> ${localizer(
+        locale,
+        isNovelAI
+          ? "commands.config.panel.system_prompt_st_preset_novelai"
+          : "commands.config.panel.system_prompt_st_preset_active",
+        {
+          preset: escapeDiscordMarkdown(stPresetName),
+        },
+      )}`
     : "";
   const contextNote = view.contextNote?.trim() ?? "";
   const responsePrefill = view.responsePrefill?.trim() ?? "";
@@ -2356,9 +2361,9 @@ function buildBehaviorGeneralBody(input: ConfigPanelRenderInput): ComponentInCon
     content: `**${localizer(locale, "commands.config.panel.response_style_title")}**\n${localizer(
       locale,
       "commands.config.panel.global_response_style_description",
-    )}\n> ${localizer(locale, "commands.config.panel.humanizer_label")}: ${getHumanizerLabel(
+    )}\n> ${localizer(locale, "commands.config.panel.humanizer_label")}: ${formatHumanizerSummary(
       locale,
-      view.humanizerDegree,
+      view.humanizer,
     )}\n> ${localizer(locale, "commands.config.panel.message_fetch_limit_label")}: ${view.messageFetchLimit}`,
   };
   const timezoneTextDisplay: ComponentInContainerData | undefined =
@@ -3105,7 +3110,7 @@ function buildBehaviorMemoryBody(input: ConfigPanelRenderInput): ComponentInCont
   components.push(
     {
       type: ComponentType.TextDisplay,
-      content: `**[${localizer(locale, "commands.config.panel.memory_tagging_title")}](https://docs.tomoribot.app/en/features/knowledge/memory/#controlling-when-memories-activate)**\n${localizer(locale, "commands.config.panel.memory_tagging_description")}`,
+      content: `**[${localizer(locale, "commands.config.panel.memory_tagging_title")}](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/#controlling-when-memories-activate)**\n${localizer(locale, "commands.config.panel.memory_tagging_description")}`,
     },
     {
       type: ComponentType.TextDisplay,
@@ -3129,7 +3134,7 @@ function buildBehaviorMemoryBody(input: ConfigPanelRenderInput): ComponentInCont
     },
     {
       type: ComponentType.TextDisplay,
-      content: `**[${localizer(locale, "commands.config.panel.stm_enabled_title")}](https://docs.tomoribot.app/en/features/knowledge/memory/#short-term-memory-stm)**\n${localizer(locale, "commands.config.panel.stm_enabled_description")}`,
+      content: `**[${localizer(locale, "commands.config.panel.stm_enabled_title")}](https://docs.tomoribot.app/en/features/knowledge/memory/short-term-memory/)**\n${localizer(locale, "commands.config.panel.stm_enabled_description")}`,
     },
     buildStateControlRow(
       [
@@ -3160,7 +3165,7 @@ function buildBehaviorMemoryBody(input: ConfigPanelRenderInput): ComponentInCont
     },
     {
       type: ComponentType.TextDisplay,
-      content: `**[${localizer(locale, "commands.config.panel.stm_parameters_title")}](https://docs.tomoribot.app/en/features/knowledge/memory/#stm-configuration)**\n${localizer(locale, "commands.config.panel.stm_parameters_description")}\n> ${localizer(locale, "commands.config.panel.stm_refresh_cadence_value", { count: view.stmConfig?.refresh_cadence ?? 5 })}\n> ${localizer(locale, "commands.config.panel.stm_render_mode_value", { mode: view.stmConfig?.render_mode ?? "supersede" })}\n> ${localizer(locale, "commands.config.panel.stm_crude_messages_value", { count: view.stmConfig?.crude_message_count ?? 6 })}\n> ${localizer(locale, "commands.config.panel.stm_nudge_depth_value", { count: view.stmConfig?.nudge_injection_depth ?? 2 })}\n> ${localizer(locale, "commands.config.panel.stm_content_depth_value", { count: view.stmConfig?.content_injection_depth ?? -1 })}`,
+      content: `**[${localizer(locale, "commands.config.panel.stm_parameters_title")}](https://docs.tomoribot.app/en/features/knowledge/memory/short-term-memory/#managing-short-term-memory)**\n${localizer(locale, "commands.config.panel.stm_parameters_description")}\n> ${localizer(locale, "commands.config.panel.stm_refresh_cadence_value", { count: view.stmConfig?.refresh_cadence ?? 5 })}\n> ${localizer(locale, "commands.config.panel.stm_render_mode_value", { mode: view.stmConfig?.render_mode ?? "supersede" })}\n> ${localizer(locale, "commands.config.panel.stm_crude_messages_value", { count: view.stmConfig?.crude_message_count ?? 6 })}\n> ${localizer(locale, "commands.config.panel.stm_nudge_depth_value", { count: view.stmConfig?.nudge_injection_depth ?? 2 })}\n> ${localizer(locale, "commands.config.panel.stm_content_depth_value", { count: view.stmConfig?.content_injection_depth ?? -1 })}`,
     },
     {
       type: ComponentType.ActionRow,

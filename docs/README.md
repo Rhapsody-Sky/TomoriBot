@@ -30,8 +30,12 @@ Pages are bucketed into task-based sub-categories:
   - [`behavior-tweaking.md`](./en/features/chatting-personality/behavior-tweaking/)
   - [`natural-nudges.md`](./en/features/chatting-personality/natural-nudges/)
 - **Knowledge**:
-  - [`memory.md`](./en/features/knowledge/memory/)
-  - [`lorebooks.md`](./en/features/knowledge/lorebooks/)
+  - `memory/`
+    - [`long-term-memory.md`](./en/features/knowledge/memory/long-term-memory/)
+    - [`memory-decay.md`](./en/features/knowledge/memory/memory-decay/)
+    - [`documents.md`](./en/features/knowledge/memory/documents/)
+    - [`lorebooks.md`](./en/features/knowledge/memory/lorebooks/)
+    - [`short-term-memory.md`](./en/features/knowledge/memory/short-term-memory/)
   - [`inside-the-prompt.md`](./en/features/knowledge/inside-the-prompt/)
   - [`personalization.md`](./en/features/knowledge/personalization/)
   - [`data-handling.md`](./en/features/knowledge/data-handling/)
@@ -48,6 +52,7 @@ Pages are bucketed into task-based sub-categories:
   - [`message-proxy-support.md`](./en/features/integrations/message-proxy-support/)
   - [`matrix-bridge.md`](./en/features/integrations/matrix-bridge/)
   - [`sillytavern-support.md`](./en/features/integrations/sillytavern-support/)
+  - [`novelai.md`](./en/features/integrations/novelai/)
 - [`features/command-reference.md`](./en/features/command-reference/): generated from command locales (Phase 3)
 
 ## Self-Hosting (order 3)
@@ -134,6 +139,8 @@ Per-stage reference. Each folder has a `README.md` (overview + ASCII flow) and n
 
 Supporting services that pipelines depend on.
 
+- [`architecture/subsystems/sharding.md`](./en/architecture/subsystems/sharding.md): shard topology, process ownership, coordination, shutdown, and per-shard health
+
 - [`architecture/subsystems/lorebooks.md`](./en/architecture/subsystems/lorebooks.md): lorebook storage, scope ownership, and pure activation contracts
 - [`architecture/subsystems/`](./en/architecture/subsystems/README.md): database schema, events, commands, tools,
   caching, cooldowns, security, localization, multi-persona, persona-presets, natural-nudges, and more
@@ -141,7 +148,7 @@ Supporting services that pipelines depend on.
 ### Integrations
 
 - [`architecture/integrations/`](./en/architecture/integrations/README.md): Discord platform, Matrix bridge,
-  NovelAI, SillyTavern, and voice pipeline internals
+  NovelAI text limitations and inpainting, SillyTavern, and voice pipeline internals
 - [`architecture/integrations/message-proxy.md`](./en/architecture/integrations/message-proxy/): proxy routing and identity contract
 - [`architecture/integrations/pluralkit.md`](./en/architecture/integrations/pluralkit/): PluralKit adapter behavior
 

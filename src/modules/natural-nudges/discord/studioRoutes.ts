@@ -2,7 +2,16 @@ import { MessageFlags, type ChatInputCommandInteraction, type ModalSubmitInterac
 import type { PanelAction } from "@/constants/panelActions";
 import type { TomoriState } from "@/types/db/schema";
 import type { PanelReceipt } from "@/types/discord/panel";
-import { CUSTOM_IDLE_NUDGE_LIMIT, type NaturalNudgeCategory } from "@/modules/natural-nudges/db/types";
+import {
+  CUSTOM_IDLE_NUDGE_LIMIT,
+  NATURAL_NUDGE_CATEGORIES,
+  type NaturalNudgeCategory,
+} from "@/modules/natural-nudges/db/types";
+import {
+  panelPageNotFoundReceipt,
+  resolvePanelPage,
+  type PanelPageDestination,
+} from "@/utils/discord/autocomplete/panelPageAutocomplete";
 import {
   buildNudgeStudioRouteId,
   NUDGE_STUDIO_ROUTE_NAMESPACE,
@@ -30,6 +39,7 @@ import {
   checklistGroupCount,
   NUDGE_STUDIO_ADD_VALUE,
   NUDGE_STUDIO_PAGE_SIZE,
+  NUDGE_STUDIO_TAB_LOCALE_KEYS,
   parseStudioRemovalKey,
   personaNudgeFormTarget,
   removalOptions,
@@ -50,6 +60,7 @@ import {
 } from "@/utils/discord/ui/modals";
 import { recordPanelActionStat } from "@/utils/stats/panelActionMetrics";
 import { localizer } from "@/utils/text/localizer";
+import { replyPanelReceipt } from "@/utils/discord/ui/panel";
 
 type StudioInteraction = GlobalRoutableInteraction | ChatInputCommandInteraction;
 
@@ -167,8 +178,8 @@ function checklistValues(
   return arrived ? checked : null;
 }
 
-async function reply(interaction: GlobalRoutableInteraction, locale: string, key: string): Promise<void> {
-  await interaction.reply({ content: localizer(locale, key), flags: MessageFlags.Ephemeral });
+function errorReceipt(locale: string, headingKey: string, detailKey: string): PanelReceipt {
+  return { tone: "error", heading: localizer(locale, headingKey), detail: localizer(locale, detailKey) };
 }
 
 function limitReceipt(locale: string): PanelReceipt {
@@ -190,9 +201,16 @@ async function openModal(
 ): Promise<void> {
   const { locale, category } = route;
   if (!deps.isAuthorized(interaction))
-    return reply(interaction, locale, "general.errors.permission_denied_description");
+    return replyPanelReceipt(
+      interaction,
+      errorReceipt(locale, "general.errors.permission_denied_title", "general.errors.permission_denied_description"),
+    );
   const scope = await deps.resolveScope(interaction);
-  if (!scope) return reply(interaction, locale, "general.errors.tomori_not_setup_description");
+  if (!scope)
+    return replyPanelReceipt(
+      interaction,
+      errorReceipt(locale, "general.errors.tomori_not_setup_title", "general.errors.tomori_not_setup_description"),
+    );
   const view = await deps.loadView(scope.serverId, category, scope.personas, { judgeBlockers: false });
   const nonce = deps.createNonce();
   const page = routePage(route);
@@ -478,9 +496,20 @@ export function createNudgeStudioInteractionRoute(
 
 export const nudgeStudioInteractionRoute = createNudgeStudioInteractionRoute();
 
+/** Destinations for `/nudge-studio page:`; the command is manager-only, so none is filtered. */
+export function listNudgeStudioPageDestinations(locale: string): PanelPageDestination<NaturalNudgeCategory, null>[] {
+  return NATURAL_NUDGE_CATEGORIES.map((category) => ({
+    category,
+    page: null,
+    categoryLabel: localizer(locale, NUDGE_STUDIO_TAB_LOCALE_KEYS[category]),
+    pageLabel: null,
+  }));
+}
+
 export async function executeNudgeStudioCommand(
   interaction: ChatInputCommandInteraction,
   locale: string,
+  requestedPage: string | null,
 ): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   if (!isAuthorized(interaction)) {
@@ -492,5 +521,14 @@ export async function executeNudgeStudioCommand(
     await terminal(interaction, locale, "general.errors.tomori_not_setup_description");
     return;
   }
-  await repaint(interaction, locale, "ping_user", scope, defaults, 0);
+  const destination = requestedPage ? resolvePanelPage(listNudgeStudioPageDestinations(locale), requestedPage) : null;
+  await repaint(
+    interaction,
+    locale,
+    destination?.category ?? "ping_user",
+    scope,
+    defaults,
+    0,
+    requestedPage && !destination ? panelPageNotFoundReceipt(locale) : undefined,
+  );
 }

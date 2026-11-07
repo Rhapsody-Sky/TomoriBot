@@ -26,10 +26,13 @@ export type SimplifiedMessageForContext = {
   authorId: string;
   authorName: string;
   authorType: "user" | "persona";
+  isSystemNotice?: boolean;
   personaName?: string | null;
   authorPersonaId?: number | null;
   authorPersonaLineageId?: number | null;
   content: string | null;
+  completionContent?: string;
+  completionSpeaker?: false;
   createdAt?: number;
   mediaSourceMessageIds?: string[];
   remoteMediaSourceKind?: "reply" | "forwarded";
@@ -146,6 +149,8 @@ export interface BuildContextParams {
 
 /** Return type for both buildContext variants. */
 export type BuildContextResult = {
+  memoryRecall?: import("@/utils/text/context/memoryRecall").MemoryRecallOutcome;
+  nativeContextItems?: StructuredContextItem[];
   contextItems: StructuredContextItem[];
   tailDirectives: string[];
   lowerPriorityTailDirectives: string[];

@@ -12,7 +12,7 @@ import { initializeLocalizer } from "@/utils/text/localizer";
 import { createServerConfig, createUserRow } from "../../helpers/fixtures";
 import { localizedCopy } from "../../helpers/localeCases";
 import type { DashboardServerStats } from "@/web/dashboard/core";
-import { type PersonalMemoryRow, PrivacyLevel } from "@/types/db/schema";
+import { type PersonalMemoryRow, personalMemorySchema, PrivacyLevel } from "@/types/db/schema";
 import { log } from "@/utils/misc/logger";
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 
@@ -452,7 +452,13 @@ describe("dashboard memory and naming authorization", () => {
   it("reports duplicate, invalid and failed import entries without hiding partial writes or exposing errors", async () => {
     const { app, headers } = setup();
     const rows: PersonalMemoryRow[] = [
-      { personal_memory_id: 1, user_id: 7, persona_lineage_id: 77, content: "Existing fact", tags: [] },
+      personalMemorySchema.parse({
+        personal_memory_id: 1,
+        user_id: 7,
+        persona_lineage_id: 77,
+        content: "Existing fact",
+        tags: [],
+      }),
     ];
     const list = spyOn(TomoriDashboardCore.prototype, "listPersonalMemories").mockImplementation(async () => rows);
     const internalError = new Error("Private database connection details");
@@ -460,7 +466,14 @@ describe("dashboard memory and naming authorization", () => {
       async (_userId, lineageId, content, tags) => {
         if (content === "Database failure") throw internalError;
         if (content === "Limit reached") return null;
-        const row = { personal_memory_id: 2, user_id: 7, persona_lineage_id: lineageId, content, tags };
+        const row = personalMemorySchema.parse({
+          personal_memory_id: 2,
+          user_id: 7,
+          persona_lineage_id: lineageId,
+          content,
+          tags,
+          manually_written: true,
+        });
         rows.push(row);
         return row;
       },

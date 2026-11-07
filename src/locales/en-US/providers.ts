@@ -1,6 +1,7 @@
 export default {
   genai: {
     tool_failure: {
+      endpoint_blocked: `This host does not allow requests to this endpoint's address.`,
       content_blocked: `The provider rejected this tool request through its content filter.`,
       authentication: `The provider rejected the credentials used for this tool request.`,
       quota: `The provider refused this tool request because a quota or billing limit was reached.`,
@@ -15,6 +16,8 @@ export default {
       script_too_long: `The voice script exceeds the selected speech model's length limit.`,
       cancelled: `This tool request was cancelled.`,
       model_error: `The provider rejected the selected model for this tool request.`,
+      model_files_missing: `The generation server does not have these configured model files installed: {models}.`,
+      not_configured: `No usable provider is configured for this tool.`,
       balance_exhausted: `The provider account used for this tool request has run out of credit.`,
       credit_limit: `The provider account cannot cover the requested output length.`,
       context_length: `This tool request exceeds the selected model's context limit.`,
@@ -29,8 +32,6 @@ export default {
     max_iterations_streaming_description: `I got stuck in a thinking loop and couldn't complete the request, use \`/refresh\` if this issue persists.`,
     still_working_title: `Still Working...`,
     still_working_description: `This task is taking more steps than usual. Use \`/kill\` if you think I'm stuck.`,
-    nai_tool_retry_exhausted_title: `Tool Error`,
-    nai_tool_retry_exhausted_description: `A tool failed multiple times and couldn't complete the request. Please try again or use \`/refresh\` if this issue persists.`,
     tool_error_loop_title: `Tool Error Loop`,
     tool_error_loop_description: `I kept running into tool errors and couldn't complete the request. Try rephrasing or use \`/refresh\` if this issue persists.`,
     fallback_used_title: `Fallback Model Used`,
@@ -41,6 +42,7 @@ export default {
     fallback_used_personal_opt_out_footer: `Stop the server's model from covering your personal provider's failures in \`/personal config\` > Models > Fallbacks`,
     markdown_table: {
       show_button: `Show Markdown`,
+      source_expired_title: `Table Source Expired`,
       source_expired: `That table's markdown is no longer cached, so I can't show the source anymore.`,
       source_attached: `This table is too long to show inline, so here it is as a file:`,
     },
@@ -98,6 +100,7 @@ export default {
       context_length_title: `Message Too Long for This Model`,
       credit_limit_title: `Not Enough Provider Credits`,
       balance_exhausted_title: `Provider Account Out of Credit`,
+      endpoint_blocked_title: `Endpoint Not Allowed`,
       flush_limit_title: `Response Length Limit Reached`,
       flush_limit_description: `This response has reached the maximum message length limit and has been stopped. You can use \`/respond\` to manually continue the response if needed.`,
       inactivity_timeout_title: `Response Timed Out`,
@@ -131,9 +134,13 @@ export default {
       choose_supported_model_personal: `Choose a supported model ID with \`/personal config\` or your custom endpoint settings.`,
       verify_api_key: `Double-check this server's API key, then try again.`,
       verify_api_key_personal: `Double-check your personal API key with \`/personal providers\`, then try again.`,
+      endpoint_not_allowed: `Switch to a public HTTPS endpoint with \`/providers\`, or ask whoever runs this host whether a local server can be allowed.`,
+      endpoint_not_allowed_personal: `Switch to a public HTTPS endpoint with \`/personal providers\`, or ask whoever runs this host whether a local server can be allowed.`,
       verify_api_key_expiry: `NVIDIA NIM keys expire, and NVIDIA refuses an expired key with the same error as a mistyped one. Check its expiry on [build.nvidia.com](https://build.nvidia.com) and generate a new key if it has lapsed.`,
       nvidia_register_free_model: `If this model keeps failing, NVIDIA may have retired it or its free queue may be backed up. Pick one it currently serves from [NVIDIA's free endpoints](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview), copy its model ID (such as \`deepseek-ai/deepseek-v4.1-flash\`), then add it in \`/providers\` > NVIDIA NIM > **+ Add new Text Model**.`,
       nvidia_register_free_model_personal: `If this model keeps failing, NVIDIA may have retired it or its free queue may be backed up. Pick one it currently serves from [NVIDIA's free endpoints](https://build.nvidia.com/models?filters=nimType%3Anim_type_preview), copy its model ID (such as \`deepseek-ai/deepseek-v4.1-flash\`), then add it in \`/personal providers\` > NVIDIA NIM > **+ Add new Text Model**.`,
+      google_free_tier_daily: `This API key used up Gemini's free requests for today. They reset at midnight Pacific time.`,
+      google_free_tier_minute: `This API key is sending requests faster than Gemini's free plan allows. Wait a minute and try again.`,
       google_credential_type: `This looks like an OAuth or service account token. The \`google\` provider needs a plain API key from [Google AI Studio](https://aistudio.google.com/apikey); use the \`vertex\` provider for Google Cloud credentials.`,
       openrouter_privacy_settings: `Adjust your "Data Policy" settings at [OpenRouter Privacy Settings](https://openrouter.ai/settings/privacy) to allow this model, or choose a different model.`,
       openrouter_fund_account: `Add at least 10 credits to your OpenRouter account to unlock 1000 free model requests per day.`,
@@ -178,6 +185,19 @@ export default {
       "403_predict_permission_message": `This key can't call Vertex AI Express models. Use an Express-mode key, or use the separate \`vertex\` provider for full Google Cloud projects.`,
     },
     novelai: {
+      tokenizer_setup:
+        "NovelAI tokenizers are missing or invalid. Ask the bot host to run `bun run setup:tokenizers` and restart TomoriBot.",
+      input_complexity:
+        "This prompt contains too much text or an unusually long unbroken word. Shorten it and try again.",
+      context_overflow:
+        "The persona, minimum examples, and recent conversation exceed this model's context window. Shorten them or choose a model with a larger window.",
+      subscription_unavailable: "NovelAI subscription information could not be loaded. Try again shortly.",
+      subscription_inactive: "This NovelAI key has no active subscription.",
+      model_tier: "This NovelAI subscription does not include the selected text model.",
+      xialong_opus:
+        "Xialong requires an active NovelAI Opus subscription. Use an Opus key or select another text model.",
+      continuation_exhausted:
+        "NovelAI ended before producing a complete reply within the output budget. Try again or increase the configured output length.",
       "400_default_message": `Invalid request format or parameters. Please ensure you inputted the correct API key.`,
       "400_trial_message": `Your trial account requires recaptcha verification for generations. API access requires a paid NovelAI subscription. Please upgrade your account at https://novelai.net/`,
       "401_default_message": `Your NovelAI API key is invalid or expired`,
@@ -216,6 +236,7 @@ The selected model requires allowing data for paid model training, but your Open
     },
     custom: {
       "402_default_message": `Your account with this endpoint has insufficient balance`,
+      PRIVATE_NETWORK_BLOCKED_default_message: `This host does not allow requests to this endpoint's address.`,
       REDIRECT_CREDENTIALS_WITHHELD_default_message: `This endpoint redirected to a different address, so TomoriBot did not send its API key there. Whoever manages this endpoint in \`/providers\` can fix it by changing its URL to the final address the server redirects to.`,
       unknown_default_message: `An unexpected error occurred`,
     },
@@ -241,33 +262,42 @@ The selected model requires allowing data for paid model training, but your Open
       unknown_default_message: `An unexpected error occurred`,
     },
     self_teach: {
+      memory_forgotten_description: `Forgot a dormant memory to make room:
+\`\`\`
+{forgotten_content}
+\`\`\``,
+      memory_saved_with_eviction_content: `Saved:
+{memory_content}
+
+Forgotten:
+{forgotten_content}`,
       server_memory_learned_title: `🧠 {persona_nickname} learned something new!`,
-      server_memory_learned_description: `A **[Server Memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory)** has been saved:
+      server_memory_learned_description: `A **[Server Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/)** has been saved:
 \`\`\`
 {memory_content}
 \`\`\``,
       server_memory_updated_title: `📝 {persona_nickname} updated a memory!`,
-      server_memory_updated_description: `A **[Server Memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory)** has been updated:
+      server_memory_updated_description: `A **[Server Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/)** has been updated:
 \`\`\`
 {memory_content}
 \`\`\``,
       server_memory_deleted_title: `🗑️ {persona_nickname} deleted a memory!`,
-      server_memory_deleted_description: `A **[Server Memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory)** has been deleted:
+      server_memory_deleted_description: `A **[Server Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/)** has been deleted:
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_learned_title: `💡 {persona_nickname} learned something new about {user_nickname}!`,
-      personal_memory_learned_description: `A **[Personal Memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory)** about {user_nickname} has been saved:
+      personal_memory_learned_description: `A **[Personal Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/)** about {user_nickname} has been saved:
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_updated_title: `📝 {persona_nickname} updated a memory about {user_nickname}!`,
-      personal_memory_updated_description: `A **[Personal Memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory)** about {user_nickname} has been updated:
+      personal_memory_updated_description: `A **[Personal Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/)** about {user_nickname} has been updated:
 \`\`\`
 {memory_content}
 \`\`\``,
       personal_memory_deleted_title: `🗑️ {persona_nickname} deleted a memory about {user_nickname}!`,
-      personal_memory_deleted_description: `A **[Personal Memory](https://docs.tomoribot.app/en/features/knowledge/memory/#long-term-memory)** about {user_nickname} has been deleted:
+      personal_memory_deleted_description: `A **[Personal Memory](https://docs.tomoribot.app/en/features/knowledge/memory/long-term-memory/)** about {user_nickname} has been deleted:
 \`\`\`
 {memory_content}
 \`\`\``,

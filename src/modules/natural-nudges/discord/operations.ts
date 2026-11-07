@@ -37,6 +37,7 @@ import {
 } from "@/utils/discord/interactions/configModelOperations";
 import { statRepository } from "@/utils/db/repositories";
 import { resolveDescription } from "@/utils/text/localizer";
+import { resolveRowPricing } from "@/utils/provider/modelPricing";
 import type { TomoriState } from "@/types/db/schema";
 import { resolveEffectiveChannelIds } from "@/modules/natural-nudges/runtime/channels";
 import { invalidateNaturalNudgeConfigCache } from "@/modules/natural-nudges/runtime/configCache";
@@ -55,6 +56,7 @@ import { loadDecisionModelsForScope } from "@/providers/utils/providerFeatureExe
 import {
   claimProviderModelSelection,
   clearProviderModelSelection,
+  describeProviderOptionModelChoices,
   findProviderOption,
 } from "@/utils/provider/providerOptionRegistry";
 
@@ -153,8 +155,19 @@ async function loadCheckerDecisionModels(serverId: number, locale: string): Prom
         id: model.decision_model_id,
         name: model.codename,
         description: resolveDescription(model.descriptions, locale),
+        pricing: resolveRowPricing(model),
+        isDefault: model.is_default,
       }));
-    if (models.length > 0) groups.set(provider, models);
+    if (models.length > 0)
+      groups.set(
+        provider,
+        await describeProviderOptionModelChoices(provider, {
+          scope: { kind: "server", ownerId: serverId },
+          capability: "decision",
+          locale,
+          choices: models,
+        }),
+      );
   }
   return [...groups].map(([provider, models]) => ({ provider, models }));
 }
