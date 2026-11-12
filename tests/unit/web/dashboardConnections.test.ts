@@ -59,6 +59,7 @@ describe("dashboard connections", () => {
     const source = await dashboardFunction("renderChannelSelector");
     const overview = {
       allowedChannelIds: ["1"],
+      channelWhitelistActive: true,
       channels: [
         { id: "1", name: "general" },
         { id: "2", name: "private" },
@@ -75,7 +76,41 @@ describe("dashboard connections", () => {
     expect(filtered).toContain('<label hidden><input type="checkbox" name="channelDiscIds" value="2" checked>');
     expect(render("allowedChannels", [])).toContain('data-channel-search="private');
     overview.allowedChannelIds = [];
+    expect(render("channelDiscIds", [])).not.toContain("data-channel-search");
+    overview.channelWhitelistActive = false;
     expect(render("channelDiscIds", [])).toContain('data-channel-search="private');
+  });
+
+  it("preserves stored admin selections when their channels are hidden from the inventory", async () => {
+    const source = await dashboardFunction("renderChannelSelector");
+    const overview = { channels: [{ id: "1", name: "general" }], allowedChannelIds: [] };
+    const render = runInNewContext(`${source}; renderChannelSelector`, {
+      state: { overview },
+      ui: String,
+      escapeHtml: String,
+    });
+    const options = { preserveMissing: true };
+    expect(render("personaChannels", ["1", "2"], false, overview.channels, options)).toContain(
+      '<label hidden><input type="checkbox" name="personaChannels" value="2" checked>',
+    );
+    const single = render("thought_log_channel_disc_id", ["2"], true, overview.channels, options);
+    expect(single).toContain('name="thought_log_channel_disc_id" value="2" checked');
+    expect(single).toContain('name="thought_log_channel_disc_id" value=""');
+    expect(single).not.toContain('name="thought_log_channel_disc_id" value="" checked');
+
+    const collectSource = await dashboardFunction("collectSettingsPatch");
+    const collect = runInNewContext(`${collectSource}; collectSettingsPatch`);
+    const input = { value: "2" };
+    let unavailableChecked = true;
+    const form = {
+      elements: { namedItem: () => input },
+      querySelector: () => (unavailableChecked ? input : null),
+    };
+    const section = { fields: [{ key: "thought_log_channel_disc_id", type: "select" }] };
+    expect(collect(form, section)).toEqual({});
+    unavailableChecked = false;
+    input.value = "";
+    expect(collect(form, section)).toEqual({ thought_log_channel_disc_id: null });
   });
 
   it("ranks setting names ahead of descriptions and matches words across their location", async () => {

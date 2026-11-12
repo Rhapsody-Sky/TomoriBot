@@ -1,4 +1,13 @@
-import type { Client, GuildBasedChannel } from "discord.js";
+import {
+  ChannelType,
+  DiscordAPIError,
+  PermissionFlagsBits,
+  RESTJSONErrorCodes,
+  type Client,
+  type Guild,
+  type GuildBasedChannel,
+  type GuildMember,
+} from "discord.js";
 import { resolve } from "node:path";
 import type { Context, MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -6,15 +15,19 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { log } from "@/utils/misc/logger";
 import { convertToPNG } from "@/utils/image/imageProcessor";
+import { getStmCount } from "@/utils/discord/interactions/personalConfigLoaders";
+import { personalMemoriesOperations } from "@/utils/discord/interactions/personalMemoriesRoutes";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
-import { localizer } from "@/utils/text/localizer";
+import { getLocaleEndonym, getSupportedLocales, localizer, resolveSupportedLocale } from "@/utils/text/localizer";
 import {
+  addressingStyleSchema,
   PERSONA_NAMING_VALUE_MAX_LENGTH,
   USER_IDENTITY_FIELD_MAX_LENGTH,
   USER_NICKNAME_MAX_LENGTH,
 } from "@/types/personaNaming";
 import {
   OAUTH_STATE_COOKIE,
+  OAUTH_STATE_TTL_SECONDS,
   SESSION_COOKIE,
   SESSION_TTL_MS,
   DashboardSessionStore,
@@ -33,14 +46,35 @@ import {
 import { type DashboardStatsTimeframe, TomoriDashboardCore } from "./core";
 import { DashboardServiceError } from "./errors";
 import { DashboardMemoryService } from "./memoryService";
+import { listModerationSettings, updateModerationSettings } from "./moderationService";
 import { DashboardLorebookService } from "./lorebookService";
-import { DashboardProviderService } from "./providerService";
+import { DashboardProviderService, ENDPOINT_WORKFLOW_MAX_BYTES } from "./providerService";
 import { DashboardPersonaChatService } from "./personaChatService";
-import { DashboardPersonaService } from "./personaService";
+import {
+  DashboardPersonaService,
+  PERSONA_ATTG_MAX_LENGTH,
+  PERSONA_IMPORT_MAX_BYTES,
+  PERSONA_REFERENCE_MAX_BYTES,
+} from "./personaService";
 import { DashboardSpriteService, SPRITE_UPLOAD_MAX_BYTES } from "./spriteService";
 import { getDashboardRuntimeConfig } from "./runtimeConfig";
 import { getSettingsCatalog, isSettingsSectionId, serializeSettingsValues } from "./settingsCatalog";
 import { DashboardSettingsService, personaSettingsSectionSchema } from "./settingsService";
+import {
+  loadRandomTriggers,
+  loadSystemPromptChoices,
+  loadToolTriggers,
+  removeRandomTrigger,
+  saveRandomTrigger,
+  updateToolTriggers,
+} from "./serverBehaviorService";
+import { listPersonalSpotlights, removePersonalSpotlight, savePersonalSpotlight } from "./spotlightService";
+import {
+  removeServerLogitBias,
+  saveServerLogitBias,
+  serializeLogitBias,
+  setAdvancedServerModel,
+} from "./serverModelService";
 import { DashboardChannelService } from "./channelService";
 import type {
   DashboardActor,
@@ -54,6 +88,7 @@ import { DashboardSiteService, cleanSiteHtml, siteCopy, siteInterfaceCopy } from
 import { escapeToBuffer } from "hono/utils/html";
 
 const BASE_PATH = "/settings";
+const LOGIT_BIAS_IMPORT_BYTES = 2 * 1024 * 1024;
 function escapeHtml(value: string): string {
   const buffer = [""];
   escapeToBuffer(value, buffer);
@@ -172,6 +207,10 @@ function serializeProfile(actor: DashboardActor) {
       genderHint: localizer("en-US", "commands.personal.config.modal_gender_description"),
       pronouns: localizer("en-US", "commands.personal.config.modal_pronouns_label"),
       pronounsHint: localizer("en-US", "commands.personal.config.modal_pronouns_description"),
+      prefix: localizer("en-US", "commands.personal.config.modal_prefix_label"),
+      prefixHint: localizer("en-US", "commands.personal.config.modal_prefix_description"),
+      suffix: localizer("en-US", "commands.personal.config.modal_suffix_label"),
+      suffixHint: localizer("en-US", "commands.personal.config.modal_suffix_description"),
       addressingStyle: localizer("en-US", "commands.personal.config.modal_style_label"),
       addressingStyleHint: localizer("en-US", "commands.personal.config.modal_style_description"),
       styleDefault: localizer("en-US", "general.dashboard.style_default"),
@@ -179,11 +218,19 @@ function serializeProfile(actor: DashboardActor) {
       styleFeminine: localizer("en-US", "commands.personal.config.style_feminine"),
       styleNeutral: localizer("en-US", "commands.personal.config.style_neutral"),
     },
-    limits: { nickname: USER_NICKNAME_MAX_LENGTH, identity: USER_IDENTITY_FIELD_MAX_LENGTH },
+    limits: {
+      nickname: USER_NICKNAME_MAX_LENGTH,
+      identity: USER_IDENTITY_FIELD_MAX_LENGTH,
+      affix: PERSONA_NAMING_VALUE_MAX_LENGTH,
+    },
     genderIdentity: actor.user.gender_identity ?? null,
     pronouns: actor.user.pronouns ?? null,
     addressingStyle: actor.user.addressing_style ?? null,
     nickname: actor.user.user_nickname,
+    prefix: actor.user.prefix_override ?? null,
+    suffix: actor.user.suffix_override ?? null,
+    language: resolveSupportedLocale(actor.user.language_pref),
+    languages: getSupportedLocales().map((value) => ({ value, label: getLocaleEndonym(value) })),
     privacyLevel: actor.user.privacy_level,
     personalDtm: actor.user.personal_dtm ?? "follow",
     personalDeliberateToolMode: actor.user.personal_deliberate_tool_mode ?? "follow",
@@ -197,18 +244,47 @@ function serializeProfile(actor: DashboardActor) {
   };
 }
 
-function serializeChannels(channels: Iterable<GuildBasedChannel>) {
+async function fetchDashboardGuildMember(guild: Guild, userId: string) {
+  try {
+    return await guild.members.fetch({ user: userId, force: true });
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.code === RESTJSONErrorCodes.UnknownMember) return null;
+    throw error;
+  }
+}
+
+function canViewDashboardChannel(channel: GuildBasedChannel, member: GuildMember) {
+  return channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel) === true;
+}
+
+function isDashboardTextChannel(channel: GuildBasedChannel) {
+  return channel.isTextBased() && !channel.isThread();
+}
+
+function dashboardChannelIds(channels: Iterable<GuildBasedChannel>) {
+  return new Set(
+    Array.from(channels)
+      .filter(isDashboardTextChannel)
+      .map((channel) => channel.id),
+  );
+}
+
+function serializeChannels(channels: Iterable<GuildBasedChannel>, member: GuildMember) {
   return Array.from(channels)
-    .filter((channel) => channel.isTextBased() && !channel.isThread())
-    .map((channel) => ({
-      id: channel.id,
-      name: channel.name,
-      type: channel.type,
-      parentId: channel.parentId,
-      parentName: channel.parent?.name ?? null,
-      parentPosition: channel.parent?.position ?? -1,
-      position: "position" in channel ? channel.position : 0,
-    }))
+    .filter((channel) => isDashboardTextChannel(channel) && canViewDashboardChannel(channel, member))
+    .map((channel) => {
+      const parent = channel.parent;
+      const visibleParent = parent && canViewDashboardChannel(parent, member) ? parent : null;
+      return {
+        id: channel.id,
+        name: channel.name,
+        type: channel.type,
+        parentId: visibleParent?.id ?? null,
+        parentName: visibleParent?.name ?? null,
+        parentPosition: visibleParent?.position ?? -1,
+        position: "position" in channel ? channel.position : 0,
+      };
+    })
     .sort(
       (left, right) =>
         left.parentPosition - right.parentPosition ||
@@ -313,6 +389,159 @@ export function createDashboardApp(client: Client) {
   const app = new Hono<DashboardEnv>();
   sessions.startCleanup();
 
+  const requireSpotlightContext = async (context: Context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    const guild = result.guild.isDirectMessage ? undefined : client.guilds.cache.get(result.guild.id);
+    const unavailable = () =>
+      jsonError(
+        context,
+        new DashboardServiceError(
+          "spotlight_guild_unavailable",
+          403,
+          localizer("en-US", "general.dashboard.spotlight_guild_unavailable"),
+        ),
+      );
+    if (!guild) return unavailable();
+    const member = await fetchDashboardGuildMember(guild, result.actor.discordId);
+    return member ? { ...result, guild, member } : unavailable();
+  };
+
+  const spotlightChannels = ({
+    guild,
+    member,
+  }: Exclude<Awaited<ReturnType<typeof requireSpotlightContext>>, Response>) =>
+    guild.channels.cache.filter(
+      (channel) => channel.type === ChannelType.GuildText && canViewDashboardChannel(channel, member),
+    );
+
+  const requireModerationContext = async (context: Context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    const guild = result.guild.isDirectMessage ? undefined : client.guilds.cache.get(result.guild.id);
+    const member = guild && (await fetchDashboardGuildMember(guild, result.actor.discordId));
+    if (!guild || !member?.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      return jsonError(
+        context,
+        new DashboardServiceError(
+          "moderation_admin_required",
+          403,
+          localizer("en-US", "general.dashboard.moderation_admin_required"),
+        ),
+      );
+    }
+    return { guild, serverId: result.snapshot.serverId };
+  };
+
+  const requirePersonaManager = async (context: Context, allowDirectMessages: boolean) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    if (result.guild.isDirectMessage && allowDirectMessages) return result;
+    const guild = result.guild.isDirectMessage ? undefined : client.guilds.cache.get(result.guild.id);
+    const member = guild && (await fetchDashboardGuildMember(guild, result.actor.discordId));
+    if (!member?.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      throw new DashboardServiceError(
+        "persona_manager_required",
+        403,
+        localizer("en-US", "general.dashboard.persona_manager_required"),
+      );
+    }
+    return result;
+  };
+
+  const requireProviderConnectionContext = async (context: Context, scope: "server" | "personal") => {
+    const result = await requireGuildContext(context, client, core, sessions, config, scope === "server");
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    if (scope === "server" && !result.guild.isDirectMessage) {
+      const guild = client.guilds.cache.get(result.guild.id);
+      const member = guild && (await fetchDashboardGuildMember(guild, result.actor.discordId));
+      if (!member?.permissions.has(PermissionFlagsBits.ManageGuild))
+        throw new DashboardServiceError(
+          "admin_required",
+          403,
+          localizer("en-US", "general.dashboard.provider_connection_admin_required"),
+        );
+    }
+    return result;
+  };
+
+  const requireServerBehaviorContext = async (context: Context, channelBound = false) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    if (result.guild.isDirectMessage && !channelBound) return { ...result, channels: [] };
+    const guild = client.guilds.cache.get(result.guild.id);
+    const member = guild && (await fetchDashboardGuildMember(guild, result.actor.discordId));
+    if (!guild || !member?.permissions.has(PermissionFlagsBits.ManageGuild))
+      throw new DashboardServiceError(
+        "admin_required",
+        403,
+        localizer("en-US", "general.dashboard.behavior_admin_required"),
+      );
+    const channels = channelBound
+      ? serializeChannels(
+          [...guild.channels.cache.values()].filter((channel) => channel.type === ChannelType.GuildText),
+          member,
+        )
+      : [];
+    return { ...result, channels };
+  };
+
+  const requireServerMemoryContext = async (context: Context) => {
+    context.header("Cache-Control", "private, no-store");
+    const result = await requireGuildContext(context, client, core, sessions, config);
+    if (result instanceof Response) return result;
+    if (context.req.method !== "GET") {
+      const csrfError = requireMutationCsrf(context, result.session);
+      if (csrfError) return csrfError;
+    }
+    if (result.guild.isDirectMessage) return { ...result, channels: [], selectableChannels: new Set<string>() };
+    const guild = client.guilds.cache.get(result.guild.id);
+    const member = guild && (await fetchDashboardGuildMember(guild, result.actor.discordId));
+    if (!guild || !member)
+      throw new DashboardServiceError(
+        "guild_forbidden",
+        403,
+        localizer("en-US", "general.dashboard.server_memory_server_unavailable"),
+      );
+    const allowed = new Set(
+      context.req.method === "DELETE" ? [] : await core.loadAllowedChannelIds(result.snapshot.serverId),
+    );
+    const channels =
+      context.req.method === "DELETE"
+        ? []
+        : serializeChannels(guild.channels.cache.values(), member).filter(
+            ({ id, type }) =>
+              (type === ChannelType.GuildText || type === ChannelType.GuildAnnouncement) &&
+              (!allowed.size || allowed.has(id)),
+          );
+    return {
+      ...result,
+      actor: { ...result.actor, canManage: member.permissions.has(PermissionFlagsBits.ManageGuild) },
+      channels,
+      selectableChannels: new Set(channels.map(({ id }) => id)),
+    };
+  };
+
   app.use("*", async (context, next) => {
     await next();
     context.header("X-Content-Type-Options", "nosniff");
@@ -330,8 +559,18 @@ export function createDashboardApp(client: Client) {
   app.get(`${BASE_PATH}/api/site`, async (context) => {
     context.header("Cache-Control", "no-store");
     const entries = await site.list();
+    const signedIn = getSession(context, config, sessions) !== null;
     return context.json({
-      entries: entries.map(({ id, kind, title, url }) => ({ id, kind, title, url })),
+      entries: entries
+        .filter((entry) => entry.kind === "page" || entry.showOnLogin || signedIn)
+        .map(({ id, kind, title, url, showOnLogin, showInSidebar }) => ({
+          id,
+          kind,
+          title,
+          url,
+          showOnLogin,
+          showInSidebar,
+        })),
       copy: siteCopy(),
       interfaceCopy: siteInterfaceCopy(),
     });
@@ -342,6 +581,7 @@ export function createDashboardApp(client: Client) {
     const page = entries.find((entry) => entry.kind === "page" && entry.id === context.req.param("pageId"));
     if (!page) return context.text(siteCopy().missing, 404);
     const links = entries
+      .filter((entry) => entry.kind === "page" || entry.showOnLogin)
       .map(
         (entry) =>
           `<a href="${escapeHtml(entry.kind === "page" ? `${BASE_PATH}/pages/${entry.id}` : entry.url)}">${escapeHtml(entry.title)}</a>`,
@@ -413,7 +653,7 @@ export function createDashboardApp(client: Client) {
       return context.text("Discord OAuth is not configured for the TomoriBot dashboard.", 503);
     }
     const state = randomToken();
-    setSignedCookie(context, config, OAUTH_STATE_COOKIE, state, 10 * 60);
+    setSignedCookie(context, config, OAUTH_STATE_COOKIE, state, OAUTH_STATE_TTL_SECONDS);
     const params = new URLSearchParams({
       client_id: config.clientId,
       redirect_uri: config.redirectUri,
@@ -477,9 +717,16 @@ export function createDashboardApp(client: Client) {
   app.get(`${BASE_PATH}/api/guilds/:guildId/overview`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config);
     if (result instanceof Response) return result;
-    const cachedGuild = client.guilds.cache.get(result.guild.id);
-    const channels = cachedGuild ? serializeChannels(cachedGuild.channels.cache.values()) : [];
+    const cachedGuild = result.guild.isDirectMessage ? undefined : client.guilds.cache.get(result.guild.id);
+    const member = cachedGuild ? await fetchDashboardGuildMember(cachedGuild, result.actor.discordId) : null;
+    if (cachedGuild && !member) {
+      return jsonError(context, new DashboardServiceError("guild_forbidden", 403, "This server is not available."));
+    }
+    const channels = cachedGuild && member ? serializeChannels(cachedGuild.channels.cache.values(), member) : [];
+    const visibleChannelIds = new Set(channels.map((channel) => channel.id));
+    const allowedChannelIds = await core.loadAllowedChannelIds(result.snapshot.serverId);
     const mainPersona = result.snapshot.rawPersonas[0];
+    const canManageGuildPersonas = result.actor.canManage && member?.permissions.has(PermissionFlagsBits.ManageGuild);
 
     return context.json({
       guild: result.guild,
@@ -677,6 +924,89 @@ export function createDashboardApp(client: Client) {
           "stats_most_active_persona",
           "primary_models",
           "connection_actions",
+          "connection_active_text",
+          "connection_remove_server_provider",
+          "connection_remove_server_provider_title",
+          "connection_remove_server_provider_hint",
+          "connection_server_provider_removed",
+          "system_prompt_label",
+          "system_prompt_presets",
+          "system_prompt_preset",
+          "system_prompt_default",
+          "system_prompt_preview",
+          "system_prompt_use_preset",
+          "system_prompt_locked",
+          "tool_phrases",
+          "tool_phrases_hint",
+          "tool_phrase_target",
+          "tool_phrase_literal",
+          "tool_phrase_add",
+          "tool_phrase_regex",
+          "tool_phrase_remove",
+          "tool_phrase_empty",
+          "tool_phrase_saved",
+          "random_schedules",
+          "random_schedules_hint",
+          "random_schedule_channel",
+          "random_schedule_persona",
+          "random_schedule_next",
+          "random_schedule_add",
+          "random_schedule_edit",
+          "random_schedule_edit_hint",
+          "random_schedule_remove",
+          "random_schedule_remove_hint",
+          "random_schedule_removed",
+          "random_schedule_saved",
+          "random_schedule_empty",
+          "random_schedule_choose_channel",
+          "random_schedule_any_persona",
+          "random_schedule_interval",
+          "random_schedule_chance",
+          "random_schedule_jitter",
+          "random_schedule_silence",
+          "random_schedule_failures",
+          "random_schedule_respond_self",
+          "random_schedule_prompt",
+          "random_schedule_prompt_hint",
+          "brave_search_key_hint",
+          "brave_search_remove_hint",
+          "rotation_title",
+          "rotation_count",
+          "rotation_key",
+          "rotation_key_hint",
+          "rotation_added",
+          "rotation_clear",
+          "rotation_clear_hint",
+          "rotation_cleared",
+          "endpoint_model_edit",
+          "endpoint_model_name",
+          "endpoint_model_context",
+          "endpoint_model_input_limit",
+          "endpoint_model_personal_routing_hint",
+          "endpoint_model_prefix_completion",
+          "endpoint_model_prefix_completion_hint",
+          "endpoint_model_prefill",
+          "endpoint_model_prefill_hint",
+          "endpoint_model_verbatim",
+          "endpoint_model_verbatim_hint",
+          "endpoint_model_image_supports",
+          "endpoint_model_txt2img",
+          "endpoint_model_img2img",
+          "endpoint_model_inpaint",
+          "endpoint_model_negative_prompt",
+          "endpoint_model_voice_mode",
+          "endpoint_model_script_markup",
+          "endpoint_model_voice_clone",
+          "endpoint_model_voice_design",
+          "endpoint_model_voice_auto",
+          "endpoint_model_markup_plain",
+          "endpoint_model_markup_brackets",
+          "endpoint_model_markup_emoji",
+          "endpoint_model_voice_instruct",
+          "endpoint_model_workflow",
+          "endpoint_model_workflow_hint",
+          "endpoint_model_workflow_invalid",
+          "endpoint_model_saved",
           "lorebook_collection_actions",
           "lorebook_book_actions",
           "stats_loading",
@@ -687,10 +1017,21 @@ export function createDashboardApp(client: Client) {
           "navigation_menu",
           "refresh_all",
           "refresh_memories",
+          "global_memory_hint",
+          "personal_stm",
+          "personal_stm_hint",
+          "personal_stm_count",
+          "personal_stm_load_failed",
+          "personal_stm_clear",
+          "personal_stm_confirm_title",
+          "personal_stm_confirm_detail",
+          "personal_stm_clear_requested",
           "refresh_providers",
-          "appearance_saved",
+          "appearance_forget_failed",
           "design_title",
           "design_hint",
+          "design_remember",
+          "design_remember_hint",
           "design_light",
           "design_dark",
           "design_glass",
@@ -761,6 +1102,42 @@ export function createDashboardApp(client: Client) {
           "sprite_import_detail",
           "sprite_export",
           "sprite_exported",
+          "persona_actions",
+          "persona_export_png",
+          "persona_export_json",
+          "persona_main_change",
+          "persona_main_label",
+          "persona_main_source",
+          "persona_main_preset",
+          "persona_main_card",
+          "persona_main_choose_preset",
+          "persona_main_no_presets",
+          "persona_main_file",
+          "persona_main_identity",
+          "persona_main_identity_fork",
+          "persona_main_identity_preserve",
+          "persona_main_review",
+          "persona_main_back",
+          "persona_main_confirm",
+          "persona_main_review_summary",
+          "persona_main_lineage",
+          "persona_main_lineage_new",
+          "persona_main_memories",
+          "persona_main_memories_same",
+          "persona_main_memories_new",
+          "persona_main_memories_switch",
+          "persona_main_memories_global",
+          "persona_main_lore",
+          "persona_main_lore_keep",
+          "persona_main_lore_replace",
+          "persona_main_lore_clear",
+          "persona_main_lore_previous",
+          "persona_main_lore_server",
+          "persona_main_shared",
+          "persona_main_preset_media",
+          "persona_main_card_media",
+          "persona_main_changed",
+          "persona_main_sync_warning",
           "sprite_empty",
           "sprite_retry",
           "sprite_loading",
@@ -770,6 +1147,15 @@ export function createDashboardApp(client: Client) {
           "navigation_close",
           "endpoint_features",
           "memory_server_transfer_unavailable",
+          "memory_channels",
+          "memory_channels_all",
+          "memory_channels_limit",
+          "memory_channels_hint",
+          "memory_channels_inactive",
+          "memory_channels_unavailable",
+          "memory_channels_unavailable_count",
+          "memory_channels_pending",
+          "memory_channels_required",
           "memory_loading",
           "memory_add",
           "settings_search",
@@ -835,6 +1221,34 @@ export function createDashboardApp(client: Client) {
           "persona_test_configured_model",
           "model_speech_design",
           "model_speech_clone",
+          "model_decision",
+          "advanced_models",
+          "advanced_models_hint",
+          "advanced_models_saved",
+          "advanced_model_unset",
+          "advanced_model_unavailable",
+          "decision_model_hint",
+          "speech_design_model_hint",
+          "speech_clone_model_hint",
+          "logit_bias",
+          "logit_bias_hint",
+          "logit_add",
+          "logit_import",
+          "logit_import_file",
+          "logit_import_hint",
+          "logit_import_invalid",
+          "logit_empty",
+          "logit_term",
+          "logit_terms",
+          "logit_terms_hint",
+          "logit_value",
+          "logit_value_hint",
+          "logit_token_id",
+          "logit_remove",
+          "logit_remove_title",
+          "logit_remove_hint",
+          "logit_saved",
+          "logit_removed",
           "model_transcription",
           "transcription_server_hint",
           "transcription_personal_hint",
@@ -846,6 +1260,74 @@ export function createDashboardApp(client: Client) {
           "persona_humanizer_source",
           "persona_humanizer_inherit",
           "persona_humanizer_custom",
+          "persona_habits_title",
+          "persona_habits_hint",
+          "persona_habits_style",
+          "persona_habits_prefix",
+          "persona_habits_suffix",
+          "persona_habits_term",
+          "persona_habits_term_hint",
+          "persona_habits_neutral_hint",
+          "persona_habits_saved",
+          "persona_knowledge",
+          "persona_personal_memory",
+          "persona_server_memory",
+          "persona_conditioning_tab",
+          "persona_conditioning_title",
+          "persona_conditioning_hint",
+          "persona_conditioning_empty",
+          "persona_conditioning_reward",
+          "persona_conditioning_punishment",
+          "persona_conditioning_count",
+          "persona_conditioning_remove",
+          "persona_conditioning_remove_title",
+          "persona_conditioning_remove_hint",
+          "persona_conditioning_removed",
+          "persona_reference_title",
+          "persona_reference_hint",
+          "persona_reference_saved",
+          "persona_reference_remove_title",
+          "persona_reference_remove_hint",
+          "persona_reference_removed",
+          "persona_voice_title",
+          "persona_voice_hint",
+          "persona_voice_priority",
+          "persona_voice_priority_hint",
+          "persona_voice_design",
+          "persona_voice_clone",
+          "persona_voice_design_prompt",
+          "persona_voice_design_hint",
+          "persona_voice_sample",
+          "persona_voice_provider",
+          "persona_voice_unassigned",
+          "persona_voice_unavailable",
+          "persona_voice_catalog_unavailable",
+          "persona_voice_effective",
+          "persona_voice_fallback",
+          "persona_voice_no_source",
+          "persona_voice_saved",
+          "persona_attg_title",
+          "persona_attg_hint",
+          "persona_attg_author",
+          "persona_attg_work_title",
+          "persona_attg_tags",
+          "persona_attg_genre",
+          "persona_attg_stars",
+          "persona_attg_unrated",
+          "persona_attg_stars_hint",
+          "persona_attg_saved",
+          "persona_preset_title",
+          "persona_preset_hint",
+          "persona_preset_linked",
+          "persona_preset_local",
+          "persona_preset_missing",
+          "persona_preset_original",
+          "persona_preset_resync",
+          "persona_preset_confirm_title",
+          "persona_preset_confirm_local",
+          "persona_preset_confirm_linked",
+          "persona_preset_saved",
+          "persona_preset_partial",
           "personal_parameters",
           "personal_parameters_hint",
           "personal_parameters_empty",
@@ -871,11 +1353,124 @@ export function createDashboardApp(client: Client) {
           "thinking_high",
           "endpoint_register_new",
           "endpoint_cancel",
+          "endpoint_edit",
+          "endpoint_edit_hint",
+          "endpoint_edit_preset_hint",
+          "endpoint_edit_label",
+          "endpoint_edit_url",
+          "endpoint_edit_url_hint",
+          "endpoint_edit_token",
+          "endpoint_edit_token_hint",
+          "endpoint_edit_handoff",
+          "endpoint_edit_handoff_hint",
+          "endpoint_edit_saved",
+          "endpoint_edit_unchanged",
           "personal_fallbacks",
           "personal_fallbacks_hint",
           "server_fallbacks",
           "server_fallbacks_hint",
-          "fallback_randomizer_hint",
+          "personal_randomizer",
+          "personal_randomizer_hint",
+          "personal_randomizer_requires_fallbacks",
+          "personal_randomizer_saved",
+          "quick_capabilities",
+          "quick_capabilities_hint",
+          "quick_capabilities_empty",
+          "quick_capability_saved",
+          "spotlights",
+          "spotlights_hint",
+          "spotlights_empty",
+          "spotlight_active",
+          "spotlight_add",
+          "spotlight_edit",
+          "spotlight_remove",
+          "spotlight_remove_title",
+          "spotlight_remove_hint",
+          "spotlight_channel",
+          "spotlight_channel_unavailable",
+          "spotlight_no_channels",
+          "spotlight_personas",
+          "spotlight_search_personas",
+          "spotlight_auto",
+          "spotlight_auto_hint",
+          "spotlight_auto_none",
+          "spotlight_hours",
+          "spotlight_hours_hint",
+          "spotlight_keep_expiry",
+          "spotlight_permanent",
+          "spotlight_saved",
+          "spotlight_removed",
+          "moderation",
+          "moderation_hint",
+          "moderation_roles",
+          "moderation_roles_hint",
+          "moderation_roles_empty",
+          "moderation_roles_search",
+          "moderation_role_column",
+          "moderation_role_unavailable",
+          "moderation_add_role",
+          "moderation_add_role_hint",
+          "moderation_role",
+          "moderation_remove_role",
+          "moderation_remove_role_hint",
+          "moderation_server_blocks",
+          "moderation_server_blocks_hint",
+          "moderation_server_blocks_empty",
+          "moderation_persona_blocks",
+          "moderation_persona_blocks_hint",
+          "moderation_persona_blocks_empty",
+          "moderation_persona_mute",
+          "moderation_persona_block",
+          "moderation_expires",
+          "moderation_expires_column",
+          "moderation_member_column",
+          "moderation_persona_column",
+          "moderation_restriction_search",
+          "moderation_blacklist_search",
+          "moderation_restriction_type",
+          "moderation_restriction_all_types",
+          "moderation_filter_count",
+          "moderation_filter_no_matches",
+          "moderation_add_user",
+          "moderation_member_query",
+          "moderation_member_query_hint",
+          "moderation_members_empty",
+          "moderation_member",
+          "moderation_remove_action",
+          "moderation_unblock_action",
+          "moderation_lift_action",
+          "moderation_lift_compact",
+          "moderation_remove_user",
+          "moderation_remove_user_hint",
+          "moderation_remove_persona_block",
+          "moderation_remove_persona_block_hint",
+          "moderation_quotas",
+          "moderation_text",
+          "moderation_image",
+          "moderation_video",
+          "moderation_daily_quota",
+          "moderation_daily_quota_hint",
+          "moderation_server_quota",
+          "moderation_server_quota_hint",
+          "moderation_reset_days",
+          "moderation_reset_days_hint",
+          "moderation_saved",
+          "moderation_refresh",
+          "personal_randomizer_failed",
+          "discord_language",
+          "discord_language_hint",
+          "drafting_title",
+          "drafting_hint",
+          "drafting_reviewer",
+          "drafting_default",
+          "drafting_default_unavailable",
+          "drafting_checker",
+          "drafting_checker_hint",
+          "drafting_checker_none",
+          "drafting_unavailable",
+          "drafting_load_failed",
+          "drafting_save_failed",
+          "drafting_saved",
           "fallback_unavailable",
           "fallback_saved",
           "switch_server",
@@ -963,6 +1558,8 @@ export function createDashboardApp(client: Client) {
           "channel_cooldown_channel",
           "channel_cooldown_server",
           "channel_cooldown_strict",
+          "cooldown_legacy_category",
+          "cooldown_legacy_zero",
           "channel_seconds",
           "channel_persona",
           "channel_persona_hint",
@@ -1026,6 +1623,39 @@ export function createDashboardApp(client: Client) {
       ),
       profile: serializeProfile(result.actor),
       personas: result.snapshot.personas,
+      personaGuildSettings: canManageGuildPersonas
+        ? {
+            attgMaxLength: PERSONA_ATTG_MAX_LENGTH,
+            values: Object.fromEntries(
+              result.snapshot.rawPersonas.map((persona) => [
+                persona.persona_id,
+                {
+                  hasCharacterReference: Boolean(persona.char_ref_url),
+                  attg: {
+                    nai_attg_author: persona.nai_attg_author ?? "",
+                    nai_attg_title: persona.nai_attg_title ?? "",
+                    nai_attg_tags: persona.nai_attg_tags ?? "",
+                    nai_attg_genre: persona.nai_attg_genre ?? "",
+                    nai_attg_stars: persona.nai_attg_stars ?? null,
+                  },
+                },
+              ]),
+            ),
+          }
+        : null,
+      personaNamingHabits:
+        result.actor.canManage &&
+        (result.guild.isDirectMessage || member?.permissions.has(PermissionFlagsBits.ManageGuild))
+          ? {
+              values: Object.fromEntries(
+                result.snapshot.rawPersonas.map((persona) => [persona.persona_id, persona.naming_config]),
+              ),
+              styles: ["neutral", ...addressingStyleSchema.options.filter((style) => style !== "neutral")].map(
+                (value) => ({ value, label: localizer("en-US", `commands.config.panel.style_${value}`) }),
+              ),
+              maxLength: PERSONA_NAMING_VALUE_MAX_LENGTH,
+            }
+          : null,
       personaNaming: {
         values: await core.loadPersonaNaming(result.actor.user.user_id, result.snapshot),
         maxLength: PERSONA_NAMING_VALUE_MAX_LENGTH,
@@ -1049,7 +1679,8 @@ export function createDashboardApp(client: Client) {
         },
       },
       channels,
-      allowedChannelIds: await core.loadAllowedChannelIds(result.snapshot.serverId),
+      allowedChannelIds: allowedChannelIds.filter((id) => visibleChannelIds.has(id)),
+      channelWhitelistActive: allowedChannelIds.length > 0,
       memoryPolicy: {
         personalMemoryUseEnabled: result.snapshot.config.personal_memories_enabled !== false,
         serverMemoryTeachingEnabled: result.snapshot.config.server_memteaching_enabled !== false,
@@ -1070,6 +1701,10 @@ export function createDashboardApp(client: Client) {
       settings: result.actor.canManage
         ? {
             catalog: getSettingsCatalog(),
+            logitBias: {
+              entries: serializeLogitBias(result.snapshot.config.llm_logit_biases ?? []),
+              maxImportBytes: LOGIT_BIAS_IMPORT_BYTES,
+            },
             stmCategories: {
               values: await core.loadStmCategories(result.snapshot.serverId),
               copy: {
@@ -1131,6 +1766,17 @@ export function createDashboardApp(client: Client) {
       await log.error("Dashboard failed to load server statistics", error);
       return jsonError(context, "Server statistics could not be loaded.");
     }
+  });
+
+  app.on(["GET", "DELETE"], `${BASE_PATH}/api/profile/short-term-memory`, async (context) => {
+    context.header("Cache-Control", "private, no-store");
+    const result = await requireActor(context, core, sessions, config);
+    if (result instanceof Response) return result;
+    if (context.req.method === "GET") return context.json({ count: await getStmCount(result.actor.discordId) });
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    await personalMemoriesOperations.clearStm(result.actor.discordId);
+    return context.body(null, 202);
   });
 
   app.get(`${BASE_PATH}/api/profile/character-reference`, async (context) => {
@@ -1200,6 +1846,104 @@ export function createDashboardApp(client: Client) {
     }
   });
 
+  app.patch(`${BASE_PATH}/api/profile/model-randomizer`, async (context) => {
+    const result = await requireActor(context, core, sessions, config);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    const enabled = await settings.setPersonalRandomizer(
+      result.actor.user.user_id,
+      result.actor.discordId,
+      await context.req.json().catch(() => null),
+    );
+    return context.json({ enabled });
+  });
+
+  app.patch(`${BASE_PATH}/api/profile/capability`, async (context) => {
+    const result = await requireActor(context, core, sessions, config);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    return context.json(
+      await providers.togglePersonalCapability(result.actor, await context.req.json().catch(() => null)),
+    );
+  });
+
+  app.get(`${BASE_PATH}/api/guilds/:guildId/personal-spotlights`, async (context) => {
+    const result = await requireSpotlightContext(context);
+    if (result instanceof Response) return result;
+    const channels = serializeChannels(spotlightChannels(result).values(), result.member);
+    const spotlights = await listPersonalSpotlights(result.actor, result.snapshot);
+    return context.json({ channels, spotlights });
+  });
+
+  app.put(`${BASE_PATH}/api/guilds/:guildId/personal-spotlights`, async (context) => {
+    const result = await requireSpotlightContext(context);
+    if (result instanceof Response) return result;
+    const spotlight = await savePersonalSpotlight(
+      result.actor,
+      result.snapshot,
+      new Set(spotlightChannels(result).keys()),
+      await context.req.json().catch(() => null),
+    );
+    return context.json({ spotlight });
+  });
+
+  app.delete(`${BASE_PATH}/api/guilds/:guildId/personal-spotlights/:channelId`, async (context) => {
+    const result = await requireSpotlightContext(context);
+    if (result instanceof Response) return result;
+    await removePersonalSpotlight(result.actor, result.snapshot, context.req.param("channelId"));
+    return context.json({ deleted: true });
+  });
+
+  const moderationPath = `${BASE_PATH}/api/guilds/:guildId/moderation`;
+  app.get(moderationPath, async (context) => {
+    const access = await requireModerationContext(context);
+    if (access instanceof Response) return access;
+    return context.json(await listModerationSettings(access.guild, access.serverId));
+  });
+
+  app.get(`${moderationPath}/members`, async (context) => {
+    const access = await requireModerationContext(context);
+    if (access instanceof Response) return access;
+    const query = context.req.query("q")?.trim() ?? "";
+    if (query.length < 2 || query.length > 100) {
+      throw new DashboardServiceError(
+        "moderation_invalid",
+        422,
+        localizer("en-US", "general.dashboard.moderation_invalid"),
+      );
+    }
+    const exact = /^\d{17,20}$/.test(query);
+    const members = exact
+      ? [await fetchDashboardGuildMember(access.guild, query)]
+      : [...(await access.guild.members.search({ query, limit: 15 })).values()];
+    return context.json({
+      members: members.flatMap((member) =>
+        member && !member.user.bot ? [{ id: member.id, name: member.displayName, username: member.user.username }] : [],
+      ),
+    });
+  });
+
+  app.patch(moderationPath, async (context) => {
+    const access = await requireModerationContext(context);
+    if (access instanceof Response) return access;
+    const { guild, serverId } = access;
+    return context.json(
+      await updateModerationSettings(guild.id, serverId, await context.req.json().catch(() => null), {
+        hasRole: async (id) => {
+          try {
+            return (await guild.roles.fetch(id, { force: true }))?.guild.id === guild.id;
+          } catch (error) {
+            if (error instanceof DiscordAPIError && error.code === RESTJSONErrorCodes.UnknownRole) return false;
+            throw error;
+          }
+        },
+        findMember: async (id) => (await fetchDashboardGuildMember(guild, id))?.user ?? null,
+      }),
+    );
+  });
+
   app.get(`${BASE_PATH}/api/guilds/:guildId/memories/personal`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config);
     if (result instanceof Response) return result;
@@ -1261,52 +2005,54 @@ export function createDashboardApp(client: Client) {
   });
 
   app.get(`${BASE_PATH}/api/guilds/:guildId/memories/server`, async (context) => {
-    const result = await requireGuildContext(context, client, core, sessions, config);
+    const result = await requireServerMemoryContext(context);
     if (result instanceof Response) return result;
     const lineageId = parseLineageId(context.req.query("lineageId"));
     if (lineageId === null) {
       return jsonError(context, new DashboardServiceError("invalid_lineage", 422, "Invalid memory scope."));
     }
     try {
-      return context.json(await memories.listServer(result.actor, result.snapshot, lineageId));
+      return context.json({
+        ...(await memories.listServer(result.actor, result.snapshot, lineageId, result.selectableChannels)),
+        channels: result.channels,
+      });
     } catch (error) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Server memories failed.");
     }
   });
 
   app.post(`${BASE_PATH}/api/guilds/:guildId/memories/server`, async (context) => {
-    const result = await requireGuildContext(context, client, core, sessions, config);
+    const result = await requireServerMemoryContext(context);
     if (result instanceof Response) return result;
-    const csrfError = requireMutationCsrf(context, result.session);
-    if (csrfError) return csrfError;
     try {
-      const input = memories.parseMutation(await context.req.json().catch(() => null));
-      return context.json({ memory: await memories.addServer(result.actor, result.snapshot, input) }, 201);
+      const input = memories.parseMutation(await context.req.json().catch(() => null), "server");
+      return context.json(
+        { memory: await memories.addServer(result.actor, result.snapshot, input, result.selectableChannels) },
+        201,
+      );
     } catch (error) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Server memory save failed.");
     }
   });
 
   app.patch(`${BASE_PATH}/api/guilds/:guildId/memories/server/:memoryId`, async (context) => {
-    const result = await requireGuildContext(context, client, core, sessions, config);
+    const result = await requireServerMemoryContext(context);
     if (result instanceof Response) return result;
-    const csrfError = requireMutationCsrf(context, result.session);
-    if (csrfError) return csrfError;
     const memoryId = parsePositiveInt(context.req.param("memoryId"));
     if (!memoryId) return jsonError(context, new DashboardServiceError("invalid_memory_id", 422, "Invalid memory."));
     try {
-      const input = memories.parseMutation(await context.req.json().catch(() => null));
-      return context.json({ memory: await memories.updateServer(result.actor, result.snapshot, memoryId, input) });
+      const input = memories.parseMutation(await context.req.json().catch(() => null), "server");
+      return context.json({
+        memory: await memories.updateServer(result.actor, result.snapshot, memoryId, input, result.selectableChannels),
+      });
     } catch (error) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Server memory update failed.");
     }
   });
 
   app.delete(`${BASE_PATH}/api/guilds/:guildId/memories/server/:memoryId`, async (context) => {
-    const result = await requireGuildContext(context, client, core, sessions, config);
+    const result = await requireServerMemoryContext(context);
     if (result instanceof Response) return result;
-    const csrfError = requireMutationCsrf(context, result.session);
-    if (csrfError) return csrfError;
     const memoryId = parsePositiveInt(context.req.param("memoryId"));
     const lineageId = parseLineageId(context.req.query("lineageId"));
     if (!memoryId || lineageId === null) {
@@ -1582,18 +2328,17 @@ export function createDashboardApp(client: Client) {
     const result = await requireGuildContext(context, client, core, sessions, config, true);
     if (result instanceof Response) return result;
     const ids = [...new Set(context.req.queries("channelId") ?? [])];
-    const available = new Set(
-      serializeChannels(client.guilds.cache.get(result.guild.id)?.channels.cache.values() ?? []).map(
-        (channel) => channel.id,
-      ),
-    );
+    const available = dashboardChannelIds(client.guilds.cache.get(result.guild.id)?.channels.cache.values() ?? []);
     if (ids.length > 500 || ids.some((id) => !available.has(id)))
       return jsonError(
         context,
         new DashboardServiceError("invalid_channel_settings", 422, "Invalid channel settings."),
       );
     try {
-      return context.json(await channelSettings.load(result.snapshot, ids));
+      return context.json({
+        ...(await channelSettings.load(result.snapshot, ids)),
+        availableChannelIds: [...available],
+      });
     } catch (error) {
       await log.error("Dashboard channel settings load failed", error, undefined, { persist: false });
       return jsonError(context, "Channel settings could not be loaded.");
@@ -1605,11 +2350,7 @@ export function createDashboardApp(client: Client) {
     if (result instanceof Response) return result;
     const csrfError = requireMutationCsrf(context, result.session);
     if (csrfError) return csrfError;
-    const available = new Set(
-      serializeChannels(client.guilds.cache.get(result.guild.id)?.channels.cache.values() ?? []).map(
-        (channel) => channel.id,
-      ),
-    );
+    const available = dashboardChannelIds(client.guilds.cache.get(result.guild.id)?.channels.cache.values() ?? []);
     try {
       return context.json(
         await channelSettings.patch(result.snapshot, await context.req.json().catch(() => null), available),
@@ -1652,10 +2393,8 @@ export function createDashboardApp(client: Client) {
         new DashboardServiceError("provider_scope_not_found", 404, "Provider scope not found."),
       );
     }
-    const result = await requireGuildContext(context, client, core, sessions, config, scope === "server");
+    const result = await requireProviderConnectionContext(context, scope);
     if (result instanceof Response) return result;
-    const csrfError = requireMutationCsrf(context, result.session);
-    if (csrfError) return csrfError;
     try {
       await providers.saveCredential(scope, result.actor, result.snapshot, await context.req.json().catch(() => null));
       return context.json({ saved: true });
@@ -1736,6 +2475,92 @@ export function createDashboardApp(client: Client) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Provider delete failed.");
     }
   });
+
+  app.delete(`${BASE_PATH}/api/guilds/:guildId/providers/server/credentials/:provider`, async (context) => {
+    const result = await requireProviderConnectionContext(context, "server");
+    if (result instanceof Response) return result;
+    return context.json(await providers.removeServerProvider(result.snapshot, context.req.param("provider") ?? ""));
+  });
+
+  app.on(
+    ["GET", "PATCH"],
+    `${BASE_PATH}/api/guilds/:guildId/providers/server/credentials/:provider/rotation`,
+    async (context) => {
+      const result = await requireProviderConnectionContext(context, "server");
+      if (result instanceof Response) return result;
+      const provider = context.req.param("provider") ?? "";
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        context.req.method === "GET"
+          ? await providers.loadRotationKeys(result.snapshot, provider)
+          : await providers.updateRotationKeys(result.snapshot, provider, await context.req.json().catch(() => null)),
+      );
+    },
+  );
+
+  app.on(
+    ["GET", "PATCH"],
+    `${BASE_PATH}/api/guilds/:guildId/providers/:scope/connections/:connectionId`,
+    async (context) => {
+      const scope = context.req.param("scope");
+      if (scope !== "personal" && scope !== "server") return context.notFound();
+      const result = await requireProviderConnectionContext(context, scope);
+      if (result instanceof Response) return result;
+      const rawId = context.req.param("connectionId") ?? "";
+      const connectionId = Number(rawId);
+      if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(connectionId))
+        throw new DashboardServiceError(
+          "endpoint_edit_not_found",
+          404,
+          localizer("en-US", "general.dashboard.endpoint_edit_not_found"),
+        );
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        context.req.method === "GET"
+          ? await providers.loadConnectionEditor(scope, result.actor, result.snapshot, connectionId)
+          : await providers.editConnection(
+              scope,
+              result.actor,
+              result.snapshot,
+              connectionId,
+              await context.req.json().catch(() => null),
+            ),
+      );
+    },
+  );
+
+  app.on(
+    ["GET", "PATCH"],
+    `${BASE_PATH}/api/guilds/:guildId/providers/:scope/connections/:connectionId/models/:endpointId`,
+    bodyLimit({ maxSize: ENDPOINT_WORKFLOW_MAX_BYTES + 4096 }),
+    async (context) => {
+      const scope = context.req.param("scope");
+      if (scope !== "personal" && scope !== "server") return context.notFound();
+      const result = await requireProviderConnectionContext(context, scope);
+      if (result instanceof Response) return result;
+      const ids = [context.req.param("connectionId"), context.req.param("endpointId")];
+      const [connectionId, endpointId] = ids.map(Number);
+      if (ids.some((id) => !/^[1-9]\d*$/.test(id ?? "")) || ![connectionId, endpointId].every(Number.isSafeInteger))
+        throw new DashboardServiceError(
+          "endpoint_model_not_found",
+          404,
+          localizer("en-US", "general.dashboard.endpoint_model_not_found"),
+        );
+      context.header("Cache-Control", "no-store");
+      return context.json(
+        context.req.method === "GET"
+          ? await providers.loadEndpointModelEditor(scope, result.actor, result.snapshot, connectionId, endpointId)
+          : await providers.editEndpointModel(
+              scope,
+              result.actor,
+              result.snapshot,
+              connectionId,
+              endpointId,
+              await context.req.json().catch(() => null),
+            ),
+      );
+    },
+  );
 
   app.post(`${BASE_PATH}/api/guilds/:guildId/providers/:scope/endpoints`, async (context) => {
     const scope = context.req.param("scope");
@@ -1863,6 +2688,34 @@ export function createDashboardApp(client: Client) {
     }
   });
 
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/providers/server/model-targets`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    await setAdvancedServerModel(result.snapshot, await context.req.json().catch(() => null));
+    return context.json({ saved: true });
+  });
+
+  const logitBiasPath = `${BASE_PATH}/api/guilds/:guildId/settings/logit-bias`;
+  app.post(logitBiasPath, bodyLimit({ maxSize: LOGIT_BIAS_IMPORT_BYTES + 1024 }), async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    const entries = await saveServerLogitBias(result.snapshot, await context.req.json().catch(() => null));
+    return context.json({ entries });
+  });
+
+  app.delete(`${logitBiasPath}/:id`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    const entries = await removeServerLogitBias(result.snapshot, context.req.param("id"));
+    return context.json({ entries });
+  });
+
   app.patch(`${BASE_PATH}/api/guilds/:guildId/providers/server/models`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config, true);
     if (result instanceof Response) return result;
@@ -1917,6 +2770,220 @@ export function createDashboardApp(client: Client) {
         error instanceof DashboardServiceError ? error : localizer("en-US", "general.dashboard.naming_failed"),
       );
     }
+  });
+
+  app.put(`${BASE_PATH}/api/guilds/:guildId/personas/:personaId/naming-habits`, async (context) => {
+    const result = await requirePersonaManager(context, true);
+    if (result instanceof Response) return result;
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId)
+      throw new DashboardServiceError(
+        "persona_not_found",
+        404,
+        localizer("en-US", "general.dashboard.naming_persona_missing"),
+      );
+    const values = await personas.updateNamingHabits(
+      result.snapshot,
+      personaId,
+      await context.req.json().catch(() => null),
+    );
+    return context.json({ values });
+  });
+
+  const personaPath = `${BASE_PATH}/api/guilds/:guildId/personas/:personaId`;
+  const requireManagedPersona = async (context: Context, allowDirectMessages = false) => {
+    const result = await requirePersonaManager(context, allowDirectMessages);
+    if (result instanceof Response) return result;
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId)
+      throw new DashboardServiceError(
+        "persona_not_found",
+        404,
+        localizer("en-US", "general.dashboard.naming_persona_missing"),
+      );
+    context.header("Cache-Control", "no-store");
+    return { snapshot: result.snapshot, personaId };
+  };
+
+  app.get(`${personaPath}/export`, async (context) => {
+    const result = await requireManagedPersona(context, true);
+    if (result instanceof Response) return result;
+    const format = context.req.query("format");
+    if (format !== "png" && format !== "json") {
+      throw new DashboardServiceError(
+        "persona_export_invalid_format",
+        422,
+        localizer("en-US", "general.dashboard.persona_export_invalid_format"),
+      );
+    }
+    const file = await personas.exportCard(result.snapshot, result.personaId, format);
+    context.header("Cache-Control", "private, no-store");
+    context.header("Content-Type", file.contentType);
+    context.header("Content-Disposition", `attachment; filename="${file.filename}"`);
+    return context.body(new Uint8Array(file.buffer));
+  });
+
+  app.get(`${personaPath}/character-reference`, async (context) => {
+    const result = await requireManagedPersona(context);
+    if (result instanceof Response) return result;
+    const image = await personas.loadCharacterReference(result.snapshot, result.personaId);
+    if (!image) return context.notFound();
+    context.header("Content-Type", "image/png");
+    return context.body(new Uint8Array(image));
+  });
+
+  app.on(
+    ["PUT", "DELETE"],
+    `${personaPath}/character-reference`,
+    bodyLimit({ maxSize: PERSONA_REFERENCE_MAX_BYTES + 65536 }),
+    async (context) => {
+      const result = await requireManagedPersona(context);
+      if (result instanceof Response) return result;
+      const file = context.req.method === "PUT" ? (await context.req.parseBody().catch(() => null))?.file : null;
+      if (file !== null && !(file instanceof File))
+        throw new DashboardServiceError(
+          "persona_reference_invalid",
+          422,
+          localizer("en-US", "general.dashboard.persona_reference_invalid"),
+        );
+      return context.json(await personas.updateCharacterReference(result.snapshot, result.personaId, file));
+    },
+  );
+
+  app.put(`${personaPath}/attg`, async (context) => {
+    const result = await requireManagedPersona(context);
+    if (result instanceof Response) return result;
+    return context.json(
+      await personas.updateAttg(result.snapshot, result.personaId, await context.req.json().catch(() => null)),
+    );
+  });
+
+  app.get(`${personaPath}/voice`, async (context) => {
+    const result = await requireManagedPersona(context, true);
+    if (result instanceof Response) return result;
+    return context.json(await personas.loadVoiceSettings(result.snapshot, result.personaId));
+  });
+
+  app.patch(`${personaPath}/voice`, async (context) => {
+    const result = await requireManagedPersona(context, true);
+    if (result instanceof Response) return result;
+    await personas.updateVoiceSettings(result.snapshot, result.personaId, await context.req.json().catch(() => null));
+    return context.json({ saved: true });
+  });
+
+  app.get(`${personaPath}/preset`, async (context) => {
+    const result = await requireManagedPersona(context);
+    if (result instanceof Response) return result;
+    return context.json(await personas.loadPresetIdentity(result.snapshot, result.personaId));
+  });
+
+  app.post(`${personaPath}/preset/resync`, async (context) => {
+    const result = await requireManagedPersona(context);
+    if (result instanceof Response) return result;
+    return context.json(
+      await personas.resyncPresetIdentity(
+        result.snapshot,
+        result.personaId,
+        await context.req.json().catch(() => null),
+      ),
+    );
+  });
+
+  const personaConditioningPath = `${BASE_PATH}/api/guilds/:guildId/personas/:personaId/conditioning`;
+  app.get(personaConditioningPath, async (context) => {
+    const result = await requirePersonaManager(context, false);
+    if (result instanceof Response) return result;
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId)
+      throw new DashboardServiceError(
+        "persona_not_found",
+        404,
+        localizer("en-US", "general.dashboard.naming_persona_missing"),
+      );
+    context.header("Cache-Control", "no-store");
+    return context.json({ entries: await personas.listConditioning(result.snapshot, personaId) });
+  });
+
+  app.delete(`${personaConditioningPath}/:id`, async (context) => {
+    const result = await requirePersonaManager(context, false);
+    if (result instanceof Response) return result;
+    const personaId = parsePositiveInt(context.req.param("personaId"));
+    if (!personaId)
+      throw new DashboardServiceError(
+        "persona_not_found",
+        404,
+        localizer("en-US", "general.dashboard.naming_persona_missing"),
+      );
+    const id = context.req.param("id");
+    if (!/^[A-Za-z0-9_-]{8}$/.test(id)) {
+      throw new DashboardServiceError(
+        "persona_conditioning_changed",
+        409,
+        localizer("en-US", "general.dashboard.persona_conditioning_changed"),
+      );
+    }
+    await personas.removeConditioning(result.snapshot, personaId, id);
+    return context.json({ deleted: true });
+  });
+
+  app.get(`${BASE_PATH}/api/guilds/:guildId/settings/response-drafting`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    return context.json(await core.loadDraftingSelections(result.snapshot));
+  });
+
+  app.patch(`${BASE_PATH}/api/guilds/:guildId/settings/response-drafting`, async (context) => {
+    const result = await requireGuildContext(context, client, core, sessions, config, true);
+    if (result instanceof Response) return result;
+    const csrfError = requireMutationCsrf(context, result.session);
+    if (csrfError) return csrfError;
+    await settings.setDraftingSelection(result.snapshot, await context.req.json().catch(() => null));
+    return context.json({ saved: true });
+  });
+
+  app.get(`${BASE_PATH}/api/guilds/:guildId/settings/system-prompt-presets`, async (context) => {
+    const result = await requireServerBehaviorContext(context);
+    if (result instanceof Response) return result;
+    return context.json(await loadSystemPromptChoices(result.snapshot));
+  });
+
+  app.on(["GET", "PATCH"], `${BASE_PATH}/api/guilds/:guildId/settings/tool-triggers`, async (context) => {
+    const result = await requireServerBehaviorContext(context);
+    if (result instanceof Response) return result;
+    const targets =
+      context.req.method === "GET"
+        ? loadToolTriggers(result.snapshot)
+        : await updateToolTriggers(result.snapshot, await context.req.json().catch(() => null));
+    return context.json({ targets });
+  });
+
+  const randomTriggerPath = `${BASE_PATH}/api/guilds/:guildId/settings/random-triggers`;
+  app.on(["GET", "POST"], randomTriggerPath, async (context) => {
+    const result = await requireServerBehaviorContext(context, true);
+    if (result instanceof Response) return result;
+    const ids = new Set(result.channels.map(({ id }) => id));
+    if (context.req.method === "GET")
+      return context.json({ channels: result.channels, triggers: await loadRandomTriggers(result.snapshot, ids) });
+    const allowed = await core.loadAllowedChannelIds(result.snapshot.serverId);
+    const candidates = allowed.length ? new Set(allowed.filter((id) => ids.has(id))) : ids;
+    await saveRandomTrigger(result.snapshot, candidates, await context.req.json().catch(() => null));
+    return context.json({ saved: true }, 201);
+  });
+
+  app.on(["PATCH", "DELETE"], `${randomTriggerPath}/:triggerId`, async (context) => {
+    const result = await requireServerBehaviorContext(context, true);
+    if (result instanceof Response) return result;
+    const triggerId = parsePositiveInt(context.req.param("triggerId"));
+    if (triggerId === null)
+      throw new DashboardServiceError(
+        "random_schedule_missing",
+        404,
+        localizer("en-US", "general.dashboard.random_schedule_missing"),
+      );
+    const ids = new Set(result.channels.map(({ id }) => id));
+    if (context.req.method === "DELETE") await removeRandomTrigger(result.snapshot, ids, triggerId);
+    else await saveRandomTrigger(result.snapshot, ids, await context.req.json().catch(() => null), triggerId);
+    return context.json({ saved: true });
   });
 
   app.patch(`${BASE_PATH}/api/guilds/:guildId/settings/:sectionId`, async (context) => {
@@ -1974,6 +3041,39 @@ export function createDashboardApp(client: Client) {
       return jsonError(context, error instanceof DashboardServiceError ? error : "Persona creation failed.");
     }
   });
+
+  const mainReplacementPath = `${BASE_PATH}/api/guilds/:guildId/personas/main/replacement`;
+  app.get(mainReplacementPath, async (context) => {
+    const result = await requirePersonaManager(context, true);
+    if (result instanceof Response) return result;
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ presets: await personas.listMainPersonaPresets(result.actor.user.language_pref) });
+  });
+  app.on(
+    ["POST", "PUT"],
+    mainReplacementPath,
+    bodyLimit({ maxSize: PERSONA_IMPORT_MAX_BYTES + 65536 }),
+    async (context) => {
+      const result = await requirePersonaManager(context, true);
+      if (result instanceof Response) return result;
+      const { revision, ...selection } = await context.req.parseBody();
+      const locale = result.actor.user.language_pref;
+      context.header("Cache-Control", "private, no-store");
+      if (context.req.method === "POST") {
+        return context.json(await personas.previewMainReplacement(result.snapshot, locale, selection));
+      }
+      return context.json(
+        await personas.replaceMainPersona(
+          result.guild.id,
+          Boolean(result.guild.isDirectMessage),
+          result.actor.discordId,
+          locale,
+          selection,
+          revision,
+        ),
+      );
+    },
+  );
 
   app.post(`${BASE_PATH}/api/guilds/:guildId/personas/import`, async (context) => {
     const result = await requireGuildContext(context, client, core, sessions, config, true);

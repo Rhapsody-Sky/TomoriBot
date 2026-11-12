@@ -32,6 +32,42 @@
   }
   document.body.append(sprite);
 
+  const trackedScrollbars = new Set();
+
+  function updateScrollbarProgress(element) {
+    const progress = (offset, range) => `${range > 0 ? Math.min(1, Math.max(0, offset / range)) * 100 : 0}%`;
+    const horizontal = progress(Math.abs(element.scrollLeft), element.scrollWidth - element.clientWidth);
+    const vertical = progress(element.scrollTop, element.scrollHeight - element.clientHeight);
+    element.style.setProperty("--scrollbar-x", horizontal);
+    element.style.setProperty("--scrollbar-y", vertical);
+  }
+
+  const scrollbarResize = new ResizeObserver((entries) => {
+    for (const { target } of entries) syncScrollbar(target);
+  });
+
+  function syncScrollbar(element) {
+    if (element.isConnected) {
+      updateScrollbarProgress(element);
+    } else {
+      scrollbarResize.unobserve(element);
+      trackedScrollbars.delete(element);
+    }
+  }
+
+  document.addEventListener(
+    "scroll",
+    ({ target }) => {
+      if (!(target instanceof HTMLElement) || target === document.body || target.id === "workspace") return;
+      if (!trackedScrollbars.has(target)) {
+        trackedScrollbars.add(target);
+        scrollbarResize.observe(target);
+      }
+      updateScrollbarProgress(target);
+    },
+    { capture: true, passive: true },
+  );
+
   function glyph(name) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.classList.add("glyph");
@@ -961,33 +997,44 @@
 
       function measure() {
         if (!navigation.isConnected) return;
-        const available = navigation.getBoundingClientRect().width;
-        if (!available) return;
+        const width = navigation.getBoundingClientRect().width;
+        if (!width) return;
         for (const button of buttons) button.hidden = false;
         const compact = matchMedia("(max-width: 800px)").matches;
         navigation.dataset.tabsCompact = String(compact);
-        const gap = parseFloat(getComputedStyle(row).gap) || 0;
-        const widths = buttons.map((button) => button.getBoundingClientRect().width + gap);
-        const total = widths.reduce((sum, width) => sum + width, 14);
-        const overflow = !compact && total > available;
-        navigation.dataset.tabsOverflow = String(overflow);
-        if (overflow) {
-          let remaining = available - 110;
-          const selected = selectedTab();
-          const order = [selected, ...buttons.filter((button) => button !== selected)];
-          for (const button of order) {
-            const width = widths[buttons.indexOf(button)];
-            button.hidden = width > remaining;
-            if (!button.hidden) remaining -= width;
+        pickerLabel.textContent = compact ? copy.control_sections || "" : copy.control_more || "";
+        selectedLabel.hidden = !compact;
+        let overflow = false;
+        if (!compact) {
+          const style = getComputedStyle(navigation);
+          const available =
+            width -
+            parseFloat(style.paddingLeft) -
+            parseFloat(style.paddingRight) -
+            parseFloat(style.borderLeftWidth) -
+            parseFloat(style.borderRightWidth);
+          const gap = parseFloat(getComputedStyle(row).gap) || 0;
+          const widths = buttons.map((button) => button.getBoundingClientRect().width + gap);
+          overflow = widths.reduce((sum, tabWidth) => sum + tabWidth, -gap) > available;
+          navigation.dataset.tabsOverflow = String(overflow);
+          if (overflow) {
+            let remaining = viewport.getBoundingClientRect().width + gap;
+            const selected = selectedTab();
+            const order = [selected, ...buttons.filter((button) => button !== selected)];
+            for (const button of order) {
+              const tabWidth = widths[buttons.indexOf(button)];
+              button.hidden = tabWidth > remaining;
+              if (!button.hidden) remaining -= tabWidth;
+            }
           }
+        } else {
+          navigation.dataset.tabsOverflow = "false";
         }
         viewport.inert = compact;
         viewport.setAttribute("aria-hidden", String(compact));
         if (compact && row.contains(document.activeElement)) picker.focus();
-        else if (!compact && document.activeElement === picker) selectedTab().focus();
+        else if (!compact && !overflow && document.activeElement === picker) selectedTab().focus();
         sync();
-        pickerLabel.textContent = compact ? copy.control_sections || "" : copy.control_more || "";
-        selectedLabel.hidden = !compact;
         if (!compact) picker.setAttribute("aria-label", copy.control_more || "");
       }
 
@@ -1074,6 +1121,7 @@
     },
     enhance(root = document) {
       hideTooltip();
+      for (const element of trackedScrollbars) syncScrollbar(element);
       enhanceHolds(root);
       enhanceActionMenus(root);
       root.querySelectorAll("select, input[type=number], input[type=file]").forEach((input) => {

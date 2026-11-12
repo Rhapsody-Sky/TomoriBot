@@ -165,6 +165,10 @@ body[data-theme="dark"] .boot-logo {
   margin-bottom: var(--space-4);
 }
 
+.persona-knowledge-panel {
+  display: flow-root;
+}
+
 .persona-panel-content {
   display: grid;
   gap: var(--space-4);
@@ -244,8 +248,8 @@ body[data-theme="dark"] .boot-logo {
   margin-top: -8px;
 }
 
-.tabs-child,
-.tab-navigation:has(.tabs-child) .tab-selection {
+.tab-navigation:where([data-tabs-compact="false"]):has(.tabs-child),
+.tab-navigation:where([data-tabs-compact="true"]):has(.tabs-child) > .tab-selection {
   margin-bottom: 0;
   padding-top: calc(var(--tabs-padding, 6px) + 8px);
   border-radius: 0 0 var(--tabs-radius, 18px) var(--tabs-radius, 18px);
@@ -257,7 +261,8 @@ body[data-theme="dark"] .boot-logo {
   justify-content: flex-end;
 }
 
-.tabs-child button {
+.tabs-child button,
+.tab-navigation:where([data-tabs-overflow="true"]):has(.tabs-child) > .tab-selection {
   padding-block: var(--space-2);
 }
 
@@ -269,6 +274,47 @@ body[data-theme="dark"] .boot-logo {
 .persona-panel-content .actions button[type="submit"] {
   min-height: var(--input-height);
   padding: 6px var(--space-3);
+}
+
+.moderation-table th,
+.moderation-table td {
+  overflow-wrap: anywhere;
+}
+
+.moderation-table th[scope="row"] strong {
+  color: var(--ink);
+}
+
+.moderation-table small {
+  display: block;
+  font-weight: normal;
+}
+
+.moderation-table .restriction-compact {
+  display: none;
+}
+
+.moderation-table .entry-actions {
+  justify-content: flex-end;
+}
+
+.moderation-table .entry-actions .button {
+  height: auto;
+  overflow-wrap: normal;
+}
+
+@media (max-width: 560px) {
+  .moderation-table :is(th, td) {
+    padding-inline: var(--space-2);
+  }
+
+  .moderation-table .restriction-wide {
+    display: none;
+  }
+
+  .moderation-table .restriction-compact {
+    display: block;
+  }
 }
 
 .persona-panel-content .actions,
@@ -544,7 +590,6 @@ body[data-theme="dark"] .boot-logo {
 .channel-choices {
   max-height: 560px;
   overflow-y: auto;
-  scrollbar-width: thin;
 }
 .channel-category {
   margin: 20px 8px 8px;
@@ -586,6 +631,29 @@ body[data-theme="dark"] .boot-logo {
   min-height: 36px;
   padding: 6px 10px;
 }
+
+[data-memory-channel-scope] > .toggle {
+  padding-block: 0 var(--space-3);
+}
+
+[data-memory-channel-scope] > .toggle:has(+ [hidden]) {
+  padding-block-end: 0;
+  border-bottom: 0;
+}
+
+[data-memory-channel-picker] .channel-selector {
+  gap: var(--space-3);
+}
+
+[data-memory-channel-picker] .channel-selection-actions,
+[data-memory-channel-picker] .channel-category:nth-child(1 of .channel-category:not([hidden])) {
+  margin-block-start: 0;
+}
+
+#memory-dialog .channel-choices {
+  max-block-size: min(30dvh, 320px);
+}
+
 .channel-setting-row.field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 250px;

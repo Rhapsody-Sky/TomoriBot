@@ -29,46 +29,88 @@ access to guild data or other users' private memories.
 Global Administration includes Pages & links, available even without a shared guild.
 Global administrators edit Imprint, Data protection, and Cookie notice with a rich-text
 editor, and add external links such as support pages. Each item has a title, display
-order, and visibility setting. Pages start empty and hidden; operators supply their
-own content. Visible items appear below the login and in the dashboard sidebar.
-Hiding a page also makes its public URL return 404 without deleting its draft.
+order, and visibility settings. Imprint and Data protection start empty and hidden.
+The built-in Cookie notice is public until a global administrator replaces or hides it.
+Published pages appear below the login and in the dashboard sidebar.
+Hiding a page makes its public URL return 404 without deleting its draft. External
+links have separate switches for the public navigation and the signed-in sidebar.
+The public navigation appears below the login and on the public pages.
 
 `DashboardSiteRepository` stores these installation-wide entries in
 `dashboard_site_entries`, created by migration `900_dashboard_site_entries` during
 normal bot startup. The deployment-specific migration band runs on both fresh and
 existing databases without adding dashboard tables to the upstream schema snapshot.
-Existing entries are preserved if the table already exists. Include this table in
-database backups. The down migration refuses to remove a table containing pages or
-links, including hidden drafts. `siteService.ts` validates writes and sanitizes rich text
-on both write and read. Public navigation and `/settings/pages/:pageId` require no
-login and expose only enabled items. The `/settings/api/site-admin/*` routes require
+Migration `901_dashboard_link_visibility` copies each existing link's visibility to
+both placements. It cannot be rolled back while any link has different settings for
+the two placements. Include this table in database backups. The table's down migration
+refuses to remove it while it contains pages or links, including hidden drafts.
+`siteService.ts` validates writes and sanitizes rich text on both write and read.
+The login navigation and `/settings/pages/:pageId` require no sign-in. Sidebar-only
+links are returned only to signed-in users. The `/settings/api/site-admin/*` routes require
 a configured global administrator; mutations also require the session CSRF token.
 The editor assets are served locally and loaded only when opening administration.
+Design changes apply to the open page. The design menu stores them in the browser
+only when the user turns on **Remember design on this device**. Turning it off clears
+the saved design and leaves sign-in cookies untouched.
 
 Every shared server member can:
 
-- edit personal profile, pronouns, gender identity, addressing style, privacy,
-  trigger/tool mode, appearance, and quarter-hour timezone offsets;
+- edit personal profile, name prefix and suffix, Discord language preference,
+  privacy, trigger/tool mode, appearance, and quarter-hour timezone offsets;
 - control cross-server short-term-memory sharing, natural-nudge targeting, and
   whether personal-provider failures may fall back to server providers;
 - manage global personal memories (lineage `0`) from the personal workspace;
+- check the number of active personal short-term memory entries and request
+  their deletion across servers and DMs. The account-scoped endpoint uses the
+  Discord count and clear operations. It returns no conversation content or
+  shared server memory;
+- manage their own channel spotlights on the selected server. The picker only
+  offers Discord text channels the member can see. Spotlights cannot override
+  server or persona permissions;
 - open a persona workspace that groups their private persona memories with the
   server memories they taught for that same lineage;
 - read serverwide lorebook collections and the selected persona's lorebook entries;
 - import and export personal memory scopes;
-- store encrypted personal provider credentials, choose active capabilities,
-  and manage personal custom endpoints and scoped OpenRouter models.
+- store encrypted personal provider credentials, switch assigned capabilities
+  on or off across servers without losing their model selections, and manage
+  personal custom endpoints and scoped OpenRouter models. The
+  personal model randomizer requires at least one personal fallback.
 
 Members with Manage Server or Administrator can additionally:
 
+- manage the role allowlist and server blacklist, lift active persona mutes and
+  blocks, and set text, image, and video quotas under **Moderation**. The page uses
+  the same operations as Discord's `/moderation` and requires a current guild
+  membership with Manage Server permission;
 - view and manage all server memories;
 - manage lorebook collections, entries, activation settings, and channel scopes,
   and import or export SillyTavern JSON;
 - create and import alter personas, change or remove their avatars, and delete
   alter personas;
+- export the selected persona as an importable JSON card or as a PNG with its
+  avatar. Cards include persona lorebook entries but do not include memories or
+  the sprite archive. DM owners can export their own persona;
+- switch the main persona to an official preset or import a TomoriBot or
+  SillyTavern PNG or JSON card. The review shows the destination lineage,
+  whether existing memories will still be available to the main persona, and
+  how many destination lorebook entries the card will replace. A preset uses
+  its own lineage and leaves lorebooks unchanged. A card can reuse its lineage
+  or start a new one. If it omits the lorebook, the destination keeps its entries;
+  an explicitly empty lorebook clears them. Memories are not moved or copied.
 - edit persona identity, trigger words, prompt, attributes and visibility,
   sample dialogues, context note, and appearance data from the same persona
   workspace as its memories;
+- set a persona's default prefix, suffix, and address term for each addressing
+  style under **Persona settings**. Individual members' affix overrides still
+  take precedence;
+- upload a persona's image-generation reference under `Appearance & image prompt`;
+- set NovelAI writing metadata and resync a customized identity with its preset
+  under `Persona settings`. Resync keeps the persona's lineage, including its
+  memories and lorebooks;
+- choose a voice description, server sample or ElevenLabs voice, and source
+  priority under `Voice`. The owner of a DM workspace can also edit its voice;
+- review and remove history entries under `Knowledge` > `Reward & Punishment`
+  for a persona on the selected server;
 - test a selected persona against the configured text model in an isolated,
   request-local preview chat, with sprite portraits and identity names for each
   part of the response;
@@ -80,12 +122,30 @@ Members with Manage Server or Administrator can additionally:
   workarounds;
 - edit short-term-memory refresh cadence, rendering mode, retained message count,
   injection depths, and tool/reminder prompt overrides;
-- configure response prefill, draft-review context and instructions, new tool
-  capabilities, and compact or detailed notices;
+- configure response prefill, draft-review context and instructions, the
+  reviewer model, and an optional compatible workspace rule checker;
+- manage server Logit Bias under `Server settings` > `Models & sampling`;
+- choose a system prompt preset as an editable draft, or restore the built-in
+  prompt. An active SillyTavern preset locks the server prompt;
+- configure tool capabilities, custom literal phrases for deliberate tool mode,
+  and notices. Existing regular expressions can be removed in the dashboard;
+  use Discord to add one;
+- manage scheduled triggers in visible text channels. Editing keeps the channel
+  and persona and restarts the interval. The existing scheduler delivers them;
+- set server response cooldowns and channel overrides using the scopes offered
+  in Discord. Existing legacy values stay in place until explicitly changed;
+  slash-command category cooldowns are set by the deployment;
 - manage server provider credentials, custom endpoints, scoped OpenRouter
-  models, and the ordered fallback chain.
+  models, and the ordered fallback chain. `Primary models` also lets managers
+  select a registered Decision model and separate targets for speech design and
+  cloning. Each speech target can be a hosted model or a compatible endpoint.
 
-The dashboard validates new and replacement API keys with their provider before storing them.
+The dashboard validates new and replacement API keys with their provider before
+storing them. Server managers can also manage a Brave Search key and a provider's
+rotation pool without viewing saved secrets. Endpoint model edits apply to one
+registered model; connection edits apply to all models that use it.
+Saving a personal endpoint model follows the Discord editor's routing rules and
+can enable that provider for the model's capability.
 
 The `/dashboard` command returns the configured public dashboard link. The URL
 comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
@@ -131,6 +191,11 @@ refreshes only the statistics section. Custom ranges include both selected UTC
 dates and apply the same bounds to totals, rankings, costs and token history.
 Editing or cancelling a range leaves the active period unchanged until Apply.
 
+The overview API filters the channel inventory and allowlist IDs by the signed-in
+member's Discord permissions. A visible channel under a hidden category has no
+category label. An active allowlist stays active even if none of its channels are
+visible.
+
 My settings groups profile and appearance, privacy and memory, and personal
 conversation preferences into separately saved panels. Personal provider
 fallback belongs to My providers; server BYOK policy belongs to Server providers.
@@ -152,8 +217,9 @@ Under `Persona settings`, the Humanizer can inherit the server settings or use
 custom delivery switches for that persona.
 Persona-specific naming stays under Personas > My preferences and affects only
 the signed-in member. Administrative persona settings remain permission-gated.
-Lorebooks opens serverwide collections; Personas > Lorebook opens the selected
-persona lineage. Members can read both scopes, but only server managers can write.
+`Lorebooks` opens serverwide collections. `Personas` > `Knowledge` > `Lorebooks`
+opens the selected persona lineage. Members can read both scopes; only server
+managers can write.
 The collection list shows each book and its entry count beside the selected
 book's entries. Collection settings have their own dialog. Entry dialogs separate
 content, matching words, and additional rules; no editing forms appear in the
@@ -243,8 +309,11 @@ Repository writes include exact owner, server, and lineage guards. The
 dashboard never relies only on a row ID supplied by the browser.
 
 Server memories no longer accept keyword tags. Upstream migrations move tagged
-server memories into lorebooks; personal memory tags are unchanged. Server-memory
-import and export are disabled in the dashboard because its transfer format does not preserve channel scopes
+server memories into lorebooks; personal memory tags are unchanged. The server
+memory editor offers visible, allowlisted text and announcement channels. Text
+edits preserve the saved channel scope, including unavailable channels and
+unresolved legacy restrictions. Changing scope uses the Discord memory operation.
+Server-memory import and export are disabled in the dashboard because its transfer format does not preserve channel scopes
 and unresolved legacy channel restrictions. Use Discord for those transfers.
 
 Lorebook entry edits use the shared Discord operations. Collection writes use the
@@ -307,9 +376,14 @@ The integration is isolated under `src/web`:
   servers without a stored STM configuration. Other settings retain their own
   repository domains; the dashboard introduces no schema or migrations.
 - Model selection uses the same config model operations as Discord, including
-  provider ownership and embedding-family changes. Custom connection removal
-  uses provider-panel operations and removes all models on that connection;
-  an active text connection must first be replaced.
+  provider ownership and embedding-family changes. `Edit connection` in both
+  provider workspaces uses the Discord provider operation to update the whole
+  named connection while preserving its models. A blank token keeps the stored
+  credential. Removing a connection removes its models; switch away from an
+  active text connection before removing it.
+- `Server providers` uses the Discord removal operation for saved providers. The
+  active text provider is protected. Removing another provider also removes its
+  saved credential, rotation keys, and server-specific model registrations.
 - Sprite routes require server management permission, including image previews
   and exports. Mutations use the shared Discord sprite operations for validation,
   quotas, preset-pointer materialization, cache invalidation and image cleanup.

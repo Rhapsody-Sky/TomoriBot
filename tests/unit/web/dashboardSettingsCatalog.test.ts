@@ -180,6 +180,8 @@ describe("dashboard settings catalog", () => {
     const notices = { tool_notice_hidden_keys: [...TOOL_NOTICE_KEYS], tool_notice_verbosity: "minimal" };
     expect(parseSettingsPatch("notices", notices)).toEqual(notices);
     expect(parseSettingsPatch("notices", { tool_notice_verbosity: "unknown" })).toBeNull();
+    expect(parseSettingsPatch("modelBehavior", { hide_respond_embed: true })).toBeNull();
+    expect(parseSettingsPatch("memberPermissions", { hide_impersonation_embeds: true })).toBeNull();
     expect(parseSettingsPatch("capabilities", { verbatim_tool_calling_enabled: true })).toBeNull();
     const capabilities = {
       response_drafting_enabled: true,
@@ -216,11 +218,14 @@ describe("dashboard settings catalog", () => {
     expect(parseSettingsPatch("modelBehavior", { memory_tagging_enabled: true })).toBeNull();
   });
 
-  it("uses the current cooldown enum, including command-category cooldowns", () => {
-    expect(parseSettingsPatch("triggers", { cooldown_type: 5 })).toEqual({
-      cooldown_type: 5,
-    });
-    expect(parseSettingsPatch("triggers", { cooldown_type: 6 })).toBeNull();
+  it("accepts Discord's editable response cooldown scopes and durations", () => {
+    for (const type of [0, 1, 2, 3]) {
+      const patch = { cooldown_type: type, cooldown_length: 86_400 };
+      expect(parseSettingsPatch("triggers", patch)).toEqual(patch);
+    }
+    for (const type of [4, 5, 6]) expect(parseSettingsPatch("triggers", { cooldown_type: type })).toBeNull();
+    for (const seconds of [0, 1.5, 86_401])
+      expect(parseSettingsPatch("triggers", { cooldown_length: seconds })).toBeNull();
   });
 
   it("rejects unknown notice keys and out-of-range sampler values", () => {

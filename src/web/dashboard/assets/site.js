@@ -66,7 +66,12 @@
           </div><div class="site-editor"></div><input type="hidden" name="content" value="${e(entry.content)}"></div>`
             : `<label class="field">${fieldLabel(c.url)}<input name="url" type="url" value="${e(entry.url)}" placeholder="https://" maxlength="2048" required></label>`
         }
-        <label class="toggle">${fieldLabel(c.visible, c.visible_hint)}<input name="enabled" type="checkbox"${entry.enabled ? " checked" : ""}></label>
+        ${
+          page
+            ? `<label class="toggle">${fieldLabel(c.visible, c.visible_hint)}<input name="enabled" type="checkbox"${entry.enabled ? " checked" : ""}></label>`
+            : `<label class="toggle">${fieldLabel(c.show_on_login, c.show_on_login_hint)}<input name="showOnLogin" type="checkbox"${entry.showOnLogin ? " checked" : ""}></label>
+               <label class="toggle">${fieldLabel(c.show_in_sidebar)}<input name="showInSidebar" type="checkbox"${entry.showInSidebar ? " checked" : ""}></label>`
+        }
         <footer class="actions form-actions"><button class="button primary" type="submit">${e(c.save)}</button></footer>
       </form>`;
     }
@@ -105,7 +110,8 @@
           title: "",
           content: "",
           url: "",
-          enabled: false,
+          showOnLogin: false,
+          showInSidebar: false,
           position: entries.length,
         };
         entries.push(entry);
@@ -222,7 +228,12 @@
                 title: form.elements.title.value,
                 content: form.elements.content?.value || "",
                 url: form.elements.url?.value || "",
-                enabled: form.elements.enabled.checked,
+                ...(entry.kind === "page"
+                  ? { enabled: form.elements.enabled.checked }
+                  : {
+                      showOnLogin: form.elements.showOnLogin.checked,
+                      showInSidebar: form.elements.showInSidebar.checked,
+                    }),
                 position: Number(form.elements.position.value),
               }),
             });

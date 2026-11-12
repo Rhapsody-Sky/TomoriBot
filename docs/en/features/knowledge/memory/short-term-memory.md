@@ -35,6 +35,9 @@ A configured shallower depth can keep the content closer to the latest message. 
 <!-- anchor: managing-short-term-memory -->
 
 You can view or correct the current channel's summary under `/config` > `Persona` > `Memories`.
+Under `/personal memories` or the dashboard's **Global memory** page, you can check how many
+personal entries are active and clear them across all servers and DMs. This leaves shared channel
+memory and long-term memories in place.
 Server managers can adjust parameters or disable short-term memory under `/config` > `Behavior` >
 `Advanced Memory`, and review or clear active channel summaries under `/memories` > `Short-Term`.
 `/refresh` clears the current channel's memory.

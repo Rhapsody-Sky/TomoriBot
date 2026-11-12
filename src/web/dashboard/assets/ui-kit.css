@@ -390,8 +390,6 @@ small,
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-1);
-  scrollbar-width: thin;
-  scrollbar-color: var(--strong-line) transparent;
 }
 
 .sidebar .sidebar-group + .sidebar-group {
@@ -503,6 +501,7 @@ small,
   display: flex;
   position: static;
   top: auto;
+  align-self: stretch;
   width: 100%;
   height: auto;
   max-height: none;
@@ -919,8 +918,16 @@ legend {
   width: max-content;
   min-width: 100%;
   flex-wrap: nowrap;
+}
+
+.tabs,
+.tab-navigation {
   --tabs-radius: var(--radius-lg);
   --tabs-padding: 6px;
+}
+
+.tabs,
+.tab-navigation:where([data-tabs-compact="false"]) {
   display: flex;
   gap: var(--space-1);
   align-items: center;
@@ -931,7 +938,15 @@ legend {
   background: var(--paper);
 }
 
-.tabs button {
+.tab-navigation:where([data-tabs-compact="false"]) > .tabs-viewport > .tabs {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.tabs button,
+.tab-navigation:where([data-tabs-overflow="true"]) > .tab-selection {
   flex: none;
   white-space: nowrap;
   border: 0;
@@ -990,34 +1005,99 @@ legend {
   display: flex;
 }
 
-.tab-navigation[data-tabs-overflow="true"] {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.tab-navigation[data-tabs-overflow="true"] .tabs-viewport {
+.tab-navigation:where([data-tabs-compact="false"]) > .tabs-viewport {
   flex: 1;
   min-width: 0;
 }
 
 .tab-navigation[data-tabs-overflow="true"] .tab-selection {
   display: flex;
-  width: 96px;
-  flex: none;
+  width: auto;
+  min-height: 0;
+  margin: 0;
   justify-content: center;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary-soft) 60%, transparent);
 }
 
-* {
+:where(body *) {
+  --scrollbar-visibility: 0%;
+  --scrollbar-x: 0%;
+  --scrollbar-y: 0%;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklab, var(--muted) 22%, transparent) transparent;
+  scrollbar-color: color-mix(in oklab, var(--primary) var(--scrollbar-visibility), transparent) transparent;
 }
 
-*:hover {
-  scrollbar-color: color-mix(in oklab, var(--muted) 50%, transparent) transparent;
+:where(body :is(:active, :focus-visible, :has(:focus-visible))) {
+  --scrollbar-visibility: 100%;
+}
+
+@supports selector(::-webkit-scrollbar) {
+  @media (forced-colors: none) {
+    :where(body *) {
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+
+    :where(body *)::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    :where(body *)::-webkit-scrollbar-track,
+    :where(body *)::-webkit-scrollbar-thumb {
+      background-clip: padding-box;
+      background-origin: padding-box;
+    }
+
+    :where(body *)::-webkit-scrollbar-track:vertical,
+    :where(body *)::-webkit-scrollbar-thumb:vertical {
+      border-inline: 3px solid transparent;
+    }
+
+    :where(body *)::-webkit-scrollbar-track:horizontal,
+    :where(body *)::-webkit-scrollbar-thumb:horizontal {
+      border-block: 3px solid transparent;
+    }
+
+    :where(body *)::-webkit-scrollbar-track {
+      background-color: color-mix(in oklab, var(--line) var(--scrollbar-visibility), transparent);
+    }
+
+    :where(body *)::-webkit-scrollbar-thumb {
+      background-image: linear-gradient(
+        var(--light-angle),
+        color-mix(in oklab, var(--primary) var(--scrollbar-visibility), transparent),
+        color-mix(in oklab, var(--accent) var(--scrollbar-visibility), transparent)
+      );
+      background-repeat: no-repeat;
+    }
+
+    :where(body *)::-webkit-scrollbar-thumb:vertical {
+      background-position: center var(--scrollbar-y);
+      background-size: 100% 55%;
+    }
+
+    :where(body *)::-webkit-scrollbar-thumb:horizontal {
+      background-position: var(--scrollbar-x) center;
+      background-size: 55% 100%;
+    }
+
+    :where(body :dir(rtl))::-webkit-scrollbar-thumb:horizontal {
+      background-position: calc(100% - var(--scrollbar-x)) center;
+    }
+
+    :where(body *)::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+  }
 }
 
 @media (hover: hover) {
+  :where(body :hover) {
+    --scrollbar-visibility: 100%;
+  }
+
   body[data-theme="light"] .button:not(:disabled):hover,
   body[data-theme="light"] .select-trigger:hover {
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 30%, transparent);
@@ -1407,9 +1487,26 @@ body[data-theme="light"] .persona-atmosphere {
   border-radius: var(--radius-md);
 }
 
-.persona-picker-trigger {
+.persona-identity-actions {
+  display: grid;
+  grid-auto-rows: 1fr;
+  gap: var(--space-2);
   justify-self: start;
+  max-inline-size: 100%;
   margin-top: var(--space-2);
+}
+
+.persona-identity-actions > .button {
+  min-inline-size: 0;
+  border-radius: var(--control-radius);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 360px) {
+  .persona-identity-actions > .button {
+    gap: var(--space-1);
+    padding-inline: var(--space-2);
+  }
 }
 
 .workspace {

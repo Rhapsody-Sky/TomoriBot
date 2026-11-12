@@ -150,7 +150,6 @@ describe("dashboard personal and memory settings", () => {
     const updateUser = mock(async () => createUserRow({ user_id: 7 }));
     const service = new DashboardSettingsService({ updateUser } as unknown as DashboardSettingsCore);
     const patch = {
-      user_nickname: " ",
       gender_identity: "nonbinary",
       pronouns: "they/them",
       addressing_style: "neutral",
@@ -159,7 +158,7 @@ describe("dashboard personal and memory settings", () => {
       timezone_offset: 5.75,
     };
     await service.updateProfile(7, "987654321098765432", patch);
-    expect(updateUser).toHaveBeenCalledWith(7, "987654321098765432", { ...patch, user_nickname: null });
+    expect(updateUser).toHaveBeenCalledWith(7, "987654321098765432", patch);
     await expect(service.updateProfile(7, "987654321098765432", { ...patch, user_id: 8 })).rejects.toMatchObject({
       code: "invalid_profile",
     });

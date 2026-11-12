@@ -9,6 +9,7 @@ import type {
   FallbackModelRef,
   PersonalProviderCapability,
   PersonalMemoryRow,
+  ResponseRuleCheckerRef,
   SavedProviderConfigRow,
   ServerAutoTriggerConfigRow,
   ServerByokConfigRow,
@@ -53,6 +54,12 @@ import { shortTermMemoryRepository } from "@/utils/db/repositories/ShortTermMemo
 import { serverStmConfigSchema } from "@/types/db/schema";
 import { userNamingRepository, userPersonaNamingPairKey } from "@/utils/db/repositories/UserNamingRepository";
 import { personalConfigOperations } from "@/utils/discord/interactions/personalConfigOperations";
+import {
+  loadResponseDraftingView,
+  responseDraftingOperations,
+} from "@/utils/discord/interactions/responseDraftingOperations";
+import { findProviderOption, findProviderOptionByActiveProvider } from "@/utils/provider/providerOptionRegistry";
+import { localizer } from "@/utils/text/localizer";
 import { configPersonaOperations } from "@/utils/discord/interactions/configPersonaOperations";
 import { loadAvailableModelsForCapability } from "@/utils/discord/interactions/personalConfigLoaders";
 import {
@@ -256,6 +263,70 @@ export class TomoriDashboardCore {
     const updated = await userRepository.update(userId, patch);
     if (updated) invalidateUserCache(userDiscordId);
     return updated;
+  }
+
+  setProfileNaming(input: Parameters<typeof personalConfigOperations.setNaming>[0]) {
+    return personalConfigOperations.setNaming(input);
+  }
+
+  setProfileLanguage(input: Parameters<typeof personalConfigOperations.setLanguage>[0]) {
+    return personalConfigOperations.setLanguage(input);
+  }
+
+  setPersonalRandomizer(input: Parameters<typeof personalConfigOperations.setRandomizer>[0]) {
+    return personalConfigOperations.setRandomizer(input);
+  }
+
+  private requireDraftingState(snapshot: DashboardGuildSnapshot) {
+    const state = snapshot.rawPersonas.find((persona) => !persona.is_alter) ?? snapshot.rawPersonas[0];
+    if (!state) {
+      throw new DashboardServiceError(
+        "drafting_unavailable",
+        404,
+        localizer("en-US", "general.dashboard.interface_drafting_load_failed"),
+      );
+    }
+    return state;
+  }
+
+  async loadDraftingSelections(snapshot: DashboardGuildSnapshot) {
+    const state = this.requireDraftingState(snapshot);
+    const view = await loadResponseDraftingView(state, "en-US");
+    const scope = { kind: "server" as const, ownerId: state.server_id, state };
+    const reviewerId = state.config.response_reviewer_llm_id ?? null;
+    const reviewers = view.reviewers.map(({ provider, models }) => ({
+      provider,
+      label: getProviderDisplayName(provider),
+      models: models.map(({ id, name }) => ({ id, name })),
+    }));
+    const reviewerProvider = view.reviewers.find(({ provider, models }) => {
+      const catalogProvider = findProviderOption(provider)?.catalogProvider ?? provider;
+      const owner = findProviderOptionByActiveProvider(catalogProvider, scope, "reviewer")?.value ?? catalogProvider;
+      return owner === provider && models.some(({ id }) => id === reviewerId);
+    })?.provider;
+    return {
+      reviewers,
+      reviewer: reviewerId === null ? null : { id: reviewerId, provider: reviewerProvider ?? null },
+      defaultModel: state.llm.llm_codename,
+      defaultModelAvailable: view.inheritedReviewerAvailable,
+      checkers: view.checkers,
+      checker: state.config.response_rule_checker_ref ?? null,
+    };
+  }
+
+  async setDraftingSelection(
+    snapshot: DashboardGuildSnapshot,
+    selection: { reviewer: { id: number; provider: string } | null } | { checker: ResponseRuleCheckerRef | null },
+  ) {
+    const state = this.requireDraftingState(snapshot);
+    return "reviewer" in selection
+      ? responseDraftingOperations.setModel(
+          state,
+          snapshot.serverDiscordId,
+          selection.reviewer?.provider ?? "",
+          selection.reviewer?.id ?? null,
+        )
+      : responseDraftingOperations.setChecker(state, snapshot.serverDiscordId, selection.checker);
   }
 
   getProviderChoices(): Array<{ name: string; value: string }> {
@@ -1067,6 +1138,7 @@ export class TomoriDashboardCore {
     lineageId: number,
     taughtByUserId: number,
     content: string,
+    channelDiscIds: string[],
   ): Promise<ServerMemoryRow | null> {
     return serverMemoryRepository.add(
       snapshot.serverId,
@@ -1075,7 +1147,7 @@ export class TomoriDashboardCore {
       taughtByUserId,
       content,
       snapshot.serverDiscordId,
-      [],
+      channelDiscIds,
       { manuallyWritten: true },
     );
   }

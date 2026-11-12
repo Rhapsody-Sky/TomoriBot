@@ -2,20 +2,21 @@ import sanitizeHtml from "sanitize-html";
 import { z } from "zod";
 import { DashboardSiteRepository, type DashboardSiteEntry } from "@/utils/db/repositories/DashboardSiteRepository";
 import { localizer } from "@/utils/text/localizer";
+import { OAUTH_STATE_COOKIE, OAUTH_STATE_TTL_SECONDS, SESSION_COOKIE, SESSION_TTL_MS } from "./auth";
 import { DashboardServiceError } from "./errors";
 import english from "@/locales/en-US/general";
 
 const pageIds = ["imprint", "data-protection", "cookies"] as const;
-const siteEntrySchema = z
-  .object({
-    kind: z.enum(["page", "link"]),
-    title: z.string().trim().min(1).max(100),
-    content: z.string().max(100_000),
-    url: z.string().trim().max(2048),
-    enabled: z.boolean(),
-    position: z.number().int().min(0).max(999),
-  })
-  .strict();
+const entryFields = {
+  title: z.string().trim().min(1).max(100),
+  content: z.string().max(100_000),
+  url: z.string().trim().max(2048),
+  position: z.number().int().min(0).max(999),
+};
+const siteEntrySchema = z.discriminatedUnion("kind", [
+  z.strictObject({ ...entryFields, kind: z.literal("page"), enabled: z.boolean() }),
+  z.strictObject({ ...entryFields, kind: z.literal("link"), showOnLogin: z.boolean(), showInSidebar: z.boolean() }),
+]);
 
 export function cleanSiteHtml(html: string): string {
   return sanitizeHtml(html, {
@@ -37,6 +38,9 @@ export function siteCopy(): Record<string, string> {
     "cookies",
     "visible",
     "visible_hint",
+    "show_on_login",
+    "show_on_login_hint",
+    "show_in_sidebar",
     "page_title",
     "content",
     "save",
@@ -87,23 +91,32 @@ export class DashboardSiteService {
 
   async list(includeHidden = false): Promise<DashboardSiteEntry[]> {
     const stored = await this.repository.list();
-    const entries = includeHidden
-      ? [
-          ...pageIds
-            .filter((id) => !stored.some((entry) => entry.id === id))
-            .map((id) => ({
-              id,
-              kind: "page" as const,
-              title: siteCopy()[id.replaceAll("-", "_")],
-              content: "",
-              url: "",
-              enabled: false,
-              position: pageIds.indexOf(id),
-            })),
-          ...stored,
-        ]
-      : stored.filter((entry) => entry.enabled);
+    const defaults: DashboardSiteEntry[] = pageIds
+      .filter((id) => (includeHidden || id === "cookies") && !stored.some((entry) => entry.id === id))
+      .map((id) => ({
+        id,
+        kind: "page",
+        title: localizer("en-US", `general.dashboard.site_${id.replaceAll("-", "_")}`),
+        content:
+          id === "cookies"
+            ? localizer("en-US", "general.dashboard.site_cookie_notice_content", {
+                oauthCookie: OAUTH_STATE_COOKIE,
+                oauthMinutes: OAUTH_STATE_TTL_SECONDS / 60,
+                sessionCookie: SESSION_COOKIE,
+                sessionHours: SESSION_TTL_MS / (60 * 60 * 1000),
+              })
+            : "",
+        url: "",
+        enabled: id === "cookies",
+        showOnLogin: false,
+        showInSidebar: false,
+        position: pageIds.indexOf(id),
+      }));
+    const entries = [...defaults, ...stored];
     return entries
+      .filter(
+        (entry) => includeHidden || (entry.kind === "page" ? entry.enabled : entry.showOnLogin || entry.showInSidebar),
+      )
       .map((entry) => ({ ...entry, content: cleanSiteHtml(entry.content) }))
       .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
   }
@@ -111,7 +124,13 @@ export class DashboardSiteService {
   async save(id: string, input: unknown): Promise<DashboardSiteEntry> {
     const parsed = siteEntrySchema.safeParse(input);
     if (!parsed.success) throw new DashboardServiceError("invalid_site_entry", 422, siteCopy().invalid);
-    const entry = { id, ...parsed.data };
+    const entry: DashboardSiteEntry = {
+      id,
+      enabled: false,
+      showOnLogin: false,
+      showInSidebar: false,
+      ...parsed.data,
+    };
     if (entry.kind === "page") {
       if (!pageIds.some((pageId) => pageId === id))
         throw new DashboardServiceError("invalid_site_entry", 422, siteCopy().invalid);

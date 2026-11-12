@@ -3,24 +3,30 @@ import { createHmac } from "node:crypto";
 import type { Client } from "discord.js";
 import { DashboardSiteRepository, type DashboardSiteEntry } from "@/utils/db/repositories/DashboardSiteRepository";
 import { initializeLocalizer } from "@/utils/text/localizer";
-import { DashboardSessionStore, SESSION_COOKIE } from "@/web/dashboard/auth";
+import { DashboardSessionStore, OAUTH_STATE_COOKIE, SESSION_COOKIE } from "@/web/dashboard/auth";
 import { createDashboardApp } from "@/web/dashboard/server";
 import { cleanSiteHtml, DashboardSiteService } from "@/web/dashboard/siteService";
 
 const client = { application: { id: "123456789012345678" }, guilds: { cache: new Map() } } as unknown as Client;
 
-function page(overrides: Partial<DashboardSiteEntry> = {}): DashboardSiteEntry {
-  return {
-    id: "imprint",
-    kind: "page",
-    title: "Information",
-    content: "<p>Sample content</p>",
-    url: "",
-    enabled: true,
-    position: 0,
-    ...overrides,
-  };
-}
+const page = {
+  kind: "page",
+  title: "Information",
+  content: "<p>Sample content</p>",
+  url: "",
+  enabled: true,
+  position: 0,
+} as const;
+const storedPage: DashboardSiteEntry = { id: "imprint", ...page, showOnLogin: false, showInSidebar: false };
+const link = {
+  kind: "link",
+  title: "Support",
+  content: "",
+  url: "https://example.org/support",
+  showOnLogin: true,
+  showInSidebar: false,
+  position: 0,
+} as const;
 
 describe("dashboard public pages", () => {
   beforeAll(() => initializeLocalizer());
@@ -64,9 +70,37 @@ describe("dashboard public pages", () => {
     };
   }
 
+  it("publishes a cookie notice without sign-in and lets an administrator hide it", async () => {
+    const { app, headers, save } = setup(true);
+    const nav = await (await app.request("/settings/api/site")).json();
+    expect(nav.entries.some((entry: DashboardSiteEntry) => entry.id === "cookies")).toBe(true);
+    const response = await app.request("/settings/pages/cookies");
+    expect(response.status).toBe(200);
+    expect(response.headers.has("set-cookie")).toBe(false);
+    const html = await response.text();
+    expect(html).toContain(OAUTH_STATE_COOKIE);
+    expect(html).toContain(SESSION_COOKIE);
+    expect(html).toContain('href="https://discord.com/terms/cookie-policy"');
+    expect(save).not.toHaveBeenCalled();
+    const admin = await (await app.request("/settings/api/site-admin/entries", { headers })).json();
+    const { title, content, position } = admin.entries.find((entry: DashboardSiteEntry) => entry.id === "cookies");
+    expect(
+      (
+        await app.request("/settings/api/site-admin/entries/cookies", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({ kind: "page", title, content, position, url: "", enabled: false }),
+        })
+      ).status,
+    ).toBe(200);
+    expect((await app.request("/settings/pages/cookies")).status).toBe(404);
+    const updated = await (await app.request("/settings/api/site")).json();
+    expect(updated.entries.some((entry: DashboardSiteEntry) => entry.id === "cookies")).toBe(false);
+  });
+
   it("keeps hidden content out of public navigation and direct URLs", async () => {
     const { app, seed } = setup();
-    seed([page(), page({ id: "cookies", enabled: false, content: "<p>unpublished</p>" })]);
+    seed([storedPage, { ...storedPage, id: "cookies", enabled: false, content: "<p>unpublished</p>" }]);
     const response = await app.request("/settings/api/site");
     expect(response.status).toBe(200);
     const payload = await response.json();
@@ -97,14 +131,14 @@ describe("dashboard public pages", () => {
 
   it("publishes, edits and hides a page without losing its content", async () => {
     const { app, headers } = setup(true);
-    const { id, ...payload } = page();
+    const { id } = storedPage;
     const noCsrf = { ...headers, "X-CSRF-Token": "incorrect" };
     expect(
       (
         await app.request(`/settings/api/site-admin/entries/${id}`, {
           method: "PUT",
           headers: noCsrf,
-          body: JSON.stringify(payload),
+          body: JSON.stringify(page),
         })
       ).status,
     ).toBe(403);
@@ -112,30 +146,31 @@ describe("dashboard public pages", () => {
       app.request(`/settings/api/site-admin/entries/${id}`, {
         method: "PUT",
         headers,
-        body: JSON.stringify({ ...payload, enabled }),
+        body: JSON.stringify({ ...page, enabled }),
       });
     expect((await write(true)).status).toBe(200);
     expect((await app.request(`/settings/pages/${id}`)).status).toBe(200);
     expect((await write(false)).status).toBe(200);
     expect((await app.request(`/settings/pages/${id}`)).status).toBe(404);
     const admin = await (await app.request("/settings/api/site-admin/entries", { headers })).json();
-    expect(admin.entries.find((entry: DashboardSiteEntry) => entry.id === id).content).toBe(payload.content);
+    expect(admin.entries.find((entry: DashboardSiteEntry) => entry.id === id).content).toBe(page.content);
   });
 
   it("rejects unsafe links and empty published pages without writing", async () => {
     const { save } = setup(true);
     const service = new DashboardSiteService();
-    const { id, ...payload } = page();
-    await expect(service.save(id, { ...payload, content: "<p><br></p>" })).rejects.toMatchObject({ status: 422 });
+    await expect(service.save(storedPage.id, { ...page, content: "<p><br></p>" })).rejects.toMatchObject({
+      status: 422,
+    });
     for (const url of [
       "javascript:alert(1)",
       "data:text/html,test",
       "https://user:secret@example.org",
       "//example.org",
     ]) {
-      await expect(
-        service.save("9bcd3efa-4408-4389-819a-93091ae8f0ec", { ...payload, kind: "link", url }),
-      ).rejects.toMatchObject({ status: 422 });
+      await expect(service.save("9bcd3efa-4408-4389-819a-93091ae8f0ec", { ...link, url })).rejects.toMatchObject({
+        status: 422,
+      });
     }
     expect(save).not.toHaveBeenCalled();
   });
@@ -154,18 +189,18 @@ describe("dashboard public pages", () => {
   it("creates and removes external links while keeping fixed pages", async () => {
     const { app, headers, remove } = setup(true);
     const id = "9bcd3efa-4408-4389-819a-93091ae8f0ec";
-    const { id: _pageId, ...payload } = page({ kind: "link", url: "https://example.org/support" });
     const response = await app.request(`/settings/api/site-admin/entries/${id}`, {
       method: "PUT",
       headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(link),
     });
     expect(response.status).toBe(200);
-    expect((await (await app.request("/settings/api/site")).json()).entries[0].url).toBe(payload.url);
+    expect((await (await app.request("/settings/api/site")).json()).entries[0].url).toBe(link.url);
     expect((await app.request(`/settings/api/site-admin/entries/${id}`, { method: "DELETE", headers })).status).toBe(
       200,
     );
-    expect((await (await app.request("/settings/api/site")).json()).entries).toHaveLength(0);
+    const remaining = await (await app.request("/settings/api/site")).json();
+    expect(remaining.entries.some((entry: DashboardSiteEntry) => entry.id === id)).toBe(false);
     expect((await app.request("/settings/api/site-admin/entries/imprint", { method: "DELETE", headers })).status).toBe(
       422,
     );

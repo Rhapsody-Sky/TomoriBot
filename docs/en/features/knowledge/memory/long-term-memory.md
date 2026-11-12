@@ -84,6 +84,9 @@ Server memories no longer use keyword tags. Their authored lore belongs in
 Server memories and documents can be limited to selected channels and their threads. Personal memories
 use a `#channel` tag. Lorebook entries also accept a channel selection.
 
+In the dashboard, open **Personas** > **Knowledge** > **Server Memory** to set channels when adding or
+editing a server memory. Restrictions take effect when **Channel-scoped memory** is enabled.
+
 Older server memory and document `#channel` tags were converted to channel selections. If a tagged
 channel no longer exists, the item remains active in every channel; `/memories` identifies these items
 so you can choose new channels.

@@ -9,6 +9,7 @@ import type { DashboardGuild, DashboardSession, DiscordOAuthGuild, DiscordOAuthU
 
 export const SESSION_COOKIE = "tomori_dashboard_session";
 export const OAUTH_STATE_COOKIE = "tomori_dashboard_oauth_state";
+export const OAUTH_STATE_TTL_SECONDS = 10 * 60;
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";

@@ -44,7 +44,7 @@ describe("dashboard memory requests", () => {
     const loadSource = await dashboardFunction("loadMemories");
 
     const state = { guildId: "1", memoryKind: "personal", lineageId: 1, memoryData: null as unknown };
-    let list = { innerHTML: "" };
+    let list = { innerHTML: "", closest: () => ({ querySelector: () => null }) };
     const pending: { resolve: (value: unknown) => void; reject: (reason: Error) => void }[] = [];
     const api = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
     let renders = 0;
@@ -64,7 +64,7 @@ describe("dashboard memory requests", () => {
     state.guildId = "2";
     state.memoryKind = "server";
     state.lineageId = 2;
-    list = { innerHTML: "" };
+    list = { innerHTML: "", closest: () => ({ querySelector: () => null }) };
     const firstRefresh = load();
     const latestRefresh = load();
     const latest = { memories: [{ id: 3 }] };
@@ -76,6 +76,24 @@ describe("dashboard memory requests", () => {
     expect(state.memoryData).toBe(latest);
     expect(renders).toBe(1);
     expect(list.innerHTML).not.toContain("stale error");
+  });
+
+  it("never widens a channel restriction by submitting an empty picker", async () => {
+    const source = await dashboardFunction("collectMemoryChannelPatch");
+    const collect = runInNewContext(`(${source})`, { ui: (key: string) => key }) as (form: unknown) => object;
+    const switchInput = { checked: true };
+    const current = "123456789012345679";
+    let selected = [{ value: current }];
+    const form = {
+      _memoryChannels: [current],
+      querySelector: () => switchInput,
+      querySelectorAll: () => selected,
+    };
+    expect(collect(form)).toEqual({});
+    selected = [];
+    expect(() => collect(form)).toThrow();
+    switchInput.checked = false;
+    expect(collect(form)).toEqual({ channelDiscIds: [] });
   });
 
   it("reports partial import failures and sends malformed entries for classification", async () => {

@@ -3,7 +3,12 @@ import { DEFAULT_HUMANIZER_SETTINGS } from "@/constants/humanizer";
 import { createHumanizerCheckboxGroups } from "@/utils/discord/humanizerOptions";
 import { NOTICE_VERBOSITY_LEVELS, TOOL_NOTICE_DEFINITIONS, TOOL_NOTICE_KEYS } from "@/constants/toolNotices";
 import { RESPONSE_REVIEW_ITEMS } from "@/constants/responseReview";
-import { responseReviewerPromptSchema, responseReviewItemsSchema, utcOffsetSchema } from "@/types/db/schema";
+import {
+  CooldownType,
+  responseReviewerPromptSchema,
+  responseReviewItemsSchema,
+  utcOffsetSchema,
+} from "@/types/db/schema";
 import { ASSISTANT_PREFILL_MAX_LENGTH } from "@/utils/chat/assistantPrefill";
 import { localizer } from "@/utils/text/localizer";
 import { MAX_MESSAGES_PER_CHANNEL } from "@/utils/cache/shortTermMemoryCache";
@@ -74,11 +79,19 @@ const snowflakeSchema = z.string().regex(/^\d{16,22}$/);
 const snowflakeArraySchema = z.array(snowflakeSchema).max(100);
 const tagsSchema = z.array(z.string().trim().min(1).max(120)).max(80);
 
+const RESPONSE_COOLDOWN_TYPES = [
+  CooldownType.OFF,
+  CooldownType.PER_USER,
+  CooldownType.PER_CHANNEL,
+  CooldownType.SERVER_WIDE,
+] as const;
+export const RESPONSE_COOLDOWN_MAX_SECONDS = 86_400;
+export const responseCooldownTypeSchema = z.literal(RESPONSE_COOLDOWN_TYPES);
+
 const modelBehaviorSchema = z
   .object({
     llm_temperature: z.number().min(0).max(2).optional(),
     thinking_level: z.enum(["auto", "none", "minimal", "low", "medium", "high"]).optional(),
-    hide_respond_embed: z.boolean().optional(),
   })
   .strict();
 
@@ -129,8 +142,8 @@ const triggersSchema = z
     deliberate_trigger_mode: z.boolean().optional(),
     deliberate_tool_mode: z.boolean().optional(),
     deliberate_tool_context_turns: z.number().int().min(0).max(10).nullable().optional(),
-    cooldown_type: z.number().int().min(0).max(5).optional(),
-    cooldown_length: z.number().int().min(0).max(86_400).optional(),
+    cooldown_type: responseCooldownTypeSchema.optional(),
+    cooldown_length: z.number().int().min(1).max(RESPONSE_COOLDOWN_MAX_SECONDS).optional(),
   })
   .strict();
 
@@ -170,7 +183,6 @@ const memberPermissionsSchema = z
     sampledialogue_memteaching_enabled: z.boolean().optional(),
     self_teaching_enabled: z.boolean().optional(),
     personal_memories_enabled: z.boolean().optional(),
-    hide_impersonation_embeds: z.boolean().optional(),
     prompt_snapshot_enabled: z.boolean().optional(),
   })
   .strict();
@@ -289,7 +301,6 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   update_nudge_override: localizer("en-US", "general.dashboard.stm_update_hint"),
   llm_temperature: "Controls response variety. Lower values are steadier; higher values are more creative.",
   thinking_level: "Sets the reasoning effort used by models that support adjustable thinking.",
-  hide_respond_embed: "Hides the technical response-details panel shown below Tomori's messages.",
   message_fetch_limit: "Number of recent Discord messages loaded as conversation context for each response.",
   send_message_limit: "Maximum number of separate Discord messages Tomori may send for one response.",
   match_limit: "Maximum number of personas whose trigger words may match a single incoming message.",
@@ -312,8 +323,8 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   deliberate_trigger_mode: "Requires explicit trigger intent and reduces accidental persona activations.",
   deliberate_tool_mode: "Makes tool use more deliberate instead of allowing tools whenever they seem useful.",
   deliberate_tool_context_turns: "Number of recent turns considered when deciding whether to use a tool.",
-  cooldown_type: "Chooses whether response cooldowns apply per user, channel, server, or command category.",
-  cooldown_length: "Minimum seconds required between responses in the selected cooldown scope.",
+  cooldown_type: localizer("en-US", "general.dashboard.response_cooldown_scope_hint"),
+  cooldown_length: localizer("en-US", "general.dashboard.response_cooldown_duration_hint"),
   tool_use_enabled: "Allows Tomori to call supported tools while preparing a response.",
   web_search_enabled: "Allows Tomori to search the web when current or external information is needed.",
   manage_message_enabled: "Allows supported tools to edit or remove Discord messages.",
@@ -340,7 +351,6 @@ const getSettingsFieldHints = (): Record<string, string> => ({
   sampledialogue_memteaching_enabled: "Lets regular members teach example dialogue for persona behavior.",
   self_teaching_enabled: "Allows Tomori to extract and store eligible memories from conversation by herself.",
   personal_memories_enabled: "Allows members to create and use private memories tied to their own account.",
-  hide_impersonation_embeds: "Hides the notice normally shown when Tomori writes in a member's voice.",
   prompt_snapshot_enabled: "Lets members inspect a sanitized snapshot of the prompt used for a response.",
   tool_notice_hidden_keys: "Checked notices stay hidden while their underlying tools continue to work.",
   memory_tagging_enabled: "Matches tagged personal memories against the conversation.",
@@ -442,7 +452,6 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
           { value: "high", label: "High" },
         ],
       },
-      toggle("hide_respond_embed", "Hide response details"),
     ],
   },
   {
@@ -512,18 +521,30 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
       number("deliberate_tool_context_turns", "Tool context turns", 0, 10, { nullable: true }),
       {
         key: "cooldown_type",
-        label: "Cooldown type",
+        label: localizer("en-US", "general.dashboard.interface_channel_cooldown_type"),
         type: "select",
         options: [
-          { value: 0, label: "None" },
-          { value: 1, label: "Per user" },
-          { value: 2, label: "Per channel" },
-          { value: 3, label: "Server-wide (admins exempt)" },
-          { value: 4, label: "Strict server-wide" },
-          { value: 5, label: "Per command category" },
+          { value: CooldownType.OFF, label: localizer("en-US", "general.dashboard.interface_channel_cooldown_off") },
+          {
+            value: CooldownType.PER_USER,
+            label: localizer("en-US", "general.dashboard.interface_channel_cooldown_user"),
+          },
+          {
+            value: CooldownType.PER_CHANNEL,
+            label: localizer("en-US", "general.dashboard.interface_channel_cooldown_channel"),
+          },
+          {
+            value: CooldownType.SERVER_WIDE,
+            label: localizer("en-US", "general.dashboard.interface_channel_cooldown_server"),
+          },
         ],
       },
-      number("cooldown_length", "Cooldown seconds", 0, 86_400),
+      number(
+        "cooldown_length",
+        localizer("en-US", "general.dashboard.response_cooldown_seconds"),
+        1,
+        RESPONSE_COOLDOWN_MAX_SECONDS,
+      ),
     ],
   },
   {
@@ -565,7 +586,6 @@ const getSettingsCatalogSource = (): SettingsSectionDefinition[] => [
       toggle("sampledialogue_memteaching_enabled", "Teach sample dialogue"),
       toggle("self_teaching_enabled", "Autonomous self-teaching"),
       toggle("personal_memories_enabled", "Use personal memories"),
-      toggle("hide_impersonation_embeds", "Hide impersonation notices"),
       toggle("prompt_snapshot_enabled", "Prompt snapshots"),
     ],
   },

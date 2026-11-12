@@ -14,6 +14,9 @@ import { DB_TESTS_AVAILABLE, executeTestSqlFile, setupTestDb, testSql } from "./
 const migration = "900_dashboard_site_entries";
 const up = resolve(`src/db/migrations/${migration}.sql`);
 const down = resolve(`src/db/migrations/${migration}.down.sql`);
+const visibilityMigration = "901_dashboard_link_visibility";
+const visibilityUp = resolve(`src/db/migrations/${visibilityMigration}.sql`);
+const visibilityDown = resolve(`src/db/migrations/${visibilityMigration}.down.sql`);
 const client = { application: { id: "123456789012345678" }, guilds: { cache: new Map() } } as unknown as Client;
 const page = {
   kind: "page" as const,
@@ -23,6 +26,7 @@ const page = {
   enabled: true,
   position: 2,
 };
+const storedPage = { id: "imprint", ...page, showOnLogin: false, showInSidebar: false };
 
 function authenticatedApp() {
   const { app, config } = createDashboardApp(client);
@@ -53,6 +57,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
   afterEach(async () => {
     mock.restore();
     await executeTestSqlFile(up);
+    await executeTestSqlFile(visibilityUp);
     await testSql`DELETE FROM dashboard_site_entries`;
     await runMigrations(testSql);
     await sql.close();
@@ -67,20 +72,20 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
     await sql.close();
     resetDatabaseConnection();
     await executeTestSqlFile(down);
-    await testSql`DELETE FROM schema_migrations WHERE name = ${migration}`;
+    await testSql`DELETE FROM schema_migrations WHERE name IN (${migration}, ${visibilityMigration})`;
     await initializeDatabase({ client: testSql, includeRag: false });
     expect(await marker()).toHaveLength(1);
 
-    await new DashboardSiteRepository().save({ id: "imprint", ...page });
+    await new DashboardSiteRepository().save(storedPage);
     await initializeDatabase({ client: testSql, includeRag: false });
     await sql.close();
     resetDatabaseConnection();
     expect(await marker()).toHaveLength(1);
-    expect(await new DashboardSiteRepository().list()).toEqual([{ id: "imprint", ...page }]);
+    expect(await new DashboardSiteRepository().list()).toEqual([storedPage]);
   }, 60_000);
 
   it("keeps existing entries when migrating and refuses a destructive rollback", async () => {
-    const stored = { id: "imprint", ...page, enabled: false };
+    const stored = { ...storedPage, enabled: false };
     await new DashboardSiteRepository().save(stored);
     await testSql`DELETE FROM schema_migrations WHERE name = ${migration}`;
     await runMigrations(testSql);
@@ -96,7 +101,34 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
     const [result] = await testSql`SELECT to_regclass('dashboard_site_entries') AS name`;
     expect(result.name).toBeNull();
     await executeTestSqlFile(up);
+    await executeTestSqlFile(visibilityUp);
     expect(await new DashboardSiteRepository().list()).toEqual([]);
+  });
+
+  it("preserves both placements for existing links and refuses to discard different placements", async () => {
+    await executeTestSqlFile(visibilityDown);
+    await testSql`DELETE FROM schema_migrations WHERE name = ${visibilityMigration}`;
+    const enabledId = randomUUID();
+    const hiddenId = randomUUID();
+    await testSql`
+      INSERT INTO dashboard_site_entries (id, kind, title, url, enabled)
+      VALUES (${enabledId}, 'link', 'Support', 'https://example.org/support', true),
+             (${hiddenId}, 'link', 'Docs', 'https://example.org/docs', false)
+    `;
+    await runMigrations(testSql);
+    const repo = new DashboardSiteRepository();
+    const entries = await repo.list();
+    const enabled = entries.find((entry) => entry.id === enabledId);
+    expect(enabled).toMatchObject({ showOnLogin: true, showInSidebar: true });
+    expect(entries.find((entry) => entry.id === hiddenId)).toMatchObject({ showOnLogin: false, showInSidebar: false });
+    if (!enabled) throw new Error("Missing migrated link");
+    await repo.save({ ...enabled, showOnLogin: false });
+    await executeTestSqlFile(visibilityUp);
+    await expect(executeTestSqlFile(visibilityDown)).rejects.toMatchObject({ errno: "P0001" });
+    expect((await repo.list()).find((entry) => entry.id === enabledId)).toMatchObject({
+      showOnLogin: false,
+      showInSidebar: true,
+    });
   });
 
   it("persists HTTP edits and hides public pages after reconnecting without deleting their drafts", async () => {
@@ -108,7 +140,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
         body: JSON.stringify(payload),
       });
     expect((await write(page)).status).toBe(200);
-    expect(await new DashboardSiteRepository().list()).toEqual([{ id: "imprint", ...page }]);
+    expect(await new DashboardSiteRepository().list()).toEqual([storedPage]);
     const edited = { ...page, content: "<p><strong>Updated content</strong></p>", title: "Updated information" };
     expect((await write(edited)).status).toBe(200);
     await sql.close();
@@ -118,14 +150,15 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
     expect(publicPage.status).toBe(200);
     expect(await publicPage.text()).toContain(edited.content);
     const navigation = await (await reopened.request("/settings/api/site")).json();
-    expect(navigation.entries.map((entry: { id: string }) => entry.id)).toEqual(["imprint"]);
+    expect(navigation.entries.some((entry: { id: string }) => entry.id === "imprint")).toBe(true);
 
     expect((await write({ ...edited, enabled: false })).status).toBe(200);
     await sql.close();
     resetDatabaseConnection();
     expect((await reopened.request("/settings/pages/imprint")).status).toBe(404);
-    expect((await (await reopened.request("/settings/api/site")).json()).entries).toEqual([]);
-    expect(await new DashboardSiteRepository().list()).toEqual([{ id: "imprint", ...edited, enabled: false }]);
+    const afterHide = await (await reopened.request("/settings/api/site")).json();
+    expect(afterHide.entries.some((entry: { id: string }) => entry.id === "imprint")).toBe(false);
+    expect(await new DashboardSiteRepository().list()).toEqual([{ ...storedPage, ...edited, enabled: false }]);
     const admin = await (await app.request("/settings/api/site-admin/entries", { headers })).json();
     expect(admin.entries.find((entry: { id: string }) => entry.id === "imprint").content).toBe(edited.content);
     expect((await write(edited)).status).toBe(200);
@@ -135,7 +168,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
   it("persists external link visibility, ordering and deletion through the HTTP routes", async () => {
     const { app, headers } = authenticatedApp();
     const id = randomUUID();
-    const link = { ...page, kind: "link", content: "", url: "https://example.org/support", position: 0 };
+    const link = { kind: "link", title: "Support", content: "", url: "https://example.org/support", position: 0 };
     const write = (entryId: string, payload: object) =>
       app.request(`/settings/api/site-admin/entries/${entryId}`, {
         method: "PUT",
@@ -143,17 +176,32 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("dashboard site PostgreSQL integration", ()
         body: JSON.stringify(payload),
       });
     expect((await write("imprint", page)).status).toBe(200);
-    expect((await write(id, link)).status).toBe(200);
-    const listed = await (await app.request("/settings/api/site")).json();
-    expect(listed.entries.map((entry: { id: string }) => entry.id)).toEqual([id, "imprint"]);
-    expect((await write(id, { ...link, enabled: false })).status).toBe(200);
-    expect(
-      (await (await app.request("/settings/api/site")).json()).entries.map((entry: { id: string }) => entry.id),
-    ).toEqual(["imprint"]);
-    expect((await new DashboardSiteRepository().list()).find((entry) => entry.id === id)?.enabled).toBe(false);
+    for (const [showOnLogin, showInSidebar] of [
+      [true, true],
+      [false, true],
+      [true, false],
+      [false, false],
+    ]) {
+      const visibility = { showOnLogin, showInSidebar };
+      expect((await write(id, { ...link, ...visibility })).status).toBe(200);
+      await sql.close();
+      resetDatabaseConnection();
+      const { app: reopened } = createDashboardApp(client);
+      const publicSite = await (await reopened.request("/settings/api/site")).json();
+      const ordered = publicSite.entries.map((entry: { id: string }) => entry.id);
+      expect(ordered.includes(id)).toBe(showOnLogin);
+      if (showOnLogin) expect(ordered.indexOf(id)).toBeLessThan(ordered.indexOf("imprint"));
+      const publicPage = await (await reopened.request("/settings/pages/imprint")).text();
+      expect(publicPage.includes(link.url)).toBe(showOnLogin);
+      const signedIn = await (await reopened.request("/settings/api/site", { headers })).json();
+      const signedInLink = signedIn.entries.find((entry: { id: string }) => entry.id === id);
+      if (showOnLogin || showInSidebar) expect(signedInLink).toMatchObject(visibility);
+      else expect(signedInLink).toBeUndefined();
+      expect((await new DashboardSiteRepository().list()).find((entry) => entry.id === id)).toMatchObject(visibility);
+    }
     expect((await app.request(`/settings/api/site-admin/entries/${id}`, { method: "DELETE", headers })).status).toBe(
       200,
     );
-    expect(await new DashboardSiteRepository().list()).toEqual([{ id: "imprint", ...page }]);
+    expect(await new DashboardSiteRepository().list()).toEqual([storedPage]);
   });
 });

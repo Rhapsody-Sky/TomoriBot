@@ -7,9 +7,10 @@ Logit bias modifies token sampling probabilities by injecting numeric bias adjus
 
 ## Configuration surface
 
-Logit bias is configured via the interactive interface in `/config` > Models > Text Samplers & Parameters > Logit Bias:
+Configure logit bias in `/config` > `Models` > `Text Samplers & Parameters` >
+`Logit Bias`, or in the dashboard under `Server settings` > `Models & sampling`.
 
-- Supports adding individual terms, removing terms, or uploading bulk JSON/YAML definitions.
+- Add or remove individual terms, or import a JSON list of text and value pairs.
 - Accepts plain text strings (such as `sorry, hello`) paired with numeric bias values (such as `-100`), as well as explicit numeric token IDs.
 
 ## Source of truth and tokenization caching
@@ -32,7 +33,7 @@ Storage locations:
 
 Tokenizer caches are refreshed when entries are modified or when the active model changes:
 
-- Adding or uploading entries in `/config` > Models > Text Samplers & Parameters.
+- Adding or importing entries in Discord or the dashboard.
 - Switching models in `/config` > Models.
 - Activating a saved provider via `/config provider switch` or `/personal config`.
 

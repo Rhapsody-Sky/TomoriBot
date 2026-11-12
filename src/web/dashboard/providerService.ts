@@ -5,7 +5,22 @@ import type {
   PersonalProviderCapability,
 } from "@/types/db/schema";
 import { z } from "zod";
+import { personalConfigOperations } from "@/utils/discord/interactions/personalConfigOperations";
+import { QUICK_TOGGLE_CAPABILITIES, ROUTING_CAPABILITY_LOCALE_KEYS } from "@/utils/discord/personalConfigPanelCatalog";
+import { offeredChatCompatFlags } from "@/utils/discord/ui/providersPanel";
+import { invalidateUserCache } from "@/utils/cache/userCache";
+import { llmProviderRepo, toolRepository } from "@/utils/db/repositories";
+import { readImageEndpointSupports } from "@/utils/provider/customImageEndpointSupport";
 import { buildCustomProviderName } from "@/utils/provider/customProviderUtils";
+import { registerCustomEndpoint } from "@/utils/provider/customEndpointService";
+import {
+  readSpeechEndpointSettings,
+  SPEECH_SCRIPT_MARKUPS,
+  SPEECH_VOICE_MODES,
+} from "@/utils/provider/customSpeechEndpointSettings";
+import { findProviderOption, findProviderOptionByActiveProvider } from "@/utils/provider/providerOptionRegistry";
+import { providerPanelOperations } from "@/utils/provider/providerPanelOperations";
+import { IMPORT_LIMITS } from "@/utils/security/rateLimiter";
 import { localizer } from "@/utils/text/localizer";
 import type {
   DashboardCustomEndpointInput,
@@ -14,6 +29,7 @@ import type {
   TomoriDashboardCore,
 } from "./core";
 import { DashboardServiceError } from "./errors";
+import { loadAdvancedServerModels } from "./serverModelService";
 import type { DashboardActor, DashboardGuildSnapshot } from "./types";
 
 const providerNameSchema = z.string().trim().toLowerCase().min(1).max(120);
@@ -31,6 +47,9 @@ const capabilitySchema = z.enum([
 const openRouterCapabilitySchema = z.enum(["text", "embedding", "image", "video", "decision"]);
 const personalModelSchema = z
   .object({ capability: capabilitySchema, provider: providerNameSchema, modelId: z.number().int().positive() })
+  .strict();
+const personalCapabilityToggleSchema = z
+  .object({ capability: z.enum(QUICK_TOGGLE_CAPABILITIES), enabled: z.boolean() })
   .strict();
 const personalParametersSchema = z
   .object({
@@ -95,6 +114,55 @@ const customEndpointSchema = z
     supportsPrefixCompletion: z.boolean().default(false),
   })
   .strict();
+
+const editConnectionSchema = z.strictObject({
+  label: z.string().trim().min(1).max(40).optional(),
+  endpointUrl: z
+    .string()
+    .trim()
+    .max(500)
+    .pipe(z.url({ protocol: /^https?$/ }))
+    .optional(),
+  authToken: z.string().trim().max(500).optional(),
+  unloadDuringComfyUi: z.boolean().optional(),
+});
+
+const rotationSchema = z.discriminatedUnion("action", [
+  z.strictObject({ action: z.literal("add"), key: providerCredentialSchema.shape.apiKey }),
+  z.strictObject({ action: z.literal("clear") }),
+]);
+
+export const ENDPOINT_WORKFLOW_MAX_BYTES = IMPORT_LIMITS.MAX_DATA_IMPORT_SIZE_MB * 1024 * 1024;
+const endpointModelFlags = z.strictObject({
+  hasTools: z.boolean(),
+  seesImages: z.boolean(),
+  seesVideos: z.boolean(),
+  supportsStructOutput: z.boolean(),
+  strictRoleAlternation: z.boolean(),
+  supportsPrefixCompletion: z.boolean(),
+  supportsAssistantPrefill: z.boolean(),
+  verbatimToolCalling: z.boolean(),
+});
+const endpointModelSchema = z.strictObject({
+  codeName: z.string().trim().min(1).max(200).optional(),
+  numCtx: z.number().int().min(512).max(10_000_000).nullable().optional(),
+  flags: endpointModelFlags.partial().optional(),
+  imageSupports: z
+    .array(z.enum(["txt2img", "img2img", "inpaint", "negative_prompt"]))
+    .max(4)
+    .optional(),
+  voiceMode: z.enum(SPEECH_VOICE_MODES).optional(),
+  scriptMarkup: z.enum(SPEECH_SCRIPT_MARKUPS).optional(),
+  supportsInstruct: z.boolean().optional(),
+  workflow: z
+    .record(z.string(), z.unknown())
+    .refine((value) => Object.keys(value).length > 0)
+    .optional(),
+});
+
+function connectionError(code: string, status: DashboardServiceError["status"], key = `general.dashboard.${code}`) {
+  return new DashboardServiceError(code, status, localizer("en-US", key));
+}
 
 const openRouterSchema = z
   .object({
@@ -189,6 +257,7 @@ function serializeEndpoint(row: {
 }) {
   return {
     id: row.custom_endpoint_id ?? 0,
+    connectionId: row.connection_id,
     provider: buildCustomProviderName(row.connection_id),
     label: row.label,
     capability: row.capability,
@@ -261,29 +330,49 @@ export class DashboardProviderService {
       openRouterModels,
       byokRequired: snapshot.config.user_byok_mode === true,
       models,
+      quickCapabilities: QUICK_TOGGLE_CAPABILITIES,
       parameters,
       ...fallbacks,
     };
   }
 
   async loadServerWorkspace(snapshot: DashboardGuildSnapshot) {
-    const [providers, endpoints, openRouterModels, fallbackOptions, models, parameters] = await Promise.all([
-      this.core.loadServerProviderConfigs(snapshot.serverId),
-      this.core.loadServerCustomEndpoints(snapshot.serverId),
-      this.core.loadServerOpenRouterModels(snapshot.serverId),
-      this.core.loadServerFallbackOptions(snapshot),
-      this.core.loadServerModelWorkspace(snapshot),
-      this.core.loadServerProviderParameters(snapshot.serverId),
-    ]);
+    const [providers, endpoints, openRouterModels, fallbackOptions, models, parameters, advancedModels, brave] =
+      await Promise.all([
+        this.core.loadServerProviderConfigs(snapshot.serverId),
+        this.core.loadServerCustomEndpoints(snapshot.serverId),
+        this.core.loadServerOpenRouterModels(snapshot.serverId),
+        this.core.loadServerFallbackOptions(snapshot),
+        this.core.loadServerModelWorkspace(snapshot),
+        this.core.loadServerProviderParameters(snapshot.serverId),
+        loadAdvancedServerModels(snapshot),
+        toolRepository.getBraveApiKeyStatusResult(snapshot.serverId),
+      ]);
+    const state = snapshot.rawPersonas.find((persona) => !persona.is_alter);
+    const catalogProvider = state?.llm.llm_provider.toLowerCase();
+    const activeTextProvider =
+      state && catalogProvider
+        ? (findProviderOptionByActiveProvider(
+            catalogProvider,
+            { kind: "server", ownerId: snapshot.serverId, state },
+            "text",
+          )?.value ?? catalogProvider)
+        : null;
     return {
-      choices: this.core.getProviderChoices(),
-      providers: providers.map((row) => serializeProvider(row, this.core.getProviderDisplayName(row.provider))),
+      choices: [...this.core.getProviderChoices(), { value: "brave", name: "Brave Search" }],
+      providers: providers.map((row) => ({
+        ...serializeProvider(row, this.core.getProviderDisplayName(row.provider)),
+        supportsRotation: !row.provider.startsWith("custom:") && !findProviderOption(row.provider),
+      })),
+      braveSearchConfigured: brave.configured,
       endpoints: endpoints.map(serializeEndpoint),
       openRouterModels,
       fallbackOptions,
       fallbackRefs: snapshot.config.fallback_model_refs ?? [],
       primaryModelId: snapshot.config.llm_id,
+      activeTextProvider,
       models,
+      advancedModels,
       parameters,
     };
   }
@@ -314,6 +403,20 @@ export class DashboardProviderService {
     value: unknown,
   ): Promise<void> {
     const parsed = providerCredentialSchema.safeParse(value);
+    if (parsed.success && scope === "server" && parsed.data.provider === "brave") {
+      const state = snapshot.rawPersonas.find((persona) => !persona.is_alter);
+      if (!state) throw connectionError("provider_credentials_unavailable", 503);
+      const result = await providerPanelOperations.addServerProvider({
+        state,
+        serverDiscId: snapshot.serverDiscordId,
+        provider: "brave",
+        apiKey: parsed.data.apiKey,
+      });
+      if (result.status === "success") return;
+      if (result.status === "validation-failed" || result.status === "invalid-key")
+        throw connectionError("provider_key_rejected", 422);
+      throw connectionError("provider_credentials_failed", 500);
+    }
     if (!parsed.success || !this.core.getProviderChoices().some((choice) => choice.value === parsed.data.provider)) {
       throw new DashboardServiceError("invalid_provider", 422, "The provider credential is invalid.");
     }
@@ -335,6 +438,41 @@ export class DashboardProviderService {
         "The key could not be validated or the provider could not be saved.",
       );
     }
+  }
+
+  async togglePersonalCapability(actor: DashboardActor, value: unknown) {
+    const parsed = personalCapabilityToggleSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new DashboardServiceError(
+        "invalid_personal_capability",
+        422,
+        localizer("en-US", "general.dashboard.quick_capability_invalid"),
+      );
+    }
+    const { capability, enabled } = parsed.data;
+    const result = await personalConfigOperations.setCapabilityEnabled({
+      userId: actor.user.user_id,
+      userDiscId: actor.discordId,
+      capability,
+      enabled,
+    });
+    if (result.status === "missing-model") {
+      throw new DashboardServiceError(
+        "personal_capability_missing_model",
+        422,
+        localizer("en-US", "commands.personal.config.missing_model_detail", {
+          capability: localizer("en-US", ROUTING_CAPABILITY_LOCALE_KEYS[capability]),
+        }),
+      );
+    }
+    if (result.status === "write-failed") {
+      throw new DashboardServiceError(
+        "personal_capability_write_failed",
+        500,
+        localizer("en-US", "general.dashboard.quick_capability_failed"),
+      );
+    }
+    return { enabled };
   }
 
   async setPersonalCapability(actor: DashboardActor, provider: string, value: unknown): Promise<void> {
@@ -408,6 +546,84 @@ export class DashboardProviderService {
     }
   }
 
+  async removeServerProvider(snapshot: DashboardGuildSnapshot, provider: string) {
+    const parsed = providerNameSchema.safeParse(provider);
+    if (!parsed.success) throw connectionError("server_provider_remove_not_found", 404);
+    const state = snapshot.rawPersonas.find((persona) => !persona.is_alter);
+    const panel = await providerPanelOperations.loadServerProviderPanelScope(snapshot.serverDiscordId);
+    if (!state || !panel || panel.data.readStatus !== "fresh")
+      throw connectionError("server_provider_remove_unavailable", 503);
+    if (panel.scopeKind === "personal" || panel.state.server_id !== snapshot.serverId)
+      throw connectionError("server_provider_remove_not_found", 404);
+    const entry = panel.data.entries.find((entry) =>
+      parsed.data === "brave" ? entry.kind === "brave" : entry.kind === "provider" && entry.provider === parsed.data,
+    );
+    if (!entry) throw connectionError("server_provider_remove_not_found", 404);
+    const result = await providerPanelOperations.removeServerProviderEntry({
+      ...panel,
+      state,
+      serverDiscId: snapshot.serverDiscordId,
+      entry,
+    });
+    switch (result.status) {
+      case "success":
+        return { deleted: true };
+      case "active":
+        throw connectionError("provider_active", 409, "commands.providers.remove_active");
+      case "not-found":
+        throw connectionError("server_provider_remove_not_found", 404);
+      case "write-failed":
+        throw connectionError("server_provider_remove_failed", 500);
+    }
+  }
+
+  private async loadRotationEntry(snapshot: DashboardGuildSnapshot, provider: string) {
+    const parsed = providerNameSchema.safeParse(provider);
+    if (!parsed.success || findProviderOption(parsed.data)) throw connectionError("rotation_not_found", 404);
+    const panel = await providerPanelOperations.loadServerProviderPanelScope(snapshot.serverDiscordId);
+    if (!panel || panel.data.readStatus !== "fresh") throw connectionError("provider_credentials_unavailable", 503);
+    if (panel.scopeKind === "personal" || panel.state.server_id !== snapshot.serverId)
+      throw connectionError("rotation_not_found", 404);
+    const entry = panel.data.entries.find((entry) => entry.kind === "provider" && entry.provider === parsed.data);
+    if (entry?.kind !== "provider") throw connectionError("rotation_not_found", 404);
+    return { panel, entry };
+  }
+
+  async loadRotationKeys(snapshot: DashboardGuildSnapshot, provider: string) {
+    const { entry } = await this.loadRotationEntry(snapshot, provider);
+    return { name: entry.displayName, count: entry.rotationKeyCount };
+  }
+
+  async updateRotationKeys(snapshot: DashboardGuildSnapshot, provider: string, value: unknown) {
+    const parsed = rotationSchema.safeParse(value);
+    if (!parsed.success) throw connectionError("rotation_invalid", 422);
+    const { panel, entry } = await this.loadRotationEntry(snapshot, provider);
+    const result = await providerPanelOperations.editServerProvider({
+      ...panel,
+      serverDiscId: snapshot.serverDiscordId,
+      provider: entry.provider,
+      apiKey: "",
+      rotationKey: parsed.data.action === "add" ? parsed.data.key : "",
+      deleteRotationKeys: parsed.data.action === "clear",
+    });
+    switch (result.status) {
+      case "success":
+      case "unchanged":
+        return { updated: result.status === "success" };
+      case "not-found":
+        throw connectionError("rotation_not_found", 404);
+      case "invalid-key":
+      case "validation-failed":
+        throw connectionError("provider_key_rejected", 422);
+      case "novelai-unavailable":
+        throw connectionError("provider_key_rejected", 422, result.descriptionKey);
+      case "invalid-combination":
+        throw connectionError("rotation_invalid", 422);
+      case "write-failed":
+        throw connectionError("provider_credentials_failed", 500);
+    }
+  }
+
   async registerEndpoint(
     scopeKind: "personal" | "server",
     actor: DashboardActor,
@@ -447,6 +663,258 @@ export class DashboardProviderService {
     if (!(await this.core.removeDashboardCustomEndpoint(this.scope(scopeKind, actor, snapshot), endpoint))) {
       throw new DashboardServiceError("endpoint_delete_failed", 500, "The endpoint was not removed.");
     }
+  }
+
+  private async loadConnectionEntry(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+  ) {
+    const panel =
+      scope === "personal"
+        ? await providerPanelOperations.loadPersonalProviderPanelScope(actor.discordId, snapshot.serverDiscordId)
+        : await providerPanelOperations.loadServerProviderPanelScope(snapshot.serverDiscordId);
+    if (!panel || panel.data.readStatus !== "fresh") throw connectionError("endpoint_edit_unavailable", 503);
+    if (
+      scope === "personal"
+        ? panel.scopeKind !== "personal" || panel.ownerId !== actor.user.user_id
+        : panel.scopeKind === "personal" || panel.state.server_id !== snapshot.serverId
+    )
+      throw connectionError("endpoint_edit_not_found", 404);
+    const entry = panel.data.entries.find(
+      (candidate) => candidate.kind === "endpoint" && candidate.connectionIds.includes(connectionId),
+    );
+    if (entry?.kind !== "endpoint") throw connectionError("endpoint_edit_not_found", 404);
+    const textConnections = entry.connectionDetails.filter((detail) => detail.capability === "text");
+    const unloadDuringComfyUi =
+      !entry.isPreset && textConnections.length
+        ? textConnections.some((detail) => detail.vramHandoff !== null)
+        : undefined;
+    return { panel, entry, unloadDuringComfyUi };
+  }
+
+  async loadConnectionEditor(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+  ) {
+    const { entry, unloadDuringComfyUi } = await this.loadConnectionEntry(scope, actor, snapshot, connectionId);
+    return {
+      label: entry.displayName,
+      endpointUrl: entry.connectionDetails[0]?.endpointUrl ?? "",
+      isPreset: entry.isPreset,
+      unloadDuringComfyUi,
+    };
+  }
+
+  async editConnection(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+    value: unknown,
+  ) {
+    const parsed = editConnectionSchema.safeParse(value);
+    if (!parsed.success) throw connectionError("endpoint_edit_invalid", 422);
+    const { panel, entry, unloadDuringComfyUi } = await this.loadConnectionEntry(scope, actor, snapshot, connectionId);
+    const patch = parsed.data;
+    if (
+      (entry.isPreset && (patch.label !== undefined || patch.endpointUrl !== undefined)) ||
+      (unloadDuringComfyUi === undefined && patch.unloadDuringComfyUi !== undefined)
+    )
+      throw connectionError("endpoint_edit_changed", 409);
+    const result = await providerPanelOperations.editServerEndpoint({
+      ...panel,
+      serverDiscId: snapshot.serverDiscordId,
+      entryId: entry.id,
+      label: patch.label ?? entry.displayName,
+      endpointUrl: patch.endpointUrl ?? "",
+      authToken: patch.authToken ?? "",
+      unloadDuringComfyUi: patch.unloadDuringComfyUi ?? (patch.endpointUrl ? unloadDuringComfyUi : undefined),
+    });
+    switch (result.status) {
+      case "success":
+        if (scope === "personal") invalidateUserCache(actor.discordId);
+        return { updated: true };
+      case "unchanged":
+        return { updated: false };
+      case "not-found":
+        throw connectionError("endpoint_edit_not_found", 404);
+      case "invalid-label":
+        throw connectionError("endpoint_edit_invalid", 422, "commands.providers.endpoint_invalid_label");
+      case "handoff-unsupported":
+        throw connectionError(
+          "endpoint_edit_handoff_unsupported",
+          422,
+          "commands.providers.endpoint_behavior_unsupported",
+        );
+      case "unreachable":
+        throw result.credentialsWithheld
+          ? connectionError(
+              "endpoint_edit_credentials_withheld",
+              422,
+              "commands.providers.endpoint_redirect_credentials_withheld",
+            )
+          : connectionError("endpoint_edit_unreachable", 422);
+      case "write-failed":
+        throw connectionError("endpoint_edit_failed", 500);
+    }
+  }
+
+  private async loadEndpointModel(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+    endpointId: number,
+  ) {
+    const { panel, entry } = await this.loadConnectionEntry(scope, actor, snapshot, connectionId);
+    const [row] = await llmProviderRepo.loadCustomEndpointsByIds([endpointId]);
+    if (
+      !row ||
+      row.connection_id !== connectionId ||
+      row.capability === "transcription" ||
+      (scope === "personal"
+        ? row.user_id !== actor.user.user_id || row.server_id != null
+        : row.server_id !== snapshot.serverId || row.user_id != null)
+    )
+      throw connectionError("endpoint_model_not_found", 404);
+    const compat = offeredChatCompatFlags("endpoint", entry.id);
+    const flags =
+      row.capability === "text"
+        ? {
+            hasTools: row.has_tools,
+            seesImages: row.sees_images,
+            seesVideos: row.sees_videos,
+            supportsStructOutput: row.supports_structoutput,
+            ...(compat.includes("strict-roles") ? { strictRoleAlternation: row.strict_role_alternation } : {}),
+            ...(compat.includes("prefix") ? { supportsPrefixCompletion: row.supports_prefix_completion } : {}),
+            ...(compat.includes("prefill") ? { supportsAssistantPrefill: row.supports_assistant_prefill } : {}),
+            ...(compat.includes("verbatim-tools") ? { verbatimToolCalling: row.verbatim_tool_calling } : {}),
+          }
+        : null;
+    const editor = {
+      connectionName: entry.displayName,
+      capability: row.capability,
+      codeName: row.capability === "speech" ? null : row.model_name || row.label,
+      numCtx: row.num_ctx ?? null,
+      flags,
+      imageSupports: row.capability === "image" ? readImageEndpointSupports(row) : null,
+      speech: row.capability === "speech" ? readSpeechEndpointSettings(row) : null,
+      allowVoiceMode: row.api_style === "tts-clone",
+      allowInpaint: row.api_style === "comfyui",
+      workflowMaxBytes:
+        row.api_style === "comfyui" && (row.capability === "image" || row.capability === "video")
+          ? ENDPOINT_WORKFLOW_MAX_BYTES
+          : null,
+    };
+    return { panel, entry, row, editor };
+  }
+
+  async loadEndpointModelEditor(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+    endpointId: number,
+  ) {
+    return (await this.loadEndpointModel(scope, actor, snapshot, connectionId, endpointId)).editor;
+  }
+
+  async editEndpointModel(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+    endpointId: number,
+    value: unknown,
+  ) {
+    const parsed = endpointModelSchema.safeParse(value);
+    if (!parsed.success || !Object.keys(parsed.data).length) throw connectionError("endpoint_model_invalid", 422);
+    const { panel, entry, row, editor } = await this.loadEndpointModel(
+      scope,
+      actor,
+      snapshot,
+      connectionId,
+      endpointId,
+    );
+    const patch = parsed.data;
+    if (
+      (patch.codeName !== undefined && editor.codeName === null) ||
+      (patch.numCtx !== undefined && row.capability !== "text" && row.capability !== "decision") ||
+      (row.capability === "decision" && patch.numCtx === null) ||
+      (patch.flags && Object.keys(patch.flags).some((key) => !editor.flags || !Object.hasOwn(editor.flags, key))) ||
+      (patch.imageSupports &&
+        (!editor.imageSupports || (!editor.allowInpaint && patch.imageSupports.includes("inpaint")))) ||
+      (patch.scriptMarkup !== undefined && !editor.speech) ||
+      ((patch.voiceMode !== undefined || patch.supportsInstruct !== undefined) &&
+        (!editor.speech || !editor.allowVoiceMode)) ||
+      (patch.workflow &&
+        (!editor.workflowMaxBytes || Buffer.byteLength(JSON.stringify(patch.workflow)) > editor.workflowMaxBytes))
+    )
+      throw connectionError("endpoint_model_invalid", 422);
+    const numCtx = patch.numCtx === undefined ? editor.numCtx : patch.numCtx;
+    if (row.capability === "text") {
+      // The Discord panel adapter omits video support when it delegates to the endpoint writer.
+      const updated = await registerCustomEndpoint({
+        scope:
+          panel.scopeKind === "personal"
+            ? { kind: "personal", ownerId: actor.user.user_id, baseConfig: panel.state?.config }
+            : {
+                kind: "server",
+                ownerId: snapshot.serverId,
+                baseConfig: panel.state.config,
+                serverDiscId: snapshot.serverDiscordId,
+              },
+        label: row.label,
+        capability: "text",
+        apiStyle: row.api_style,
+        endpointUrl: row.endpoint_url,
+        modelName: patch.codeName ?? row.model_name,
+        numCtx,
+        extraConfig: row.extra_config,
+        hasTools: row.has_tools,
+        seesImages: row.sees_images,
+        seesVideos: row.sees_videos,
+        supportsStructOutput: row.supports_structoutput,
+        strictRoleAlternation: row.strict_role_alternation,
+        supportsPrefixCompletion: row.supports_prefix_completion,
+        supportsAssistantPrefill: row.supports_assistant_prefill,
+        verbatimToolCalling: row.verbatim_tool_calling,
+        ...patch.flags,
+        editingEndpointId: endpointId,
+      });
+      if (!updated) throw connectionError("endpoint_model_failed", 422);
+    } else {
+      const id = row.capability === "speech" ? endpointId : row.model_ref_id;
+      if (!id) throw connectionError("endpoint_model_not_found", 404);
+      const result = await providerPanelOperations.saveProviderModel({
+        ...panel,
+        serverDiscId: snapshot.serverDiscordId,
+        entryId: entry.id,
+        editingModelId: id,
+        capability: row.capability,
+        codeName: patch.codeName ?? editor.codeName ?? row.label,
+        numCtx,
+        imageSupportValues:
+          patch.imageSupports ??
+          (editor.imageSupports
+            ? Object.entries(editor.imageSupports)
+                .filter(([, enabled]) => enabled)
+                .map(([key]) => key)
+            : undefined),
+        speechVoiceMode: patch.voiceMode ?? editor.speech?.voiceMode,
+        speechScriptMarkup: patch.scriptMarkup ?? editor.speech?.scriptMarkup,
+        speechInstructValues: (patch.supportsInstruct ?? editor.speech?.supportsInstruct) ? ["supports-instruct"] : [],
+        workflow: patch.workflow,
+      });
+      if (result.status === "not-found") throw connectionError("endpoint_model_not_found", 404);
+      if (result.status !== "success") throw connectionError("endpoint_model_failed", 422);
+    }
+    if (scope === "personal") invalidateUserCache(actor.discordId);
+    return { updated: true };
   }
 
   async registerOpenRouter(

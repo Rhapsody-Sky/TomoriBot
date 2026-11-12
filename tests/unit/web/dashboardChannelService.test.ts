@@ -173,15 +173,21 @@ describe("dashboard channel settings", () => {
     expect(s.autochat).not.toHaveBeenCalled();
   });
 
-  it("preserves a cooldown when allowlisting and resets it explicitly", async () => {
+  it("preserves a legacy cooldown when allowlisting and only accepts supported scopes for new overrides", async () => {
     const s = setup();
-    s.read.mockResolvedValue([{ channel_disc_id: "a", cooldown_type: 2, cooldown_length: 12 }] as Awaited<
+    s.read.mockResolvedValue([{ channel_disc_id: "a", cooldown_type: 4, cooldown_length: 12 }] as Awaited<
       ReturnType<typeof whitelistRepository.getAllWhitelistChannels>
     >);
+    await expect(
+      s.service.patch(snapshot, { channelIds: ["a"], patch: { cooldown: { type: 4, seconds: 10 } } }, available),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(s.channels).not.toHaveBeenCalled();
     await s.service.patch(snapshot, { channelIds: ["a"], patch: { allowlisted: true } }, available);
     await s.service.patch(snapshot, { channelIds: ["a"], patch: { cooldown: null } }, available);
-    expect(s.channels.mock.calls[0]?.[1]).toEqual([{ channelId: "a", cooldownType: 2, cooldownLength: 12 }]);
+    expect(s.channels.mock.calls[0]?.[1]).toEqual([{ channelId: "a", cooldownType: 4, cooldownLength: 12 }]);
     expect(s.channels.mock.calls[1]?.[1]).toEqual([{ channelId: "a", cooldownType: null, cooldownLength: null }]);
+    await s.service.patch(snapshot, { channelIds: ["a"], patch: { cooldown: { type: 2, seconds: 0 } } }, available);
+    expect(s.channels).toHaveBeenLastCalledWith(42, [{ channelId: "a", cooldownType: 2, cooldownLength: 0 }]);
     await expect(
       s.service.patch(snapshot, { channelIds: ["b"], patch: { cooldown: { type: 1, seconds: 5 } } }, available),
     ).rejects.toMatchObject({ status: 422 });

@@ -13,6 +13,7 @@ import { setTextModelOverride } from "@/utils/discord/interactions/textModelOver
 import { CONTEXT_NOTE_DEPTH_MAX, CONTEXT_NOTE_MAX_LENGTH } from "@/utils/discord/contextNoteOptions";
 import { log } from "@/utils/misc/logger";
 import { DashboardServiceError } from "./errors";
+import { RESPONSE_COOLDOWN_MAX_SECONDS, responseCooldownTypeSchema } from "./settingsCatalog";
 import type { TomoriDashboardCore } from "./core";
 import type { DashboardGuildSnapshot } from "./types";
 
@@ -37,7 +38,10 @@ const patchSchema = z
           .optional(),
         allowlisted: z.boolean().optional(),
         cooldown: z
-          .object({ type: z.number().int().min(0).max(4), seconds: z.number().int().min(0).max(86400) })
+          .object({
+            type: responseCooldownTypeSchema,
+            seconds: z.number().int().min(0).max(RESPONSE_COOLDOWN_MAX_SECONDS),
+          })
           .strict()
           .nullable()
           .optional(),

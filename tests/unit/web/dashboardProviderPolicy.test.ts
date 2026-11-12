@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { TomoriDashboardCore } from "@/web/dashboard/core";
 import { configModelOperations } from "@/utils/discord/interactions/configModelOperations";
+import * as configModelCatalog from "@/utils/discord/interactions/configModelOperations";
 import { personalConfigOperations } from "@/utils/discord/interactions/personalConfigOperations";
 import { configPersonaOperations } from "@/utils/discord/interactions/configPersonaOperations";
 import * as personalLoaders from "@/utils/discord/interactions/personalConfigLoaders";
@@ -18,6 +19,7 @@ import * as openRouterModels from "@/utils/provider/openrouterModelRegistry";
 import * as crypto from "@/utils/security/crypto";
 import { customEndpointSchema, savedProviderConfigSchema, userSavedProviderConfigSchema } from "@/types/db/schema";
 import { type DashboardProviderCore, DashboardProviderService } from "@/web/dashboard/providerService";
+import { loadAdvancedServerModels } from "@/web/dashboard/serverModelService";
 import type { DashboardActor, DashboardGuildSnapshot } from "@/web/dashboard/types";
 import { createLlmRow, createPersona, createServerConfig } from "../../helpers/fixtures";
 
@@ -807,6 +809,32 @@ describe("dashboard provider policy", () => {
       });
     }
     expect(core.setPersonalFallbacks).not.toHaveBeenCalled();
+  });
+
+  it("matches speech selections to their own namespaces and keeps an unavailable decision selection visible", async () => {
+    const snapshot = createSnapshot();
+    snapshot.config = {
+      ...snapshot.config,
+      decision_model_id: 99,
+      speech_design_endpoint_id: 8,
+      speech_clone_model_id: 8,
+    };
+    spyOn(configModelCatalog, "loadConfigModelProviders").mockImplementation(async (_id, capability) =>
+      capability === "decision" ? ["openrouter"] : ["openrouter", "custom:12"],
+    );
+    spyOn(configModelCatalog, "loadConfigModelChoices").mockImplementation(async (_id, _capability, provider) => [
+      { id: 8, name: provider === "openrouter" ? "example/hosted" : "local endpoint", description: null },
+    ]);
+    const slots = await loadAdvancedServerModels(snapshot);
+    expect(slots.find((slot) => slot.kind === "decision")?.selected).toEqual({ provider: null, modelId: 99 });
+    expect(slots.find((slot) => slot.kind === "speech_design")?.selected).toEqual({
+      provider: "custom:12",
+      modelId: 8,
+    });
+    expect(slots.find((slot) => slot.kind === "speech_clone")?.selected).toEqual({
+      provider: "openrouter",
+      modelId: 8,
+    });
   });
 
   it("saves only available server models and preserves non-clearable capabilities", async () => {

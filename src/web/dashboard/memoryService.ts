@@ -1,5 +1,7 @@
 import { PrivacyLevel } from "@/types/db/schema";
 import { getMemoryLimits, validateMemoryContent } from "@/utils/misc/memoryLimits";
+import { serverMemoriesOperations } from "@/utils/discord/interactions/memoriesRoutes";
+import { localizer } from "@/utils/text/localizer";
 import { z } from "zod";
 import type { TomoriDashboardCore } from "./core";
 import { DashboardServiceError } from "./errors";
@@ -13,6 +15,13 @@ const memoryMutationSchema = z
     tags: z.array(z.string().trim().min(1).max(32)).max(5).default([]),
   })
   .strict();
+
+const serverMemoryMutationSchema = memoryMutationSchema.extend({
+  channelDiscIds: z
+    .array(z.string().regex(/^\d{17,20}$/))
+    .max(500)
+    .optional(),
+});
 
 function normalizeContent(value: string): string {
   return value.trim().replace(/\r\n/g, "\n");
@@ -40,8 +49,8 @@ export type DashboardMemoryCore = Pick<
 export class DashboardMemoryService {
   constructor(private readonly core: DashboardMemoryCore) {}
 
-  parseMutation(value: unknown): MemoryMutationInput {
-    const parsed = memoryMutationSchema.safeParse(value);
+  parseMutation(value: unknown, kind: "personal" | "server" = "personal"): MemoryMutationInput {
+    const parsed = (kind === "server" ? serverMemoryMutationSchema : memoryMutationSchema).safeParse(value);
     if (!parsed.success) {
       throw new DashboardServiceError("invalid_memory", 422, "The memory or its tags are invalid.");
     }
@@ -161,7 +170,12 @@ export class DashboardMemoryService {
     if (!removed) throw new DashboardServiceError("memory_not_found", 404, "Personal memory not found.");
   }
 
-  async listServer(actor: DashboardActor, snapshot: DashboardGuildSnapshot, lineageId: number) {
+  async listServer(
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    lineageId: number,
+    selectableChannels: ReadonlySet<string>,
+  ) {
     this.assertLineage(snapshot, lineageId, false);
     const rows = await this.core.listServerMemories(
       snapshot.serverId,
@@ -173,14 +187,21 @@ export class DashboardMemoryService {
       mode: actor.canManage ? "all" : "owned",
       teachingEnabled: snapshot.config.server_memteaching_enabled !== false,
       limits: getMemoryLimits(),
-      memories: rows.map((row) => serializeServerMemory(row, actor.user.user_id, actor.canManage)),
+      channelMemoryEnabled: snapshot.config.channel_memory_enabled === true,
+      memories: rows.map((row) => serializeServerMemory(row, actor.user.user_id, actor.canManage, selectableChannels)),
     };
   }
 
-  async addServer(actor: DashboardActor, snapshot: DashboardGuildSnapshot, input: MemoryMutationInput) {
+  async addServer(
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    input: MemoryMutationInput,
+    selectableChannels: ReadonlySet<string>,
+  ) {
     await this.assertCanAdd(actor, snapshot, input.lineageId, "server");
     if (input.tags.length)
       throw new DashboardServiceError("invalid_memory", 422, "Server memory tags are not supported.");
+    const channelDiscIds = this.validateChannelScope(input.channelDiscIds ?? [], selectableChannels);
 
     const existingContents = await this.core.listServerMemoryContents(snapshot.serverId, input.lineageId);
     if (hasDuplicate(existingContents, input.content)) {
@@ -196,11 +217,12 @@ export class DashboardMemoryService {
       input.lineageId,
       actor.user.user_id,
       input.content,
+      channelDiscIds,
     );
     if (!created) {
       throw new DashboardServiceError("memory_limit_or_write_failed", 409, "The memory could not be saved.");
     }
-    return serializeServerMemory(created, actor.user.user_id, actor.canManage);
+    return serializeServerMemory(created, actor.user.user_id, actor.canManage, selectableChannels);
   }
 
   async updateServer(
@@ -208,6 +230,7 @@ export class DashboardMemoryService {
     snapshot: DashboardGuildSnapshot,
     memoryId: number,
     input: MemoryMutationInput,
+    selectableChannels: ReadonlySet<string>,
   ) {
     this.assertLineage(snapshot, input.lineageId, false);
     await this.assertCanTeachServerMemory(actor, snapshot);
@@ -219,19 +242,52 @@ export class DashboardMemoryService {
       input.lineageId,
       actor.canManage ? undefined : actor.user.user_id,
     );
-    if (!visibleRows.some((row) => row.server_memory_id === memoryId)) {
+    const target = visibleRows.find((row) => row.server_memory_id === memoryId);
+    if (!target) {
       throw new DashboardServiceError("memory_not_found", 404, "Server memory not found.");
     }
 
-    const allContents = await this.core.listServerMemories(snapshot.serverId, input.lineageId);
+    const contentKey = input.content.trim().toLocaleLowerCase();
     if (
-      allContents.some(
-        (row) =>
-          row.server_memory_id !== memoryId &&
-          row.content.trim().toLocaleLowerCase() === input.content.trim().toLocaleLowerCase(),
+      target.content.trim().toLocaleLowerCase() !== contentKey &&
+      (await this.core.listServerMemoryContents(snapshot.serverId, input.lineageId)).some(
+        (content) => content.trim().toLocaleLowerCase() === contentKey,
       )
     ) {
       throw new DashboardServiceError("duplicate_memory", 409, "That server memory already exists for this persona.");
+    }
+
+    if (input.channelDiscIds !== undefined) {
+      const channelDiscIds = this.validateChannelScope(input.channelDiscIds, selectableChannels);
+      if ((target.channel_disc_ids ?? []).some((id) => !selectableChannels.has(id))) {
+        throw new DashboardServiceError(
+          "server_memory_scope_unavailable",
+          409,
+          localizer("en-US", "general.dashboard.server_memory_scope_unavailable"),
+        );
+      }
+      const result = await serverMemoriesOperations.edit({
+        serverId: snapshot.serverId,
+        personaLineageId: input.lineageId,
+        taughtByUserId: actor.user.user_id,
+        memoryId,
+        workspaceId: snapshot.serverDiscordId,
+        canManage: actor.canManage,
+        isBlacklisted: false,
+        memteachingEnabled: snapshot.config.server_memteaching_enabled !== false,
+        content: input.content,
+        channelDiscIds,
+      });
+      if (result.status === "success" || result.status === "unchanged") {
+        return serializeServerMemory(result.row, actor.user.user_id, actor.canManage, selectableChannels);
+      }
+      if (result.status === "not-found")
+        throw new DashboardServiceError("memory_not_found", 404, "Server memory not found.");
+      throw new DashboardServiceError(
+        "server_memory_scope_save_failed",
+        500,
+        localizer("en-US", "general.dashboard.server_memory_scope_save_failed"),
+      );
     }
 
     const updated = await this.core.updateServerMemory(
@@ -242,7 +298,12 @@ export class DashboardMemoryService {
       actor.canManage ? undefined : actor.user.user_id,
     );
     if (!updated) throw new DashboardServiceError("memory_not_found", 404, "Server memory not found.");
-    return serializeServerMemory(updated, actor.user.user_id, actor.canManage);
+    return serializeServerMemory(
+      { ...updated, channel_scope_pending: target.channel_scope_pending },
+      actor.user.user_id,
+      actor.canManage,
+      selectableChannels,
+    );
   }
 
   async removeServer(
@@ -260,6 +321,16 @@ export class DashboardMemoryService {
       actor.canManage ? undefined : actor.user.user_id,
     );
     if (!removed) throw new DashboardServiceError("memory_not_found", 404, "Server memory not found.");
+  }
+
+  private validateChannelScope(channelDiscIds: string[], selectableChannels: ReadonlySet<string>): string[] {
+    if (channelDiscIds.some((id) => !selectableChannels.has(id)))
+      throw new DashboardServiceError(
+        "server_memory_channel_forbidden",
+        422,
+        localizer("en-US", "general.dashboard.server_memory_channel_forbidden"),
+      );
+    return [...new Set(channelDiscIds)];
   }
 
   private async assertCanTeachServerMemory(actor: DashboardActor, snapshot: DashboardGuildSnapshot): Promise<void> {

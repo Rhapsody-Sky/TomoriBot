@@ -45,35 +45,32 @@
   ];
   const loginMessage = loginMessages[Math.floor(Math.random() * loginMessages.length)];
 
-  const readAppearance = (key, fallback) => {
-    try {
-      return localStorage.getItem(`tomoribot.dashboard.${key}`) || fallback;
-    } catch {
-      return fallback;
-    }
-  };
+  const designStorageKey = "tomoribot.dashboard.rememberedDesign";
+  let storedDesign = null;
+  try {
+    const stored = JSON.parse(localStorage.getItem(designStorageKey));
+    if (stored && typeof stored === "object" && !Array.isArray(stored)) storedDesign = stored;
+  } catch {}
+  let rememberDesign = storedDesign !== null;
 
   const appearance = {
-    palette: readAppearance("palette", "tomori"),
-    theme: readAppearance("theme", "dark"),
-    surface: readAppearance("surface", "glass"),
-    colorMode: readAppearance("colorMode", "colorful"),
-    motion: readAppearance("motion", "full"),
+    palette: palettes.some(({ id }) => id === storedDesign?.palette) ? storedDesign.palette : "tomori",
+    theme: storedDesign?.theme === "light" ? "light" : "dark",
+    surface: storedDesign?.surface === "solid" ? "solid" : "glass",
+    colorMode: storedDesign?.colorMode === "reduced" ? "reduced" : "colorful",
+    motion: ["subtle", "off"].includes(storedDesign?.motion) ? storedDesign.motion : "full",
     lighting: { dark: { angle: 350, spread: 150, intensity: 50 }, light: { angle: 45, spread: 300, intensity: 50 } },
   };
-  try {
-    const stored = JSON.parse(readAppearance("lighting", "null"));
-    for (const theme of ["dark", "light"]) {
-      for (const [key, min, max] of [
-        ["angle", 0, 359],
-        ["spread", 50, 500],
-        ["intensity", 0, 200],
-      ]) {
-        const value = stored?.[theme]?.[key];
-        if (Number.isFinite(value) && value >= min && value <= max) appearance.lighting[theme][key] = value;
-      }
+  for (const theme of ["dark", "light"]) {
+    for (const [key, min, max] of [
+      ["angle", 0, 359],
+      ["spread", 50, 500],
+      ["intensity", 0, 200],
+    ]) {
+      const value = storedDesign?.lighting?.[theme]?.[key];
+      if (Number.isFinite(value) && value >= min && value <= max) appearance.lighting[theme][key] = value;
     }
-  } catch {}
+  }
 
   const applyAppearance = () => {
     document.body.dataset.palette = palettes.some((palette) => palette.id === appearance.palette)
@@ -89,20 +86,20 @@
     document.body.style.setProperty("--light-intensity", light.intensity / 100);
   };
 
+  function setRememberDesign(remember) {
+    try {
+      if (remember) localStorage.setItem(designStorageKey, JSON.stringify(appearance));
+      else localStorage.removeItem(designStorageKey);
+      rememberDesign = remember;
+    } catch {
+      toast(ui(remember ? "appearance_session_only" : "appearance_forget_failed"), "warning");
+    }
+  }
+
   const saveAppearance = () => {
     applyAppearance();
     stopReducedPanelMotion();
-    try {
-      localStorage.setItem("tomoribot.dashboard.palette", appearance.palette);
-      localStorage.setItem("tomoribot.dashboard.theme", appearance.theme);
-      for (const key of ["surface", "colorMode", "motion"])
-        localStorage.setItem(`tomoribot.dashboard.${key}`, appearance[key]);
-      localStorage.setItem("tomoribot.dashboard.lighting", JSON.stringify(appearance.lighting));
-      const status = document.querySelector("#design-status");
-      if (status) status.textContent = ui("appearance_saved");
-    } catch {
-      toast(ui("appearance_session_only"), "warning");
-    }
+    if (rememberDesign) setRememberDesign(true);
   };
 
   const syncAppearanceControls = () => {
@@ -131,6 +128,14 @@
   };
 
   applyAppearance();
+
+  window.addEventListener("storage", (event) => {
+    if (!rememberDesign || event.newValue !== null || event.storageArea !== localStorage) return;
+    if (event.key !== designStorageKey && event.key !== null) return;
+    rememberDesign = false;
+    const toggle = document.querySelector("[data-design-remember]");
+    if (toggle) toggle.checked = false;
+  });
 
   const ui = (key) => state.overview?.interfaceCopy[key] ?? state.publicSite?.interfaceCopy[key];
 
@@ -289,8 +294,7 @@
           titleKey: "diagnostics",
           descriptionKey: "diagnostics_hint",
           sources: [
-            { section: "modelBehavior", fields: ["hide_respond_embed"] },
-            { section: "memberPermissions", fields: ["hide_impersonation_embeds", "prompt_snapshot_enabled"] },
+            { section: "memberPermissions", fields: ["prompt_snapshot_enabled"] },
             { section: "chat", fields: ["self_debug_enabled"] },
             { section: "channelScope", fields: ["thought_log_channel_disc_id"] },
           ],
@@ -311,6 +315,7 @@
     memoryData: null,
     personaId: 0,
     personaPanel: "personal",
+    personaKnowledgePanel: "personal",
     lorebookBookId: null,
     lorebookData: null,
     lorebookImportReceipt: null,
@@ -377,15 +382,18 @@
       ),
     ].slice(0, 80);
 
+  const personaAvatarUrl = (persona) =>
+    persona?.avatarUrl
+      ? `${persona.avatarUrl}${persona.avatarUrl.includes("?") ? "&" : "?"}v=${state.avatarRevision}`
+      : "";
+
   const personaAvatar = (persona, extraClass = "") => {
     const initial =
       String(persona?.nickname || "?")
         .trim()
         .slice(0, 1) || "?";
     const classes = `persona-avatar${extraClass ? ` ${extraClass}` : ""}`;
-    const avatarUrl = persona?.avatarUrl
-      ? `${persona.avatarUrl}${persona.avatarUrl.includes("?") ? "&" : "?"}v=${state.avatarRevision}`
-      : "";
+    const avatarUrl = personaAvatarUrl(persona);
     return avatarUrl
       ? `<img src="${escapeHtml(avatarUrl)}" alt="" class="${classes}" data-avatar-fallback="${escapeHtml(initial)}">`
       : `<span class="${classes} persona-avatar-fallback">${escapeHtml(initial)}</span>`;
@@ -415,9 +423,9 @@
   };
 
   const draftForms =
-    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-lorebook-form], #stm-categories-form";
+    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], #stm-categories-form";
   const localEditForms =
-    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-sprite-form], #persona-channel-workspace form, #server-models-form, [data-personal-model], [data-personal-parameters], #fallback-form, #memory-edit-form";
+    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-sprite-form], [data-spotlight-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], [data-personal-model], [data-personal-parameters], #fallback-form, #memory-edit-form";
   const editForms = `${draftForms}, ${localEditForms}`;
   const editSubmit = 'button[type="submit"]:not([value="reset"]), button[value="save"]:not([type])';
   const drafts = new Map();
@@ -514,11 +522,16 @@
       );
       if (!value) return;
       if (
-        ["channel_model", "channel_persona_id", "channel_autochat_id"].includes(input.name) &&
+        ["channel_model", "channel_persona_id", "channel_autochat_id", "reviewer", "checker"].includes(input.name) &&
         value.value &&
         ![...input.options].some((option) => option.value === value.value)
       ) {
-        input.add(new Option(ui("channel_loading"), value.value));
+        input.add(
+          new Option(
+            ui(form.matches("[data-drafting-selections]") ? "drafting_unavailable" : "channel_loading"),
+            value.value,
+          ),
+        );
       }
       if (value.checked !== undefined) input.checked = value.checked;
       else input.value = value.value;
@@ -642,6 +655,21 @@
     return data;
   }
 
+  async function downloadAttachment(path, fallbackName) {
+    const response = await fetch(`${BASE}${path}`);
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.error?.message || `Request failed (${response.status})`);
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || fallbackName;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return response;
+  }
+
   function renderLoggedOut() {
     app.innerHTML = `
       <main class="login-screen">
@@ -689,8 +717,11 @@
 
   function renderPublicLinks(sidebar = false) {
     const site = state.publicSite;
-    if (!site?.entries.length) return "";
-    const links = site.entries
+    const entries = site?.entries.filter(
+      (entry) => entry.kind === "page" || (sidebar ? entry.showInSidebar : entry.showOnLogin),
+    );
+    if (!entries?.length) return "";
+    const links = entries
       .map(
         (entry) =>
           `<a href="${escapeHtml(entry.kind === "page" ? `/settings/pages/${entry.id}` : entry.url)}">${sidebar ? navigationIcon("book-open") : ""}<span>${escapeHtml(entry.title)}</span></a>`,
@@ -744,6 +775,7 @@
             <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_settings"))}</h2><div class="sidebar-group-links">
             ${navButton("overview", "Overview")}
             ${navButton("personas", "Personas")}
+            ${state.overview.guild.isDirectMessage ? "" : navButton("personal-spotlights", ui("spotlights"))}
             ${navButton("lorebooks", ui("lorebooks"))}
             </div></section>
             ${
@@ -751,6 +783,7 @@
                 ? `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_administration"))}</h2><div class="sidebar-group-links">
                    ${navButton("server-providers", "Server providers", true)}
                    ${state.overview.guild.isDirectMessage ? "" : navButton("channel-settings", ui("channel_settings"), true)}
+                   ${state.overview.guild.isDirectMessage ? "" : navButton("moderation", ui("moderation"), true)}
                    ${navButton("settings", "Server settings", true)}</div></section>`
                 : ""
             }
@@ -812,10 +845,13 @@
         </form>
       </dialog>
       <dialog id="memory-dialog" class="dialog" aria-labelledby="memory-dialog-title">
-        <form method="dialog" class="stack" id="memory-edit-form">
+        <form method="dialog" id="memory-edit-form">
           <header class="panel-header"><div class="heading"><p class="eyebrow">Memory</p><h2 id="memory-dialog-title">Update this memory</h2></div></header>
-          <label class="field"><span class="field-label">Memory</span><textarea name="content" rows="6" required></textarea></label>
-          <label class="field" data-memory-tags><span class="field-label">Tags</span><input name="tags" type="text" placeholder="character, preference"></label>
+          <div class="stack">
+            <label class="field"><span class="field-label">Memory</span><textarea name="content" rows="4" required></textarea></label>
+            <label class="field" data-memory-tags><span class="field-label">Tags</span><input name="tags" type="text" placeholder="character, preference"></label>
+            <div class="subsection" data-memory-channel-scope hidden></div>
+          </div>
           <input name="memoryId" type="hidden">
           <div class="actions">
             <button type="button" class="button " data-dialog-close="memory-dialog">Cancel</button>
@@ -874,8 +910,9 @@
       <label class="field">${fieldLabel(ui("design_color_mode"))}<select data-design-setting="colorMode"><option value="colorful">${escapeHtml(ui("design_colorful"))}</option><option value="reduced">${escapeHtml(ui("design_reduced"))}</option></select></label>
       <div class="preview-controls"><label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-light-setting="angle" data-scrub></label>
       <label class="field">${fieldLabel(ui("design_spread"))}<input type="range" min="50" max="500" step="10" data-light-setting="spread"></label><label class="field">${fieldLabel(ui("design_intensity"))}<input type="range" min="0" max="200" step="5" data-light-setting="intensity"></label></div>
-      <label class="field">${fieldLabel(ui("design_motion"))}<select data-design-setting="motion">${["full", "subtle", "off"].map((value) => `<option value="${value}">${escapeHtml(ui(`design_motion_${value}`))}</option>`).join("")}</select></label></div>
-      <div class="actions form-actions"><button class="button " type="button" data-design-reset>${escapeHtml(ui("design_reset"))}</button></div><p class="hint" id="design-status" role="status">${escapeHtml(ui("appearance_saved"))}</p>
+      <label class="field">${fieldLabel(ui("design_motion"))}<select data-design-setting="motion">${["full", "subtle", "off"].map((value) => `<option value="${value}">${escapeHtml(ui(`design_motion_${value}`))}</option>`).join("")}</select></label>
+      <label class="toggle">${fieldLabel(ui("design_remember"), ui("design_remember_hint"))}<input type="checkbox" role="switch" data-design-remember${rememberDesign ? " checked" : ""}></label></div>
+      <div class="actions form-actions"><button class="button " type="button" data-design-reset>${escapeHtml(ui("design_reset"))}</button></div>
     </div>`;
   }
 
@@ -942,12 +979,14 @@
     personas: "users-round",
     profile: "user-round",
     "personal-memory": "brain",
+    "personal-spotlights": "radio",
     lorebooks: "book-open",
     lorebook: "book-open",
     "personal-providers": "plug",
     "server-providers": "plug",
     settings: "settings-2",
     "channel-settings": "radio",
+    moderation: "users-round",
     conversation: "message-circle",
     models: "sliders-horizontal",
     channels: "radio",
@@ -1043,6 +1082,9 @@
       case "personas":
         renderPersonaWorkspace(workspace);
         break;
+      case "personal-spotlights":
+        renderPersonalSpotlights(workspace);
+        break;
       case "server-providers":
         renderProviders(workspace, "server");
         break;
@@ -1051,6 +1093,9 @@
         break;
       case "channel-settings":
         renderChannelSettings(workspace);
+        break;
+      case "moderation":
+        renderModeration(workspace);
         break;
       default:
         renderOverview(workspace);
@@ -1111,8 +1156,23 @@
     for (const section of ["profile", "privacy", "conversation"])
       addMarkup(renderProfilePanel(section), { view: "profile" }, ui("my_settings"));
     page("personal-memory", "Global memory");
+    page("personal-memory", ui("personal_stm"), {
+      path: "Global memory",
+      hint: ui("personal_stm_hint"),
+      tag: "h2",
+    });
+    if (!state.overview.guild?.isDirectMessage)
+      page("personal-spotlights", ui("spotlights"), { hint: ui("spotlights_hint") });
     page("lorebooks", ui("lorebooks"));
     if (state.overview.canManage) {
+      if (!state.overview.guild.isDirectMessage) {
+        for (const [moderationTab, key] of Object.entries(moderationTabs)) {
+          page("moderation", ui(key), { moderationTab, path: ui("moderation") });
+        }
+        for (const type of ["text", "image", "video"]) {
+          page("moderation", ui(`moderation_${type}`), { moderationTab: "quotas", path: ui("moderation"), tag: "h2" });
+        }
+      }
       for (const [section, fields] of [
         [
           "content",
@@ -1156,7 +1216,12 @@
         const route = { view: "settings", settingsGroup: group.id };
         const path = `Server settings / ${group.labelKey ? ui(group.labelKey) : group.label}`;
         for (const panel of group.panels) addMarkup(renderSettingsPanel(panel), route, path);
+        if (group.id === "conversation") addMarkup(renderDraftingPanel(), route, path);
+        if (group.id === "models") addMarkup(renderLogitBiasPanel(), route, path);
         if (group.id === "memory") addMarkup(renderStmCategories(), route, path);
+        if (group.id === "media") page("settings", ui("tool_phrases"), { ...route, path, tag: "h2" });
+        if (group.id === "channels" && !state.overview.guild?.isDirectMessage)
+          page("settings", ui("random_schedules"), { ...route, path, tag: "h2" });
       }
       for (const [sectionId, key] of channelSettingsFields) {
         const field = state.overview.settings.catalog
@@ -1187,13 +1252,16 @@
         personaHome: true,
         path: `Personas / ${persona.nickname}`,
       });
-      for (const [panel, title] of [
-        ["personal", "Personal memory"],
-        ["server", "Server knowledge"],
-        ["lorebook", ui("lorebooks")],
-        ["preferences", state.overview.personaNaming.copy.tab],
-      ])
-        page("personas", title, { ...route, personaPanel: panel, path: `Personas / ${persona.nickname} / ${title}` });
+      const knowledgePath = `Personas / ${persona.nickname} / ${ui("persona_knowledge")}`;
+      for (const [panel, label] of personaKnowledgeTabs()) {
+        const title = ui(label);
+        page("personas", title, {
+          ...route,
+          personaPanel: panel,
+          path: knowledgePath,
+          ...(panel === "conditioning" ? { hint: ui("persona_conditioning_hint") } : {}),
+        });
+      }
       addMarkup(
         renderPersonaNaming(persona),
         { ...route, personaPanel: "preferences" },
@@ -1218,6 +1286,14 @@
           { ...route, personaPanel: "appearance" },
           `Personas / ${persona.nickname} / Appearance & image prompt`,
         );
+        const voicePath = `Personas / ${persona.nickname} / ${ui("persona_voice_title")}`;
+        page("personas", ui("persona_voice_title"), { ...route, personaPanel: "voice", path: voicePath });
+        for (const [name, key] of [
+          ["priority", "persona_voice_priority"],
+          ["designPrompt", "persona_voice_design_prompt"],
+        ]) {
+          page("personas", ui(key), { ...route, personaPanel: "voice", name, path: voicePath });
+        }
         page("personas", ui("sprites"), { ...route, personaPanel: "sprites", path: `Personas / ${persona.nickname}` });
         page("personas", ui("persona_channels"), {
           ...route,
@@ -1245,8 +1321,15 @@
           `${path} / ${connection.name}`,
         );
       if (!hasModels) continue;
+      if (scope === "personal") {
+        addMarkup(
+          renderQuickCapabilities(data),
+          { view, scope, providerPanel: "models" },
+          `${path} / ${ui("quick_capabilities")}`,
+        );
+      }
       addMarkup(
-        scope === "personal" ? renderPersonalModels(data) : renderServerModels(data),
+        scope === "personal" ? renderPersonalModels(data) : renderServerModels(data) + renderAdvancedServerModels(data),
         { view, scope, providerPanel: "models" },
         `${path} / ${ui("primary_models")}`,
       );
@@ -1786,6 +1869,16 @@
             ? `
         <div class="grid">
           <label class="field">${fieldLabel("Nickname", "Your personal display name when Tomori refers to you. Empty uses your current Discord display name.")}<input name="user_nickname" value="${escapeHtml(profile.nickname ?? "")}" maxlength="${profile.limits.nickname}"></label>
+          <label class="field">${fieldLabel(ui("discord_language"), ui("discord_language_hint"))}<select name="language_pref">
+            ${(profile.languages || [])
+              .map(
+                ({ value, label }) =>
+                  `<option value="${escapeHtml(value)}"${value === profile.language ? " selected" : ""}>${escapeHtml(label)}</option>`,
+              )
+              .join("")}
+          </select></label>
+          <label class="field">${fieldLabel(profile.copy.prefix, profile.copy.prefixHint)}<input name="prefix_override" value="${escapeHtml(profile.prefix ?? "")}" maxlength="${profile.limits.affix}"></label>
+          <label class="field">${fieldLabel(profile.copy.suffix, profile.copy.suffixHint)}<input name="suffix_override" value="${escapeHtml(profile.suffix ?? "")}" maxlength="${profile.limits.affix}"></label>
           <label class="field">${fieldLabel(profile.copy.gender, profile.copy.genderHint)}<input name="gender_identity" value="${escapeHtml(profile.genderIdentity ?? "")}" maxlength="${profile.limits.identity}"></label>
           <label class="field">${fieldLabel(profile.copy.pronouns, profile.copy.pronounsHint)}<input name="pronouns" value="${escapeHtml(profile.pronouns ?? "")}" maxlength="${profile.limits.identity}"></label>
           <label class="field">${fieldLabel(profile.copy.addressingStyle, profile.copy.addressingStyleHint)}<select name="addressing_style">
@@ -1890,6 +1983,504 @@
       <div class="grid"><div class="stack">${renderProfilePanel("profile")}</div><div class="stack">${["privacy", "conversation"].map(renderProfilePanel).join("")}</div></div>`;
   }
 
+  function renderPersonalSpotlights(workspace) {
+    workspace.innerHTML = `${pageHeader(state.overview.guild.name, ui("spotlights"), ui("spotlights_hint"))}<section class="panel stack" id="personal-spotlights"></section>`;
+    void loadPersonalSpotlights(workspace.querySelector("#personal-spotlights"));
+  }
+
+  async function loadPersonalSpotlights(host) {
+    const path = `/guilds/${state.guildId}/personal-spotlights`;
+    host.innerHTML = loadingBar(ui("spotlights"));
+    try {
+      const data = await api(path);
+      if (host.isConnected) renderPersonalSpotlightList(host, path, data);
+    } catch (error) {
+      if (!host.isConnected) return;
+      host.innerHTML = `<div class="row"><p role="alert">${escapeHtml(error.message)}</p>${refreshButton("spotlight", ui("refresh_all"))}</div>`;
+      host.querySelector("[data-spotlight-refresh]").onclick = () => loadPersonalSpotlights(host);
+    }
+  }
+
+  function renderPersonalSpotlightList(host, path, data) {
+    const channels = new Map(data.channels.map((channel) => [channel.id, channel]));
+    const personas = new Map(state.overview.personas.map((persona) => [persona.personaId, persona.nickname]));
+    const allowed = state.overview.allowedChannelIds || [];
+    const restricted = state.overview.channelWhitelistActive ?? allowed.length > 0;
+    const newChannels = data.channels.filter(
+      (channel) =>
+        (!restricted || allowed.includes(channel.id)) && !data.spotlights.some((row) => row.channelId === channel.id),
+    );
+    host.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("spotlight_active"))}</h2></div><div class="actions">
+      ${refreshButton("spotlight", ui("spotlights"))}
+      <button class="button primary" type="button" data-spotlight-add aria-haspopup="dialog"${newChannels.length ? "" : " disabled"}>${navigationIcon("plus")}${escapeHtml(ui("spotlight_add"))}</button>
+    </div></header>
+      ${
+        data.spotlights.length
+          ? data.spotlights
+              .map((row) => {
+                const channel = channels.get(row.channelId);
+                const names = row.personaIds.map((id) => personas.get(id)).filter(Boolean);
+                const auto = personas.get(row.autoTriggerPersonaId);
+                return `<article class="subsection stack"><div class="row">
+          <div class="heading"><h3>${escapeHtml(channel ? `#${channel.name}` : ui("spotlight_channel_unavailable"))}</h3><small>${escapeHtml(row.expiresAt ? formatDate(row.expiresAt) : ui("spotlight_permanent"))}</small></div>
+          <div class="actions">${channel ? `<button class="button" type="button" data-spotlight-edit="${escapeHtml(row.channelId)}" aria-haspopup="dialog">${escapeHtml(ui("spotlight_edit"))}</button>` : ""}<button class="button danger" type="button" data-spotlight-remove="${escapeHtml(row.channelId)}">${escapeHtml(ui("spotlight_remove"))}</button></div>
+        </div>${names.length ? `<p>${escapeHtml(names.join(", "))}</p>` : ""}${auto ? `<p><strong>${escapeHtml(ui("spotlight_auto"))}:</strong> ${escapeHtml(auto)}</p>` : ""}</article>`;
+              })
+              .join("")
+          : `<p class="hint">${escapeHtml(ui("spotlights_empty"))}</p>`
+      }
+      ${!newChannels.length ? `<p class="hint">${escapeHtml(ui("spotlight_no_channels"))}</p>` : ""}`;
+    host.querySelector("[data-spotlight-refresh]").onclick = () => loadPersonalSpotlights(host);
+    const edit = (row) => {
+      openPersonalSpotlightEditor(path, row, row ? [channels.get(row.channelId)] : newChannels, (saved) => {
+        if (!host.isConnected) return;
+        data.spotlights = [...data.spotlights.filter(({ channelId }) => channelId !== saved.channelId), saved];
+        renderPersonalSpotlightList(host, path, data);
+        host.querySelector(`[data-spotlight-edit="${saved.channelId}"]`)?.focus({ preventScroll: true });
+      });
+    };
+    host.querySelector("[data-spotlight-add]").onclick = () => edit(null);
+    host.querySelectorAll("[data-spotlight-edit]").forEach((button) => {
+      button.onclick = () => edit(data.spotlights.find(({ channelId }) => channelId === button.dataset.spotlightEdit));
+    });
+    host.querySelectorAll("[data-spotlight-remove]").forEach((button) => {
+      button.onclick = async () => {
+        if (!(await confirmAction(ui("spotlight_remove_title"), ui("spotlight_remove_hint")))) return;
+        if (!host.isConnected || host.classList.contains("is-saving")) return;
+        const channelId = button.dataset.spotlightRemove;
+        try {
+          await withBusyForm(host, () => api(`${path}/${channelId}`, { method: "DELETE" }));
+          if (!host.isConnected) return;
+          data.spotlights = data.spotlights.filter((row) => row.channelId !== channelId);
+          renderPersonalSpotlightList(host, path, data);
+          host.querySelector("[data-spotlight-refresh]").focus({ preventScroll: true });
+          toast(ui("spotlight_removed"));
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      };
+    });
+    enhanceDashboard(host);
+  }
+
+  function openPersonalSpotlightEditor(path, row, channels, onSave) {
+    const personas = state.overview.personas;
+    const title = ui(row ? "spotlight_edit" : "spotlight_add");
+    const dialog = document.createElement("dialog");
+    dialog.className = "dialog wide";
+    dialog.setAttribute("aria-labelledby", "spotlight-editor-title");
+    dialog.innerHTML = `<form class="stack" data-spotlight-form>
+      <header class="panel-header"><div class="heading"><h2 id="spotlight-editor-title">${escapeHtml(title)}</h2></div></header>
+      ${row ? `<p><strong>${escapeHtml(ui("spotlight_channel"))}:</strong> #${escapeHtml(channels[0].name)}</p>` : renderChannelSelector("channelId", [], true, channels)}
+      <fieldset class="stack"><legend>${escapeHtml(ui("spotlight_personas"))}</legend>
+        <label class="field">${fieldLabel(ui("spotlight_search_personas"))}<input type="search" data-spotlight-persona-search></label>
+        <div class="channel-choices">${personas
+          .map(
+            (persona) =>
+              `<label class="channel-choice" data-spotlight-persona-name="${escapeHtml(persona.nickname.toLowerCase())}"><input type="checkbox" name="personaIds" value="${persona.personaId}"${row?.personaIds.includes(persona.personaId) ? " checked" : ""}>${personaAvatar(persona, "avatar")}<span>${escapeHtml(persona.nickname)}</span></label>`,
+          )
+          .join("")}</div>
+      </fieldset>
+      <div class="grid">
+        <label class="field">${fieldLabel(ui("spotlight_auto"), ui("spotlight_auto_hint"))}<select name="autoTriggerPersonaId" data-searchable></select></label>
+        <label class="field">${fieldLabel(ui("spotlight_hours"), ui(row ? "spotlight_keep_expiry" : "spotlight_hours_hint"))}<input type="number" name="durationHours" min="0" max="999999" step="1" value="${row ? "" : "0"}"${row ? "" : " required"}></label>
+      </div>
+      <footer class="actions form-actions"><button class="button" type="button" data-spotlight-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></footer>
+    </form>`;
+    document.body.append(dialog);
+    const form = dialog.querySelector("form");
+    const selectedIds = () =>
+      [...form.querySelectorAll('[name="personaIds"]:checked')].map((input) => Number(input.value));
+    const channelId = () => row?.channelId || form.elements.channelId.value;
+    const auto = form.elements.autoTriggerPersonaId;
+    const update = (current = auto.value) => {
+      const selected = new Set(selectedIds());
+      auto.replaceChildren(new Option(ui("spotlight_auto_none"), ""));
+      personas
+        .filter((persona) => selected.has(persona.personaId))
+        .forEach((persona) => {
+          auto.add(new Option(persona.nickname, persona.personaId));
+        });
+      auto.value = selected.has(Number(current)) ? current : "";
+      form.querySelector('[type="submit"]').disabled = !selected.size || !channelId();
+    };
+    form.addEventListener("change", (event) => {
+      if (["personaIds", "channelId"].includes(event.target.name)) update();
+    });
+    form.querySelector("[data-spotlight-persona-search]").oninput = (event) => {
+      const query = event.target.value.trim().toLowerCase();
+      form.querySelectorAll("[data-spotlight-persona-name]").forEach((label) => {
+        label.hidden = !label.dataset.spotlightPersonaName.includes(query);
+      });
+    };
+    form.querySelector("[data-spotlight-cancel]").onclick = () => dialog.close();
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.classList.contains("is-saving") || !channelId() || !selectedIds().length) return;
+      const hours = form.elements.durationHours.value;
+      const body = {
+        channelId: channelId(),
+        personaIds: selectedIds(),
+        autoTriggerPersonaId: Number(auto.value) || null,
+        durationHours: hours === "" ? null : Number(hours),
+      };
+      try {
+        const { spotlight } = await withBusyForm(form, () => api(path, { method: "PUT", body: JSON.stringify(body) }));
+        dialog.close();
+        onSave(spotlight);
+        toast(ui("spotlight_saved"));
+      } catch (error) {
+        showFormError(form, error);
+      }
+    });
+    dialog.addEventListener("cancel", (event) => {
+      if (form.classList.contains("is-saving")) event.preventDefault();
+    });
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    update(row?.autoTriggerPersonaId == null ? "" : String(row.autoTriggerPersonaId));
+    dialog.showModal();
+    enhanceDashboard(dialog);
+  }
+
+  const moderationTabs = {
+    roles: "moderation_roles",
+    blacklist: "moderation_server_blocks",
+    restrictions: "moderation_persona_blocks",
+    quotas: "moderation_quotas",
+  };
+  let moderationTab = "roles";
+
+  function dashboardPanelHeading(key, hint = "", actions = "") {
+    return `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui(key))}</h2>${hint ? `<p>${escapeHtml(ui(hint))}</p>` : ""}</div>${actions ? `<div class="actions">${actions}</div>` : ""}</header>`;
+  }
+
+  async function renderModeration(
+    workspace,
+    listFilters = { roles: { query: "" }, blacklist: { query: "" }, restrictions: { query: "", type: "" } },
+  ) {
+    const path = `/guilds/${state.guildId}/moderation`;
+    workspace.innerHTML = `${pageHeader(state.overview.guild.name, ui("moderation"), ui("moderation_hint"), refreshButton("moderation", ui("moderation_refresh")))}
+      <nav class="tabs" aria-label="${escapeHtml(ui("moderation"))}"></nav>
+      <div class="stack" data-moderation-content>${loadingBar(ui("moderation"))}</div>`;
+    const host = workspace.querySelector("[data-moderation-content]");
+    const tabs = workspace.querySelector("nav");
+    const refresh = workspace.querySelector("[data-moderation-refresh]");
+    refresh.onclick = () => {
+      if (!savingForms) void renderModeration(workspace, listFilters);
+    };
+    tabs.innerHTML = Object.entries(moderationTabs)
+      .map(
+        ([id, key]) =>
+          `<button class="settings-tab${id === moderationTab ? " is-active" : ""}" type="button" data-moderation-tab="${id}"${id === moderationTab ? ' aria-current="page"' : ""}>${escapeHtml(ui(key))}</button>`,
+      )
+      .join("");
+    const tabButtons = [...tabs.querySelectorAll("button")];
+    initNavigationMenus();
+    let data;
+    try {
+      data = await api(path);
+    } catch (error) {
+      if (host.isConnected)
+        host.innerHTML = `<div class="notice error" role="alert">${escapeHtml(error.message)}</div>`;
+      return;
+    }
+    if (!host.isConnected) return;
+    const onSaved = () => {
+      if (!host.isConnected) return;
+      toast(ui("moderation_saved"));
+      void renderModeration(workspace, listFilters);
+    };
+    for (const button of tabButtons) {
+      button.onclick = () => {
+        if (moderationTab === button.dataset.moderationTab || savingForms) return;
+        moderationTab = button.dataset.moderationTab;
+        for (const tab of tabButtons) {
+          tab.classList.toggle("is-active", tab === button);
+          if (tab === button) tab.setAttribute("aria-current", "page");
+          else tab.removeAttribute("aria-current");
+        }
+        renderModerationPanel(host, path, data, onSaved, listFilters);
+        window.TomoriControls?.enhanceTabs(workspace);
+        focusNavigation(`[data-moderation-tab="${moderationTab}"]`);
+      };
+    }
+    renderModerationPanel(host, path, data, onSaved, listFilters);
+  }
+
+  function renderModerationPanel(host, path, data, onSaved, listFilters) {
+    const patch = (body) => api(path, { method: "PATCH", body: JSON.stringify(body) });
+    const addButton = (key, disabled = false) =>
+      `<button class="button primary" type="button" data-moderation-add aria-haspopup="dialog"${disabled ? " disabled" : ""}>${navigationIcon("plus")}${escapeHtml(ui(key))}</button>`;
+    const removeButton = (action, index, description, compactAction) => {
+      const label = escapeHtml(ui(action));
+      return `<div class="entry-actions"><button class="button danger" type="button" data-moderation-remove="${index}" aria-describedby="${description}" aria-haspopup="dialog"${compactAction ? ` aria-label="${label}"` : ""}>${compactAction ? `<span class="restriction-wide">${label}</span><span class="restriction-compact">${escapeHtml(ui(compactAction))}</span>` : label}</button></div>`;
+    };
+    const removals = [];
+    let availableRoles;
+    if (moderationTab !== "quotas") {
+      const roles = moderationTab === "roles";
+      const restrictions = moderationTab === "restrictions";
+      const filters = listFilters[moderationTab];
+      const heading = moderationTabs[moderationTab];
+      const action = roles
+        ? "moderation_remove_action"
+        : restrictions
+          ? "moderation_lift_action"
+          : "moderation_unblock_action";
+      const searchLabel = roles
+        ? "moderation_roles_search"
+        : restrictions
+          ? "moderation_restriction_search"
+          : "moderation_blacklist_search";
+      let entries = restrictions ? data.personaBlocks : data.serverBlocks;
+      if (roles) {
+        const names = new Map(data.roles.map(({ id, name }) => [id, name]));
+        const allowed = new Set(data.allowedRoleIds);
+        availableRoles = data.roles.filter(({ id }) => !allowed.has(id));
+        entries = data.allowedRoleIds.map((id) => ({ id, name: names.get(id) }));
+      }
+      const tableRows = entries.map((entry, index) => {
+        const id = roles ? entry.id : entry.userId;
+        const name = entry.name || id;
+        const searchText = [name, id, entry.personaName].join(" ").toLowerCase();
+        const rowId = `moderation-entry-${index}`;
+        const detail = entry.name ? id : roles ? ui("moderation_role_unavailable") : "";
+        let description = rowId;
+        let personaCells = "";
+        if (roles) {
+          removals.push({
+            title: ui("moderation_remove_role").replace("{name}", () => name),
+            hint: entries.length === 1 ? ui("moderation_remove_role_hint") : "",
+            body: { action: "removeRole", roleId: id },
+          });
+        } else if (restrictions) {
+          const personaId = `moderation-persona-${index}`;
+          description += ` ${personaId}`;
+          removals.push({
+            title: ui("moderation_remove_persona_block")
+              .replace("{name}", () => name)
+              .replace("{persona}", () => entry.personaName),
+            hint: ui("moderation_remove_persona_block_hint"),
+            body: { action: "removePersonaBlock", userId: id, personaId: entry.personaId },
+          });
+          const type = ui(entry.type === "mute" ? "moderation_persona_mute" : "moderation_persona_block");
+          const date = formatDate(entry.expiresAt);
+          personaCells = `<td id="${personaId}"><span dir="auto">${escapeHtml(entry.personaName)}</span><small class="hint restriction-compact">${escapeHtml(type)}<br>${escapeHtml(ui("moderation_expires").replace("{date}", () => date))}</small></td>
+          <td class="restriction-wide">${escapeHtml(type)}</td>
+          <td class="restriction-wide"><time datetime="${escapeHtml(entry.expiresAt)}">${escapeHtml(date)}</time></td>`;
+        } else {
+          removals.push({
+            title: ui("moderation_remove_user").replace("{name}", () => name),
+            hint: ui("moderation_remove_user_hint"),
+            body: { action: "unblockUser", userId: id },
+          });
+        }
+        return `<tr data-moderation-search="${escapeHtml(searchText)}"${restrictions ? ` data-restriction-type="${escapeHtml(entry.type)}"` : ""}>
+          <th scope="row" id="${rowId}"><strong dir="auto">${escapeHtml(name)}</strong>${detail ? `<small class="hint">${escapeHtml(detail)}</small>` : ""}</th>
+          ${personaCells}<td>${removeButton(action, index, description, restrictions ? "moderation_lift_compact" : undefined)}</td>
+        </tr>`;
+      });
+      const add = roles
+        ? addButton("moderation_add_role", !availableRoles.length)
+        : restrictions
+          ? ""
+          : addButton("moderation_add_user");
+      host.innerHTML = `<section class="panel stack" data-moderation-list="${moderationTab}">${dashboardPanelHeading(heading, `${heading}_hint`, add)}
+        ${
+          tableRows.length
+            ? `<div class="grid">
+          <label class="field">${fieldLabel(ui(searchLabel))}<input type="search" data-moderation-query value="${escapeHtml(filters.query)}"></label>
+          ${
+            restrictions
+              ? `<label class="field">${fieldLabel(ui("moderation_restriction_type"))}<select data-restriction-filter>
+            ${[
+              ["", "moderation_restriction_all_types"],
+              ["mute", "moderation_persona_mute"],
+              ["block", "moderation_persona_block"],
+            ]
+              .map(
+                ([value, key]) =>
+                  `<option value="${value}"${value === filters.type ? " selected" : ""}>${escapeHtml(ui(key))}</option>`,
+              )
+              .join("")}
+          </select></label>`
+              : ""
+          }
+        </div>
+        <div class="table-wrap"><table class="moderation-table" aria-label="${escapeHtml(ui(heading))}">
+          <thead><tr>
+            <th scope="col">${escapeHtml(ui(roles ? "moderation_role_column" : "moderation_member_column"))}</th>
+            ${
+              restrictions
+                ? `<th scope="col">${escapeHtml(ui("moderation_persona_column"))}</th>
+            <th scope="col" class="restriction-wide">${escapeHtml(ui("moderation_restriction_type"))}</th>
+            <th scope="col" class="restriction-wide">${escapeHtml(ui("moderation_expires_column"))}</th>`
+                : ""
+            }
+            <th scope="col"><span class="sr-only">${escapeHtml(ui(action))}</span></th>
+          </tr></thead><tbody>${tableRows.join("")}</tbody>
+        </table></div>
+        <p class="hint" role="status" data-moderation-filter-status></p>`
+            : `<p class="hint">${escapeHtml(ui(`${heading}_empty`))}</p>`
+        }
+        </section>`;
+      if (tableRows.length) {
+        const query = host.querySelector("[data-moderation-query]");
+        const type = host.querySelector("[data-restriction-filter]");
+        const rows = [...host.querySelectorAll("[data-moderation-search]")];
+        const table = host.querySelector(".table-wrap");
+        const status = host.querySelector("[data-moderation-filter-status]");
+        const filterRows = () => {
+          filters.query = query.value;
+          if (type) filters.type = type.value;
+          const terms = query.value.toLowerCase().trim().split(/\s+/);
+          let visible = 0;
+          for (const entry of rows) {
+            entry.hidden =
+              (type?.value && type.value !== entry.dataset.restrictionType) ||
+              !terms.every((term) => entry.dataset.moderationSearch.includes(term));
+            if (!entry.hidden) visible++;
+          }
+          table.hidden = visible === 0;
+          status.textContent = visible
+            ? ui("moderation_filter_count")
+                .replace("{visible}", String(visible))
+                .replace("{total}", String(rows.length))
+            : ui("moderation_filter_no_matches");
+        };
+        query.addEventListener("input", filterRows);
+        type?.addEventListener("change", filterRows);
+        filterRows();
+      }
+    } else {
+      const fields = [
+        ["dailyUserQuota", "daily_user_quota", "moderation_daily_quota", 0, 100],
+        ["serverwideQuota", "serverwide_quota", "moderation_server_quota", 0, 99999],
+        ["serverwideQuotaResetsIn", "serverwide_quota_resets_in", "moderation_reset_days", 1, 365],
+      ];
+      host.innerHTML = ["text", "image", "video"]
+        .map(
+          (type) => `<form class="panel stack" data-moderation-quota="${type}" data-settings-key="moderation/${type}">
+        ${dashboardPanelHeading(`moderation_${type}`)}
+        <div class="grid">${fields.map(([name, column, label, min, max]) => `<label class="field">${fieldLabel(ui(label), ui(`${label}_hint`))}<input type="number" name="${name}" min="${min}" max="${max}" step="1" value="${escapeHtml(data.quotas[type][column])}" required></label>`).join("")}</div>
+        <footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></footer>
+      </form>`,
+        )
+        .join("");
+      host.querySelectorAll("[data-moderation-quota]").forEach((form) => {
+        form.onsubmit = async (event) => {
+          event.preventDefault();
+          const quotaType = form.dataset.moderationQuota;
+          const changes = Object.fromEntries(
+            fields.flatMap(([name, column]) => {
+              const value = form.elements[name].valueAsNumber;
+              return value === data.quotas[quotaType][column] ? [] : [[name, value]];
+            }),
+          );
+          if (!Object.keys(changes).length) return;
+          try {
+            const saved = await withBusyForm(form, () => patch({ action: "quota", quotaType, ...changes }));
+            if (!saved || !form.isConnected) return;
+            data.quotas[quotaType] = saved.quota;
+            for (const [name, column] of fields) form.elements[name].value = saved.quota[column];
+            completeFormSave(form);
+            toast(ui("moderation_saved"));
+          } catch (error) {
+            if (form.isConnected) showFormError(form, error);
+          }
+        };
+      });
+    }
+    const add = host.querySelector("[data-moderation-add]");
+    if (add) add.onclick = () => openModerationPicker(path, patch, availableRoles, data.serverBlocks, onSaved);
+    host.querySelectorAll("[data-moderation-remove]").forEach((button) => {
+      button.onclick = async () => {
+        const { title, hint, body } = removals[Number(button.dataset.moderationRemove)];
+        if (!(await confirmAction(title, hint)) || !host.isConnected) return;
+        button.disabled = true;
+        try {
+          await patch(body);
+          onSaved();
+        } catch (error) {
+          button.disabled = false;
+          if (host.isConnected) toast(error.message, "error");
+        }
+      };
+    });
+    initDraftForms(host);
+    enhanceDashboard(host);
+  }
+
+  function openModerationPicker(path, patch, roles, serverBlocks, onSaved) {
+    const isRole = !!roles;
+    const key = isRole ? "moderation_add_role" : "moderation_add_user";
+    const dialog = document.createElement("dialog");
+    dialog.className = "dialog stack";
+    dialog.setAttribute("aria-label", ui(key));
+    dialog.innerHTML = `${dashboardPanelHeading(key, isRole ? "moderation_add_role_hint" : "moderation_server_blocks_hint")}
+      ${isRole ? "" : `<form class="stack" data-member-search><label class="field">${fieldLabel(ui("moderation_member_query"), ui("moderation_member_query_hint"))}<input type="search" name="query" minlength="2" maxlength="100" required autofocus></label><div class="actions form-actions"><button class="button" type="submit">${escapeHtml(ui("settings_search"))}</button></div></form>`}
+      <form class="stack" data-moderation-picker>
+        <label class="field"${isRole ? "" : " hidden"}>${fieldLabel(ui(isRole ? "moderation_role" : "moderation_member"))}<select name="target" required${isRole ? " data-searchable autofocus" : ""}></select></label>
+        <p role="status" class="hint" hidden></p>
+        <footer class="actions form-actions"><button type="button" class="button" data-picker-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button type="submit" class="button primary"${isRole ? "" : " hidden disabled"}>${escapeHtml(ui(key))}</button></footer>
+      </form>`;
+    const form = dialog.querySelector("[data-moderation-picker]");
+    const select = form.elements.target;
+    const search = dialog.querySelector("[data-member-search]");
+    const status = dialog.querySelector("[role=status]");
+    const submit = form.querySelector('button[type="submit"]');
+    if (isRole) select.replaceChildren(...roles.map(({ id, name }) => new Option(name, id)));
+    if (search) {
+      const clearSelection = () => {
+        select.replaceChildren();
+        select.closest(".field").hidden = true;
+        submit.hidden = true;
+        submit.disabled = true;
+        status.hidden = true;
+      };
+      search.elements.query.oninput = clearSelection;
+      search.onsubmit = async (event) => {
+        event.preventDefault();
+        clearSelection();
+        search.querySelector(".form-error")?.remove();
+        try {
+          const query = search.elements.query.value.trim();
+          const result = await withBusyForm(search, () => api(`${path}/members?q=${encodeURIComponent(query)}`));
+          if (!result || !dialog.open) return;
+          const members = result.members.filter(({ id }) => !serverBlocks.some(({ userId }) => userId === id));
+          select.replaceChildren(...members.map(({ id, name, username }) => new Option(`${name} (@${username})`, id)));
+          status.textContent = ui("moderation_members_empty");
+          status.hidden = !!members.length;
+          select.closest(".field").hidden = !members.length;
+          submit.hidden = !members.length;
+          submit.disabled = !members.length;
+        } catch (error) {
+          if (dialog.open) showFormError(search, error);
+        }
+      };
+    }
+    form.querySelector("[data-picker-cancel]").onclick = () => dialog.close();
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const body = isRole ? { action: "addRole", roleId: select.value } : { action: "blockUser", userId: select.value };
+      try {
+        const saved = await withBusyForm(form, () => patch(body));
+        if (!saved) return;
+        dialog.close();
+        onSaved();
+      } catch (error) {
+        if (dialog.open) showFormError(form, error);
+      }
+    };
+    dialog.addEventListener("cancel", (event) => {
+      if (form.classList.contains("is-saving")) event.preventDefault();
+    });
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+    enhanceDashboard(dialog);
+  }
+
   function renderMemoryCollection({ personal, global = false, persona = null }) {
     const serverWritesDisabled =
       !personal && !state.overview.canManage && !state.overview.memoryPolicy.serverMemoryTeachingEnabled;
@@ -1898,7 +2489,7 @@
       ? "Global personal memory"
       : personal
         ? `${persona.nickname}'s memories about you`
-        : "Server knowledge";
+        : ui("persona_server_memory");
     const copy = global
       ? "Private facts available to your Tomori experience across persona lineages."
       : personal
@@ -1918,19 +2509,20 @@
           ${refreshButton("memory", ui("refresh_memories"))}
           <button class="button " data-memory-export type="button"${transferAttributes}>Export</button>
           <button class="button " data-memory-import type="button"${transferAttributes}>Import</button>
-          ${serverWritesDisabled || personalCreationDisabled ? "" : `<button class="button primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false">${escapeHtml(ui("memory_add"))}</button>`}
+          ${serverWritesDisabled || personalCreationDisabled ? "" : `<button class="button primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false"${personal ? "" : " disabled"}>${escapeHtml(ui("memory_add"))}</button>`}
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
         </div></header>
       <div class="stack">
       ${
         serverWritesDisabled || personalCreationDisabled
           ? `<div class="notice info"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><p>Existing entries remain visible according to your access.</p></div>`
-          : `<form class="stack" id="memory-compose-form" hidden>
-              <label class="field">${fieldLabel("New memory", "Write one concise fact. Its visibility follows the memory scope shown above.")}<textarea name="content" rows="3" required placeholder="A concise fact Tomori should remember"></textarea></label>
+          : `<form id="memory-compose-form" hidden>
               <div class="stack">
+                <label class="field">${fieldLabel("New memory", "Write one concise fact. Its visibility follows the memory scope shown above.")}<textarea name="content" rows="3" required placeholder="A concise fact Tomori should remember"></textarea></label>
+                ${personal ? "" : '<div class="subsection" data-memory-channel-scope hidden></div>'}
                 ${personal ? `<label class="field">${fieldLabel("Tags", ui("memory_personal_tags_hint"))}<input name="tags" placeholder="preference, character"></label>` : ""}
-                <div class="actions"><button class="button" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
               </div>
+              <div class="actions"><button class="button" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
             </form>`
       }
       <section id="memory-list" class="stack">${loadingBar(ui("memory_loading"))}</section></div></section>`;
@@ -1945,6 +2537,7 @@
       form.elements.content.focus();
     } else {
       form.reset();
+      form.querySelector("[data-memory-channel-picker]")?.setAttribute("hidden", "");
       trigger.focus({ preventScroll: true });
     }
   }
@@ -1953,9 +2546,50 @@
     state.memoryKind = "personal";
     state.lineageId = 0;
     workspace.innerHTML = `
-      ${pageHeader("Personal", "Global memory", "This is the only memory scope that is not attached to a persona.")}
-      <div class="stack">${renderMemoryCollection({ personal: true, global: true })}</div>`;
+      ${pageHeader("Personal", "Global memory", ui("global_memory_hint"))}
+      <div class="stack">
+        <section class="panel stack" id="personal-stm">
+          ${dashboardPanelHeading("personal_stm", "personal_stm_hint", refreshButton("personal-stm", ui("refresh_memories")))}
+          <div class="row">
+            <div data-personal-stm-status role="status"></div>
+            <button class="button danger" type="button" data-personal-stm-clear>${escapeHtml(ui("personal_stm_clear"))}</button>
+          </div>
+        </section>
+        ${renderMemoryCollection({ personal: true, global: true })}
+      </div>`;
+    void loadPersonalStm(workspace.querySelector("#personal-stm"));
     loadMemories();
+  }
+
+  const personalStmPath = "/profile/short-term-memory";
+
+  async function loadPersonalStm(panel) {
+    if (panel.hasAttribute("aria-busy")) return;
+    const status = panel.querySelector("[data-personal-stm-status]");
+    const clear = panel.querySelector("[data-personal-stm-clear]");
+    panel.setAttribute("aria-busy", "true");
+    clear.disabled = true;
+    status.innerHTML = loadingBar(ui("memory_loading"));
+    try {
+      const { count } = await api(personalStmPath);
+      status.textContent = ui("personal_stm_count").replace("{count}", count.toLocaleString());
+    } catch {
+      status.textContent = ui("personal_stm_load_failed");
+    } finally {
+      clear.disabled = false;
+      panel.removeAttribute("aria-busy");
+    }
+  }
+
+  async function clearPersonalStm(panel) {
+    if (!(await confirmAction(ui("personal_stm_confirm_title"), ui("personal_stm_confirm_detail")))) return;
+    if (!panel.isConnected || panel.hasAttribute("aria-busy")) return;
+    try {
+      await withBusyForm(panel, () => api(personalStmPath, { method: "DELETE" }));
+      panel.querySelector("[data-personal-stm-status]").textContent = ui("personal_stm_clear_requested");
+    } catch (error) {
+      toast(error.message, "error");
+    }
   }
 
   let memoryRequestId = 0;
@@ -1977,6 +2611,13 @@
       const data = await api(path);
       if (!isCurrent()) return;
       state.memoryData = data;
+      if (memoryKind === "server") {
+        const panel = list.closest(".panel");
+        const form = panel.querySelector("#memory-compose-form");
+        if (form?.hidden) renderMemoryChannelScope(form, data);
+        const add = panel.querySelector("[data-memory-add]");
+        if (add) add.disabled = false;
+      }
       renderMemoryList();
     } catch (error) {
       if (!isCurrent()) return;
@@ -2004,6 +2645,7 @@
             <p>${escapeHtml(memory.content)}</p>
             <div class="row hint">
               ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : ""}
+              ${state.memoryKind === "server" && !state.overview.guild?.isDirectMessage ? `<span>${escapeHtml(memoryChannelSummary(memory, state.memoryData))}</span>` : ""}
               ${memory.updatedAt || memory.createdAt ? `<time>${escapeHtml(formatDate(memory.updatedAt || memory.createdAt))}</time>` : ""}
               ${state.memoryKind === "server" && state.overview.canManage && memory.taughtByUserId ? `<small>Teacher #${memory.taughtByUserId}</small>` : ""}
             </div>
@@ -2019,6 +2661,59 @@
         </article>`,
       )
       .join("");
+  }
+
+  function memoryChannelSummary(memory, data) {
+    const names = (memory.channelDiscIds || []).flatMap((id) => {
+      const channel = data.channels?.find((entry) => entry.id === id);
+      return channel ? [`#${channel.name}`] : [];
+    });
+    if (memory.unavailableChannelCount) {
+      names.push(ui("memory_channels_unavailable_count").replace("{count}", memory.unavailableChannelCount));
+    }
+    const scope = names.length ? `${ui("memory_channels")}: ${names.join(", ")}` : ui("memory_channels_all");
+    return memory.channelScopePending ? `${scope}. ${ui("memory_channels_pending")}` : scope;
+  }
+
+  function renderMemoryChannelScope(form, data, memory) {
+    const host = form.querySelector("[data-memory-channel-scope]");
+    if (!host) return;
+    host.replaceChildren();
+    host.hidden = true;
+    form._memoryChannels = memory?.channelDiscIds ?? [];
+    if (!data || state.overview.guild?.isDirectMessage) return;
+    const saved = form._memoryChannels;
+    const notices = [
+      !data.channelMemoryEnabled ? ui("memory_channels_inactive") : "",
+      memory?.channelScopePending ? ui("memory_channels_pending") : "",
+      memory?.unavailableChannelCount
+        ? ui("memory_channels_unavailable").replace("{count}", memory.unavailableChannelCount)
+        : "",
+    ];
+    if (!memory?.unavailableChannelCount && data.channels?.length) {
+      host.innerHTML = `<label class="toggle">${fieldLabel(ui("memory_channels_limit"), ui("memory_channels_hint"))}
+        <input type="checkbox" name="restrictMemoryChannels" role="switch" aria-controls="${form.id}-channels" data-memory-channel-limit${saved.length ? " checked" : ""}></label>
+        <div id="${form.id}-channels" data-memory-channel-picker${saved.length ? "" : " hidden"}>${renderChannelSelector("channelDiscIds", saved, false, data.channels)}</div>`;
+    }
+    for (const notice of notices.filter(Boolean)) {
+      const message = document.createElement("p");
+      message.className = "hint";
+      message.textContent = notice;
+      host.append(message);
+    }
+    host.hidden = !host.hasChildNodes();
+    enhanceDashboard(host);
+  }
+
+  function collectMemoryChannelPatch(form) {
+    const limit = form.querySelector("[data-memory-channel-limit]");
+    if (!limit) return {};
+    const saved = form._memoryChannels;
+    const ids = limit.checked
+      ? [...form.querySelectorAll('[name="channelDiscIds"]:checked')].map((input) => input.value)
+      : [];
+    if (limit.checked && !ids.length) throw new Error(ui("memory_channels_required"));
+    return ids.length === saved.length && ids.every((id) => saved.includes(id)) ? {} : { channelDiscIds: ids };
   }
 
   let lorebookLoadVersion = 0;
@@ -2522,6 +3217,291 @@
     </form>`;
   }
 
+  const namingHabitFields = [
+    ["prefix", "prefixes", "persona_habits_prefix"],
+    ["suffix", "suffixes", "persona_habits_suffix"],
+    ["addressTerm", "addressTerms", "persona_habits_term", "persona_habits_term_hint"],
+  ];
+
+  function renderPersonaNamingHabits(persona) {
+    const habits = state.overview.personaNamingHabits;
+    if (!habits) return "";
+    const values = habits.values[persona.personaId];
+    return `<section class="panel stack" data-persona-habits="${persona.personaId}">
+      ${dashboardPanelHeading("persona_habits_title", "persona_habits_hint")}
+      <label class="field">${fieldLabel(ui("persona_habits_style"), ui("persona_habits_neutral_hint"))}
+        <select data-persona-habit-style>${habits.styles.map(({ value, label }) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}</select>
+      </label>
+      ${habits.styles
+        .map(
+          ({
+            value: style,
+          }) => `<form class="stack" data-persona-habit-form="${escapeHtml(style)}" data-settings-key="persona-habits/${persona.personaId}/${escapeHtml(style)}"${style === "neutral" ? "" : " hidden"}>
+        <div class="grid">${namingHabitFields.map(([name, group, label, hint]) => `<label class="field">${fieldLabel(ui(label), hint ? ui(hint) : undefined)}<input name="${name}" maxlength="${habits.maxLength}" value="${escapeHtml(values?.[group]?.[style] ?? "")}"></label>`).join("")}</div>
+        <footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></footer>
+      </form>`,
+        )
+        .join("")}
+    </section>`;
+  }
+
+  async function savePersonaNamingHabits(form) {
+    if (savingForms) return;
+    const personaId = Number(form.closest("[data-persona-habits]").dataset.personaHabits);
+    const habits = state.overview.personaNamingHabits;
+    const style = form.dataset.personaHabitForm;
+    const payload = {
+      style,
+      ...Object.fromEntries(namingHabitFields.map(([name]) => [name, form.elements[name].value])),
+    };
+    const result = await withBusyForm(form, () =>
+      api(`/guilds/${state.guildId}/personas/${personaId}/naming-habits`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
+    if (!result || !form.isConnected) return;
+    habits.values[personaId] ??= {};
+    const naming = habits.values[personaId];
+    for (const [name, group] of namingHabitFields) {
+      const value = result.values[name];
+      naming[group] ??= {};
+      if (value) naming[group][style] = value;
+      else delete naming[group][style];
+      form.elements[name].value = value;
+    }
+    completeFormSave(form);
+    toast(ui("persona_habits_saved"));
+  }
+
+  async function loadPersonaConditioning(host, personaId) {
+    const path = `/guilds/${state.guildId}/personas/${personaId}/conditioning`;
+    const content = host.querySelector("[data-conditioning-entries]");
+    const refresh = host.querySelector("[data-conditioning-refresh]");
+    refresh.disabled = true;
+    content.innerHTML = loadingBar(ui("persona_conditioning_title"));
+    let entries;
+    try {
+      ({ entries } = await api(path));
+    } catch (error) {
+      if (content.isConnected)
+        content.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+      return;
+    } finally {
+      refresh.disabled = false;
+    }
+    if (!content.isConnected) return;
+    content.innerHTML = entries.length
+      ? `<div class="entry-list">${entries
+          .map(
+            ({ id, type, action, reason, count }) => `<article class="inline-entry"><div class="entry-read">
+        <div class="entry-copy" id="conditioning-${escapeHtml(id)}">
+          <div class="row hint"><span>${escapeHtml(ui(type === "reward" ? "persona_conditioning_reward" : "persona_conditioning_punishment"))} &middot; ${escapeHtml(action)}</span><span>${escapeHtml(ui("persona_conditioning_count").replace("{count}", String(count)))}</span></div>
+          <p class="read-text" dir="auto">${escapeHtml(reason)}</p>
+        </div>
+        <div class="entry-actions"><button class="button danger" type="button" data-conditioning-remove="${escapeHtml(id)}" aria-describedby="conditioning-${escapeHtml(id)}" aria-haspopup="dialog">${escapeHtml(ui("persona_conditioning_remove"))}</button></div>
+      </div></article>`,
+          )
+          .join("")}</div>`
+      : `<p class="hint">${escapeHtml(ui("persona_conditioning_empty"))}</p>`;
+    content.querySelectorAll("[data-conditioning-remove]").forEach((button) => {
+      button.onclick = async () => {
+        if (
+          !(await confirmAction(ui("persona_conditioning_remove_title"), ui("persona_conditioning_remove_hint"))) ||
+          !button.isConnected
+        )
+          return;
+        button.disabled = true;
+        try {
+          await api(`${path}/${encodeURIComponent(button.dataset.conditioningRemove)}`, { method: "DELETE" });
+          toast(ui("persona_conditioning_removed"));
+          if (host.isConnected) {
+            await loadPersonaConditioning(host, personaId);
+            if (refresh.isConnected) refresh.focus({ preventScroll: true });
+          }
+        } catch (error) {
+          if (button.isConnected) {
+            button.disabled = false;
+            toast(error.message, "error");
+          }
+        }
+      };
+    });
+  }
+
+  function personaKnowledgeTabs() {
+    const tabs = [
+      ["personal", "persona_personal_memory"],
+      ["server", "persona_server_memory"],
+      ["lorebook", "lorebooks"],
+    ];
+    if (state.overview.canManage && state.overview.personaNamingHabits && !state.overview.guild.isDirectMessage)
+      tabs.push(["conditioning", "persona_conditioning_tab"]);
+    return tabs;
+  }
+
+  const personaAttgFields = [
+    ["nai_attg_author", "persona_attg_author"],
+    ["nai_attg_title", "persona_attg_work_title"],
+    ["nai_attg_tags", "persona_attg_tags"],
+    ["nai_attg_genre", "persona_attg_genre"],
+  ];
+
+  function renderPersonaAttg(personaId) {
+    const settings = state.overview.personaGuildSettings;
+    const attg = settings?.values[personaId]?.attg;
+    if (!attg) return "";
+    return `<form class="panel stack" data-persona-attg="${personaId}" data-settings-key="persona-attg/${personaId}">
+      ${dashboardPanelHeading("persona_attg_title", "persona_attg_hint")}
+      <div class="grid">${personaAttgFields.map(([name, key]) => `<label class="field">${fieldLabel(ui(key))}<input name="${name}" maxlength="${settings.attgMaxLength}" value="${escapeHtml(attg[name] ?? "")}"></label>`).join("")}
+      <label class="field">${fieldLabel(ui("persona_attg_stars"), ui("persona_attg_stars_hint"))}<select name="nai_attg_stars"><option value="">${escapeHtml(ui("persona_attg_unrated"))}</option>${[1, 2, 3, 4, 5].map((stars) => `<option value="${stars}"${stars === attg.nai_attg_stars ? " selected" : ""}>${stars}</option>`).join("")}</select></label></div>
+      <footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>
+    </form>`;
+  }
+
+  async function savePersonaAttg(form) {
+    const personaId = Number(form.dataset.personaAttg);
+    const settings = state.overview.personaGuildSettings.values[personaId];
+    const data = Object.fromEntries(new FormData(form));
+    data.nai_attg_stars = data.nai_attg_stars ? Number(data.nai_attg_stars) : null;
+    const result = await withBusyForm(form, () =>
+      api(`/guilds/${state.guildId}/personas/${personaId}/attg`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    );
+    if (!result || !form.isConnected) return;
+    settings.attg = result.values;
+    for (const [key, value] of Object.entries(result.values)) form.elements[key].value = value ?? "";
+    completeFormSave(form);
+    toast(ui("persona_attg_saved"));
+  }
+
+  function personaSettingsPanel(key, hint, attributes, refresh = "") {
+    return `<section class="panel stack" ${attributes}>
+      ${dashboardPanelHeading(key, hint, refresh ? refreshButton(refresh, ui(key)) : "")}
+      <div data-persona-panel-body>${loadingBar(ui(key))}</div>
+    </section>`;
+  }
+
+  async function loadPersonaVoice(host, personaId) {
+    const body = host.querySelector("[data-persona-panel-body]");
+    const refresh = host.querySelector("[data-voice-refresh]");
+    refresh.disabled = true;
+    body.innerHTML = loadingBar(ui("persona_voice_title"));
+    try {
+      const voice = await api(`/guilds/${state.guildId}/personas/${personaId}/voice`);
+      if (!host.isConnected) return;
+      const title = (kind) => ui(kind === "clone" ? "persona_voice_clone" : "persona_voice_design");
+      const currentSource = [title(voice.effectiveSource), voice.effectiveTarget].filter(Boolean).join(" / ");
+      const current = voice.effectiveSource
+        ? ui(voice.effectiveSource === voice.priority ? "persona_voice_effective" : "persona_voice_fallback").replace(
+            "{source}",
+            () => currentSource,
+          )
+        : ui("persona_voice_no_source");
+      const settingsKey = `persona-voice/${personaId}/${voice.mode}`;
+      const draftChoice = drafts
+        .get(`${state.guildId}/${settingsKey}`)
+        ?.find(({ name }) => name === "assignment")?.value;
+      const unavailable = [...new Set([voice.selectedId, draftChoice])].filter(
+        (id) => id && !voice.options.some((option) => option.id === id),
+      );
+      body.innerHTML = `<form class="stack" data-persona-voice="${personaId}" data-voice-mode="${escapeHtml(voice.mode)}" data-settings-key="${escapeHtml(settingsKey)}">
+        <p class="hint">${escapeHtml(current)}</p>
+        <div class="grid"><label class="field">${fieldLabel(ui("persona_voice_priority"), ui("persona_voice_priority_hint"))}
+          <select name="priority">${["design", "clone"].map((kind) => `<option value="${kind}"${kind === voice.priority ? " selected" : ""}>${escapeHtml(title(kind))}</option>`).join("")}</select></label>
+        <label class="field">${fieldLabel(ui(voice.mode === "elevenlabs" ? "persona_voice_provider" : "persona_voice_sample"))}
+          <select name="assignment" data-searchable><option value="">${escapeHtml(ui("persona_voice_unassigned"))}</option>
+          ${unavailable.map((id) => `<option value="${escapeHtml(id)}"${id === voice.selectedId ? " selected" : ""}>${escapeHtml(ui("persona_voice_unavailable"))}</option>`).join("")}
+          ${voice.options.map(({ id, label }) => `<option value="${escapeHtml(id)}"${id === voice.selectedId ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>
+          ${voice.catalogUnavailable ? `<small class="hint">${escapeHtml(ui("persona_voice_catalog_unavailable"))}</small>` : ""}</label></div>
+        <label class="field">${fieldLabel(ui("persona_voice_design_prompt"), ui("persona_voice_design_hint"))}
+          <textarea name="designPrompt" maxlength="${voice.maxLength}" rows="4">${escapeHtml(voice.designPrompt)}</textarea></label>
+        <footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>
+      </form>`;
+      initDraftForms(host);
+      enhanceDashboard(host);
+      focusSearchDestination();
+    } catch (error) {
+      if (host.isConnected) body.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+    } finally {
+      refresh.disabled = false;
+    }
+  }
+
+  async function savePersonaVoice(form) {
+    const personaId = Number(form.dataset.personaVoice);
+    const mode = form.dataset.voiceMode;
+    const changed = Object.fromEntries(
+      formSnapshot(form)
+        .filter(({ name, value }) => formBaselines.get(form)?.find((entry) => entry.name === name)?.value !== value)
+        .map(({ name, value }) => [name, value]),
+    );
+    if (!Object.keys(changed).length) return;
+    if (changed.assignment !== undefined) {
+      const id = changed.assignment;
+      changed.assignment = { mode, id: id === "" ? null : mode === "sample" ? Number(id) : id };
+    }
+    const saved = await withBusyForm(form, () =>
+      api(`/guilds/${state.guildId}/personas/${personaId}/voice`, {
+        method: "PATCH",
+        body: JSON.stringify(changed),
+      }),
+    );
+    if (!saved || !form.isConnected) return;
+    const host = form.closest("[data-persona-voice-panel]");
+    completeFormSave(form);
+    toast(ui("persona_voice_saved"));
+    await loadPersonaVoice(host, personaId);
+    if (host.isConnected) host.querySelector("[data-voice-refresh]").focus({ preventScroll: true });
+  }
+
+  async function loadPersonaPreset(host, personaId) {
+    const body = host.querySelector("[data-persona-panel-body]");
+    const path = `/guilds/${state.guildId}/personas/${personaId}/preset`;
+    try {
+      const preset = await api(path);
+      if (!host.isConnected) return;
+      body.innerHTML = preset.name
+        ? `<div class="stack"><strong>${escapeHtml(preset.name)}</strong><p class="hint">${escapeHtml(ui(preset.linked ? "persona_preset_linked" : "persona_preset_local"))}</p>
+          ${preset.revision ? `<div class="actions form-actions"><button type="button" class="button danger" data-persona-resync aria-haspopup="dialog">${escapeHtml(ui("persona_preset_resync"))}</button></div>` : ""}</div>`
+        : `<p class="hint">${escapeHtml(ui(preset.hasPreset ? "persona_preset_missing" : "persona_preset_original"))}</p>`;
+      const button = body.querySelector("[data-persona-resync]");
+      if (button)
+        button.onclick = async () => {
+          if (
+            savingForms ||
+            !(await confirmAction(
+              ui("persona_preset_confirm_title"),
+              ui(preset.linked ? "persona_preset_confirm_linked" : "persona_preset_confirm_local"),
+            )) ||
+            !host.isConnected
+          )
+            return;
+          try {
+            const result = await withBusyForm(host, () =>
+              api(`${path}/resync`, {
+                method: "POST",
+                body: JSON.stringify({ revision: preset.revision }),
+              }),
+            );
+            if (!result) return;
+            toast(
+              ui(result.avatarSynced ? "persona_preset_saved" : "persona_preset_partial"),
+              result.avatarSynced ? "success" : "warning",
+            );
+            if (host.isConnected) await refreshPersonas(personaId);
+          } catch (error) {
+            toast(error.message, "error");
+            if (host.isConnected && error.code === "persona_preset_changed") await loadPersonaPreset(host, personaId);
+          }
+        };
+    } catch (error) {
+      if (host.isConnected) body.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
   function renderPersonaSettings(persona) {
     const formHeader = (eyebrow, title, description) =>
       `<header class="panel-header"><div class="heading"><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p></div></header>`;
@@ -2537,6 +3517,8 @@
           <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
           ${saveActions}
         </form>
+
+        ${renderPersonaNamingHabits(persona)}
 
         <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="prompt">
           ${formHeader("Conversation", "Triggers", "Names and phrases that can activate this persona in conversation.")}
@@ -2561,6 +3543,8 @@
           ${saveActions}
         </form>
 
+        ${renderPersonaAttg(persona.personaId)}
+        ${state.overview.personaGuildSettings ? personaSettingsPanel("persona_preset_title", "persona_preset_hint", "data-persona-preset-panel") : ""}
         ${
           persona.isAlter
             ? `<section class="panel" data-persona-id="${persona.personaId}">
@@ -2648,6 +3632,7 @@
         </label><button class="button" type="button" data-persona-avatar-remove="${persona.personaId}">Remove</button></div></div>`
         }
       </section>
+        ${state.overview.personaGuildSettings?.values[persona.personaId] ? `<section class="panel stack" data-persona-reference="${persona.personaId}">${renderPersonaReference(persona.personaId)}</section>` : ""}
         <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="prompt">
           ${formHeader("Image generation", "Visual character prompt", "A visual description Tomori can also use when generating images. This is not the persona's main conversation prompt.")}
           <label class="field">${fieldLabel("Visual description", "Describe the character's stable visual identity, clothing, features, and other image-generation details.")}<textarea name="personaPrompt" rows="10">${escapeHtml(persona.personaPrompt || "")}</textarea></label>
@@ -2659,6 +3644,41 @@
           ${saveActions}
         </form>
     </div>`;
+  }
+
+  function renderPersonaReference(personaId) {
+    const saved = state.overview.personaGuildSettings.values[personaId].hasCharacterReference;
+    const url = `${BASE}/guilds/${state.guildId}/personas/${personaId}/character-reference?v=${state.avatarRevision}`;
+    return `${dashboardPanelHeading("persona_reference_title", "persona_reference_hint")}
+      ${saved ? `<img class="character-reference-preview" src="${escapeHtml(url)}" alt="${escapeHtml(ui("persona_reference_title"))}">` : ""}
+      <div class="actions"><button class="button" type="button" data-persona-reference-upload>${escapeHtml(ui("character_reference_upload"))}</button>
+      ${saved ? `<button class="button danger" type="button" data-persona-reference-remove aria-haspopup="dialog">${escapeHtml(ui("character_reference_remove"))}</button>` : ""}</div>
+      <input type="file" data-persona-reference-file accept="image/*" hidden>`;
+  }
+
+  async function savePersonaReference(host, file) {
+    const personaId = Number(host.dataset.personaReference);
+    const settings = state.overview.personaGuildSettings.values[personaId];
+    try {
+      const body = new FormData();
+      if (file) body.set("file", file);
+      const result = await withBusyForm(host, () =>
+        api(`/guilds/${state.guildId}/personas/${personaId}/character-reference`, {
+          method: file ? "PUT" : "DELETE",
+          ...(file ? { body } : {}),
+        }),
+      );
+      if (!result) return;
+      settings.hasCharacterReference = result.hasCharacterReference;
+      if (host.isConnected) {
+        state.avatarRevision += 1;
+        host.innerHTML = renderPersonaReference(personaId);
+        host.querySelector("[data-persona-reference-upload]").focus({ preventScroll: true });
+      }
+      toast(ui(file ? "persona_reference_saved" : "persona_reference_removed"));
+    } catch (error) {
+      toast(error.message, "error");
+    }
   }
 
   function renderPersonaNaming(persona) {
@@ -2721,16 +3741,71 @@
     if (!personas.some((persona) => persona.personaId === state.personaId)) {
       state.personaId = personas[0].personaId;
     }
-    if (!state.overview.canManage && ["settings", "appearance", "sprites", "channels"].includes(state.personaPanel)) {
+    const persona = personas.find((entry) => entry.personaId === state.personaId) || personas[0];
+    const avatarUrl = personaAvatarUrl(persona);
+    const knowledgeTabs = personaKnowledgeTabs();
+    const isKnowledge = (panel) => knowledgeTabs.some(([key]) => key === panel);
+    const primaryTabs = [
+      ["knowledge", ui("persona_knowledge")],
+      ["preferences", state.overview.personaNaming.copy.tab],
+    ];
+    if (state.overview.canManage) {
+      primaryTabs.push(["settings", "Persona settings"]);
+      if (!state.overview.guild.isDirectMessage) primaryTabs.push(["channels", ui("persona_channels")]);
+      primaryTabs.push(
+        ["appearance", "Appearance & image prompt"],
+        ["voice", ui("persona_voice_title")],
+        ["sprites", ui("sprites")],
+      );
+    }
+    if (!isKnowledge(state.personaKnowledgePanel)) state.personaKnowledgePanel = "personal";
+    if (!isKnowledge(state.personaPanel) && !primaryTabs.some(([key]) => key === state.personaPanel)) {
       state.personaPanel = "personal";
     }
-
-    const persona = personas.find((entry) => entry.personaId === state.personaId) || personas[0];
-    const memoryPanel = ["personal", "server"].includes(state.personaPanel);
+    const panel = state.personaPanel;
+    const knowledgeActive = isKnowledge(panel);
+    if (knowledgeActive) state.personaKnowledgePanel = panel;
+    const primaryPanel = knowledgeActive ? "knowledge" : panel;
+    const renderTab = (key, label, selected) =>
+      `<button type="button" id="persona-tab-${key}" role="tab" aria-selected="${key === selected}"${key === selected ? ` aria-controls="persona-content-${key}"` : ""} data-persona-panel="${key}">${escapeHtml(label)}</button>`;
+    const memoryPanel = panel === "personal" || panel === "server";
     if (memoryPanel) {
-      state.memoryKind = state.personaPanel === "server" ? "server" : "personal";
+      state.memoryKind = panel === "server" ? "server" : "personal";
       state.lineageId = persona.lineageId;
     }
+    let body;
+    switch (panel) {
+      case "channels":
+        body = '<section class="panel stack" id="persona-channel-workspace"></section>';
+        break;
+      case "lorebook":
+        body = '<div id="lorebook-workspace"></div>';
+        break;
+      case "conditioning":
+        body = `<section class="panel stack" data-persona-conditioning>
+          ${dashboardPanelHeading("persona_conditioning_title", "persona_conditioning_hint", refreshButton("conditioning", ui("persona_conditioning_title")))}
+          <div data-conditioning-entries></div>
+        </section>`;
+        break;
+      case "preferences":
+        body = renderPersonaNaming(persona);
+        break;
+      case "settings":
+        body = renderPersonaSettings(persona);
+        break;
+      case "appearance":
+        body = renderPersonaAppearance(persona);
+        break;
+      case "voice":
+        body = personaSettingsPanel("persona_voice_title", "persona_voice_hint", "data-persona-voice-panel", "voice");
+        break;
+      case "sprites":
+        body = `<div class="${state.overview.guild.isDirectMessage ? "stack" : "workspace"}"><section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>${renderPersonaTestChat(persona)}</div>`;
+        break;
+      default:
+        body = renderMemoryCollection({ personal: panel === "personal", persona });
+    }
+    const content = `<div class="persona-panel-content" id="persona-content-${panel}" role="tabpanel" aria-labelledby="persona-tab-${panel}">${body}</div>`;
 
     workspace.innerHTML = `
       ${pageHeader(
@@ -2742,62 +3817,70 @@
       ${renderPersonaPicker(personas, persona.personaId)}
       ${state.overview.guild.isDirectMessage ? `<p class="hint">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
       <section class="persona-focus" data-glow>
-        ${persona.avatarUrl ? `<div class="persona-atmosphere" aria-hidden="true"><img src="${escapeHtml(persona.avatarUrl)}" alt=""></div>` : ""}
-        <div class="persona-identity"><p class="eyebrow">${persona.isAlter ? "Alter persona" : "Main persona"}</p><h2>${escapeHtml(persona.nickname)}</h2><button class="button persona-picker-trigger" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_choose"))}${navigationIcon("arrow-up-down")}</button></div>
-        <div class="persona-art">${persona.avatarUrl ? `<img src="${escapeHtml(persona.avatarUrl)}" alt="${escapeHtml(persona.nickname)}" data-avatar-fallback="${escapeHtml(persona.nickname.slice(0, 1))}">` : personaAvatar(persona)}</div>
+        ${avatarUrl ? `<div class="persona-atmosphere" aria-hidden="true"><img src="${escapeHtml(avatarUrl)}" alt=""></div>` : ""}
+        <div class="persona-identity"><p class="eyebrow">${persona.isAlter ? "Alter persona" : "Main persona"}</p><h2>${escapeHtml(persona.nickname)}</h2>
+          <div class="persona-identity-actions">
+            <button class="button" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_choose"))}${navigationIcon("arrow-up-down")}</button>
+            ${
+              state.overview.canManage
+                ? `<button class="button" type="button" popovertarget="persona-actions-menu">${navigationIcon("ellipsis")}${escapeHtml(ui("persona_actions"))}</button>
+                <div id="persona-actions-menu" class="action-menu" popover aria-label="${escapeHtml(ui("persona_actions"))}">
+                  <button class="button" type="button" data-persona-export-format="png">${navigationIcon("download")}${escapeHtml(ui("persona_export_png"))}</button>
+                  <button class="button" type="button" data-persona-export-format="json">${navigationIcon("download")}${escapeHtml(ui("persona_export_json"))}</button>
+                  ${persona.isAlter ? "" : `<hr><button class="button" type="button" data-main-persona-change aria-haspopup="dialog">${escapeHtml(ui("persona_main_change"))}</button>`}
+                </div>`
+                : ""
+            }
+          </div>
+        </div>
+        <div class="persona-art">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(persona.nickname)}" data-avatar-fallback="${escapeHtml(persona.nickname.slice(0, 1))}">` : personaAvatar(persona)}</div>
       </section>
-        <nav class="tabs" aria-label="${escapeHtml(persona.nickname)} workspace" role="tablist">
-          <button type="button" role="tab" aria-selected="${state.personaPanel === "personal"}" data-persona-panel="personal">Personal memory</button>
-          <button type="button" role="tab" aria-selected="${state.personaPanel === "server"}" data-persona-panel="server">Server knowledge</button>
-          <button type="button" role="tab" aria-selected="${state.personaPanel === "lorebook"}" data-persona-panel="lorebook">${escapeHtml(ui("lorebooks"))}</button>
-          <button type="button" role="tab" aria-selected="${state.personaPanel === "preferences"}" data-persona-panel="preferences">${escapeHtml(state.overview.personaNaming.copy.tab)}</button>
-          ${
-            state.overview.canManage
-              ? `<button type="button" role="tab" aria-selected="${state.personaPanel === "settings"}" data-persona-panel="settings">Persona settings</button>
-                 ${state.overview.guild.isDirectMessage ? "" : `<button type="button" role="tab" aria-selected="${state.personaPanel === "channels"}" data-persona-panel="channels">${escapeHtml(ui("persona_channels"))}</button>`}
-                 <button type="button" role="tab" aria-selected="${state.personaPanel === "appearance"}" data-persona-panel="appearance">Appearance &amp; image prompt</button>
-                 <button type="button" role="tab" aria-selected="${state.personaPanel === "sprites"}" data-persona-panel="sprites">${escapeHtml(ui("sprites"))}</button>`
-              : ""
-          }
+      <nav class="tabs tabs-parent${knowledgeActive ? " tabs-joined" : ""}" aria-label="${escapeHtml(persona.nickname)} workspace" role="tablist">
+        ${primaryTabs.map(([key, label]) => renderTab(key, label, primaryPanel)).join("")}
+      </nav>
+      ${
+        knowledgeActive
+          ? `<div class="persona-knowledge-panel" id="persona-content-knowledge" role="tabpanel" aria-labelledby="persona-tab-knowledge">
+        <nav class="tabs tabs-child" aria-label="${escapeHtml(ui("persona_knowledge"))}" role="tablist">
+          ${knowledgeTabs.map(([key, label]) => renderTab(key, ui(label), panel)).join("")}
         </nav>
-      <div class="persona-panel-content">
-        ${
-          state.personaPanel === "channels"
-            ? '<section class="panel stack" id="persona-channel-workspace"></section>'
-            : state.personaPanel === "lorebook"
-              ? `<div id="lorebook-workspace"></div>`
-              : state.personaPanel === "preferences"
-                ? renderPersonaNaming(persona)
-                : state.personaPanel === "settings"
-                  ? renderPersonaSettings(persona)
-                  : state.personaPanel === "appearance"
-                    ? renderPersonaAppearance(persona)
-                    : state.personaPanel === "sprites"
-                      ? `<div class="${state.overview.guild.isDirectMessage ? "stack" : "workspace"}"><section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>${renderPersonaTestChat(persona)}</div>`
-                      : renderMemoryCollection({
-                          personal: state.personaPanel === "personal",
-                          persona,
-                        })
-        }
-      </div>`;
+        ${content}
+      </div>`
+          : content
+      }`;
 
-    if (state.personaPanel === "channels") {
+    if (panel === "channels") {
       renderPersonaChannels(workspace.querySelector("#persona-channel-workspace"), persona);
-    } else if (state.personaPanel === "lorebook") {
+    } else if (panel === "lorebook") {
       loadLorebooks(persona.lineageId);
+    } else if (panel === "conditioning") {
+      const host = workspace.querySelector("[data-persona-conditioning]");
+      const refresh = () => loadPersonaConditioning(host, persona.personaId);
+      host.querySelector("[data-conditioning-refresh]").onclick = refresh;
+      void refresh();
     } else if (memoryPanel) {
       loadMemories();
-    } else if (state.personaPanel === "sprites") {
+    } else if (panel === "sprites") {
       loadSprites(persona.personaId);
+    } else if (panel === "voice") {
+      const host = workspace.querySelector("[data-persona-voice-panel]");
+      const refresh = () => loadPersonaVoice(host, persona.personaId);
+      host.querySelector("[data-voice-refresh]").onclick = refresh;
+      void refresh();
     } else {
       resizeAutoGrowTextareas(workspace);
-      if (state.personaPanel === "settings" && state.overview.canManage) loadPersonaTextModel(persona.personaId);
+      if (panel === "settings") {
+        loadPersonaTextModel(persona.personaId);
+        const preset = workspace.querySelector("[data-persona-preset-panel]");
+        if (preset) void loadPersonaPreset(preset, persona.personaId);
+      }
     }
   }
 
   function personaChannelSelection(data, personaId) {
     const stored = data.personaChannels.find((entry) => entry.personaId === personaId)?.channelIds || [];
-    return new Set(stored.length ? stored : state.overview.channels.map((channel) => channel.id));
+    const available = data.availableChannelIds ?? state.overview.channels.map((channel) => channel.id);
+    return new Set(stored.length ? stored.filter((id) => available.includes(id)) : available);
   }
 
   async function savePersonaChannels(assignments) {
@@ -2813,7 +3896,7 @@
     try {
       const data = await api(`/guilds/${state.guildId}/channel-settings`);
       if (!host.isConnected) return;
-      host.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_channels"))}</h2><p>${escapeHtml(ui("persona_channels_hint"))}</p></div></header><form class="stack">${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)])}<p role="alert" hidden></p><footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("channel_apply"))}</button></footer></form>`;
+      host.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_channels"))}</h2><p>${escapeHtml(ui("persona_channels_hint"))}</p></div></header><form class="stack">${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p role="alert" hidden></p><footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("channel_apply"))}</button></footer></form>`;
       const form = host.querySelector("form");
       form.querySelector('[role="alert"]').className = "notice error";
       const selected = () => [...form.querySelectorAll('[name="personaChannels"]:checked')].map((input) => input.value);
@@ -3074,13 +4157,23 @@
     }
   }
 
-  function renderChannelSelector(name, values = [], single = false, channels = state.overview.channels) {
-    const selected = new Set(values.map(String));
+  function renderChannelSelector(
+    name,
+    values = [],
+    single = false,
+    channels = state.overview.channels,
+    { preserveMissing = false, required = false } = {},
+  ) {
+    const selected = new Set(values.filter((value) => value != null && value !== "").map(String));
     const allowed = state.overview.allowedChannelIds || [];
+    const restricted = state.overview.channelWhitelistActive ?? allowed.length > 0;
+    const missing = preserveMissing
+      ? [...selected].filter((id) => !channels?.some((channel) => channel.id === id))
+      : [];
     const excluded =
       name === "allowedChannels"
         ? []
-        : (channels || []).filter((channel) => allowed.length && !allowed.includes(channel.id));
+        : (channels || []).filter((channel) => restricted && !allowed.includes(channel.id));
     channels = (channels || []).filter((channel) => !excluded.includes(channel));
     const groups = new Map();
     for (const channel of channels || []) {
@@ -3090,9 +4183,12 @@
     }
     const preserved = excluded
       .filter((channel) => selected.has(channel.id))
-      .map(
-        (channel) =>
-          `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}" checked></label>`,
+      .map((channel) => channel.id)
+      .concat(missing)
+      .map((id) =>
+        single && missing.includes(id)
+          ? `<label class="channel-choice"><input type="radio" name="${escapeHtml(name)}" value="${escapeHtml(id)}" checked data-unavailable-channel><span>${escapeHtml(ui("spotlight_channel_unavailable"))}</span></label>`
+          : `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(id)}" checked></label>`,
       )
       .join("");
     const rows =
@@ -3100,10 +4196,15 @@
       [...groups.values()]
         .map(
           (group) =>
-            `<h3 class="channel-category">${escapeHtml(group.name)}</h3>${group.channels.map((channel) => `<label class="channel-choice" data-channel-search="${escapeHtml(`${channel.name} ${group.name}`.toLowerCase())}"><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}><span aria-hidden="true">#</span><span>${escapeHtml(channel.name)}</span></label>`).join("")}`,
+            `<h3 class="channel-category">${escapeHtml(group.name)}</h3>${group.channels.map((channel) => `<label class="channel-choice" data-channel-search="${escapeHtml(`${channel.name} ${group.name}`.toLowerCase())}"><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}${single && required ? " required" : ""}><span aria-hidden="true">#</span><span>${escapeHtml(channel.name)}</span></label>`).join("")}`,
         )
         .join("");
-    return `<div class="channel-selector stack" data-channel-selector><label class="field"><span class="field-label">${escapeHtml(ui("channel_search"))}</span><input type="search" data-channel-filter></label>${single ? `<label class="channel-choice"><input type="radio" name="${escapeHtml(name)}" value=""${!values[0] ? " checked" : ""}><span>${escapeHtml(ui("channel_none"))}</span></label>` : `<div class="actions channel-selection-actions"><button class="button" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`}<div class="channel-choices">${rows}<p data-channel-empty class="hint"${rows ? " hidden" : ""}>${escapeHtml(ui("channel_empty"))}</p></div></div>`;
+    const actions = single
+      ? required
+        ? ""
+        : `<label class="channel-choice"><input type="radio" name="${escapeHtml(name)}" value=""${!values[0] ? " checked" : ""}><span>${escapeHtml(ui("channel_none"))}</span></label>`
+      : `<div class="actions channel-selection-actions"><button class="button" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
+    return `<div class="channel-selector stack" data-channel-selector><label class="field"><span class="field-label">${escapeHtml(ui("channel_search"))}</span><input type="search" data-channel-filter></label>${actions}<div class="channel-choices">${rows}<p data-channel-empty class="hint"${rows ? " hidden" : ""}>${escapeHtml(ui("channel_empty"))}</p></div></div>`;
   }
 
   function selectOptions(field, value) {
@@ -3115,12 +4216,20 @@
         )
         .join("")}`;
     }
-    return (field.options || [])
-      .map(
-        (option) =>
-          `<option value="${escapeHtml(option.value)}"${String(value) === String(option.value) ? " selected" : ""}>${escapeHtml(option.label)}</option>`,
-      )
-      .join("");
+    const legacyCooldownLabel = field.key === "cooldown_type" && cooldownLabels[value];
+    const savedOption =
+      legacyCooldownLabel && !field.options.some((option) => option.value === value)
+        ? `<option value="${escapeHtml(value)}" selected disabled hidden>${escapeHtml(ui(legacyCooldownLabel))}</option>`
+        : "";
+    return (
+      savedOption +
+      (field.options || [])
+        .map(
+          (option) =>
+            `<option value="${escapeHtml(option.value)}"${String(value) === String(option.value) ? " selected" : ""}>${escapeHtml(option.label)}</option>`,
+        )
+        .join("")
+    );
   }
 
   function renderSettingField(field, value) {
@@ -3129,6 +4238,8 @@
         <input name="${escapeHtml(field.key)}" type="checkbox"${value ? " checked" : ""}></label>`;
     }
     if (field.type === "textarea") {
+      if (field.key === "system_prompt")
+        return `<div class="stack span-all"><label class="field">${fieldLabel(field.label, field.hint)}<textarea name="system_prompt" rows="5">${escapeHtml(value ?? "")}</textarea></label><div class="actions"><button class="button" type="button" data-system-prompt-presets aria-haspopup="dialog">${escapeHtml(ui("system_prompt_presets"))}</button></div></div>`;
       return `<label class="field span-all">${fieldLabel(field.label, field.hint)}<textarea name="${escapeHtml(field.key)}" rows="5">${escapeHtml(value ?? "")}</textarea></label>`;
     }
     if (field.type === "channels") {
@@ -3148,12 +4259,14 @@
     }
     if (field.type === "select" || field.type === "persona") {
       if (["welcome_channel_disc_id", "thought_log_channel_disc_id"].includes(field.key)) {
-        return `<fieldset class="field span-all choice-field"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}${renderChannelSelector(field.key, [value], true)}</fieldset>`;
+        return `<fieldset class="field span-all choice-field"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}${renderChannelSelector(field.key, [value], true, state.overview.channels, { preserveMissing: true })}</fieldset>`;
       }
       return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${escapeHtml(field.key)}"${["welcome_channel_disc_id", "thought_log_channel_disc_id"].includes(field.key) ? " data-searchable" : ""}>${selectOptions(field, value)}</select></label>`;
     }
     if (field.type === "number") {
-      return `<label class="field">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" type="number" min="${field.min}" max="${field.max}" step="${field.step || 1}" value="${formatStoredParameterValue(value)}"${field.nullable ? "" : " required"}></label>`;
+      const legacyZero = field.key === "cooldown_length" && value === 0;
+      const hint = legacyZero ? ui("cooldown_legacy_zero") : field.hint;
+      return `<label class="field">${fieldLabel(field.label, hint)}<input name="${escapeHtml(field.key)}" type="number" min="${field.min}" max="${field.max}" step="${field.step || 1}" value="${legacyZero ? "" : formatStoredParameterValue(value)}"${field.nullable || legacyZero ? "" : " required"}></label>`;
     }
     return `<label class="field span-all">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : (value ?? ""))}"></label>`;
   }
@@ -3202,6 +4315,14 @@
   ];
 
   const channelExtraFields = ["textModel", "prompt", "contextNote", "cooldown", "autochatPersona"];
+  const cooldownLabels = [
+    "channel_cooldown_off",
+    "channel_cooldown_user",
+    "channel_cooldown_channel",
+    "channel_cooldown_server",
+    "channel_cooldown_strict",
+    "cooldown_legacy_category",
+  ];
   const channelWorkspaces = new WeakMap();
 
   function channelHasChanges(form, panel = form) {
@@ -3256,8 +4377,7 @@
             [1, "cooldown_user"],
             [2, "cooldown_channel"],
             [3, "cooldown_server"],
-            [4, "cooldown_strict"],
-          ])}</select>`,
+          ])}<option value="4" disabled hidden>${escapeHtml(ui("channel_cooldown_strict"))}</option></select>`,
         ) + field("seconds", '<input name="channel_cooldown_seconds" type="number" min="0" max="86400" value="5">'),
       persona: field("persona", '<select name="channel_persona_id"></select>'),
       autochatPersona: field("autochatPersona", '<select name="channel_autochat_id"></select>'),
@@ -3320,7 +4440,7 @@
               : field === "autochatPersona"
                 ? data.personas.find((p) => p.id === value)?.label || String(value)
                 : field === "cooldown"
-                  ? `${ui(["channel_cooldown_off", "channel_cooldown_user", "channel_cooldown_channel", "channel_cooldown_server", "channel_cooldown_strict"][value.type])} · ${value.seconds} ${ui("channel_seconds")}`
+                  ? `${ui(cooldownLabels[value.type])} · ${value.seconds} ${ui("channel_seconds")}`
                   : value.text;
         form.querySelector(`[data-channel-current="${field}"]`).textContent =
           `${ui("channel_current")}: ${summary.length > 220 ? `${summary.slice(0, 220)}…` : summary}`;
@@ -3575,7 +4695,7 @@
             ? `${personaAvatar(persona, "avatar")}<strong>${escapeHtml(persona.nickname)}</strong>`
             : "";
         }
-        inputs.querySelectorAll("input, select, textarea").forEach((input) => {
+        inputs.querySelectorAll("input[name], select[name], textarea[name]").forEach((input) => {
           input.disabled = inputs.hidden;
           input.required = !inputs.hidden;
         });
@@ -3585,7 +4705,7 @@
           form.elements.channel_cooldown.disabled = unavailable;
           if (reset) reset.querySelector("input").disabled = unavailable;
           if (unavailable)
-            inputs.querySelectorAll("input, select, textarea").forEach((input) => {
+            inputs.querySelectorAll("input[name], select[name], textarea[name]").forEach((input) => {
               input.disabled = true;
             });
         }
@@ -3678,7 +4798,11 @@
     const activeGroup = settingsGroups.find((group) => group.id === state.settingsGroup) || settingsGroups[0];
     const settingsContent = `<div class="columns">
       ${activeGroup.panels.map(renderSettingsPanel).join("")}
+      ${activeGroup.id === "conversation" ? '<div id="response-drafting-workspace" class="panel"></div>' : ""}
+      ${activeGroup.id === "models" ? renderLogitBiasPanel() : ""}
       ${activeGroup.id === "memory" ? renderStmCategories() : ""}
+      ${activeGroup.id === "media" ? '<section class="panel stack" id="tool-phrase-panel"></section>' : ""}
+      ${activeGroup.id === "channels" && !state.overview.guild.isDirectMessage ? '<section class="panel stack" id="random-schedule-panel"></section>' : ""}
     </div>`;
     workspace.innerHTML = `
       ${pageHeader(
@@ -3697,6 +4821,359 @@
       </nav>
       ${settingsContent}`;
     resizeAutoGrowTextareas(workspace);
+    const draftingHost = workspace.querySelector("#response-drafting-workspace");
+    if (draftingHost) void loadDraftingPanel(draftingHost);
+    const toolHost = workspace.querySelector("#tool-phrase-panel");
+    if (toolHost) void loadToolPhrasePanel(toolHost);
+    const scheduleHost = workspace.querySelector("#random-schedule-panel");
+    if (scheduleHost) void loadRandomSchedulePanel(scheduleHost);
+  }
+
+  async function openSystemPromptPresets(button) {
+    const prompt = button.closest("form").elements.system_prompt;
+    const { dialog, form, fields, save } = openDashboardEditor(
+      button,
+      "system_prompt_presets",
+      true,
+      "system_prompt_label",
+    );
+    try {
+      const { locked, presets } = await api(`/guilds/${state.guildId}/settings/system-prompt-presets`);
+      if (!dialog.open) return;
+      if (locked) {
+        fields.textContent = ui("system_prompt_locked");
+        return;
+      }
+      fields.innerHTML = `<label class="field">${fieldLabel(ui("system_prompt_preset"))}<select name="preset"><option value="">${escapeHtml(ui("system_prompt_default"))}</option>${presets.map(({ id, name }) => `<option value="${id}">${escapeHtml(name)}</option>`).join("")}</select></label><label class="field" data-preset-preview hidden>${fieldLabel(ui("system_prompt_preview"))}<textarea rows="10" readonly></textarea></label>`;
+      const preview = fields.querySelector("[data-preset-preview]");
+      const selected = () => presets.find(({ id }) => String(id) === form.elements.preset.value);
+      form.elements.preset.onchange = () => {
+        const entry = selected();
+        preview.hidden = !entry;
+        preview.querySelector("textarea").value = entry?.text ?? "";
+      };
+      save.textContent = ui("system_prompt_use_preset");
+      save.hidden = false;
+      form.onsubmit = (event) => {
+        event.preventDefault();
+        if (prompt.isConnected) {
+          prompt.value = selected()?.text ?? "";
+          prompt.dispatchEvent(new Event("input", { bubbles: true }));
+          resizeAutoGrowTextareas(prompt.closest("form"));
+        }
+        dialog.close();
+      };
+      enhanceDashboard(dialog);
+    } catch (error) {
+      if (dialog.open) fields.textContent = error.message;
+    }
+  }
+
+  async function loadToolPhrasePanel(host) {
+    const path = `/guilds/${state.guildId}/settings/tool-triggers`;
+    const header = dashboardPanelHeading("tool_phrases", "tool_phrases_hint");
+    host.innerHTML = header + loadingBar(ui("tool_phrases"));
+    try {
+      let { targets } = await api(path);
+      if (!host.isConnected) return;
+      let selected = (targets.find(({ entries }) => entries.length) ?? targets[0]).target;
+      const render = () => {
+        const { entries } = targets.find(({ target }) => target === selected);
+        host.innerHTML = `${header}<form class="stack"><label class="field">${fieldLabel(ui("tool_phrase_target"))}<select name="target">${targets.map(({ target, label }) => `<option value="${escapeHtml(target)}"${target === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
+          <label class="field">${fieldLabel(ui("tool_phrase_literal"))}<input name="phrase" maxlength="40" required></label>
+          <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("tool_phrase_add"))}</button></div></form>
+          ${entries.length ? `<ul class="stack">${entries.map(({ kind, value }, index) => `<li class="entry-read"><div><strong dir="auto">${escapeHtml(value)}</strong>${kind === "regex" ? `<small class="hint">${escapeHtml(ui("tool_phrase_regex"))}</small>` : ""}</div><div class="entry-actions"><button class="button icon danger" type="button" data-phrase-remove="${index}" aria-label="${escapeHtml(ui("tool_phrase_remove"))}" data-tooltip="${escapeHtml(ui("tool_phrase_remove"))}">${navigationIcon("trash-2")}</button></div></li>`).join("")}</ul>` : `<p class="hint">${escapeHtml(ui("tool_phrase_empty"))}</p>`}`;
+        const form = host.querySelector("form");
+        form.elements.target.onchange = () => {
+          const phrase = form.elements.phrase.value;
+          selected = form.elements.target.value;
+          render();
+          host.querySelector('[name="phrase"]').value = phrase;
+          host.querySelector('[name="phrase"]').focus();
+        };
+        const update = async (patch) => {
+          try {
+            const result = await withBusyForm(host, () =>
+              api(path, { method: "PATCH", body: JSON.stringify({ ...patch, target: selected }) }),
+            );
+            if (!host.isConnected || !result) return;
+            targets = result.targets;
+            render();
+            host.querySelector('[name="phrase"]').focus({ preventScroll: true });
+            toast(ui("tool_phrase_saved"));
+          } catch (error) {
+            if (host.isConnected) showFormError(form, error);
+          }
+        };
+        form.onsubmit = (event) => {
+          event.preventDefault();
+          void update({ action: "add", value: form.elements.phrase.value });
+        };
+        host.querySelectorAll("[data-phrase-remove]").forEach((button) => {
+          button.onclick = () => update({ action: "remove", ...entries[Number(button.dataset.phraseRemove)] });
+        });
+        enhanceDashboard(host);
+      };
+      render();
+    } catch (error) {
+      if (host.isConnected)
+        host.innerHTML = `${header}<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  async function loadRandomSchedulePanel(host) {
+    const guildId = state.guildId;
+    const path = `/guilds/${guildId}/settings/random-triggers`;
+    const header = (actions = "") => dashboardPanelHeading("random_schedules", "random_schedules_hint", actions);
+    host.innerHTML = header() + loadingBar(ui("random_schedules"));
+    try {
+      const { channels, triggers } = await api(path);
+      if (!host.isConnected) return;
+      const allowed = state.overview.allowedChannelIds || [];
+      const restricted = state.overview.channelWhitelistActive ?? allowed.length > 0;
+      const candidates = channels.filter(({ id }) => !restricted || allowed.includes(id));
+      const personas = state.overview.personas;
+      const channelName = (id) => channels.find((channel) => channel.id === id)?.name;
+      const personaName = (id) =>
+        id == null ? ui("random_schedule_any_persona") : personas.find(({ personaId }) => personaId === id)?.nickname;
+      host.innerHTML =
+        header(
+          candidates.length
+            ? `<button class="button" type="button" data-random-schedule-add aria-haspopup="dialog">${escapeHtml(ui("random_schedule_add"))}</button>`
+            : "",
+        ) +
+        (triggers.length
+          ? `<div class="table-wrap"><table><thead><tr><th scope="col">${escapeHtml(ui("random_schedule_channel"))}</th><th scope="col">${escapeHtml(ui("random_schedule_persona"))}</th><th scope="col">${escapeHtml(ui("random_schedule_next"))}</th><th scope="col"><span class="sr-only">${escapeHtml(ui("connection_actions"))}</span></th></tr></thead><tbody>${triggers.map((entry, index) => `<tr><td>#${escapeHtml(channelName(entry.channel_disc_id))}</td><td>${escapeHtml(personaName(entry.persona_id))}</td><td>${escapeHtml(new Date(entry.next_trigger_at).toLocaleString())}</td><td><div class="entry-actions"><button class="button" type="button" data-schedule-edit="${index}" aria-haspopup="dialog">${escapeHtml(ui("random_schedule_edit"))}</button><button class="button icon danger" type="button" data-schedule-remove="${index}" aria-label="${escapeHtml(ui("random_schedule_remove"))}" data-tooltip="${escapeHtml(ui("random_schedule_remove"))}">${navigationIcon("trash-2")}</button></div></td></tr>`).join("")}</tbody></table></div>`
+          : `<p class="hint">${escapeHtml(ui("random_schedule_empty"))}</p>`);
+      const openEditor = (button, entry) =>
+        openRandomScheduleEditor(button, host, path, candidates, personas, entry, channelName, personaName);
+      const add = host.querySelector("[data-random-schedule-add]");
+      if (add) add.onclick = () => openEditor(add);
+      host.querySelectorAll("[data-schedule-edit]").forEach((button) => {
+        button.onclick = () => openEditor(button, triggers[Number(button.dataset.scheduleEdit)]);
+      });
+      host.querySelectorAll("[data-schedule-remove]").forEach((button) => {
+        button.onclick = async () => {
+          const entry = triggers[Number(button.dataset.scheduleRemove)];
+          if (
+            !(await confirmAction(ui("random_schedule_remove"), ui("random_schedule_remove_hint"))) ||
+            !host.isConnected ||
+            guildId !== state.guildId
+          )
+            return;
+          try {
+            await withBusyForm(host, () => api(`${path}/${entry.trigger_id}`, { method: "DELETE" }));
+            toast(ui("random_schedule_removed"));
+            if (host.isConnected) await loadRandomSchedulePanel(host);
+          } catch (error) {
+            toast(error.message, "error");
+          }
+        };
+      });
+      enhanceDashboard(host);
+    } catch (error) {
+      if (host.isConnected)
+        host.innerHTML = `${header()}<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  function openRandomScheduleEditor(button, host, path, channels, personas, entry, channelName, personaName) {
+    const { dialog, form, fields, save } = openDashboardEditor(
+      button,
+      entry ? "random_schedule_edit" : "random_schedule_add",
+      true,
+      "random_schedules",
+    );
+    const maxScheduleValue = 2_147_483_647;
+    const number = (name, label, value, min, max, required = false) =>
+      `<label class="field">${fieldLabel(ui(label))}<input name="${name}" type="number" min="${min}" max="${max}" value="${value ?? ""}"${required ? " required" : ""}></label>`;
+    fields.innerHTML = `${entry ? `<p>#${escapeHtml(channelName(entry.channel_disc_id))} / ${escapeHtml(personaName(entry.persona_id))}</p><p class="hint">${escapeHtml(ui("random_schedule_edit_hint"))}</p>` : `<fieldset class="stack"><legend>${escapeHtml(ui("random_schedule_choose_channel"))}</legend>${renderChannelSelector("channelDiscId", [], true, channels, { required: true })}</fieldset><label class="field">${fieldLabel(ui("random_schedule_persona"))}<select name="personaId" data-searchable><option value="">${escapeHtml(ui("random_schedule_any_persona"))}</option>${personas.map(({ personaId, nickname }) => `<option value="${personaId}">${escapeHtml(nickname)}</option>`).join("")}</select></label>`}
+      <div class="grid">${number("timerHours", "random_schedule_interval", entry?.timer_hours ?? 24, 1, maxScheduleValue, true)}${number("chancePercent", "random_schedule_chance", entry?.chance_percent ?? 100, 1, 100, true)}${number("randomOffsetRange", "random_schedule_jitter", entry?.random_offset_range, 0, maxScheduleValue)}${number("silenceThresholdHours", "random_schedule_silence", entry?.silence_threshold_hours, 1, maxScheduleValue)}${number("failureThreshold", "random_schedule_failures", entry?.failure_threshold, 1, maxScheduleValue)}</div>
+      <label class="toggle">${fieldLabel(ui("random_schedule_respond_self"))}<input type="checkbox" role="switch" name="respondToSelf"${entry?.respond_to_self ? " checked" : ""}></label>
+      <label class="field">${fieldLabel(ui("random_schedule_prompt"), ui("random_schedule_prompt_hint"))}<textarea name="customPrompt" maxlength="1000" rows="4">${escapeHtml(entry?.custom_prompt ?? "")}</textarea></label>`;
+    save.hidden = false;
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!host.isConnected || form.classList.contains("is-saving")) return;
+      const values = new FormData(form);
+      const nullableNumber = (key) => (values.get(key) ? Number(values.get(key)) : null);
+      const payload = {
+        channelDiscId: entry?.channel_disc_id ?? values.get("channelDiscId"),
+        personaId: entry ? (entry.persona_id ?? null) : nullableNumber("personaId"),
+        timerHours: Number(values.get("timerHours")),
+        chancePercent: Number(values.get("chancePercent")),
+        randomOffsetRange: nullableNumber("randomOffsetRange"),
+        silenceThresholdHours: nullableNumber("silenceThresholdHours"),
+        failureThreshold: nullableNumber("failureThreshold"),
+        respondToSelf: values.has("respondToSelf"),
+        customPrompt: values.get("customPrompt") || null,
+      };
+      try {
+        await withBusyForm(form, () =>
+          api(entry ? `${path}/${entry.trigger_id}` : path, {
+            method: entry ? "PATCH" : "POST",
+            body: JSON.stringify(payload),
+          }),
+        );
+        dialog.close();
+        toast(ui("random_schedule_saved"));
+        if (host.isConnected) await loadRandomSchedulePanel(host);
+      } catch (error) {
+        if (dialog.open) showFormError(form, error);
+      }
+    };
+    enhanceDashboard(dialog);
+  }
+
+  function renderLogitBiasPanel() {
+    const bias = state.overview.settings.logitBias;
+    if (!bias) return "";
+    return `<section class="panel stack" id="logit-bias-panel">
+      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("logit_bias"))}</h2><p>${escapeHtml(ui("logit_bias_hint"))}</p></div>
+      <div class="actions"><button class="button" type="button" data-logit-open="import" aria-haspopup="dialog">${escapeHtml(ui("logit_import"))}</button><button class="button primary" type="button" data-logit-open="add" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("logit_add"))}</button></div></header>
+      <div data-logit-list>${renderLogitBiasList(bias.entries)}</div>
+    </section>`;
+  }
+
+  function renderLogitBiasList(entries) {
+    if (!entries.length) return `<p class="hint">${escapeHtml(ui("logit_empty"))}</p>`;
+    return `<div class="table-wrap"><table><thead><tr><th scope="col">${escapeHtml(ui("logit_term"))}</th><th scope="col">${escapeHtml(ui("logit_value"))}</th><th scope="col"></th></tr></thead><tbody>${entries
+      .map(
+        (entry) =>
+          `<tr><td>${escapeHtml(entry.text)}${entry.kind === "token_id" ? ` <small class="hint">${escapeHtml(ui("logit_token_id"))}</small>` : ""}</td>
+        <td>${entry.value > 0 ? "+" : ""}${escapeHtml(entry.value)}</td><td><div class="actions"><button class="button icon danger" type="button"
+        data-logit-remove="${escapeHtml(entry.id)}" aria-label="${escapeHtml(`${ui("logit_remove")}: ${entry.text}`)}" data-tooltip="${escapeHtml(ui("logit_remove"))}">${navigationIcon("trash-2")}</button></div></td></tr>`,
+      )
+      .join("")}</tbody></table></div>`;
+  }
+
+  function updateLogitBiasList(panel, entries) {
+    if (!panel.isConnected) return;
+    state.overview.settings.logitBias.entries = entries;
+    panel.querySelector("[data-logit-list]").innerHTML = renderLogitBiasList(entries);
+  }
+
+  function openLogitBiasEditor(panel, mode) {
+    const importing = mode === "import";
+    const title = ui(importing ? "logit_import" : "logit_add");
+    const path = `/guilds/${state.guildId}/settings/logit-bias`;
+    const dialog = document.createElement("dialog");
+    dialog.className = "dialog";
+    dialog.setAttribute("aria-labelledby", "logit-dialog-title");
+    dialog.innerHTML = `<form class="stack">
+      <header class="panel-header"><div class="heading"><h2 id="logit-dialog-title">${escapeHtml(title)}</h2></div></header>
+      ${
+        importing
+          ? `<label class="field">${fieldLabel(ui("logit_import_file"), ui("logit_import_hint"))}<input type="file" name="file" accept=".json,application/json" required></label>`
+          : `<label class="field">${fieldLabel(ui("logit_terms"), ui("logit_terms_hint"))}<input name="terms" type="text" maxlength="4000" required></label>
+          <label class="field">${fieldLabel(ui("logit_value"), ui("logit_value_hint"))}<input name="bias" type="number" min="-100" max="100" step="any" required></label>`
+      }
+      <footer class="actions form-actions"><button type="button" class="button" data-logit-close>${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(importing ? title : ui("save"))}</button></footer>
+    </form>`;
+    document.body.append(dialog);
+    const form = dialog.querySelector("form");
+    form.querySelector("[data-logit-close]").onclick = () => dialog.close();
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.classList.contains("is-saving")) return;
+      try {
+        const { entries } = await withBusyForm(form, async () => {
+          let body;
+          if (importing) {
+            const file = form.elements.file.files[0];
+            if (!file || file.size > state.overview.settings.logitBias.maxImportBytes)
+              throw new Error(ui("logit_import_invalid"));
+            try {
+              body = { action: "import", payload: JSON.parse(await file.text()) };
+            } catch {
+              throw new Error(ui("logit_import_invalid"));
+            }
+          } else {
+            body = { action: "add", terms: form.elements.terms.value, bias: form.elements.bias.value };
+          }
+          return api(path, { method: "POST", body: JSON.stringify(body) });
+        });
+        updateLogitBiasList(panel, entries);
+        dialog.close();
+        toast(ui("logit_saved"));
+      } catch (error) {
+        showFormError(form, error);
+      }
+    });
+    dialog.addEventListener("cancel", (event) => {
+      if (form.classList.contains("is-saving")) event.preventDefault();
+    });
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.showModal();
+    enhanceDashboard(dialog);
+  }
+
+  async function deleteLogitBias(button) {
+    const panel = button.closest("#logit-bias-panel");
+    if (!panel || panel.classList.contains("is-saving")) return;
+    if (!(await confirmAction(ui("logit_remove_title"), ui("logit_remove_hint")))) return;
+    if (!panel.isConnected || panel.classList.contains("is-saving")) return;
+    try {
+      const { entries } = await withBusyForm(panel, () =>
+        api(`/guilds/${state.guildId}/settings/logit-bias/${encodeURIComponent(button.dataset.logitRemove)}`, {
+          method: "DELETE",
+        }),
+      );
+      updateLogitBiasList(panel, entries);
+      panel.querySelector('[data-logit-open="add"]')?.focus({ preventScroll: true });
+      toast(ui("logit_removed"));
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  function renderDraftingPanel(data) {
+    const reviewer = data?.reviewer ? JSON.stringify(data.reviewer) : "";
+    const checker = data?.checker ? JSON.stringify(data.checker) : "";
+    const reviewerGroups = (data?.reviewers || [])
+      .map(({ provider, label, models }) => {
+        const options = models.map(({ id, name }) => {
+          const value = JSON.stringify({ id, provider });
+          return `<option value="${escapeHtml(value)}"${reviewer === value ? " selected" : ""}>${escapeHtml(`${label} / ${name}`)}</option>`;
+        });
+        return `<optgroup label="${escapeHtml(label)}">${options.join("")}</optgroup>`;
+      })
+      .join("");
+    const checkerOptions = (data?.checkers || [])
+      .map(({ reference, label }) => {
+        const value = JSON.stringify(reference);
+        return `<option value="${escapeHtml(value)}"${checker === value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    const unavailable = (value) =>
+      `<option value="${escapeHtml(value)}" selected>${escapeHtml(ui("drafting_unavailable"))}</option>`;
+    const defaultLabel = data ? `${ui("drafting_default")} (${data.defaultModel})` : ui("drafting_default");
+    return `<form class="stack" data-drafting-selections data-settings-key="response-drafting">
+      <header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("conversation"))}</p><h2>${escapeHtml(ui("drafting_title"))}</h2><p>${escapeHtml(ui("drafting_hint"))}</p></div></header>
+      <label class="field">${fieldLabel(ui("drafting_reviewer"), data && !data.defaultModelAvailable ? ui("drafting_default_unavailable") : "")}
+        <select name="reviewer" data-searchable><option value="">${escapeHtml(defaultLabel)}</option>
+        ${data?.reviewer?.provider === null ? unavailable(reviewer) : ""}${reviewerGroups}</select>
+      </label>
+      <label class="field">${fieldLabel(ui("drafting_checker"), ui("drafting_checker_hint"))}
+        <select name="checker" data-searchable><option value="">${escapeHtml(ui("drafting_checker_none"))}</option>
+        ${checker && !data.checkers.some(({ reference }) => JSON.stringify(reference) === checker) ? unavailable(checker) : ""}${checkerOptions}</select>
+      </label>
+      <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
+    </form>`;
+  }
+
+  async function loadDraftingPanel(host) {
+    host.innerHTML = loadingBar(ui("drafting_title"));
+    try {
+      const data = await api(`/guilds/${state.guildId}/settings/response-drafting`);
+      if (!host.isConnected) return;
+      host.innerHTML = renderDraftingPanel(data);
+      initDraftForms(host);
+      enhanceDashboard(host);
+    } catch {
+      if (!host.isConnected) return;
+      host.innerHTML = `<div class="row"><p role="alert">${escapeHtml(ui("drafting_load_failed"))}</p>${refreshButton("drafting", ui("drafting_title"))}</div>`;
+    }
   }
 
   function openChannelMemorySettings() {
@@ -3718,7 +5195,7 @@
       .join("");
   }
 
-  function renderEndpointRows(data) {
+  function renderEndpointRows(data, scope) {
     if (!data.endpoints?.length) {
       return `<p class="hint">No custom endpoints.</p>`;
     }
@@ -3726,9 +5203,9 @@
       .map(
         (endpoint) => `<article class="subsection">
           <div class="row">
-            <div class="heading"><p class="eyebrow">${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}</p><h3>${escapeHtml(endpoint.displayName)}</h3><small>${escapeHtml(endpoint.endpointUrl)}</small></div>
+            <div class="heading"><p class="eyebrow">${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}</p><h3>${escapeHtml(endpoint.modelName || endpoint.displayName)}</h3><small>${escapeHtml(endpoint.endpointUrl)}</small></div>
+            ${endpoint.id && endpoint.capability !== "transcription" && (endpoint.capability === "text" || endpoint.capability === "speech" || endpoint.modelRefId) ? `<button class="button" type="button" data-endpoint-model-edit="${endpoint.id}" data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_model_edit"))}</button>` : ""}
           </div>
-          ${endpoint.modelName ? `<p>${escapeHtml(endpoint.modelName)}</p>` : ""}
           <div class="row">
             ${endpoint.requiresAuth ? "<span>Auth</span>" : ""}
             ${endpoint.hasTools ? "<span>Tools</span>" : ""}
@@ -3812,6 +5289,69 @@
     </form>`;
   }
 
+  function renderAdvancedServerModels(data) {
+    if (!data.advancedModels) return "";
+    const hints = {
+      decision: "decision_model_hint",
+      speech_design: "speech_design_model_hint",
+      speech_clone: "speech_clone_model_hint",
+    };
+    return `<form class="panel stack provider-panel server-model-panel" data-advanced-models>
+      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("advanced_models"))}</h2><p>${escapeHtml(ui("advanced_models_hint"))}</p></div></header>
+      <div class="grid">${data.advancedModels
+        .map(
+          ({ kind, options, selected }) => `<label class="field">
+        ${fieldLabel(ui(`model_${kind}`), ui(hints[kind]))}
+        <select name="${escapeHtml(kind)}" data-searchable>
+          <option value="">${escapeHtml(ui("advanced_model_unset"))}</option>
+          ${selected && selected.provider === null ? `<option value="unavailable" selected disabled>${escapeHtml(ui("advanced_model_unavailable"))}</option>` : ""}
+          ${options.map(({ id, provider, label }) => `<option value="${escapeHtml(JSON.stringify({ provider, modelId: id }))}"${id === selected?.modelId && provider === selected?.provider ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+        </select></label>`,
+        )
+        .join("")}</div>
+      <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
+    </form>`;
+  }
+
+  function renderQuickCapabilities(data) {
+    const switches = (data.quickCapabilities || []).flatMap((capability) => {
+      const model = data.models?.[capability];
+      const selected = model?.selected;
+      if (!selected) return [];
+      const option = model.options.find(({ id, provider }) => id === selected.id && provider === selected.provider);
+      return [
+        `<label class="toggle">${fieldLabel(ui(`model_${capability}`), option?.label || ui("personal_model_unavailable"))}
+        <input type="checkbox" role="switch" name="routing_${escapeHtml(capability)}" data-personal-capability="${escapeHtml(capability)}"${model.enabled ? " checked" : ""}>
+      </label>`,
+      ];
+    });
+    return `<section class="panel stack provider-panel" data-quick-capabilities>
+      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("quick_capabilities"))}</h2><p>${escapeHtml(ui("quick_capabilities_hint"))}</p></div></header>
+      ${switches.length ? `<div class="grid">${switches.join("")}</div>` : `<p class="hint">${escapeHtml(ui("quick_capabilities_empty"))}</p>`}
+    </section>`;
+  }
+
+  async function togglePersonalCapability(input) {
+    const capability = input.dataset.personalCapability;
+    const model = state.providerData.personal?.models?.[capability];
+    if (!model) return;
+    if (savingForms) {
+      input.checked = model.enabled;
+      toast(ui("saving"));
+      return;
+    }
+    try {
+      const result = await withBusyForm(input.closest("[data-quick-capabilities]"), () =>
+        api("/profile/capability", { method: "PATCH", body: JSON.stringify({ capability, enabled: input.checked }) }),
+      );
+      input.checked = model.enabled = result.enabled;
+      toast(ui("quick_capability_saved"));
+    } catch (error) {
+      input.checked = model.enabled;
+      toast(error.message, "error");
+    }
+  }
+
   function renderPersonalModels(data) {
     if (!data.models) return "";
     return `<form class="panel stack provider-panel server-model-panel" data-personal-model>
@@ -3843,12 +5383,7 @@
               })
               .join("");
             const original = hasSelected ? JSON.stringify({ provider: selected.provider, modelId: selected.id }) : "";
-            const hint =
-              selected && !model.enabled
-                ? "personal_model_disabled"
-                : capability === "transcription"
-                  ? "transcription_personal_hint"
-                  : null;
+            const hint = capability === "transcription" ? "transcription_personal_hint" : null;
             return `<label class="field">${fieldLabel(ui(`model_${capability}`), hint ? ui(hint) : undefined)}<select name="${capability}" data-original-model="${escapeHtml(original)}"${model.options.length ? "" : " disabled"}><option value="" disabled${hasSelected ? "" : " selected"}>${escapeHtml(ui(placeholder))}</option>${options}</select></label>`;
           })
           .join("")}
@@ -3858,6 +5393,7 @@
   }
 
   async function savePersonalModel(form) {
+    if (savingForms) return;
     const changed = [...form.querySelectorAll("select[data-original-model]")].filter(
       (field) => !field.disabled && field.value && field.value !== field.dataset.originalModel,
     );
@@ -3945,7 +5481,7 @@
     const lastFilled = (data.fallbackRefs || []).reduce((last, ref, index) => (ref ? index : last), -1);
     const profile = state.overview.profile;
     return `<section class="panel provider-panel"><form id="fallback-form" data-provider-scope="${scope}" data-original-fallbacks="${escapeHtml(JSON.stringify((data.fallbackRefs || []).filter(Boolean)))}">
-      <div class="panel-header"><div class="heading"><p class="eyebrow">Failover</p><h2>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks" : "server_fallbacks"))}</h2><p>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks_hint" : "server_fallbacks_hint"))}</p>${data.randomizerEnabled ? `<p>${escapeHtml(ui("fallback_randomizer_hint"))}</p>` : ""}</div></div>
+      <div class="panel-header"><div class="heading"><p class="eyebrow">Failover</p><h2>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks" : "server_fallbacks"))}</h2><p>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks_hint" : "server_fallbacks_hint"))}</p></div></div>
       <ol class="chain">
         <li>${fieldLabel(ui("fallback_primary"))}<strong>${escapeHtml(primaryLabel)}</strong>${personal && selected && !data.models.text.enabled ? `<small>${escapeHtml(ui("personal_model_disabled"))}</small>` : ""}</li>
         ${[0, 1, 2, 3, 4]
@@ -3966,7 +5502,14 @@
           })
           .join("")}
       </ol>
-      ${personal ? `<div class="subsection"><label class="toggle"><span class="field-label"><strong>${escapeHtml(profile.copy.serverFallback)}</strong><small>${escapeHtml(profile.copy.serverFallbackHint)}</small></span><input name="personal_server_fallback_enabled" type="checkbox" data-original-value="${profile.personalServerFallback}"${profile.personalServerFallback ? " checked" : ""}></label></div>` : ""}
+      ${
+        personal
+          ? `<div class="subsection">
+        <label class="toggle">${fieldLabel(ui("personal_randomizer"), ui("personal_randomizer_hint"))}<input name="model_randomizer_enabled" type="checkbox" data-original-value="${Boolean(data.randomizerEnabled)}"${data.randomizerEnabled ? " checked" : ""}></label>
+        <label class="toggle"><span class="field-label"><strong>${escapeHtml(profile.copy.serverFallback)}</strong><small>${escapeHtml(profile.copy.serverFallbackHint)}</small></span><input name="personal_server_fallback_enabled" type="checkbox" data-original-value="${profile.personalServerFallback}"${profile.personalServerFallback ? " checked" : ""}></label>
+      </div>`
+          : ""
+      }
       <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
     </form></section>`;
   }
@@ -3983,9 +5526,14 @@
     const serialized = JSON.stringify(refs);
     const serverFallback = form.elements.personal_server_fallback_enabled;
     const enabled = serverFallback?.checked;
+    const randomizer = form.elements.model_randomizer_enabled;
+    const saveRandomizer = randomizer && String(randomizer.checked) !== randomizer.dataset.originalValue;
     const saveChain = serialized !== form.dataset.originalFallbacks;
     const saveServerFallback = scope === "personal" && String(enabled) !== serverFallback.dataset.originalValue;
-    if (!saveChain && !saveServerFallback) return;
+    if (!saveChain && !saveServerFallback && !saveRandomizer) return;
+    if (saveRandomizer && randomizer.checked && refs.length === 0) {
+      throw new Error(ui("personal_randomizer_requires_fallbacks"));
+    }
     const saved = [];
     const failed = [];
     await withBusyForm(form, async () => {
@@ -4015,12 +5563,65 @@
           failed.push(`${ui("fallback_server_save_failed")} ${error.message}`);
         }
       }
+      if (saveRandomizer && (!randomizer.checked || form.dataset.originalFallbacks === serialized)) {
+        try {
+          const result = await api("/profile/model-randomizer", {
+            method: "PATCH",
+            body: JSON.stringify({ enabled: randomizer.checked }),
+          });
+          state.providerData[scope].randomizerEnabled = result.enabled;
+          randomizer.dataset.originalValue = String(result.enabled);
+          saved.push(ui("personal_randomizer_saved"));
+        } catch (error) {
+          failed.push(error.message);
+        }
+      }
     });
     if (failed.length) {
+      const baseline = formBaselines.get(form);
+      for (const field of formSnapshot(form)) {
+        const original = baseline.find(({ name }) => name === field.name);
+        const wasSaved = field.name.startsWith("fallback-")
+          ? form.dataset.originalFallbacks === serialized
+          : String(field.checked) === form.elements[field.name].dataset.originalValue;
+        if (wasSaved && original) Object.assign(original, field);
+      }
+      captureDraft(form);
       throw Object.assign(new Error([...saved, ...failed].join(" ")), { partial: saved.length > 0 });
     }
-    toast(ui("fallback_saved"));
+    toast(saved.length === 1 ? saved[0] : ui("fallback_saved"));
     await refreshProviders(scope);
+  }
+
+  async function saveModelSelections(form, path, savedKey, onSaved) {
+    if (form.classList.contains("is-saving")) return;
+    const baseline = formBaselines.get(form);
+    const changed = formSnapshot(form).filter(({ name, value }) =>
+      baseline.some((entry) => entry.name === name && entry.value !== value),
+    );
+    if (!changed.length) return;
+    const failures = [];
+    let saved = 0;
+    await withBusyForm(form, async () => {
+      for (const field of changed) {
+        try {
+          const value = field.value ? JSON.parse(field.value) : null;
+          await api(path, {
+            method: "PATCH",
+            body: JSON.stringify({ [field.name]: value }),
+          });
+          onSaved?.(field.name, value);
+          baseline.find(({ name }) => name === field.name).value = field.value;
+          saved += 1;
+        } catch (error) {
+          failures.push(error.message);
+        }
+      }
+      if (!failures.length) completeFormSave(form);
+      else captureDraft(form);
+    });
+    if (failures.length) showFormError(form, new Error(failures.join(" ")), saved > 0);
+    else toast(ui(savedKey));
   }
 
   function providerConnections(data) {
@@ -4041,6 +5642,16 @@
         endpoint: null,
         name: provider.displayName,
       })),
+      ...(data.braveSearchConfigured
+        ? [
+            {
+              key: "provider:brave",
+              name: "Brave Search",
+              provider: { provider: "brave", hasApiKey: true },
+              endpoint: null,
+            },
+          ]
+        : []),
       ...Array.from(endpointGroups, ([name, group]) => ({
         key: `endpoint:${name}`,
         endpoint: group[0],
@@ -4074,13 +5685,24 @@
             "speech_clone",
             "transcription",
           ]
-        : ["text", "vision", "embedding", "image", "imageNai", "video", "transcription"];
+        : [
+            "text",
+            "vision",
+            "embedding",
+            "image",
+            "imageNai",
+            "video",
+            "transcription",
+            "decision",
+            "speech_design",
+            "speech_clone",
+          ];
     const groups = kinds
       .map((kind) => {
         const options =
           scope === "personal" || kind === "transcription"
             ? data.models?.[kind]?.options
-            : data.models?.options?.[kind];
+            : (data.models?.options?.[kind] ?? data.advancedModels?.find((slot) => slot.kind === kind)?.options);
         const models = (options || []).filter((option) => option.provider === provider);
         if (!models.length) return "";
         const key = kind === "imageNai" ? "image_nai" : kind;
@@ -4096,16 +5718,32 @@
     const provider = connection.provider;
     const endpoint = connection.endpoint;
     const providerName = provider?.provider || endpoint?.provider;
+    const brave = providerName === "brave";
     const parameters = (data.parameters || []).filter((entry) => entry.provider === providerName);
     const canReplace = provider && !endpoint && !provider.provider.startsWith("custom:");
-    const canRemove = endpoint || (scope === "personal" && provider && !provider.provider.startsWith("custom:"));
+    const activeTextProvider =
+      scope === "server" && canReplace && provider.provider.toLowerCase() === data.activeTextProvider;
+    const remove = endpoint
+      ? `<button class="button danger" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>`
+      : canReplace && scope === "personal"
+        ? `<button class="button danger" type="button" data-provider-delete="${escapeHtml(provider.provider)}">Remove</button>`
+        : canReplace && (brave || (data.activeTextProvider && !activeTextProvider))
+          ? `<button class="button danger" type="button" data-server-provider-delete="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(connection.name)}" aria-haspopup="dialog">${escapeHtml(ui("connection_remove_server_provider"))}</button>`
+          : "";
     const menuId = `connection-actions-${scope}`;
+    const edit = endpoint?.connectionId
+      ? `<button class="button" type="button" data-endpoint-edit="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_edit"))}</button>`
+      : "";
+    const rotation =
+      scope === "server" && provider?.supportsRotation
+        ? `<button class="button" type="button" data-provider-rotation="${escapeHtml(provider.provider)}" aria-haspopup="dialog">${escapeHtml(ui("rotation_title"))}</button>`
+        : "";
     const actions =
-      canReplace || canRemove
-        ? `<button class="button icon" type="button" popovertarget="${menuId}" aria-label="${escapeHtml(ui("connection_actions"))}" data-tooltip="${escapeHtml(ui("connection_actions"))}">${navigationIcon("ellipsis")}</button><div id="${menuId}" class="action-menu" popover aria-label="${escapeHtml(ui("connection_actions"))}">${canReplace ? `<button class="button" type="button" data-provider-open="${escapeHtml(provider.provider)}">${escapeHtml(ui("connection_replace_key"))}</button>` : ""}${endpoint ? `<button class="button danger" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>` : canRemove ? `<button class="button danger" type="button" data-provider-delete="${escapeHtml(provider.provider)}">Remove</button>` : ""}</div>`
+      canReplace || edit || remove
+        ? `<button class="button icon" type="button" popovertarget="${menuId}" aria-label="${escapeHtml(ui("connection_actions"))}" data-tooltip="${escapeHtml(ui("connection_actions"))}">${navigationIcon("ellipsis")}</button><div id="${menuId}" class="action-menu" popover aria-label="${escapeHtml(ui("connection_actions"))}">${edit}${canReplace ? `<button class="button" type="button" data-provider-open="${escapeHtml(provider.provider)}">${escapeHtml(ui("connection_replace_key"))}</button>` : ""}${rotation}${remove}</div>`
         : "";
     return `<div class="${parameters.length || providerName?.toLowerCase() === "openrouter" ? "grid" : "stack"}">
-      <section class="panel provider-panel"><header class="panel-header"><div class="heading"><h2>${escapeHtml(connection.name)}</h2>${provider ? `<small>${provider.hasApiKey ? "Encrypted key stored" : "No key stored"}</small>` : ""}</div><div class="actions">${actions}</div></header>${endpoint ? renderEndpointRows({ endpoints: connection.endpoints }) : ""}${renderConnectionModels(data, scope, providerName)}${providerName?.toLowerCase() === "openrouter" ? `<div class="subsection stack"><h3>${escapeHtml(ui("connection_registered_models"))}</h3>${renderOpenRouterRows(data, scope)}</div>` : ""}</section>
+      <section class="panel provider-panel"><header class="panel-header"><div class="heading"><h2>${escapeHtml(connection.name)}</h2>${provider ? `<small>${provider.hasApiKey ? "Encrypted key stored" : "No key stored"}</small>` : ""}${activeTextProvider ? `<small>${escapeHtml(ui("connection_active_text"))}</small>` : ""}</div><div class="actions">${actions}</div></header>${endpoint ? renderEndpointRows({ endpoints: connection.endpoints }, scope) : ""}${brave ? `<p>${escapeHtml(ui("brave_search_key_hint"))}</p>` : renderConnectionModels(data, scope, providerName)}${providerName?.toLowerCase() === "openrouter" ? `<div class="subsection stack"><h3>${escapeHtml(ui("connection_registered_models"))}</h3>${renderOpenRouterRows(data, scope)}</div>` : ""}</section>
       <div class="stack">
       ${
         providerName?.toLowerCase() === "openrouter"
@@ -4166,7 +5804,7 @@
         <div class="actions"><button class="button secondary" type="button" data-provider-open aria-haspopup="dialog">${escapeHtml(ui("add_provider"))}</button><button class="button secondary" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button></div>
         </div>${renderConnectionDetail(data, scope, connection)}
       </section>
-      <section class="stack" aria-label="${escapeHtml(ui("model_routing"))}"${state.providerPanel[scope] === "models" ? "" : " hidden"}>${personal ? renderPersonalModels(data) : renderServerModels(data)}${personal ? "" : renderSettingsPanel({ section: "byok" })}</section>
+      <section class="stack" aria-label="${escapeHtml(ui("model_routing"))}"${state.providerPanel[scope] === "models" ? "" : " hidden"}>${personal ? renderQuickCapabilities(data) + renderPersonalModels(data) : renderServerModels(data) + renderAdvancedServerModels(data) + renderSettingsPanel({ section: "byok" })}</section>
       <section class="stack" aria-label="${escapeHtml(ui("connection_fallbacks"))}"${state.providerPanel[scope] === "fallbacks" ? "" : " hidden"}>${renderFallbacks(data, scope)}</section>
       <dialog id="provider-dialog"  aria-labelledby="provider-dialog-title">
         <form class="stack" id="provider-credential-form" data-provider-scope="${scope}">
@@ -4244,6 +5882,7 @@
     const patch = {};
     for (const field of section.fields) {
       const input = form.elements.namedItem(field.key);
+      if (form.querySelector(`[name="${field.key}"][data-unavailable-channel]:checked`)) continue;
       if (field.type === "channels" || field.type === "multiselect") {
         const choices = form.querySelectorAll(`input[type="checkbox"][name="${field.key}"]`);
         if (choices.length > 0) {
@@ -4254,6 +5893,11 @@
         continue;
       }
       if (!input) continue;
+      if (field.key === "cooldown_type" || field.key === "cooldown_length") {
+        const saved = state.overview.settings.values[section.id]?.[field.key];
+        if (input.value !== "" && Number(input.value) !== saved) patch[field.key] = Number(input.value);
+        continue;
+      }
       if (field.type === "toggle") patch[field.key] = input.checked;
       else if (field.type === "number")
         patch[field.key] = input.value === "" && field.nullable ? null : Number(input.value);
@@ -4284,11 +5928,17 @@
     state.lineageId = 0;
     state.personaId = 0;
     state.personaPanel = "personal";
+    state.personaKnowledgePanel = "personal";
     state.personaTestChats = {};
     state.personaTestChatBusy = false;
     renderBootScreen();
     try {
       state.overview = await api(`/guilds/${guildId}/overview`);
+      if (
+        (state.view === "personal-spotlights" && state.overview.guild.isDirectMessage) ||
+        (state.view === "moderation" && (!state.overview.canManage || state.overview.guild.isDirectMessage))
+      )
+        state.view = "overview";
       renderShell();
     } catch (error) {
       app.innerHTML = `<main class="login-screen"><div class="login-brand"><img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="login-logo"><h1>This server could not be loaded.</h1><p class="login-copy">${escapeHtml(error.message)}</p><button class="button secondary" id="retry-boot">Retry</button></div></main>`;
@@ -4352,6 +6002,487 @@
       await refreshProviders("personal", "Provider removed");
     } catch (error) {
       toast(error.message, "error");
+    }
+  }
+
+  async function deleteServerProvider(button) {
+    const guildId = state.guildId;
+    const stillHere = () => guildId === state.guildId && state.view === "server-providers";
+    const confirm = await confirmAction(
+      ui("connection_remove_server_provider_title").replace("{name}", () => button.dataset.providerName),
+      ui(
+        button.dataset.serverProviderDelete === "brave"
+          ? "brave_search_remove_hint"
+          : "connection_remove_server_provider_hint",
+      ),
+    );
+    if (!confirm || !stillHere() || !button.isConnected) return;
+    try {
+      const result = await withBusyForm(button, () =>
+        api(
+          `/guilds/${guildId}/providers/server/credentials/${encodeURIComponent(button.dataset.serverProviderDelete)}`,
+          {
+            method: "DELETE",
+          },
+        ),
+      );
+      if (!result?.deleted) return;
+      toast(ui("connection_server_provider_removed"));
+      if (guildId !== state.guildId) return;
+      await refreshProviders("server");
+      if (stillHere()) {
+        focusNavigation(
+          document.querySelector('[data-connection-select][aria-selected="true"]')
+            ? '[data-connection-select][aria-selected="true"]'
+            : "[data-provider-open]",
+        );
+      }
+    } catch (error) {
+      toast(error.message, "error");
+      if (error.code === "provider_active" && stillHere()) await loadProviderWorkspace("server");
+    }
+  }
+
+  function openDashboardEditor(button, title, wide = false, eyebrow = "connections") {
+    const dialog = document.createElement("dialog");
+    if (wide) dialog.className = "wide";
+    dialog.setAttribute("aria-labelledby", "dashboard-editor-title");
+    dialog.innerHTML = `<form class="stack"><header class="panel-header"><div class="heading"><p class="eyebrow" data-editor-context>${escapeHtml(ui(eyebrow))}</p><h2 id="dashboard-editor-title">${escapeHtml(ui(title))}</h2></div></header>
+      <div class="stack" data-editor-fields>${loadingBar(ui(title))}</div>
+      <footer class="actions form-actions"><button class="button" type="button" data-editor-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit" hidden>${escapeHtml(ui("save"))}</button></footer></form>`;
+    const form = dialog.querySelector("form");
+    form.querySelector("[data-editor-cancel]").onclick = () => dialog.close();
+    dialog.addEventListener("cancel", (event) => {
+      if (form.classList.contains("is-saving")) event.preventDefault();
+    });
+    dialog.addEventListener(
+      "close",
+      () => {
+        dialog.remove();
+        if (button.checkVisibility()) button.focus({ preventScroll: true });
+        else if (button.isConnected) {
+          const menu = button.closest(".action-menu");
+          if (menu) focusNavigation(`[popovertarget="${menu.id}"]`);
+        }
+      },
+      { once: true },
+    );
+    document.body.append(dialog);
+    dialog.showModal();
+    return {
+      dialog,
+      form,
+      fields: form.querySelector("[data-editor-fields]"),
+      save: form.querySelector('[type="submit"]'),
+    };
+  }
+
+  function renderMainPersonaReview(review, source) {
+    const format = (key, values) =>
+      escapeHtml(ui(key).replace(/\{(\w+)\}/g, (token, field) => String(values[field] ?? token)));
+    const sameLineage = review.currentLineageId === review.targetLineageId;
+    const memoriesKey = sameLineage
+      ? "persona_main_memories_same"
+      : review.targetLineageId === null
+        ? "persona_main_memories_new"
+        : "persona_main_memories_switch";
+    const loreKey =
+      review.incomingLoreCount === null
+        ? "persona_main_lore_keep"
+        : review.incomingLoreCount === 0
+          ? "persona_main_lore_clear"
+          : "persona_main_lore_replace";
+    const target = review.targetLineageId === null ? ui("persona_main_lineage_new") : `#${review.targetLineageId}`;
+    const affectsExistingLore = review.incomingLoreCount !== null && review.existingLoreCount > 0;
+    return `
+      <strong>${format("persona_main_review_summary", { current: review.currentName, source: review.sourceName, name: review.nextName })}</strong>
+      <div class="heading"><h3>${escapeHtml(ui("persona_main_lineage"))}</h3>
+        <p>#${escapeHtml(review.currentLineageId)} → ${escapeHtml(target)}</p></div>
+      <div class="heading"><h3>${escapeHtml(ui("persona_main_memories"))}</h3>
+        <p>${escapeHtml(ui(memoriesKey))}</p>
+        <p>${escapeHtml(ui("persona_main_memories_global"))}</p></div>
+      <div class="heading"><h3>${escapeHtml(ui("persona_main_lore"))}</h3>
+        <p${affectsExistingLore ? ' class="notice warning"' : ""}>${format(loreKey, { existing: review.existingLoreCount, incoming: review.incomingLoreCount })}</p>
+        <p>${escapeHtml(ui(sameLineage ? "persona_main_lore_server" : "persona_main_lore_previous"))}</p>
+        ${review.sharedPersonas.length ? `<p>${format("persona_main_shared", { names: review.sharedPersonas.join(", ") })}</p>` : ""}
+      </div>
+      <p class="hint">${escapeHtml(ui(source === "preset" ? "persona_main_preset_media" : "persona_main_card_media"))}</p>`;
+  }
+
+  async function openMainPersonaChange(button) {
+    const guildId = state.guildId;
+    const path = `/guilds/${guildId}/personas/main/replacement`;
+    const { dialog, form, fields, save } = openDashboardEditor(
+      button,
+      "persona_main_change",
+      true,
+      "persona_main_label",
+    );
+    try {
+      const { presets } = await api(path);
+      if (!dialog.open) return;
+      fields.innerHTML = `
+        <div class="stack" data-main-selection>
+        <label class="field">${fieldLabel(ui("persona_main_source"))}<select name="source">
+          <option value="preset"${presets.length ? "" : " disabled"}>${escapeHtml(ui("persona_main_preset"))}</option>
+          <option value="card"${presets.length ? "" : " selected"}>${escapeHtml(ui("persona_main_card"))}</option>
+        </select></label>
+        ${presets.length ? "" : `<p class="hint">${escapeHtml(ui("persona_main_no_presets"))}</p>`}
+        <label class="field" data-main-preset>${fieldLabel(ui("persona_main_preset"))}<select name="presetId" required>
+          <option value="">${escapeHtml(ui("persona_main_choose_preset"))}</option>
+          ${presets.map(({ id, name }) => `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join("")}
+        </select></label>
+        <div class="stack" data-main-card>
+          <label class="field">${fieldLabel(ui("persona_main_file"))}<input type="file" name="file" accept=".png,.json,image/png,application/json" required></label>
+          <label class="field">${fieldLabel(ui("persona_main_identity"))}<select name="identityMode">
+            <option value="fork">${escapeHtml(ui("persona_main_identity_fork"))}</option>
+            <option value="preserve">${escapeHtml(ui("persona_main_identity_preserve"))}</option>
+          </select></label>
+        </div>
+        </div>
+        <section class="subsection" data-main-review tabindex="-1" hidden></section>`;
+      const selectionPanel = fields.querySelector("[data-main-selection]");
+      const reviewPanel = fields.querySelector("[data-main-review]");
+      const presetField = fields.querySelector("[data-main-preset]");
+      const cardFields = fields.querySelector("[data-main-card]");
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "button";
+      back.textContent = ui("persona_main_back");
+      save.before(back);
+      let reviewed = null;
+      const resetReview = () => {
+        reviewed = null;
+        selectionPanel.hidden = false;
+        back.hidden = true;
+        reviewPanel.hidden = true;
+        reviewPanel.replaceChildren();
+        save.classList.remove("danger");
+        save.classList.add("primary");
+        save.textContent = ui("persona_main_review");
+      };
+      back.onclick = () => {
+        resetReview();
+        dialog.scrollTop = 0;
+        selectionPanel.querySelector('[role="combobox"]')?.focus({ preventScroll: true });
+      };
+      const sync = () => {
+        const isPreset = form.elements.source.value === "preset";
+        presetField.hidden = !isPreset;
+        cardFields.hidden = isPreset;
+        form.elements.presetId.disabled = !isPreset;
+        form.elements.file.disabled = isPreset;
+        form.elements.identityMode.disabled = isPreset;
+        resetReview();
+        form.querySelector(".form-error")?.remove();
+      };
+      form.addEventListener("change", sync);
+      sync();
+      enhanceDashboard(fields);
+      save.hidden = false;
+      form.onsubmit = async (event) => {
+        event.preventDefault();
+        if (!dialog.open || state.guildId !== guildId || form.classList.contains("is-saving")) return;
+        form.querySelector(".form-error")?.remove();
+        const body = new FormData(form);
+        try {
+          if (!reviewed) {
+            reviewed = await withBusyForm(form, () => api(path, { method: "POST", body }));
+            if (!dialog.open) return;
+            reviewPanel.innerHTML = renderMainPersonaReview(reviewed, body.get("source"));
+            selectionPanel.hidden = true;
+            reviewPanel.hidden = false;
+            back.hidden = false;
+            dialog.scrollTop = 0;
+            reviewPanel.focus({ preventScroll: true });
+            save.textContent = ui("persona_main_confirm");
+            if (reviewed.incomingLoreCount !== null && reviewed.existingLoreCount > 0) {
+              save.classList.remove("primary");
+              save.classList.add("danger");
+            }
+            return;
+          }
+          body.set("revision", reviewed.revision);
+          const result = await withBusyForm(form, () => api(path, { method: "PUT", body }));
+          dialog.close();
+          toast(
+            ui(result.synchronized ? "persona_main_changed" : "persona_main_sync_warning"),
+            result.synchronized ? "success" : "warning",
+          );
+          if (state.guildId === guildId) await refreshPersonas(result.personaId);
+        } catch (error) {
+          if (dialog.open) {
+            resetReview();
+            showFormError(form, error);
+          } else {
+            toast(error.message, "error");
+          }
+        }
+      };
+    } catch (error) {
+      if (dialog.open) fields.textContent = error.message;
+    }
+  }
+
+  async function openRotationKeys(button) {
+    const guildId = state.guildId;
+    const path = `/guilds/${guildId}/providers/server/credentials/${encodeURIComponent(button.dataset.providerRotation)}/rotation`;
+    const { dialog, form, fields, save } = openDashboardEditor(button, "rotation_title");
+    try {
+      const { name, count } = await api(path);
+      if (!dialog.open) return;
+      form.querySelector("[data-editor-context]").textContent = name;
+      fields.innerHTML = `<p>${escapeHtml(ui("rotation_count").replace("{count}", String(count)))}</p><label class="field">${fieldLabel(ui("rotation_key"), ui("rotation_key_hint"))}<input type="password" name="key" minlength="10" maxlength="4000" required autocomplete="new-password"></label>`;
+      if (count > 0)
+        save.parentElement.insertAdjacentHTML(
+          "afterbegin",
+          `<button type="button" class="button danger" data-rotation-clear>${escapeHtml(ui("rotation_clear"))}</button>`,
+        );
+      save.textContent = ui("rotation_key");
+      save.hidden = false;
+      async function update(payload, receipt) {
+        if (!dialog.open || state.guildId !== guildId || form.classList.contains("is-saving")) return;
+        try {
+          const result = await withBusyForm(form, () => api(path, { method: "PATCH", body: JSON.stringify(payload) }));
+          dialog.close();
+          toast(ui(result.updated ? receipt : "endpoint_edit_unchanged"));
+        } catch (error) {
+          if (dialog.open) showFormError(form, error);
+        }
+      }
+      form.onsubmit = (event) => {
+        event.preventDefault();
+        void update({ action: "add", key: form.elements.key.value }, "rotation_added");
+      };
+      const clear = form.querySelector("[data-rotation-clear]");
+      if (clear)
+        clear.onclick = async () => {
+          if (await confirmAction(ui("rotation_clear"), ui("rotation_clear_hint")))
+            await update({ action: "clear" }, "rotation_cleared");
+        };
+    } catch (error) {
+      if (dialog.open) fields.textContent = error.message;
+    }
+  }
+
+  const endpointModelFlagLabels = {
+    hasTools: "endpoint_tools",
+    seesImages: "endpoint_images",
+    seesVideos: "endpoint_videos",
+    supportsStructOutput: "endpoint_structured",
+    strictRoleAlternation: "endpoint_roles",
+    supportsPrefixCompletion: "endpoint_model_prefix_completion",
+    supportsAssistantPrefill: "endpoint_model_prefill",
+    verbatimToolCalling: "endpoint_model_verbatim",
+  };
+
+  async function openEndpointModelEditor(button) {
+    const guildId = state.guildId;
+    const { providerScope: scope, endpointConnection, endpointModelEdit } = button.dataset;
+    const path = `/guilds/${guildId}/providers/${scope}/connections/${endpointConnection}/models/${endpointModelEdit}`;
+    const { dialog, form, fields, save } = openDashboardEditor(button, "endpoint_model_edit", true);
+    try {
+      const model = await api(path);
+      if (!dialog.open) return;
+      form.querySelector("[data-editor-context]").textContent = model.connectionName;
+      const canEnableRoute = scope === "personal" && ["text", "embedding", "image", "video"].includes(model.capability);
+      const toggle = (key, label, checked, hint = "") =>
+        `<label class="toggle">${fieldLabel(ui(label), hint)}<input type="checkbox" role="switch" name="${key}"${checked ? " checked" : ""}></label>`;
+      const options = (name, selected, choices) =>
+        `<select name="${name}">${choices.map(([value, key]) => `<option value="${value}"${value === selected ? " selected" : ""}>${escapeHtml(ui(`endpoint_model_${key}`))}</option>`).join("")}</select>`;
+      fields.innerHTML = `${canEnableRoute ? `<p class="hint">${escapeHtml(ui("endpoint_model_personal_routing_hint"))}</p>` : ""}
+        ${model.codeName === null ? "" : `<label class="field">${fieldLabel(ui("endpoint_model_name"))}<input name="codeName" maxlength="200" value="${escapeHtml(model.codeName)}" required></label>`}
+        ${model.capability === "text" || model.capability === "decision" ? `<label class="field">${fieldLabel(ui(model.capability === "decision" ? "endpoint_model_input_limit" : "endpoint_model_context"))}<input type="number" name="numCtx" min="512" max="10000000" value="${model.numCtx ?? ""}"${model.capability === "decision" ? " required" : ""}></label>` : ""}
+        ${
+          model.flags
+            ? `<div class="grid">${Object.entries(model.flags)
+                .map(([key, enabled]) =>
+                  toggle(
+                    `flag_${key}`,
+                    endpointModelFlagLabels[key],
+                    enabled,
+                    ui(`${endpointModelFlagLabels[key]}_hint`),
+                  ),
+                )
+                .join("")}</div>`
+            : ""
+        }
+        ${
+          model.imageSupports
+            ? `<fieldset class="stack"><legend>${escapeHtml(ui("endpoint_model_image_supports"))}</legend>${Object.entries(
+                model.imageSupports,
+              )
+                .filter(([key]) => key !== "inpaint" || model.allowInpaint)
+                .map(([key, enabled]) => toggle(`image_${key}`, `endpoint_model_${key}`, enabled))
+                .join("")}</fieldset>`
+            : ""
+        }
+        ${
+          model.speech
+            ? `${
+                model.allowVoiceMode
+                  ? `<label class="field">${fieldLabel(ui("endpoint_model_voice_mode"))}${options(
+                      "voiceMode",
+                      model.speech.voiceMode,
+                      [
+                        ["clone", "voice_clone"],
+                        ["voice-design", "voice_design"],
+                        ["auto", "voice_auto"],
+                      ],
+                    )}</label>${toggle("supportsInstruct", "endpoint_model_voice_instruct", model.speech.supportsInstruct)}`
+                  : ""
+              }<label class="field">${fieldLabel(ui("endpoint_model_script_markup"))}${options(
+                "scriptMarkup",
+                model.speech.scriptMarkup,
+                [
+                  ["plain", "markup_plain"],
+                  ["bracket-tags", "markup_brackets"],
+                  ["emoji", "markup_emoji"],
+                ],
+              )}</label>`
+            : ""
+        }
+        ${model.workflowMaxBytes ? `<label class="field">${fieldLabel(ui("endpoint_model_workflow"), ui("endpoint_model_workflow_hint"))}<input type="file" name="workflow" accept=".json,application/json"></label>` : ""}`;
+      enhanceDashboard(dialog);
+      const initial = formSnapshot(form);
+      const changes = () =>
+        formSnapshot(form).filter(({ name, value, checked }, index) =>
+          name === "workflow"
+            ? Boolean(form.elements.workflow.files[0])
+            : value !== initial[index].value || checked !== initial[index].checked,
+        );
+      const sync = () => {
+        save.disabled = changes().length === 0;
+      };
+      form.addEventListener("input", sync);
+      form.addEventListener("change", sync);
+      sync();
+      save.hidden = false;
+      form.onsubmit = async (event) => {
+        event.preventDefault();
+        const dirty = changes();
+        if (!dirty.length || state.guildId !== guildId || form.classList.contains("is-saving")) return;
+        try {
+          await withBusyForm(form, async () => {
+            const patch = {};
+            for (const { name, value, checked } of dirty) {
+              if (name.startsWith("flag_")) {
+                patch.flags ||= {};
+                patch.flags[name.slice(5)] = checked;
+              } else if (name.startsWith("image_"))
+                patch.imageSupports ??= formSnapshot(form)
+                  .filter((field) => field.name.startsWith("image_") && field.checked)
+                  .map((field) => field.name.slice(6));
+              else if (name === "workflow") {
+                const file = form.elements.workflow.files[0];
+                try {
+                  if (file.size > model.workflowMaxBytes) throw new Error();
+                  patch.workflow = JSON.parse(await file.text());
+                  if (!patch.workflow || typeof patch.workflow !== "object" || Array.isArray(patch.workflow))
+                    throw new Error();
+                } catch {
+                  throw new Error(ui("endpoint_model_workflow_invalid"));
+                }
+              } else patch[name] = name === "numCtx" ? (value ? Number(value) : null) : (checked ?? value);
+            }
+            await api(path, { method: "PATCH", body: JSON.stringify(patch) });
+          });
+          dialog.close();
+          toast(ui("endpoint_model_saved"));
+          if (state.guildId === guildId) await loadProviderWorkspace(scope);
+        } catch (error) {
+          if (dialog.open) showFormError(form, error);
+        }
+      };
+    } catch (error) {
+      if (dialog.open) fields.textContent = error.message;
+    }
+  }
+
+  async function openConnectionEditor(scope, connectionId) {
+    const guildId = state.guildId;
+    const path = `/guilds/${guildId}/providers/${scope}/connections/${connectionId}`;
+    const dialog = document.createElement("dialog");
+    dialog.className = "wide";
+    dialog.setAttribute("aria-labelledby", "endpoint-edit-title");
+    dialog.innerHTML = `<form class="stack">
+      <header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connections"))}</p><h2 id="endpoint-edit-title">${escapeHtml(ui("endpoint_edit"))}</h2></div></header>
+      <div class="stack" data-connection-fields>${loadingBar(ui("endpoint_edit"))}</div>
+      <footer class="actions form-actions"><button class="button" type="button" data-connection-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit" hidden>${escapeHtml(ui("save"))}</button></footer>
+    </form>`;
+    const form = dialog.querySelector("form");
+    const fields = form.querySelector("[data-connection-fields]");
+    const save = form.querySelector('[type="submit"]');
+    const focusMenu = () => {
+      if (guildId === state.guildId) focusNavigation(`[popovertarget="connection-actions-${scope}"]`);
+    };
+    form.querySelector("[data-connection-cancel]").onclick = () => dialog.close();
+    dialog.addEventListener("cancel", (event) => {
+      if (form.classList.contains("is-saving")) event.preventDefault();
+    });
+    dialog.addEventListener(
+      "close",
+      () => {
+        dialog.remove();
+        focusMenu();
+      },
+      { once: true },
+    );
+    document.body.append(dialog);
+    dialog.showModal();
+
+    try {
+      const connection = await api(path);
+      if (!dialog.open) return;
+      const hint = connection.isPreset ? "endpoint_edit_preset_hint" : "endpoint_edit_hint";
+      fields.innerHTML = `<p class="hint">${escapeHtml(ui(hint))}</p>
+        <label class="field">${fieldLabel(ui("endpoint_edit_label"))}<input ${connection.isPreset ? "readonly" : 'name="label" required maxlength="40"'} value="${escapeHtml(connection.label)}"></label>
+        <label class="field">${fieldLabel(ui("endpoint_edit_url"), connection.isPreset ? "" : ui("endpoint_edit_url_hint"))}<input type="url" ${connection.isPreset ? "readonly" : 'name="endpointUrl" required maxlength="500"'} value="${escapeHtml(connection.endpointUrl)}"></label>
+        <label class="field">${fieldLabel(ui("endpoint_edit_token"), ui("endpoint_edit_token_hint"))}<input name="authToken" type="password" maxlength="500" autocomplete="new-password"></label>
+        ${connection.unloadDuringComfyUi === undefined ? "" : `<label class="toggle">${fieldLabel(ui("endpoint_edit_handoff"), ui("endpoint_edit_handoff_hint"))}<input name="unloadDuringComfyUi" type="checkbox" role="switch"${connection.unloadDuringComfyUi ? " checked" : ""}></label>`}`;
+      const initial = formSnapshot(form);
+      const patch = () =>
+        Object.fromEntries(
+          formSnapshot(form).flatMap(({ name, checked, value }, index) => {
+            const previous = initial[index];
+            return checked === undefined
+              ? value.trim() === previous.value.trim()
+                ? []
+                : [[name, value.trim()]]
+              : checked === previous.checked
+                ? []
+                : [[name, checked]];
+          }),
+        );
+      form.addEventListener("input", () => {
+        save.disabled = Object.keys(patch()).length === 0;
+      });
+      save.disabled = true;
+      save.hidden = false;
+      fields.querySelector("input[name]")?.focus({ preventScroll: true });
+      form.onsubmit = async (event) => {
+        event.preventDefault();
+        const changes = patch();
+        if (form.classList.contains("is-saving") || !Object.keys(changes).length) return;
+        let result;
+        try {
+          result = await withBusyForm(form, () => api(path, { method: "PATCH", body: JSON.stringify(changes) }));
+        } catch (error) {
+          if (dialog.open) showFormError(form, error);
+          return;
+        }
+        dialog.close();
+        toast(
+          ui(result.updated ? "endpoint_edit_saved" : "endpoint_edit_unchanged"),
+          result.updated ? "success" : "info",
+        );
+        if (result.updated && guildId === state.guildId) {
+          await loadProviderWorkspace(scope);
+          focusMenu();
+        }
+      };
+    } catch (error) {
+      if (dialog.open) fields.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
     }
   }
 
@@ -4426,6 +6557,7 @@
     form.elements.content.value = memory.content;
     form.elements.tags.value = (memory.tags || []).join(", ");
     form.querySelector("[data-memory-tags]").hidden = state.memoryKind !== "personal";
+    renderMemoryChannelScope(form, state.memoryKind === "server" ? state.memoryData : null, memory);
     form.elements.memoryId.value = memory.id;
     completeFormSave(form);
     dialog.showModal();
@@ -4692,6 +6824,12 @@
   });
 
   async function handleDashboardAction(event) {
+    const logitAction = event.target.closest("[data-logit-open], [data-logit-remove]");
+    if (logitAction) {
+      if (savingForms) return;
+      if (logitAction.hasAttribute("data-logit-remove")) return deleteLogitBias(logitAction);
+      return openLogitBiasEditor(logitAction.closest("#logit-bias-panel"), logitAction.dataset.logitOpen);
+    }
     if (event.target.closest("[data-settings-search-open]")) {
       await openSettingsSearch();
       return;
@@ -4727,6 +6865,7 @@
         if (entry.connection) state.providerConnection[entry.scope] = entry.connection;
       }
       if (entry.channelTab) channelTab = entry.channelTab;
+      if (entry.moderationTab) moderationTab = entry.moderationTab;
       renderShell();
       return;
     }
@@ -4736,6 +6875,21 @@
     }
     if (event.target.closest("[data-character-reference-remove]")) {
       await saveCharacterReference(null);
+      return;
+    }
+    const personaReferenceAction = event.target.closest(
+      "[data-persona-reference-upload], [data-persona-reference-remove]",
+    );
+    if (personaReferenceAction) {
+      const host = personaReferenceAction.closest("[data-persona-reference]");
+      if (personaReferenceAction.hasAttribute("data-persona-reference-upload")) {
+        host.querySelector("[data-persona-reference-file]").click();
+      } else if (
+        (await confirmAction(ui("persona_reference_remove_title"), ui("persona_reference_remove_hint"))) &&
+        host.isConnected
+      ) {
+        await savePersonaReference(host, null);
+      }
       return;
     }
     if (event.target.closest("[data-stats-range-cancel], [data-stats-range-edit]")) {
@@ -4917,15 +7071,10 @@
     if (spriteExport) {
       spriteExport.disabled = true;
       try {
-        const response = await fetch(`${BASE}/guilds/${state.guildId}/personas/${state.personaId}/sprites/export`);
-        if (!response.ok) throw new Error((await response.json()).error.message);
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "sprites.zip";
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const response = await downloadAttachment(
+          `/guilds/${state.guildId}/personas/${state.personaId}/sprites/export`,
+          "sprites.zip",
+        );
         const skipped = Number(response.headers.get("X-Sprite-Skipped") || 0);
         toast(ui("sprite_exported").replace("{skipped}", String(skipped)), skipped ? "warning" : "success");
       } catch (error) {
@@ -4959,7 +7108,7 @@
     if (
       savingForms &&
       event.target.closest(
-        "[data-nav], [data-persona-select], [data-persona-panel], [data-settings-group], [data-provider-panel], [data-guild-select], [data-overview-refresh]",
+        "[data-nav], [data-persona-select], [data-persona-panel], [data-settings-group], [data-provider-panel], [data-guild-select], [data-overview-refresh], [data-provider-refresh]",
       )
     ) {
       toast(ui("saving"));
@@ -5089,12 +7238,48 @@
       document.querySelector("#endpoint-dialog")?.showModal();
       return;
     }
+    const endpointEdit = event.target.closest("[data-endpoint-edit]");
+    if (endpointEdit) {
+      void openConnectionEditor(endpointEdit.dataset.providerScope, endpointEdit.dataset.endpointEdit);
+      return;
+    }
+    const endpointModelEdit = event.target.closest("[data-endpoint-model-edit]");
+    if (endpointModelEdit) {
+      void openEndpointModelEditor(endpointModelEdit);
+      return;
+    }
+    const rotationKeys = event.target.closest("[data-provider-rotation]");
+    if (rotationKeys) {
+      void openRotationKeys(rotationKeys);
+      return;
+    }
     if (event.target.closest("[data-persona-create-open]")) {
       document.querySelector("#persona-create-dialog")?.showModal();
       return;
     }
     if (event.target.closest("[data-persona-import-open]")) {
       document.querySelector("#persona-import-dialog")?.showModal();
+      return;
+    }
+    const mainPersonaChange = event.target.closest("[data-main-persona-change]");
+    if (mainPersonaChange) {
+      void openMainPersonaChange(mainPersonaChange);
+      return;
+    }
+    const personaExport = event.target.closest("[data-persona-export-format]");
+    if (personaExport) {
+      const format = personaExport.dataset.personaExportFormat;
+      personaExport.disabled = true;
+      try {
+        await downloadAttachment(
+          `/guilds/${state.guildId}/personas/${state.personaId}/export?format=${format}`,
+          `tomori-preset.${format}`,
+        );
+      } catch (error) {
+        toast(error.message, "error");
+      } finally {
+        personaExport.disabled = false;
+      }
       return;
     }
     const avatarChoose = event.target.closest("[data-persona-avatar-choose]");
@@ -5197,10 +7382,18 @@
     }
     const personaPanel = event.target.closest("[data-persona-panel]");
     if (personaPanel) {
-      state.personaPanel = personaPanel.dataset.personaPanel;
+      const tab = personaPanel.dataset.personaPanel;
+      const panel = tab === "knowledge" ? state.personaKnowledgePanel : tab;
+      if (panel === state.personaPanel) return;
+      state.personaPanel = panel;
       state.memoryData = null;
       renderView();
-      focusNavigation(`[data-persona-panel="${state.personaPanel}"]`);
+      focusNavigation(`[data-persona-panel="${tab}"]`);
+      return;
+    }
+    const promptPresets = event.target.closest("[data-system-prompt-presets]");
+    if (promptPresets) {
+      void openSystemPromptPresets(promptPresets);
       return;
     }
     const settingsGroup = event.target.closest("[data-settings-group]");
@@ -5217,6 +7410,13 @@
       state.memoryData = null;
       renderShell();
       focusNavigation(`.nav-stack [data-nav="${state.view}"]`);
+      return;
+    }
+    const personalStm = event.target.closest("[data-personal-stm-refresh], [data-personal-stm-clear]");
+    if (personalStm) {
+      const panel = personalStm.closest("#personal-stm");
+      if (personalStm.hasAttribute("data-personal-stm-refresh")) await loadPersonalStm(panel);
+      else await clearPersonalStm(panel);
       return;
     }
     const memoryAdd = event.target.closest("[data-memory-add]");
@@ -5242,8 +7442,12 @@
       document.querySelector("#memory-import-file")?.click();
     const providerRefresh = event.target.closest("[data-provider-refresh]");
     if (providerRefresh) await refreshProviders(providerRefresh.dataset.providerRefresh, "Providers refreshed");
+    const draftingRefresh = event.target.closest("[data-drafting-refresh]");
+    if (draftingRefresh) return loadDraftingPanel(draftingRefresh.closest("#response-drafting-workspace"));
     const providerDelete = event.target.closest("[data-provider-delete]");
     if (providerDelete) await deleteProvider(providerDelete.dataset.providerDelete);
+    const serverProviderDelete = event.target.closest("[data-server-provider-delete]");
+    if (serverProviderDelete) return deleteServerProvider(serverProviderDelete);
     const endpointDelete = event.target.closest("[data-endpoint-delete]");
     if (endpointDelete) {
       await deleteEndpoint(endpointDelete.dataset.providerScope, Number(endpointDelete.dataset.endpointDelete));
@@ -5272,6 +7476,21 @@
   document.addEventListener("holdcomplete", handleDashboardAction);
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-memory-channel-limit]"))
+      event.target.form.querySelector("[data-memory-channel-picker]").hidden = !event.target.checked;
+    if (event.target.matches("[data-persona-habit-style]")) {
+      event.target
+        .closest("[data-persona-habits]")
+        .querySelectorAll("[data-persona-habit-form]")
+        .forEach((form) => {
+          form.hidden = form.dataset.personaHabitForm !== event.target.value;
+        });
+      return;
+    }
+    if (event.target.matches("[data-personal-capability]")) {
+      await togglePersonalCapability(event.target);
+      return;
+    }
     if (event.target.matches("[data-persona-humanizer-mode]")) {
       event.target.form.querySelector("[data-persona-humanizer-fields]").hidden = event.target.value === "inherit";
     }
@@ -5291,6 +7510,11 @@
       slots.forEach((slot, index) => {
         slot.hidden = index > lastFilled + 1;
       });
+    }
+    if (event.target.matches("[data-design-remember]")) {
+      setRememberDesign(event.target.checked);
+      event.target.checked = rememberDesign;
+      return;
     }
     if (event.target.matches("[data-design-setting]")) {
       appearance[event.target.dataset.designSetting] = event.target.value;
@@ -5393,6 +7617,12 @@
       event.target.value = "";
     }
     const avatarInput = event.target.closest("[data-persona-avatar-file]");
+    if (event.target.matches("[data-persona-reference-file]")) {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file) await savePersonaReference(event.target.closest("[data-persona-reference]"), file);
+      return;
+    }
     if (avatarInput?.files?.[0]) {
       const personaId = Number(avatarInput.dataset.personaAvatarFile);
       const body = new FormData();
@@ -5433,6 +7663,25 @@
     }
     if (event.target.classList.contains("is-saving")) {
       event.preventDefault();
+      return;
+    }
+    if (event.target.matches("[data-persona-habit-form]")) {
+      event.preventDefault();
+      try {
+        await savePersonaNamingHabits(event.target);
+      } catch (error) {
+        if (event.target.isConnected) showFormError(event.target, error);
+      }
+      return;
+    }
+    if (event.target.matches("[data-persona-attg], [data-persona-voice]")) {
+      event.preventDefault();
+      try {
+        if (event.target.hasAttribute("data-persona-attg")) await savePersonaAttg(event.target);
+        else await savePersonaVoice(event.target);
+      } catch (error) {
+        if (event.target.isConnected) showFormError(event.target, error);
+      }
       return;
     }
     if (event.target.matches("[data-lorebook-form], [data-lorebook-import-form]")) {
@@ -5764,21 +8013,52 @@
       return;
     }
 
+    if (event.target.matches("[data-drafting-selections], [data-advanced-models]")) {
+      event.preventDefault();
+      const advanced = event.target.matches("[data-advanced-models]");
+      const resource = advanced ? "providers/server/model-targets" : "settings/response-drafting";
+      const update = advanced
+        ? (name, value) => {
+            const slot = state.providerData.server?.advancedModels.find((model) => model.kind === name);
+            if (slot) slot.selected = value;
+          }
+        : undefined;
+      await saveModelSelections(
+        event.target,
+        `/guilds/${state.guildId}/${resource}`,
+        advanced ? "advanced_models_saved" : "drafting_saved",
+        update,
+      );
+      return;
+    }
+
     if (event.target.matches("[data-profile-section]")) {
       event.preventDefault();
       const form = event.target;
+      const baseline = formBaselines.get(form);
       const patch = {};
       for (const input of form.querySelectorAll("input[name], select[name], textarea[name]")) {
+        const original = baseline.find(({ name }) => name === input.name);
+        if (original?.value === input.value && (input.type !== "checkbox" || original.checked === input.checked))
+          continue;
         if (input.type === "checkbox") patch[input.name] = input.checked;
         else if (input.name === "privacy_level") patch[input.name] = Number(input.value);
         else if (input.name === "timezone_offset") patch[input.name] = input.value === "" ? null : Number(input.value);
         else if (input.name === "physical_appearance_tags") patch[input.name] = parseTags(input.value);
         else patch[input.name] = input.value || null;
       }
+      if (!Object.keys(patch).length) return;
       try {
         await withBusyForm(form, async () => {
           const result = await api("/profile", { method: "PATCH", body: JSON.stringify(patch) });
           state.overview.profile = result.profile;
+          for (const [name, key] of [
+            ["user_nickname", "nickname"],
+            ["prefix_override", "prefix"],
+            ["suffix_override", "suffix"],
+          ]) {
+            if (name in patch) form.elements[name].value = result.profile[key] ?? "";
+          }
           completeFormSave(form);
         });
         toast("Profile saved");
@@ -5800,6 +8080,7 @@
               lineageId: state.lineageId,
               content: form.elements.content.value,
               tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
+              ...collectMemoryChannelPatch(form),
             }),
           }),
         );
@@ -5818,14 +8099,18 @@
       const form = event.target;
       if (event.submitter?.value !== "save") return;
       try {
-        await api(`/guilds/${state.guildId}/memories/${state.memoryKind}/${form.elements.memoryId.value}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            lineageId: state.lineageId,
-            content: form.elements.content.value,
-            tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
+        const channelPatch = collectMemoryChannelPatch(form);
+        await withBusyForm(form, () =>
+          api(`/guilds/${state.guildId}/memories/${state.memoryKind}/${form.elements.memoryId.value}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              lineageId: state.lineageId,
+              content: form.elements.content.value,
+              tags: state.memoryKind === "personal" ? parseTags(form.elements.tags.value).slice(0, 5) : [],
+              ...channelPatch,
+            }),
           }),
-        });
+        );
         document.querySelector("#memory-dialog").close();
         toast("Memory updated");
         await loadMemories();
@@ -5948,7 +8233,7 @@
       event.preventDefault();
       const panel = event.submitter?.closest("[data-channel-panel]");
       if (!panel) return;
-      for (const input of panel.querySelectorAll("input, select, textarea")) {
+      for (const input of panel.querySelectorAll("input[name], select[name], textarea[name]")) {
         if (!input.reportValidity()) return;
       }
       const selected = new Set(
@@ -6030,9 +8315,11 @@
       try {
         await withBusyForm(settingsForm, async () => {
           for (const section of sections) {
+            const patch = collectSettingsPatch(settingsForm, section);
+            if (!Object.keys(patch).length) continue;
             const result = await api(`/guilds/${state.guildId}/settings/${section.id}`, {
               method: "PATCH",
-              body: JSON.stringify(collectSettingsPatch(settingsForm, section)),
+              body: JSON.stringify(patch),
             });
             state.overview.settings.values[section.id] = result.values;
             if (section.id === "byok") state.providerData.personal = null;

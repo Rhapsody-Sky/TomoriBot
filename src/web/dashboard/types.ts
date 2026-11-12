@@ -88,6 +88,7 @@ export interface MemoryMutationInput {
   lineageId: number;
   content: string;
   tags: string[];
+  channelDiscIds?: string[];
 }
 
 export interface PersonalMemoryView {
@@ -102,6 +103,9 @@ export interface PersonalMemoryView {
 export interface ServerMemoryView extends PersonalMemoryView {
   taughtByUserId: number | null;
   editable: boolean;
+  channelDiscIds: string[];
+  unavailableChannelCount: number;
+  channelScopePending: boolean;
 }
 
 export function serializePersonalMemory(row: PersonalMemoryRow): PersonalMemoryView {
@@ -115,7 +119,14 @@ export function serializePersonalMemory(row: PersonalMemoryRow): PersonalMemoryV
   };
 }
 
-export function serializeServerMemory(row: ServerMemoryRow, actorUserId: number, canManage: boolean): ServerMemoryView {
+export function serializeServerMemory(
+  row: ServerMemoryRow,
+  actorUserId: number,
+  canManage: boolean,
+  selectableChannels: ReadonlySet<string>,
+): ServerMemoryView {
+  const savedChannels = row.channel_disc_ids ?? [];
+  const channelDiscIds = savedChannels.filter((id) => selectableChannels.has(id));
   return {
     id: row.server_memory_id ?? 0,
     lineageId: row.persona_lineage_id,
@@ -123,6 +134,9 @@ export function serializeServerMemory(row: ServerMemoryRow, actorUserId: number,
     tags: row.tags ?? [],
     taughtByUserId: row.user_id,
     editable: canManage || row.user_id === actorUserId,
+    channelDiscIds,
+    unavailableChannelCount: savedChannels.length - channelDiscIds.length,
+    channelScopePending: row.channel_scope_pending === true,
     createdAt: row.created_at?.toISOString() ?? null,
     updatedAt: row.updated_at?.toISOString() ?? null,
   };

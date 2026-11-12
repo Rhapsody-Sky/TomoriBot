@@ -88,17 +88,20 @@ const serverInput: MemoryMutationInput = {
   content: "Server fact",
   tags: [],
 };
+const noChannels = new Set<string>();
 
 describe("dashboard memory ownership", () => {
   it("rejects server keyword tags rather than silently saving inactive tags", async () => {
     const core = createCore();
     const service = new DashboardMemoryService(core as unknown as DashboardMemoryCore);
     const tagged = { ...serverInput, tags: ["keyword"] };
-    await expect(service.addServer(createActor(true), createSnapshot(), tagged)).rejects.toMatchObject({
+    await expect(service.addServer(createActor(true), createSnapshot(), tagged, noChannels)).rejects.toMatchObject({
       code: "invalid_memory",
       status: 422,
     });
-    await expect(service.updateServer(createActor(true), createSnapshot(), 2, tagged)).rejects.toMatchObject({
+    await expect(
+      service.updateServer(createActor(true), createSnapshot(), 2, tagged, noChannels),
+    ).rejects.toMatchObject({
       code: "invalid_memory",
       status: 422,
     });
@@ -110,10 +113,10 @@ describe("dashboard memory ownership", () => {
     const core = createCore();
     const service = new DashboardMemoryService(core as unknown as DashboardMemoryCore);
 
-    await service.listServer(createActor(false), createSnapshot(), 77);
+    await service.listServer(createActor(false), createSnapshot(), 77, noChannels);
     expect(core.listServerMemories).toHaveBeenCalledWith(42, 77, 7);
 
-    await service.listServer(createActor(true), createSnapshot(), 77);
+    await service.listServer(createActor(true), createSnapshot(), 77, noChannels);
     expect(core.listServerMemories).toHaveBeenLastCalledWith(42, 77, undefined);
   });
 
@@ -140,13 +143,13 @@ describe("dashboard memory ownership", () => {
     const service = new DashboardMemoryService(core as unknown as DashboardMemoryCore);
     const snapshot = createSnapshot({ server_memteaching_enabled: false });
 
-    await expect(service.addServer(createActor(false), snapshot, serverInput)).rejects.toMatchObject({
+    await expect(service.addServer(createActor(false), snapshot, serverInput, noChannels)).rejects.toMatchObject({
       code: "server_teaching_disabled",
       status: 403,
     });
     expect(core.addServerMemory).not.toHaveBeenCalled();
 
-    await service.addServer(createActor(true), snapshot, serverInput);
+    await service.addServer(createActor(true), snapshot, serverInput, noChannels);
     expect(core.addServerMemory).toHaveBeenCalledTimes(1);
   });
 
