@@ -177,11 +177,12 @@ Persona attributes and sample dialogues open in place. Sprite tiles open an
 editor dialog. Click the image preview or drop a file on it to stage a new image
 until Save. A hold button deletes the sprite. A failed write keeps the editor
 open with its input intact.
-Server lorebooks use a book list, entry list and selected-entry editor. In the
-Persona workspace, each row previews the entry's content, activation and channel
-scope. The full-width editor saves content, triggers, advanced rules and channel
-scope in separate cards. Returning to the list restores the filter and asks
-about unsaved edits.
+Server lorebooks show the book list beside searchable entry previews. Both
+server and persona previews show content, activation and channel scope. They
+open a full-width editor with separate cards for content, triggers and advanced
+rules. Server entries inherit the book's channels, which are edited in Lorebook
+settings. Persona entries have their own channel card. Returning to the list
+restores the filter and asks about unsaved edits.
 
 Overview shows the persona count in the server banner and ranks personas by
 interactions in the selected period. The Personas shortcut opens the workspace,

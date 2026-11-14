@@ -170,6 +170,7 @@ body[data-theme="dark"] .boot-logo {
 }
 
 [data-persona-summary],
+[data-lorebook-summary],
 [data-overview-summary] {
   gap: var(--space-3);
 }
@@ -358,50 +359,13 @@ body[data-theme="dark"] .boot-logo {
   }
 }
 
-.mailbox .actions {
-  align-self: stretch;
-  justify-content: flex-end;
-}
-
-.mail-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.mail-list > footer,
-.mail-folders > footer {
-  margin-top: auto;
-  padding-top: var(--space-4);
-}
-
-@media (min-width: 651px) {
-  .mail-detail {
-    display: flex;
-    flex-direction: column;
-    padding-bottom: var(--space-3);
-  }
-}
-
-.mail-detail > .stack {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.mail-detail [data-lorebook-form="content"] {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.mail-detail [data-lorebook-form="content"] > .form-actions {
-  margin-top: auto;
-  padding-top: var(--space-3);
-}
-
 .provider-panel > .subsection {
   margin-top: var(--space-4);
   padding-top: var(--space-4);
+}
+
+[data-dashboard-view="lorebooks"] [data-lorebook-preview] {
+  gap: var(--space-1);
 }
 
 [data-stats-content] > .stat-grid.framed {
