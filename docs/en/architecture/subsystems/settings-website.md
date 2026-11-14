@@ -199,12 +199,12 @@ totals; the highest-usage day remains visible separately. The model filter uses
 the token counters' model keys. UTC day buckets cannot
 provide an hourly breakdown. Hovering, focusing or selecting a bar shows its
 values, which are also available in an expandable table. Changing the period
-refreshes the statistics below the period controls. The 7-, 30- and 90-day
-presets are always visible. Overview opens on 30 days. The tiles show trends for
-periods spanning at least seven days, using up to 30 buckets across the selected
-period. The cost trend uses the same catalog pricing as the total. Custom ranges
-include both selected UTC dates and apply the same bounds to totals, rankings,
-costs and token history.
+refreshes the statistics below the period controls. Overview opens on 30 days.
+The period bar moves options into More when they cannot all fit. The tiles show
+trends for periods spanning at least seven days, using up to 30 buckets across
+the selected period. The cost trend uses the same catalog pricing as the total.
+Custom ranges include both selected UTC dates and apply the same bounds to
+totals, rankings, costs and token history.
 Editing or cancelling a range leaves the active period unchanged until Apply.
 
 The overview API filters the channel inventory and allowlist IDs by the signed-in

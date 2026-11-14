@@ -1876,32 +1876,34 @@
   }
 
   const statsPeriods = {
+    today: "stats_today",
     week: "stats_week",
     month: "stats_month",
     quarter: "stats_quarter",
-    today: "stats_today",
     year: "stats_year",
     all_time: "stats_all_time",
     custom: "stats_custom",
   };
 
   function renderStatsToolbar() {
-    const presets = ["week", "month", "quarter"];
-    const extras = ["today", "year", "all_time", "custom"];
-    return `<div class="toolbar">
-      <div class="segmented" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui("stats_timeframe"))}">
-        ${presets.map((period) => `<button type="button" role="radio" data-history-timeframe="${period}" aria-checked="false" tabindex="-1">${escapeHtml(ui(statsPeriods[period]))}</button>`).join("")}
-        <button type="button" role="radio" data-history-timeframe-extra aria-checked="false" tabindex="-1" hidden></button>
+    return `<div class="toolbar" data-stats-filters>
+      <div class="segmented" data-fx="indicator" data-overflow role="tablist" aria-label="${escapeHtml(ui("stats_timeframe"))}">
+        ${Object.entries(statsPeriods)
+          .map(
+            ([period, label]) =>
+              `<button type="button" id="overview-period-${period}" role="tab" data-history-timeframe="${period}" aria-selected="false" aria-controls="overview-period-content" tabindex="-1">${escapeHtml(ui(label))}</button>`,
+          )
+          .join("")}
       </div>
       <div class="actions">
         <label class="field"><span class="field-label sr-only">${escapeHtml(ui("stats_history_model_filter"))}</span><select data-history-model disabled><option value="">${escapeHtml(ui("stats_server_total"))}</option></select></label>
-        <button class="button icon" type="button" popovertarget="stats-period-menu" aria-label="${escapeHtml(ui("stats_more_periods"))}" data-tooltip="${escapeHtml(ui("stats_more_periods"))}">${navigationIcon("ellipsis")}</button>
-        <div class="action-menu" id="stats-period-menu" popover aria-label="${escapeHtml(ui("stats_more_periods"))}">
-          ${extras.map((period) => `<button class="button" type="button" data-stats-period-option="${period}" data-action-menu-preserve-focus>${escapeHtml(ui(statsPeriods[period]))}</button>`).join("")}
+        <button class="button icon" type="button" popovertarget="stats-actions" aria-label="${escapeHtml(ui("stats_actions"))}" data-tooltip="${escapeHtml(ui("stats_actions"))}">${navigationIcon("ellipsis")}</button>
+        <div class="action-menu" id="stats-actions" popover aria-label="${escapeHtml(ui("stats_actions"))}">
+          <button class="button" type="button" data-stats-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("stats_refresh"))}</button>
         </div>
-        ${refreshButton("stats", ui("stats_refresh"))}
       </div>
     </div>
+    <div class="stage" id="overview-period-content" role="tabpanel">
     <form class="card" id="stats-range-form" ${state.statsRangeEditing ? "" : "hidden"}>
       <div class="card-head"><div><h3>${escapeHtml(ui("stats_edit_range"))}</h3><p class="hint">${escapeHtml(ui("stats_range_hint"))}</p></div></div>
       <div class="grid"><label class="field">${fieldLabel(ui("stats_from"))}<input type="date" name="from" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.from || ""}"></label><label class="field">${fieldLabel(ui("stats_through"))}<input type="date" name="through" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.through || ""}"></label></div>
@@ -1983,7 +1985,7 @@
       <h2 class="sr-only" id="overview-stats-title">${escapeHtml(ui("stats_title"))}</h2>
       ${renderStatsToolbar()}
       <div data-stats-loading hidden>${loadingBar(ui("stats_loading"))}</div>
-      <div class="stage" data-stats-content></div>
+      <div class="stage" data-stats-content></div></div>
     </section>`;
   }
 
@@ -1992,14 +1994,15 @@
     const current = document.querySelector("[data-server-stats]");
     if (!current) return;
     const timeframe = state.statsTimeframe;
-    const extra = current.querySelector("[data-history-timeframe-extra]");
-    const preset = current.querySelector(`[data-history-timeframe="${timeframe}"]`);
-    extra.hidden = Boolean(preset);
-    if (!preset) extra.textContent = ui(timeframe === "custom" ? "stats_custom_short" : statsPeriods[timeframe]);
-    for (const button of current.querySelectorAll('[role="radio"]')) {
-      const checked = button === (preset || extra);
-      button.setAttribute("aria-checked", String(checked));
-      button.tabIndex = checked ? 0 : -1;
+    const displayedTimeframe = state.statsRangeEditing ? "custom" : timeframe;
+    current
+      .querySelector("#overview-period-content")
+      .setAttribute("aria-labelledby", `overview-period-${displayedTimeframe}`);
+    for (const button of current.querySelectorAll("[data-history-timeframe]")) {
+      const selected = button.dataset.historyTimeframe === displayedTimeframe;
+      const value = String(selected);
+      if (button.getAttribute("aria-selected") !== value) button.setAttribute("aria-selected", value);
+      button.tabIndex = selected ? 0 : -1;
     }
 
     const form = current.querySelector("#stats-range-form");
@@ -7793,7 +7796,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section], [data-design-choice], [data-history-timeframe], [data-history-timeframe-extra]",
+      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section], [data-design-choice], [data-history-timeframe]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
@@ -7811,8 +7814,7 @@
         if (group.matches(".quick, .dock, .segmented")) next.click();
         if (
           next.isConnected &&
-          (group.matches(".deck") ||
-            next.matches("[data-design-choice], [data-history-timeframe], [data-history-timeframe-extra]"))
+          (group.matches(".deck") || next.matches("[data-design-choice], [data-history-timeframe]"))
         )
           next.focus();
       }
@@ -8004,9 +8006,9 @@
       }
       return;
     }
-    const statsPeriod = event.target.closest("[data-history-timeframe], [data-stats-period-option]");
+    const statsPeriod = event.target.closest("[data-history-timeframe]");
     if (statsPeriod) {
-      const period = statsPeriod.dataset.historyTimeframe ?? statsPeriod.dataset.statsPeriodOption;
+      const period = statsPeriod.dataset.historyTimeframe;
       state.statsRangeEditing = period === "custom";
       if (!state.statsRangeEditing && state.statsTimeframe !== period) {
         state.statsTimeframe = period;
@@ -8014,26 +8016,23 @@
       } else {
         updateServerStatsSection(false);
       }
-      if (state.statsRangeEditing) {
-        document.querySelector('#stats-range-form input[name="from"]')?.focus();
-      } else if (statsPeriod.hasAttribute("data-stats-period-option")) {
-        document.querySelector("[data-history-timeframe-extra]")?.focus({ preventScroll: true });
-      }
       return;
     }
-    const editStatsRange =
-      event.target.closest("[data-stats-range-edit]") ||
-      (state.statsTimeframe === "custom" && event.target.closest("[data-history-timeframe-extra]"));
+    const editStatsRange = event.target.closest("[data-stats-range-edit]");
     if (editStatsRange || event.target.closest("[data-stats-range-cancel]")) {
       state.statsRangeEditing = Boolean(editStatsRange);
       updateServerStatsSection(false);
       if (state.statsRangeEditing) {
         document.querySelector('#stats-range-form input[name="from"]')?.focus();
       } else {
-        (
-          document.querySelector("[data-stats-range-summary]:not([hidden]) [data-stats-range-edit]") ||
-          document.querySelector('[data-server-stats] [aria-checked="true"]')
-        )?.focus({ preventScroll: true });
+        queueMicrotask(() =>
+          requestAnimationFrame(() => {
+            (
+              document.querySelector("[data-stats-range-summary]:not([hidden]) [data-stats-range-edit]") ||
+              document.querySelector('[data-history-timeframe][aria-selected="true"]')
+            )?.focus({ preventScroll: true });
+          }),
+        );
       }
       return;
     }

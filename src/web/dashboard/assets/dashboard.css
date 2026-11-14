@@ -408,6 +408,28 @@ body[data-theme="dark"] .boot-logo {
   margin: 0;
 }
 
+[data-server-stats] > [data-stats-filters] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+[data-stats-filters] > .segmented[data-overflow] {
+  justify-self: stretch;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+@container content (max-width: 860px) {
+  [data-server-stats] > [data-stats-filters] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  [data-stats-filters] > .actions {
+    justify-self: end;
+  }
+}
+
 [data-server-stats] .toolbar .actions {
   flex: 0 1 auto;
   min-width: 0;
