@@ -20,6 +20,7 @@ describe("dashboard connections", () => {
     const source = await dashboardFunction("buildSettingsSearchIndex");
     const overview = {
       canManage: true,
+      guild: { isDirectMessage: false },
       personas: [
         { personaId: 1, lineageId: 0, nickname: "Shared" },
         { personaId: 2, lineageId: 4, nickname: "Juno" },
@@ -30,14 +31,25 @@ describe("dashboard connections", () => {
     const build = runInNewContext(`${source}; buildSettingsSearchIndex`, {
       state: { overview, providerData: {} },
       ui: String,
+      moderationTabs: {},
+      personaKnowledgeTabs: () => [],
+      settingSearchText: (element: { textContent: string }) => element.textContent,
       document: {
-        createElement: () => ({
-          innerHTML: "",
-          content: { querySelectorAll: () => [] },
-        }),
+        createElement: () => {
+          const template = {
+            innerHTML: "",
+            content: {
+              querySelectorAll: () =>
+                template.innerHTML
+                  ? [{ tagName: "h3", textContent: template.innerHTML, closest: () => null, querySelector: () => null }]
+                  : [],
+            },
+          };
+          return template;
+        },
       },
       renderProfilePanel: () => "",
-      renderPersonaNaming: () => "",
+      renderPersonaNaming: () => "How this persona addresses you",
       renderPersonaSettings: () => "",
       renderPersonaAppearance: () => "",
     }) as () => { personaId?: number; personaHome?: boolean; personaPanel?: string; name?: string }[];
@@ -113,6 +125,40 @@ describe("dashboard connections", () => {
     expect(collect(form, section)).toEqual({ thought_log_channel_disc_id: null });
   });
 
+  it("filters flat Collection channel rows within their own category", async () => {
+    const source = await dashboardFunction("filterChannelGroup");
+    const rows = await dashboardFunction("channelGroupRows");
+    const filter = runInNewContext(`${rows}\n${source}\nfilterChannelGroup`) as (
+      heading: unknown,
+      query: string,
+      expanded: boolean,
+    ) => void;
+    const nextGroup = { hidden: false, hasAttribute: () => false };
+    const second = {
+      hidden: false,
+      dataset: { channelSearch: "memes quality not guaranteed" },
+      hasAttribute: (name: string) => name === "data-channel-search",
+      nextElementSibling: nextGroup,
+    };
+    const first = { ...second, dataset: { channelSearch: "general say hi" }, nextElementSibling: second };
+    const attributes = new Map();
+    const heading = {
+      hidden: false,
+      nextElementSibling: first,
+      setAttribute: (name: string, value: string) => attributes.set(name, value),
+    };
+    filter(heading, "", false);
+    expect(first.hidden && second.hidden).toBe(true);
+    expect(attributes.get("aria-expanded")).toBe("false");
+    filter(heading, "quality", true);
+    expect(first.hidden).toBe(true);
+    expect(second.hidden).toBe(false);
+    expect(nextGroup.hidden).toBe(false);
+    expect(heading.hidden).toBe(false);
+    filter(heading, "unmatched", true);
+    expect(heading.hidden).toBe(true);
+  });
+
   it("ranks setting names ahead of descriptions and matches words across their location", async () => {
     const source = await dashboardFunction("filterSettingsSearch");
     const filter = runInNewContext(`${source}; filterSettingsSearch`);
@@ -140,6 +186,7 @@ describe("dashboard connections", () => {
   it("puts sprite editing and deletion in the dialog and keeps the tile a single action", async () => {
     const tileSource = await dashboardFunction("renderSpriteTile");
     const dialogSource = await dashboardFunction("renderSpriteDialog");
+    const previewSource = await dashboardFunction("renderSpritePreview");
     const shared = {
       escapeHtml: String,
       ui: String,
@@ -147,9 +194,15 @@ describe("dashboard connections", () => {
       personaSticker: () => "",
       fieldLabel: String,
     };
-    const sprite = { key: "smile", name: "Smile", instructions: "When greeting someone", identity: true };
+    const sprite = {
+      key: "smile",
+      name: "Smile",
+      instructions: "When greeting someone",
+      identity: true,
+      imageUrl: "/sprite.png",
+    };
     const tile = runInNewContext(`(${tileSource})`, shared) as (sprite: unknown) => string;
-    const dialog = runInNewContext(`(${dialogSource})`, shared) as (
+    const dialog = runInNewContext(`${previewSource}\n${dialogSource}\nrenderSpriteDialog`, shared) as (
       personaId: number,
       sprite: unknown,
       limits: { name: number; instructions: number },
@@ -163,6 +216,10 @@ describe("dashboard connections", () => {
     expect(tileHtml).not.toContain("data-sprite-remove");
     expect(editHtml).toContain('data-sprite-key="smile"');
     expect(editHtml).toContain("data-hold data-sprite-remove");
+    expect(editHtml).toMatch(
+      /<label[^>]+data-upload-zone>[\s\S]*<img[^>]+src="\/sprite\.png"[\s\S]*<input type="file"[^>]*>\s*<\/label>/,
+    );
+    expect(editHtml.match(/type="file"/g)).toHaveLength(1);
     expect(createHtml).not.toContain("data-sprite-remove");
   });
 

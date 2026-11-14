@@ -174,8 +174,9 @@ remember them on that device. Stored settings apply before the dashboard paints.
 Persona colors affect the persona banner and test chat.
 
 Persona attributes and sample dialogues open in place. Sprite tiles open an
-editor dialog with an image preview, independent Save and a hold button for
-deletion. A failed sprite write keeps the editor open with its input intact.
+editor dialog. Click the image preview or drop a file on it to stage a new image
+until Save. A hold button deletes the sprite. A failed write keeps the editor
+open with its input intact.
 Server lorebooks use a book list, entry list and selected-entry editor. In the
 Persona workspace, the entry list keeps its filter when the editor switches
 entries. Content, matching words, channel scope and activation rules save in

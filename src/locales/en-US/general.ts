@@ -761,6 +761,7 @@ export default {
       interface_sprite_identity_hint:
         "Display the sprite name as an identity, followed by the persona name, instead of only changing the portrait.",
       interface_sprite_file: "Image",
+      interface_sprite_upload_image: "Choose an image or drop it here",
       interface_sprite_file_hint:
         "PNG, JPEG or GIF. Images are converted to PNG. Leave empty when editing to keep the current image.",
       interface_sprite_add: "Add sprite",

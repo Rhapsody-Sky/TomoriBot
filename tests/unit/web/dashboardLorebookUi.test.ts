@@ -669,7 +669,7 @@ describe("dashboard lorebook UI", () => {
       .join("");
     expect(menuMarkup).not.toContain('data-lorebook-open="lorebook-entry-dialog"');
     expect(browsing).toContain(
-      '<button class="button primary" type="button" data-lorebook-open="lorebook-entry-dialog"',
+      '<button class="button small primary" type="button" data-lorebook-open="lorebook-entry-dialog"',
     );
     expect(browsing).toContain('data-lorebook-form="book-rename"');
     expect(browsing).toContain("novalidate hidden");

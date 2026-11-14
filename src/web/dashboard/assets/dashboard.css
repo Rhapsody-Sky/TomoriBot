@@ -192,9 +192,29 @@ body[data-theme="dark"] .boot-logo {
   margin-inline-end: auto;
 }
 
-[data-sprite-form] .art-preview {
-  min-height: 0;
+[data-sprite-form] .media-upload {
+  align-self: stretch;
+  min-height: min-content;
   padding: var(--space-6);
+}
+
+[data-sprite-preview],
+[data-sprite-form] .media-overlay {
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) {
+  [data-sprite-form] .media-upload:has([data-sprite-image]) .media-overlay {
+    opacity: 0;
+  }
+}
+
+[data-sprite-form] .media-upload:is(:hover, :focus-within, .is-dragging) [data-sprite-preview] {
+  opacity: 0.4;
+}
+
+[data-sprite-form] .media-upload:is(:hover, :focus-within, .is-dragging) .media-overlay {
+  opacity: 1;
 }
 
 [data-persona-reference] .art-preview {

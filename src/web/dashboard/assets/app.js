@@ -2928,7 +2928,7 @@
     }
     const setting = `<a href="/settings?guild=${encodeURIComponent(state.guildId)}#channel-scoped-memory" data-lorebook-channel-settings>${escapeHtml(ui("lorebook_channel_settings_link"))}</a>`;
     const dependency = escapeHtml(ui("lorebook_channels_dependency")).replace("{setting}", () => setting);
-    return `<fieldset class="stack"><legend${headingInCard ? ' class="sr-only"' : ""}>${escapeHtml(ui("lorebook_channels"))}</legend><p class="hint">${escapeHtml(ui("lorebook_channels_hint"))} ${dependency}</p>${missing.length ? `<p class="hint">${escapeHtml(ui("lorebook_missing_channels"))}</p>` : ""}${renderChannelSelector("channelDiscIds", ids)}${missing.map((id) => `<input name="channelDiscIds" type="checkbox" value="${escapeHtml(id)}" data-missing-channel checked hidden>`).join("")}</fieldset>`;
+    return `<fieldset class="stack"><legend${headingInCard ? ' class="sr-only"' : ""}>${escapeHtml(ui("lorebook_channels"))}</legend>${renderChannelSelector("channelDiscIds", ids)}<p class="hint">${escapeHtml(ui("lorebook_channels_hint"))} ${dependency}</p>${missing.length ? `<p class="hint">${escapeHtml(ui("lorebook_missing_channels"))}</p>` : ""}${missing.map((id) => `<input name="channelDiscIds" type="checkbox" value="${escapeHtml(id)}" data-missing-channel checked hidden>`).join("")}</fieldset>`;
   }
 
   function lorebookEntry(entry, collection) {
@@ -3029,7 +3029,7 @@
     const actions = collection
       ? cardSaveActions(ui("lorebook_save"))
       : `<div class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`;
-    const deleteButton = `<button class="button danger hold-button" type="button" data-hold data-lorebook-delete-entry="${entryId}" data-confirm-title="${escapeHtml(ui("lorebook_delete_title").replace("{name}", () => entry.title))}" data-confirm-description="${escapeHtml(ui("lorebook_delete_entry_confirm"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>`;
+    const deleteButton = `<button class="button small danger hold-button" type="button" data-hold data-lorebook-delete-entry="${entryId}" data-confirm-title="${escapeHtml(ui("lorebook_delete_title").replace("{name}", () => entry.title))}" data-confirm-description="${escapeHtml(ui("lorebook_delete_entry_confirm"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>`;
     const selectionKey = lorebookSelectionKey(lineageId);
     const selection = lorebookSelections.get(selectionKey);
     lorebookSelections.set(selectionKey, { ...selection, entryId, section });
@@ -3077,7 +3077,7 @@
           ` data-original-keys="${escapeHtml(JSON.stringify(entry.keys))}"`,
         );
         body = collection
-          ? `${content}${constantForm}${keysForm}${form("entry-channels", "channels", `${cardHead("lorebook_channels")}<div class="stack">${lorebookChannels(entry.channel_disc_ids, true, true)}${entry.legacy_channel_tags?.length ? `<p class="hint">${escapeHtml(ui("lorebook_pending_channels"))}: ${escapeHtml(entry.legacy_channel_tags.join(", "))}</p>` : ""}</div>`, ` data-original-channels="${escapeHtml(JSON.stringify(entry.channel_disc_ids))}"`)}`
+          ? `${content}${constantForm}${keysForm}${form("entry-channels", "channels", `<div class="stack">${lorebookChannels(entry.channel_disc_ids, true, true)}${entry.legacy_channel_tags?.length ? `<p class="hint">${escapeHtml(ui("lorebook_pending_channels"))}: ${escapeHtml(entry.legacy_channel_tags.join(", "))}</p>` : ""}</div>`, ` data-original-channels="${escapeHtml(JSON.stringify(entry.channel_disc_ids))}"`)}`
           : `${matching}${constantForm}${keysForm}`;
       } else if (section === "content") body = content;
       if (collection || section === "rules") {
@@ -3162,7 +3162,7 @@
     const scopeKey = `lorebook/${lineageId}/${book?.lorebook_id || 0}`;
     const available = !serverwide || Boolean(book);
     const add = canManage
-      ? `<button class="button primary" type="button" data-lorebook-open="lorebook-entry-dialog" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("lorebook_new_entry"))}</button>`
+      ? `<button class="button small primary" type="button" data-lorebook-open="lorebook-entry-dialog" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("lorebook_new_entry"))}</button>`
       : "";
     const count = escapeHtml(ui("lorebook_entry_count").replace("{count}", String(data.entries.length)));
     const searchLabel = escapeHtml(ui("lorebook_search"));
@@ -4060,12 +4060,13 @@
         .map((key) => {
           const value = preference[key];
           const mode = value == null ? "inherit" : value === "" && key !== "nickname" ? "none" : "custom";
-          return `<fieldset class="grid"><legend>${escapeHtml(copy[key])}</legend>
-          <label class="field"><span class="sr-only">${escapeHtml(copy[key])}</span><select name="${key}Mode" data-naming-mode="${key}">
+          const labelId = `persona-naming-${key}`;
+          return `<div class="grid" role="group" aria-labelledby="${labelId}">
+          <label class="field"><span class="field-label" id="${labelId}">${escapeHtml(copy[key])}</span><select name="${key}Mode" data-naming-mode="${key}">
             ${["inherit", "custom", ...(key === "nickname" ? [] : ["none"])].map((option) => `<option value="${option}"${mode === option ? " selected" : ""}>${escapeHtml(copy[option])}</option>`).join("")}
           </select></label>
           <label class="field"${mode === "custom" ? "" : " hidden"}><span class="field-label">${escapeHtml(copy.value)}</span><input name="${key}" maxlength="${maxLength}" value="${escapeHtml(value ?? "")}" required${mode === "custom" ? "" : " disabled"}></label>
-        </fieldset>`;
+        </div>`;
         })
         .join("")}</div>
       <div class="actions"><button class="button small" type="button" data-persona-naming-reset>${escapeHtml(copy.reset)}</button></div>
@@ -4754,13 +4755,20 @@
     </button>`;
   }
 
+  function renderSpritePreview(url) {
+    return url
+      ? `<span class="sticker"><img src="${escapeHtml(url)}" alt="" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></span>`
+      : `<span class="sticker dashed" aria-hidden="true">${navigationIcon("image")}</span>`;
+  }
+
   function renderSpriteDialog(personaId, sprite, limits) {
+    const upload = escapeHtml(ui("sprite_upload_image"));
     return `<dialog class="wide" id="sprite-editor" aria-labelledby="sprite-editor-title">
+      <form class="stack" data-sprite-form novalidate data-persona-id="${personaId}"${sprite ? ` data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
       <header class="panel-header">
         <div class="heading"><h2 id="sprite-editor-title">${escapeHtml(ui(sprite ? "sprite_editor_title" : "sprite_add"))}</h2></div>
         <button class="button icon" type="button" data-sprite-cancel aria-label="${escapeHtml(ui("persona_cancel"))}">${navigationIcon("x")}</button>
       </header>
-      <form data-sprite-form novalidate data-persona-id="${personaId}"${sprite ? ` data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
         <div class="stack">
           <div class="split">
             <div class="stack">
@@ -4768,10 +4776,11 @@
               <label class="field">${fieldLabel(ui("sprite_instructions"), ui("sprite_instructions_hint"))}<textarea name="instructions" maxlength="${limits.instructions}" rows="4">${escapeHtml(sprite?.instructions || "")}</textarea></label>
               <label class="toggle"><span class="field-label"><strong>${escapeHtml(ui("sprite_identity"))}</strong><small>${escapeHtml(ui("sprite_identity_hint"))}</small></span><input type="checkbox" name="identity"${sprite?.identity ? " checked" : ""}></label>
             </div>
-            <div class="stack">
-              <div class="art-preview">${sprite?.imageUrl ? `<span class="sticker"><img src="${escapeHtml(sprite.imageUrl)}" alt="" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></span>` : `<span class="sticker dashed" aria-hidden="true">${navigationIcon("image")}</span>`}</div>
-              <label class="field">${fieldLabel(ui("sprite_file"), ui("sprite_file_hint"))}<input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif"></label>
-            </div>
+            <label class="art-preview media-upload" data-upload-zone>
+              <span data-sprite-preview>${renderSpritePreview(sprite?.imageUrl)}</span>
+              <span class="media-overlay">${upload}</span>
+              <input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif" aria-label="${upload}">
+            </label>
           </div>
           <p class="notice error" role="alert" data-sprite-error hidden></p>
         </div>
@@ -4794,7 +4803,9 @@
     if (trigger.hasAttribute("data-sprite-edit") && !sprite) return;
     root.insertAdjacentHTML("beforeend", renderSpriteDialog(state.personaId, sprite, root._spriteLimits));
     const dialog = root.querySelector("#sprite-editor");
-    dialog.querySelector("form")._spriteImageLimit = root._spriteLimits.imageBytes;
+    const form = dialog.querySelector("form");
+    form._spriteImageLimit = root._spriteLimits.imageBytes;
+    form._spriteImageUrl = sprite?.imageUrl;
     dialog.addEventListener(
       "close",
       () => {
@@ -4934,13 +4945,20 @@
       const rows = [...groups.values()]
         .map(
           (group) =>
-            `<button class="channel-group" type="button" data-channel-group aria-expanded="true" >${navigationIcon("chevron-down")}${escapeHtml(group.name)}<span class="n">${group.channels.filter((channel) => selected.has(String(channel.id))).length} / ${group.channels.length}</span></button>
-        <div>${group.channels.map((channel) => `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span><input type="checkbox" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}></label>`).join("")}</div>`,
+            `<button class="channel-group" type="button" data-channel-group aria-expanded="true">${navigationIcon("chevron-down")}${escapeHtml(group.name)}<span class="n">${escapeHtml(channelSelectionCount(group.channels.filter((channel) => selected.has(String(channel.id))).length, group.channels.length))}</span></button>
+        ${group.channels.map((channel) => `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span><input type="checkbox" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}></label>`).join("")}`,
         )
         .join("");
       const search = escapeHtml(ui("channel_search"));
       const controls = `<div class="actions"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
-      return `<div data-channel-selector>${name === "personaChannels" ? `<header class="card-head"><h3>${escapeHtml(ui("persona_channels"))}<small data-persona-channel-total></small></h3>${controls}</header>` : ""}<div class="stack"><label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label>${name === "personaChannels" ? "" : controls}<div class="channels">${preserved}${rows}<div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div></div></div>`;
+      const count = channelSelectionCount(
+        channels.filter((channel) => selected.has(String(channel.id))).length,
+        channels.length,
+      );
+      return `<div data-channel-selector>
+        <header class="card-head"><h3>${escapeHtml(ui(name === "personaChannels" ? "persona_channels" : "memory_channels"))}<small data-persona-channel-total>${escapeHtml(count)}</small></h3><label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label></header>
+        ${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div>${controls}
+      </div>`;
     }
     const rows =
       preserved +
@@ -5506,12 +5524,18 @@
     if (event.target.matches("[data-channel-filter]")) {
       const selector = event.target.closest("[data-channel-selector]");
       const query = event.target.value.trim().toLowerCase();
+      const groups = selector.querySelectorAll("[data-channel-group]");
+      if (groups.length) {
+        let matches = false;
+        for (const heading of groups) {
+          filterChannelGroup(heading, query, Boolean(query) || !heading.hasAttribute("data-channel-collapsed"));
+          matches ||= !heading.hidden;
+        }
+        selector.querySelector("[data-channel-empty]").hidden = matches;
+        return;
+      }
       selector.querySelectorAll("[data-channel-search]").forEach((row) => {
         row.hidden = !row.dataset.channelSearch.includes(query);
-      });
-      selector.querySelectorAll("[data-channel-group]").forEach((heading) => {
-        heading.hidden = !heading.nextElementSibling.querySelector("[data-channel-search]:not([hidden])");
-        heading.nextElementSibling.hidden = !query && heading.getAttribute("aria-expanded") === "false";
       });
       selector.querySelectorAll(".channel-category").forEach((heading) => {
         let row = heading.nextElementSibling;
@@ -5537,9 +5561,14 @@
     }
     const category = event.target.closest("[data-channel-group]");
     if (category) {
-      const expanded = category.getAttribute("aria-expanded") === "true";
-      category.setAttribute("aria-expanded", String(!expanded));
-      category.nextElementSibling.hidden = expanded;
+      const expanded = category.getAttribute("aria-expanded") !== "true";
+      const query = category
+        .closest("[data-channel-selector]")
+        .querySelector("[data-channel-filter]")
+        .value.trim()
+        .toLowerCase();
+      category.toggleAttribute("data-channel-collapsed", !expanded);
+      filterChannelGroup(category, query, expanded);
     }
     const button = event.target.closest("[data-channel-select]");
     if (button) {
@@ -5553,17 +5582,41 @@
     }
   });
 
+  function channelGroupRows(heading) {
+    const rows = [];
+    for (let row = heading.nextElementSibling; row?.hasAttribute("data-channel-search"); row = row.nextElementSibling) {
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function filterChannelGroup(heading, query, expanded) {
+    let hasMatch = false;
+    for (const row of channelGroupRows(heading)) {
+      const matches = row.dataset.channelSearch.includes(query);
+      hasMatch ||= matches;
+      row.hidden = !matches || !expanded;
+    }
+    heading.hidden = !hasMatch;
+    heading.setAttribute("aria-expanded", String(expanded));
+  }
+
+  function channelSelectionCount(selected, total) {
+    return ui("persona_channel_count").replace("{selected}", String(selected)).replace("{total}", String(total));
+  }
+
   function updateChannelCounts(selector) {
     const total = selector?.querySelector("[data-persona-channel-total]");
     if (total) {
       const inputs = [...selector.querySelectorAll("[data-channel-search] input")];
-      total.textContent = ui("persona_channel_count")
-        .replace("{selected}", String(inputs.filter((input) => input.checked).length))
-        .replace("{total}", String(inputs.length));
+      total.textContent = channelSelectionCount(inputs.filter((input) => input.checked).length, inputs.length);
     }
     selector?.querySelectorAll("[data-channel-group]").forEach((heading) => {
-      const inputs = [...heading.nextElementSibling.querySelectorAll("input")];
-      heading.querySelector(".n").textContent = `${inputs.filter((input) => input.checked).length} / ${inputs.length}`;
+      const rows = channelGroupRows(heading);
+      heading.querySelector(".n").textContent = channelSelectionCount(
+        rows.filter((row) => row.querySelector("input").checked).length,
+        rows.length,
+      );
     });
   }
 
@@ -7559,7 +7612,8 @@
 
   document.addEventListener("dragover", (event) => {
     const zone = event.target.closest?.("[data-upload-zone]");
-    if (!zone?.querySelector('input[type="file"]')) return;
+    const input = zone?.querySelector('input[type="file"]');
+    if (!input || input.disabled || !event.dataTransfer?.types.includes("Files")) return;
     event.preventDefault();
     zone.classList.add("is-dragging");
   });
@@ -7576,7 +7630,13 @@
     event.preventDefault();
     zone.classList.remove("is-dragging");
     const file = event.dataTransfer?.files[0];
-    if (!file || !["image/png", "image/jpeg", "image/gif"].includes(file.type)) return;
+    if (input.disabled || !file) return;
+    if (!["image/png", "image/jpeg", "image/gif"].includes(file.type) && !/\.(png|jpe?g|gif)$/i.test(file.name)) {
+      const error = input.form.querySelector("[data-sprite-error]");
+      error.textContent = ui("control_file_invalid");
+      error.hidden = false;
+      return;
+    }
     const transfer = new DataTransfer();
     transfer.items.add(file);
     input.files = transfer.files;
@@ -8472,15 +8532,19 @@
     }
     if (event.target.matches('[data-sprite-form] input[type="file"]')) {
       const { form, files } = event.target;
-      const preview = form.querySelector(".art-preview");
+      const preview = form.querySelector("[data-sprite-preview]");
       const file = files[0];
-      if (!file || file.size > form._spriteImageLimit) return;
+      form.querySelector("[data-sprite-error]").hidden = true;
+      if (!file || file.size > form._spriteImageLimit) {
+        preview.innerHTML = renderSpritePreview(form._spriteImageUrl);
+        return;
+      }
       const reader = new FileReader();
       reader.addEventListener(
         "load",
         () => {
           if (!preview.isConnected || reader.result === null || event.target.files[0] !== file) return;
-          preview.innerHTML = `<span class="sticker"><img src="${escapeHtml(reader.result)}" alt="" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></span>`;
+          preview.innerHTML = renderSpritePreview(reader.result);
         },
         { once: true },
       );

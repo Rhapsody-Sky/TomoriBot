@@ -1107,6 +1107,7 @@ export function createDashboardApp(client: Client) {
           "sprite_identity",
           "sprite_identity_hint",
           "sprite_file",
+          "sprite_upload_image",
           "sprite_file_hint",
           "sprite_add",
           "sprite_edit",
