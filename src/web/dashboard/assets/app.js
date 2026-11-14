@@ -509,7 +509,14 @@
       else input.value = value.value;
     });
     form.querySelectorAll("[data-naming-mode]").forEach((mode) => {
-      form.elements[mode.dataset.namingMode].disabled = mode.value !== "custom";
+      const input = form.elements[mode.dataset.namingMode];
+      input.disabled = mode.value !== "custom";
+      input.closest(".field").hidden = input.disabled;
+    });
+    form.querySelectorAll("[data-persona-chip-values]").forEach((input) => {
+      const editor = input.closest("[data-persona-chip-editor]");
+      editor.querySelector("[data-persona-chip-add]").value = "";
+      editor.querySelector(".chips").innerHTML = renderPersonaChips(JSON.parse(input.value), input.name);
     });
     const humanizerFields = form.querySelector("[data-persona-humanizer-fields]");
     if (humanizerFields) humanizerFields.hidden = form.elements.humanizerMode.value === "inherit";
@@ -2563,14 +2570,15 @@
         <header class="${collection ? "card-head" : "panel-header"}">
           ${
             collection
-              ? `<div><h3>${escapeHtml(title)}</h3><p class="hint">${escapeHtml(copy)}</p></div>
-              <label class="field"><span class="sr-only">${escapeHtml(ui("persona_memories_search"))}</span><input type="search" data-persona-memory-search placeholder="${escapeHtml(ui("persona_memories_search"))}"></label>`
+              ? `<h3>${escapeHtml(ui(personal ? "persona_personal_memory" : "persona_server_memory"))}<small data-persona-memory-list-count></small></h3>
+              <label class="field"><span class="field-label sr-only">${escapeHtml(ui("persona_memories_search"))}</span><input type="search" data-persona-memory-search placeholder="${escapeHtml(ui("persona_memories_search"))}"></label>`
               : `<div class="heading"><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>`
           }
           ${actions}
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
         </header>
       <div class="stack">
+      ${collection ? `<p class="hint">${escapeHtml(copy)}</p>` : ""}
       ${
         serverWritesDisabled || personalCreationDisabled
           ? `<div class="notice info"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><p>Existing entries remain visible according to your access.</p></div>`
@@ -2701,6 +2709,7 @@
 
   function updatePersonaMemorySummary(summary, data, kind) {
     const count = data.memories.length;
+    summary.closest(".split").querySelector("[data-persona-memory-list-count]").textContent = String(count);
     const limit =
       kind === "personal"
         ? data.limits.maxPersonalMemories
@@ -2749,7 +2758,7 @@
             ${collection ? "" : `<span class="badge">#${memory.id}</span>`}
             <p>${escapeHtml(memory.content)}</p>
             <div class="${collection ? "item-meta" : "row hint"}">
-              ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : ""}
+              ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span${collection ? ' class="chip"' : ""}>${escapeHtml(tag)}</span>`).join("") : ""}
               ${state.memoryKind === "server" && !state.overview.guild?.isDirectMessage ? `<span>${escapeHtml(memoryChannelSummary(memory, state.memoryData))}</span>` : ""}
               ${memory.updatedAt || memory.createdAt ? `<time>${escapeHtml(formatDate(memory.updatedAt || memory.createdAt))}</time>` : ""}
               ${state.memoryKind === "server" && state.overview.canManage && memory.taughtByUserId ? `<small>Teacher #${memory.taughtByUserId}</small>` : ""}
@@ -2962,6 +2971,29 @@
     if (!(await confirmAction(ui("discard_title"), ui("discard_detail"), ui("discard"))) || !editor.isConnected)
       return false;
     for (const form of changed) drafts.delete(form.dataset.draftKey);
+    return true;
+  }
+
+  async function confirmPersonaSectionChange(content) {
+    if (!content) return true;
+    if (state.personaPanel === "lorebook") return confirmLorebookEntryChange(content);
+    const entryForms = [...content.querySelectorAll("[data-persona-entry-form]")];
+    const composer = content.querySelector("#memory-compose-form:not([hidden])");
+    if (
+      !content.querySelector("form[data-changed]") &&
+      ![...content.querySelectorAll("[data-persona-chip-add]")].some((input) => input.value.trim()) &&
+      !entryForms.length &&
+      !composer?.elements.content.value.trim() &&
+      !composer?.elements.tags?.value.trim()
+    )
+      return true;
+    if (!(await confirmAction(ui("discard_title"), ui("discard_detail"), ui("discard"))) || !content.isConnected)
+      return false;
+    for (const form of content.querySelectorAll("form[data-draft-key]")) drafts.delete(form.dataset.draftKey);
+    for (const form of entryForms) {
+      const { personaId, entryKind, entryIndex } = form.closest("[data-entry-kind]").dataset;
+      personaEntryDrafts.delete(personaEntryKey(personaId, entryKind, entryIndex));
+    }
     return true;
   }
 
@@ -3465,15 +3497,17 @@
     const habits = state.overview.personaNamingHabits;
     if (!habits) return "";
     const values = habits.values[persona.personaId];
-    return `<div class="stack" data-persona-habits="${persona.personaId}">
-      <div class="toolbar"><label class="field">${fieldLabel(ui("persona_habits_style"), ui("persona_habits_neutral_hint"))}<select aria-label="${escapeHtml(ui("persona_habits_style"))}" data-persona-habit-style>${habits.styles.map(({ value, label }) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}</select></label></div>
+    return `<div data-persona-habits="${persona.personaId}">
       ${habits.styles
         .map(
           ({
             value: style,
           }) => `<form class="card" data-fx="track" data-persona-habit-form="${escapeHtml(style)}" data-settings-key="persona-habits/${persona.personaId}/${escapeHtml(style)}"${style === "neutral" ? "" : " hidden"}>
         ${personaCardHead(ui("persona_habits_title"), ui("persona_habits_hint"))}
-        <div class="grid">${namingHabitFields.map(([name, group, label, hint]) => `<label class="field">${fieldLabel(ui(label), hint ? ui(hint) : undefined)}<input name="${name}" maxlength="${habits.maxLength}" value="${escapeHtml(values?.[group]?.[style] ?? "")}"></label>`).join("")}</div>
+        <div class="stack">
+          <label class="field">${fieldLabel(ui("persona_habits_style"), ui("persona_habits_neutral_hint"))}<select data-persona-habit-style>${habits.styles.map(({ value, label }) => `<option value="${escapeHtml(value)}"${value === style ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
+          <div class="grid">${namingHabitFields.map(([name, group, label, hint]) => `<label class="field">${fieldLabel(ui(label), hint ? ui(hint) : undefined)}<input name="${name}" maxlength="${habits.maxLength}" value="${escapeHtml(values?.[group]?.[style] ?? "")}"></label>`).join("")}</div>
+        </div>
         ${cardSaveActions(ui("save"))}
       </form>`,
         )
@@ -3647,26 +3681,26 @@
       const unavailable = [...new Set([voice.selectedId, draftChoice])].filter(
         (id) => id && !voice.options.some((option) => option.id === id),
       );
-      body.innerHTML = `<form class="card" data-fx="track" data-persona-voice="${personaId}" data-voice-mode="${escapeHtml(voice.mode)}" data-settings-key="${escapeHtml(settingsKey)}">
-        ${personaCardHead(ui("persona_voice_title"), current, refreshButton("voice", ui("persona_voice_title")))}
-        <div class="stack"><div class="grid"><label class="field">${fieldLabel(ui("persona_voice_priority"), ui("persona_voice_priority_hint"))}
+      body.innerHTML = `<div class="split"><form class="card" data-fx="track" data-persona-voice="${personaId}" data-voice-mode="${escapeHtml(voice.mode)}" data-settings-key="${escapeHtml(settingsKey)}">
+        ${personaCardHead(ui("persona_voice_title"), ui("persona_voice_hint"))}
+        <div class="stack"><label class="field">${fieldLabel(ui("persona_voice_priority"), ui("persona_voice_priority_hint"))}
           <select name="priority">${["design", "clone"].map((kind) => `<option value="${kind}"${kind === voice.priority ? " selected" : ""}>${escapeHtml(title(kind))}</option>`).join("")}</select></label>
         <label class="field">${fieldLabel(ui(voice.mode === "elevenlabs" ? "persona_voice_provider" : "persona_voice_sample"))}
           <select name="assignment" data-searchable><option value="">${escapeHtml(ui("persona_voice_unassigned"))}</option>
           ${unavailable.map((id) => `<option value="${escapeHtml(id)}"${id === voice.selectedId ? " selected" : ""}>${escapeHtml(ui("persona_voice_unavailable"))}</option>`).join("")}
           ${voice.options.map(({ id, label }) => `<option value="${escapeHtml(id)}"${id === voice.selectedId ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>
-          ${voice.catalogUnavailable ? `<small class="hint">${escapeHtml(ui("persona_voice_catalog_unavailable"))}</small>` : ""}</label></div>
+          ${voice.catalogUnavailable ? `<small class="hint">${escapeHtml(ui("persona_voice_catalog_unavailable"))}</small>` : ""}</label>
         <label class="field">${fieldLabel(ui("persona_voice_design_prompt"), ui("persona_voice_design_hint"))}
           <textarea name="designPrompt" maxlength="${voice.maxLength}" rows="4">${escapeHtml(voice.designPrompt)}</textarea></label></div>
         ${cardSaveActions(ui("persona_save"))}
-      </form>`;
+      </form><aside class="card">${personaCardHead(ui("persona_voice_status"), "", refreshButton("voice", ui("persona_voice_refresh")))}<p class="hint">${escapeHtml(current)}</p></aside></div>`;
       host.querySelector("[data-voice-refresh]").onclick = () => loadPersonaVoice(host, personaId);
       initDraftForms(host);
       enhanceDashboard(host);
       focusSearchDestination();
     } catch (error) {
       if (host.isConnected) {
-        body.innerHTML = `<section class="card">${personaCardHead(ui("persona_voice_title"), "", refreshButton("voice", ui("persona_voice_title")))}<p class="notice error" role="alert">${escapeHtml(error.message)}</p></section>`;
+        body.innerHTML = `<section class="card">${personaCardHead(ui("persona_voice_title"), "", refreshButton("voice", ui("persona_voice_refresh")))}<p class="notice error" role="alert">${escapeHtml(error.message)}</p></section>`;
         host.querySelector("[data-voice-refresh]").onclick = () => loadPersonaVoice(host, personaId);
       }
     } finally {
@@ -3746,60 +3780,98 @@
     }
   }
 
+  function renderPersonaChips(values, field) {
+    return values
+      .map(
+        (value, index) =>
+          `<span class="chip${field === "triggerWords" ? " tone" : ""}">${escapeHtml(value)}<button class="chip-x" type="button" data-persona-chip-remove="${index}" aria-label="${escapeHtml(ui("persona_chip_remove").replace("{value}", () => value))}">×</button></span>`,
+      )
+      .join("");
+  }
+
+  function renderPersonaChipEditor(field, values, label) {
+    const text = escapeHtml(ui(label));
+    return `<div class="stack" data-persona-chip-editor>
+      <input type="hidden" name="${field}" value="${escapeHtml(JSON.stringify(values))}" data-persona-chip-values>
+      <div class="chips">${renderPersonaChips(values, field)}</div>
+      <label class="field"><span class="field-label sr-only">${text}</span><input type="text" placeholder="${text}" enterkeyhint="done" data-persona-chip-add></label>
+    </div>`;
+  }
+
+  function editPersonaChips(control) {
+    const editor = control.closest("[data-persona-chip-editor]");
+    const values = editor.querySelector("[data-persona-chip-values]");
+    const input = editor.querySelector("[data-persona-chip-add]");
+    const chips = JSON.parse(values.value);
+    const removed = control.dataset.personaChipRemove;
+    if (removed !== undefined) chips.splice(Number(removed), 1);
+    const next = removed === undefined ? [...new Set([...chips, ...parseTags(input.value)])].slice(0, 80) : chips;
+    values.value = JSON.stringify(next);
+    values.dispatchEvent(new Event("input", { bubbles: true }));
+    const list = editor.querySelector(".chips");
+    window.TomoriFX.swap(list, renderPersonaChips(next, values.name));
+    if (removed === undefined) {
+      input.value = "";
+      input.focus({ preventScroll: true });
+    } else {
+      const nextButton =
+        list.querySelector(`[data-persona-chip-remove="${removed}"]`) || list.lastElementChild?.querySelector("button");
+      (nextButton || input).focus({ preventScroll: true });
+    }
+  }
+
   function renderPersonaSettings(persona) {
     const saveActions = cardSaveActions(ui("persona_save"));
     const attributes = persona.attributes || [];
     const dialogues = persona.sampleDialogues || [];
-    return `<div class="stack">
-        ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}">${loadingBar(ui("persona_model_loading"))}</div>` : ""}
-        ${renderPersonaHumanizer(persona)}
+    return `<div class="split"><div class="col">
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="identity">
-          ${personaCardHead("Display identity", "The name used by this persona in conversation.")}
-          <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
+          ${personaCardHead(ui("persona_identity_title"), ui("persona_identity_hint"))}
+          <label class="field">${fieldLabel(ui("persona_nickname"), ui("persona_nickname_hint"))}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
           ${saveActions}
         </form>
-
-        ${renderPersonaNamingHabits(persona)}
 
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
-          ${personaCardHead("Triggers", "Names and phrases that can activate this persona in conversation.")}
-          <label class="field">${fieldLabel("Trigger words", "Comma-separated names or phrases that can activate this persona.")}<input name="triggerWords" value="${escapeHtml((persona.triggerWords || []).join(", "))}"></label>
+          ${personaCardHead(ui("persona_triggers_title"), ui("persona_triggers_hint"))}
+          ${renderPersonaChipEditor("triggerWords", persona.triggerWords || [], "persona_triggers_add")}
           ${saveActions}
         </form>
 
         <section class="card" data-persona-id="${persona.personaId}">
-          <header class="card-head"><div><h3>Attributes</h3></div><button class="button" type="button" data-entry-add="attribute">${escapeHtml(ui("persona_add_attribute"))}</button></header>
-          <div class="rows" data-persona-entries>${attributes.map((attribute, index) => renderPersonaEntry(persona, "attribute", index, attribute)).join("")}${personaEntryDrafts.has(personaEntryKey(persona.personaId, "attribute", "new")) ? renderPersonaEntry(persona, "attribute", "new", { text: "", isPublic: false }) : ""}</div>
-        </section>
-
-        <section class="card" data-persona-id="${persona.personaId}">
-          <header class="card-head"><div><h3>Sample dialogues</h3><p>Example exchanges teach the model how this persona tends to respond.</p></div><button class="button" type="button" data-entry-add="dialogue">${escapeHtml(ui("persona_add_dialogue"))}</button></header>
-          <div class="rows" data-persona-entries>${dialogues.map((dialogue, index) => renderPersonaEntry(persona, "dialogue", index, dialogue)).join("")}${personaEntryDrafts.has(personaEntryKey(persona.personaId, "dialogue", "new")) ? renderPersonaEntry(persona, "dialogue", "new", { input: "", output: "" }) : ""}</div>
+          <header class="card-head"><h3>${escapeHtml(ui("persona_attributes_title"))}<small>${attributes.length}</small></h3><button class="button small" type="button" data-entry-add="attribute">${navigationIcon("plus")}${escapeHtml(ui("persona_add_attribute"))}</button></header>
+          <div data-persona-entries>${personaEntryDrafts.has(personaEntryKey(persona.personaId, "attribute", "new")) ? renderPersonaEntry(persona, "attribute", "new", { text: "", isPublic: false }) : ""}${attributes.length ? `<div class="rows">${attributes.map((attribute, index) => renderPersonaEntry(persona, "attribute", index, attribute)).join("")}</div>` : `<div class="empty-note"><strong>${escapeHtml(ui("persona_attributes_empty"))}</strong></div>`}</div>
         </section>
 
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="context">
-          ${personaCardHead("Pinned context note", "Persistent context inserted at the configured depth.")}
+          ${personaCardHead(ui("persona_context_title"), ui("persona_context_hint"))}
           <div class="stack">
-            <label class="field">${fieldLabel("Context note", "Persona-specific context inserted into the assembled conversation.")}<textarea name="contextNote" rows="5">${escapeHtml(persona.contextNote || "")}</textarea></label>
-            <label class="field">${fieldLabel("Depth", "How far back in the prompt the note is inserted.")}<input name="contextNoteDepth" type="number" min="0" max="100" value="${persona.contextNoteDepth || 0}"></label>
+            <label class="field">${fieldLabel(ui("persona_context_field"))}<textarea name="contextNote" rows="3">${escapeHtml(persona.contextNote || "")}</textarea></label>
+            <label class="field">${fieldLabel(ui("persona_context_depth"), ui("persona_context_depth_hint"))}<input name="contextNoteDepth" type="number" min="0" max="100" value="${persona.contextNoteDepth || 0}"></label>
           </div>
           ${saveActions}
         </form>
-
+        ${renderPersonaNamingHabits(persona)}
+        ${renderPersonaHumanizer(persona)}
+        ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}">${loadingBar(ui("persona_model_loading"))}</div>` : ""}
         ${renderPersonaAttg(persona.personaId)}
         ${state.overview.personaGuildSettings ? personaSettingsPanel("persona_preset_title", "persona_preset_hint", "data-persona-preset-panel") : ""}
+      </div><div class="col">
+        <section class="card" data-persona-id="${persona.personaId}">
+          <header class="card-head"><h3>${escapeHtml(ui("persona_dialogues_title"))}<small>${dialogues.length}</small></h3><button class="button small" type="button" data-entry-add="dialogue">${navigationIcon("plus")}${escapeHtml(ui("persona_add_dialogue"))}</button></header>
+          <div data-persona-entries>${personaEntryDrafts.has(personaEntryKey(persona.personaId, "dialogue", "new")) ? renderPersonaEntry(persona, "dialogue", "new", { input: "", output: "" }) : ""}${dialogues.length ? `<div class="rows">${dialogues.map((dialogue, index) => renderPersonaEntry(persona, "dialogue", index, dialogue)).join("")}</div>` : `<div class="empty-note"><strong>${escapeHtml(ui("persona_dialogues_empty"))}</strong></div>`}</div>
+        </section>
         ${
           persona.isAlter
             ? `<section class="card" data-persona-id="${persona.personaId}">
-                <header class="card-head"><div><h3>Delete alter persona</h3><p class="hint">This removes the server's persona configuration. Memories remain governed by their own ownership and retention rules.</p></div><div class="actions"><button class="button danger hold-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div></header>
+                ${personaCardHead(ui("persona_delete_alter"), ui("persona_delete_alter_hint"), `<div class="actions"><button class="button danger hold-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div>`)}
               </section>`
             : ""
         }
-    </div>`;
+      </div></div>`;
   }
 
   function renderPersonaEntry(persona, kind, index, saved) {
-    return `<article class="item" data-entry-kind="${kind}" data-entry-index="${index}" data-persona-id="${persona.personaId}">${renderPersonaEntryContent(persona, kind, index, saved)}</article>`;
+    return `<article class="${index === "new" ? "compose" : "item"}" data-entry-kind="${kind}" data-entry-index="${index}" data-persona-id="${persona.personaId}">${renderPersonaEntryContent(persona, kind, index, saved)}</article>`;
   }
 
   function renderPersonaEntryContent(persona, kind, index, saved) {
@@ -3812,8 +3884,8 @@
       : `<label class="field"><span class="field-label">${escapeHtml(ui("persona_dialogue_user"))}</span><textarea name="input" rows="3" required>${escapeHtml(value.input)}</textarea></label><label class="field"><span class="field-label">${escapeHtml(persona.nickname)}</span><textarea name="output" rows="3" required>${escapeHtml(value.output)}</textarea></label>`;
     const read = attributes
       ? `<div><p>${escapeHtml(saved.text)}</p>${saved.isPublic ? `<div class="item-meta"><span class="chip">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span></div>` : ""}</div>`
-      : `<dl class="stack"><div><dt class="hint">${escapeHtml(ui("persona_dialogue_user"))}</dt><dd data-read-field="user">${escapeHtml(saved.input)}</dd></div><div><dt class="hint">${escapeHtml(persona.nickname)}</dt><dd data-read-field="persona">${escapeHtml(saved.output)}</dd></div></dl>`;
-    return `${draft ? `<form class="stack" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}">${fields}<div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `${read}<div class="item-actions"><button class="button small icon" type="button" data-entry-edit aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div>`}`;
+      : `<div class="talk"><div class="bubble-row me"><p class="speech" dir="auto">${escapeHtml(saved.input)}</p></div><div class="bubble-row">${personaSticker(persona, "flat")}<p class="speech" dir="auto">${escapeHtml(saved.output)}</p></div></div>`;
+    return `${draft ? `<form class="stack" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}"><div class="${attributes ? "stack" : "edit-pair"}">${fields}</div><div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit" data-fx="spark">${escapeHtml(ui("persona_save"))}</button></div></form>` : `${read}<div class="item-actions"><button class="button small icon" type="button" data-entry-edit aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div>`}`;
   }
 
   function personaTint(persona) {
@@ -3915,48 +3987,42 @@
 
   function renderPersonaAppearance(persona) {
     const saveActions = cardSaveActions(ui("persona_save"));
-
-    const avatarActions = state.overview.guild.isDirectMessage
-      ? ""
-      : `<div class="actions">
-          ${personaAvatarUrl(persona) ? `<button class="button small danger" type="button" data-persona-avatar-remove="${persona.personaId}" aria-haspopup="dialog">${escapeHtml(ui("persona_avatar_remove"))}</button>` : ""}
-          <button class="button small" type="button" data-persona-avatar-choose="${persona.personaId}">${navigationIcon("image")}${escapeHtml(ui("persona_avatar_change"))}</button>
-        </div>`;
-
+    const tags = persona.physicalAppearanceTags || [];
     return `<div class="split">
+      <section class="card" data-persona-id="${persona.personaId}" data-persona-reference="${persona.personaId}">${renderPersonaReference(persona)}</section>
       <div class="col">
-        <section class="card" data-persona-id="${persona.personaId}">
-          ${personaCardHead(ui("persona_avatar_title"), "", avatarActions)}
-          <div class="art-preview" role="img" aria-label="${escapeHtml(persona.nickname)}">${personaSticker(persona)}</div>
-          <input id="persona-avatar-file-${persona.personaId}" data-persona-avatar-file="${persona.personaId}" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" hidden>
-        </section>
-        ${state.overview.personaGuildSettings?.values[persona.personaId] ? `<section class="card" data-persona-reference="${persona.personaId}">${renderPersonaReference(persona.personaId)}</section>` : ""}
-      </div>
-      <div class="col">
-        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
-          ${personaCardHead("Visual character prompt", "A visual description Tomori can also use when generating images. This is not the persona's main conversation prompt.")}
-          <label class="field">${fieldLabel("Visual description", "Describe the character's stable visual identity, clothing, features, and other image-generation details.")}<textarea name="personaPrompt" rows="10">${escapeHtml(persona.personaPrompt || "")}</textarea></label>
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="appearance">
+          ${personaCardHead(ui("persona_appearance_tags"), ui("persona_appearance_tags_hint"))}
+          ${renderPersonaChipEditor("physicalAppearanceTags", tags, "persona_appearance_add")}
           ${saveActions}
         </form>
-        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="appearance">
-          ${personaCardHead("Appearance tags", "Reusable visual traits added when this persona appears in generated images.")}
-          <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated visual traits reused when generating this persona.")}<input name="physicalAppearanceTags" value="${escapeHtml((persona.physicalAppearanceTags || []).join(", "))}"></label>
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
+          ${personaCardHead(ui("persona_visual_prompt"), ui("persona_visual_prompt_hint"))}
+          <label class="field"><span class="field-label sr-only">${escapeHtml(ui("persona_visual_description"))}</span><textarea name="personaPrompt" rows="5">${escapeHtml(persona.personaPrompt || "")}</textarea></label>
           ${saveActions}
         </form>
       </div>
     </div>`;
   }
 
-  function renderPersonaReference(personaId) {
-    const saved = state.overview.personaGuildSettings.values[personaId].hasCharacterReference;
+  function renderPersonaReference(persona) {
+    const { personaId } = persona;
+    const canChangeAvatar = !state.overview.guild.isDirectMessage;
+    const reference = state.overview.personaGuildSettings?.values[personaId];
+    const saved = reference?.hasCharacterReference;
     const url = `${BASE}/guilds/${state.guildId}/personas/${personaId}/character-reference?v=${state.avatarRevision}`;
+    const removals = `${canChangeAvatar && personaAvatarUrl(persona) ? `<button class="button danger" type="button" data-persona-avatar-remove="${personaId}" aria-haspopup="dialog">${escapeHtml(ui("persona_avatar_remove"))}</button>` : ""}${saved ? `<button class="button danger" type="button" data-persona-reference-remove aria-haspopup="dialog">${escapeHtml(ui("character_reference_remove"))}</button>` : ""}`;
+    const actionsLabel = escapeHtml(ui("persona_actions"));
     const actions = `<div class="actions">
-      ${saved ? `<button class="button small danger" type="button" data-persona-reference-remove aria-haspopup="dialog">${escapeHtml(ui("character_reference_remove"))}</button>` : ""}
-      <button class="button small" type="button" data-persona-reference-upload>${navigationIcon("image")}${escapeHtml(ui("character_reference_upload"))}</button>
+      ${removals ? `<button class="button icon" type="button" popovertarget="persona-art-actions" aria-label="${actionsLabel}">${navigationIcon("ellipsis")}</button><div class="action-menu" id="persona-art-actions" popover aria-label="${actionsLabel}">${removals}</div>` : ""}
+      ${canChangeAvatar ? `<button class="button small" type="button" data-persona-avatar-choose="${personaId}">${navigationIcon("image")}${escapeHtml(ui("persona_avatar_change"))}</button>` : ""}
+      ${reference ? `<button class="button small" type="button" data-persona-reference-upload>${navigationIcon("image")}${escapeHtml(ui("character_reference_upload"))}</button>` : ""}
     </div>`;
-    return `${personaCardHead(ui("persona_reference_title"), ui("persona_reference_hint"), actions)}
-      ${saved ? `<div class="art-preview"><img src="${escapeHtml(url)}" alt="${escapeHtml(ui("persona_reference_title"))}"></div>` : ""}
-      <input type="file" data-persona-reference-file accept="image/*" hidden>`;
+    return `${personaCardHead(ui(reference ? "persona_avatar_and_reference" : "persona_avatar_title"), "", actions)}
+      <div class="stack">${reference ? `<p class="hint">${escapeHtml(ui("persona_reference_hint"))}</p>` : ""}
+      <div class="art-preview">${saved ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(ui("persona_reference_title"))}">` : `<div role="img" aria-label="${escapeHtml(persona.nickname)}">${personaSticker(persona)}</div>`}</div></div>
+      <input id="persona-avatar-file-${personaId}" data-persona-avatar-file="${personaId}" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" hidden>
+      ${reference ? '<input type="file" data-persona-reference-file accept="image/*" hidden>' : ""}`;
   }
 
   async function savePersonaReference(host, file) {
@@ -3975,7 +4041,8 @@
       settings.hasCharacterReference = result.hasCharacterReference;
       if (host.isConnected) {
         state.avatarRevision += 1;
-        host.innerHTML = renderPersonaReference(personaId);
+        const persona = state.overview.personas.find((item) => item.personaId === personaId);
+        window.TomoriFX.swap(host, renderPersonaReference(persona));
         host.querySelector("[data-persona-reference-upload]").focus({ preventScroll: true });
       }
       toast(ui(file ? "persona_reference_saved" : "persona_reference_removed"));
@@ -3987,24 +4054,23 @@
   function renderPersonaNaming(persona) {
     const { values, copy, maxLength } = state.overview.personaNaming;
     const preference = values[persona.personaId] || {};
-    return `<form class="card" data-fx="track" data-persona-naming="${persona.personaId}">
-      <header class="card-head"><div><h3>${escapeHtml(copy.title)}</h3><p>${escapeHtml(copy.description)}</p></div></header>
-      <p class="hint">${escapeHtml(copy.hint)}</p>
-      <div class="grid">${["nickname", "prefix", "suffix"]
+    return `<div class="split"><form class="card" data-fx="track" data-persona-naming="${persona.personaId}">
+      ${personaCardHead(copy.title)}
+      <div class="stack">${["nickname", "prefix", "suffix"]
         .map((key) => {
           const value = preference[key];
           const mode = value == null ? "inherit" : value === "" && key !== "nickname" ? "none" : "custom";
-          return `<fieldset class="stack"><legend>${escapeHtml(copy[key])}</legend>
+          return `<fieldset class="grid"><legend>${escapeHtml(copy[key])}</legend>
           <label class="field"><span class="sr-only">${escapeHtml(copy[key])}</span><select name="${key}Mode" data-naming-mode="${key}">
             ${["inherit", "custom", ...(key === "nickname" ? [] : ["none"])].map((option) => `<option value="${option}"${mode === option ? " selected" : ""}>${escapeHtml(copy[option])}</option>`).join("")}
           </select></label>
-          <label class="field"><span class="field-label">${escapeHtml(copy.value)}</span><input name="${key}" maxlength="${maxLength}" value="${escapeHtml(value ?? "")}" required${mode === "custom" ? "" : " disabled"}></label>
+          <label class="field"${mode === "custom" ? "" : " hidden"}><span class="field-label">${escapeHtml(copy.value)}</span><input name="${key}" maxlength="${maxLength}" value="${escapeHtml(value ?? "")}" required${mode === "custom" ? "" : " disabled"}></label>
         </fieldset>`;
         })
         .join("")}</div>
       <div class="actions"><button class="button small" type="button" data-persona-naming-reset>${escapeHtml(copy.reset)}</button></div>
       ${cardSaveActions(copy.save)}
-    </form>`;
+    </form><aside class="card">${personaCardHead(ui("persona_naming_defaults"))}<div class="stack"><p class="hint">${escapeHtml(copy.description)}</p><p class="hint">${escapeHtml(copy.hint)}</p></div></aside></div>`;
   }
 
   async function saveNamingOrCategories(namingForm, categoriesForm, reset) {
@@ -4048,9 +4114,11 @@
         if (state.overview === overview && form.isConnected) {
           const workspace = form.closest("[data-dashboard-view]");
           const scrollTop = workspace.scrollTop;
-          form.outerHTML = namingForm
-            ? renderPersonaNaming(overview.personas.find((persona) => persona.personaId === personaId))
-            : renderStmCategories();
+          if (namingForm) {
+            form.closest(".split").outerHTML = renderPersonaNaming(
+              overview.personas.find((persona) => persona.personaId === personaId),
+            );
+          } else form.outerHTML = renderStmCategories();
           initDraftForms(workspace);
           enhanceDashboard(workspace);
           resizeAutoGrowTextareas(document);
@@ -4058,7 +4126,7 @@
           workspace
             .querySelector(
               namingForm
-                ? "[data-persona-naming] button[type=submit]:not([value=reset])"
+                ? "[data-persona-naming] [data-persona-naming-reset]"
                 : "#stm-categories-form button[type=submit]:not([value=reset])",
             )
             ?.focus({ preventScroll: true });
@@ -4093,9 +4161,10 @@
       <header class="collection-head">
         <div class="collection-title"><h2 id="persona-picker-title">${escapeHtml(ui("persona_choose"))} <small>${personas.length}</small></h2>
           <div class="row">${actions}<button class="button icon" type="button" data-persona-picker-close aria-label="${escapeHtml(ui("persona_cancel"))}">${navigationIcon("x")}</button></div></div>
-        <div class="collection-tools"><label class="field"><span class="sr-only">${escapeHtml(ui("persona_search"))}</span><input type="search" data-persona-picker-search placeholder="${escapeHtml(ui("persona_search"))}"></label></div>
+        <div class="collection-tools"><label class="field"><span class="field-label sr-only">${escapeHtml(ui("persona_search"))}</span><input type="search" data-persona-picker-search placeholder="${escapeHtml(ui("persona_search"))}"></label>
+          <label class="field"><span class="field-label sr-only">${escapeHtml(ui("persona_picker_sort"))}</span><select data-persona-picker-sort><option value="default">${escapeHtml(ui("persona_picker_sort_default"))}</option><option value="name">${escapeHtml(ui("persona_picker_sort_name"))}</option></select></label></div>
       </header>
-      <div class="collection-body"><div class="deck">${renderPersonaPickerTiles(personas, selectedId)}</div></div>
+      <div class="collection-body"><div class="deck">${renderPersonaPickerTiles(personas, selectedId)}</div><div class="empty-note" data-persona-picker-empty hidden><strong>${escapeHtml(ui("persona_picker_no_results"))}</strong></div></div>
     </dialog>`;
   }
 
@@ -4106,6 +4175,26 @@
           `<button class="deck-card" type="button" data-persona-search="${escapeHtml([entry.nickname, ...(entry.triggerWords || [])].join(" ").toLowerCase())}" data-persona-select="${entry.personaId}" aria-current="${entry.personaId === selectedId}">${personaSticker(entry)}<strong>${escapeHtml(entry.nickname)}</strong><small>${escapeHtml(ui(entry.isAlter ? "persona_alter_label" : "persona_main_label"))} / #${entry.lineageId}</small></button>`,
       )
       .join("");
+  }
+
+  function filterPersonaPicker(dialog) {
+    const query = dialog.querySelector("[data-persona-picker-search]").value.trim().toLowerCase();
+    const cards = [...dialog.querySelectorAll("[data-persona-search]")];
+    for (const card of cards) card.hidden = !card.dataset.personaSearch.includes(query);
+    dialog.querySelector("[data-persona-picker-empty]").hidden = cards.some((card) => !card.hidden);
+  }
+
+  function sortPersonaPicker(dialog) {
+    const personas = state.overview.personas.filter((persona) => persona.lineageId !== 0);
+    if (dialog.querySelector("[data-persona-picker-sort]").value === "name") {
+      personas.sort(
+        (left, right) => Number(left.isAlter) - Number(right.isAlter) || left.nickname.localeCompare(right.nickname),
+      );
+    }
+    const deck = dialog.querySelector(".deck");
+    deck.innerHTML = renderPersonaPickerTiles(personas, state.personaId);
+    filterPersonaPicker(dialog);
+    if (dialog.open) window.TomoriFX.stagger(deck);
   }
 
   const personaArt = new Map([
@@ -4269,7 +4358,7 @@
     );
     const picker = workspace.querySelector("#persona-picker-dialog");
     if (picker.dataset.revision !== revision && !picker.open) {
-      picker.querySelector(".deck").innerHTML = renderPersonaPickerTiles(personas, persona.personaId);
+      sortPersonaPicker(picker);
       picker.querySelector(".collection-title small").textContent = String(personas.length);
       picker.dataset.revision = revision;
     }
@@ -4323,6 +4412,7 @@
       else button.removeAttribute("aria-controls");
     });
     toolbar.hidden = !knowledgeActive;
+    toolbar.querySelector(".segmented").hidden = !knowledgeActive;
     const stageActions = stage.querySelector("[data-persona-stage-actions]");
     stageActions.hidden = true;
     stageActions.replaceChildren();
@@ -4360,7 +4450,7 @@
         break;
       case "conditioning":
         body = `<section class="card" data-persona-conditioning>
-          ${personaCardHead(ui("persona_conditioning_title"), ui("persona_conditioning_hint"), refreshButton("conditioning", ui("persona_conditioning_title")))}
+          ${personaCardHead(ui("persona_conditioning_title"), ui("persona_conditioning_hint"), refreshButton("conditioning", ui("persona_conditioning_refresh")))}
           <div data-conditioning-entries></div>
         </section>`;
         break;
@@ -4443,9 +4533,8 @@
     try {
       const data = await api(`/guilds/${state.guildId}/channel-settings`);
       if (!host.isConnected) return;
-      host.innerHTML = `<form class="card" data-fx="track">${personaCardHead(ui("persona_channels"), ui("persona_channels_hint"))}${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p role="alert" hidden></p>${cardSaveActions(ui("channel_apply"))}</form>`;
+      host.innerHTML = `<div class="split"><form class="card" data-fx="track">${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p class="notice error" role="alert" hidden></p>${cardSaveActions(ui("channel_apply"))}</form><aside class="card">${personaCardHead(ui("persona_channel_behavior"))}<p class="hint">${escapeHtml(ui("persona_channels_hint"))}</p></aside></div>`;
       const form = host.querySelector("form");
-      form.querySelector('[role="alert"]').className = "notice error";
       const selected = () => [...form.querySelectorAll('[name="personaChannels"]:checked')].map((input) => input.value);
       const validate = () => {
         const empty = !selected().length;
@@ -4471,6 +4560,7 @@
         validate();
       });
       validate();
+      updateChannelCounts(form.querySelector("[data-channel-selector]"));
       enhanceDashboard(host);
     } catch (error) {
       host.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
@@ -4780,8 +4870,11 @@
         panel.className = "card";
         root.replaceChildren(panel);
       }
-      const actions = `<button class="button small" type="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button class="button small" type="button" data-sprite-export${data.sprites.length ? "" : " disabled"}>${escapeHtml(ui("sprite_export"))}</button>`;
-      panel.innerHTML = `<header class="card-head"><div><h3>${escapeHtml(ui("sprites"))}<small>${data.sprites.length} / ${data.limits.count}</small></h3></div><div class="actions">${actions}</div></header>
+      const actions = root.closest(".stage").querySelector("[data-persona-stage-actions]");
+      actions.innerHTML = `<button class="button small" type="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button class="button small" type="button" data-sprite-export${data.sprites.length ? "" : " disabled"}>${escapeHtml(ui("sprite_export"))}</button><button class="button primary" type="button" data-fx="spark" data-sprite-new aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("sprite_add"))}</button>`;
+      actions.hidden = false;
+      actions.parentElement.hidden = false;
+      panel.innerHTML = `<header class="card-head"><h3>${escapeHtml(ui("sprites"))}<small>${data.sprites.length} / ${data.limits.count}</small></h3></header>
         <input type="file" accept=".zip,application/zip" data-sprite-archive hidden>
         <div class="stack">
           ${data.inherited ? `<p class="notice info">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
@@ -4793,6 +4886,7 @@
       root._sprites = data.sprites;
       root._spriteLimits = data.limits;
       enhanceDashboard(root);
+      enhanceDashboard(actions);
       window.TomoriFX.stagger(root.querySelector(".sticker-grid"));
     } catch (error) {
       if (!current()) return;
@@ -4844,7 +4938,9 @@
         <div>${group.channels.map((channel) => `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span><input type="checkbox" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}></label>`).join("")}</div>`,
         )
         .join("");
-      return `<div class="stack" data-channel-selector><label class="field">${fieldLabel(ui("channel_search"))}<input type="search" data-channel-filter></label><div class="actions"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div><div class="channels">${preserved}${rows}<p data-channel-empty class="hint"${rows ? " hidden" : ""}>${escapeHtml(ui("channel_empty"))}</p></div></div>`;
+      const search = escapeHtml(ui("channel_search"));
+      const controls = `<div class="actions"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
+      return `<div data-channel-selector>${name === "personaChannels" ? `<header class="card-head"><h3>${escapeHtml(ui("persona_channels"))}<small data-persona-channel-total></small></h3>${controls}</header>` : ""}<div class="stack"><label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label>${name === "personaChannels" ? "" : controls}<div class="channels">${preserved}${rows}<div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div></div></div>`;
     }
     const rows =
       preserved +
@@ -5449,6 +5545,7 @@
     if (button) {
       const selector = button.closest("[data-channel-selector]");
       selector.querySelectorAll("[data-channel-search]:not([hidden]) input").forEach((input) => {
+        if (state.view === "personas" && input.closest("[hidden]")) return;
         input.checked = button.dataset.channelSelect === "all";
       });
       selector.dispatchEvent(new Event("change", { bubbles: true }));
@@ -5457,6 +5554,13 @@
   });
 
   function updateChannelCounts(selector) {
+    const total = selector?.querySelector("[data-persona-channel-total]");
+    if (total) {
+      const inputs = [...selector.querySelectorAll("[data-channel-search] input")];
+      total.textContent = ui("persona_channel_count")
+        .replace("{selected}", String(inputs.filter((input) => input.checked).length))
+        .replace("{total}", String(inputs.length));
+    }
     selector?.querySelectorAll("[data-channel-group]").forEach((heading) => {
       const inputs = [...heading.nextElementSibling.querySelectorAll("input")];
       heading.querySelector(".n").textContent = `${inputs.filter((input) => input.checked).length} / ${inputs.length}`;
@@ -7441,6 +7545,12 @@
       return;
     }
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    const chipInput = event.target.closest?.("[data-persona-chip-add]");
+    if (chipInput) {
+      event.preventDefault();
+      editPersonaChips(chipInput);
+      return;
+    }
     const input = event.target instanceof Element ? event.target.closest("#persona-test-input") : null;
     if (!input || input.disabled || state.personaTestChatBusy) return;
     event.preventDefault();
@@ -7488,12 +7598,7 @@
       if (state.memoryData) renderMemoryList();
       return;
     }
-    if (event.target.matches("[data-persona-picker-search]")) {
-      const query = event.target.value.trim().toLowerCase();
-      document.querySelectorAll("[data-persona-search]").forEach((choice) => {
-        choice.hidden = !choice.dataset.personaSearch.includes(query);
-      });
-    }
+    if (event.target.matches("[data-persona-picker-search]")) filterPersonaPicker(event.target.closest("dialog"));
     const entryForm = event.target.closest("[data-persona-entry-form]");
     if (entryForm) {
       const entry = entryForm.closest("[data-entry-kind]");
@@ -7555,11 +7660,17 @@
       searchResult.closest("dialog").close();
       const unsaved = [...document.querySelectorAll(localEditForms)].some(
         (form) =>
+          !form.closest("[data-persona-content]") &&
           formBaselines.has(form) &&
           (form.dataset.editFile !== undefined ||
             JSON.stringify(formSnapshot(form)) !== JSON.stringify(formBaselines.get(form))),
       );
       if (unsaved && !(await confirmAction(ui("discard_title"), ui("leave_detail")))) return;
+      if (
+        state.view === "personas" &&
+        !(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))
+      )
+        return;
       pendingSearchDestination = entry;
       setTimeout(() => {
         if (pendingSearchDestination === entry) pendingSearchDestination = null;
@@ -7855,6 +7966,11 @@
       await saveNamingOrCategories(namingReset.form, null, true);
       return;
     }
+    const removeChip = event.target.closest("[data-persona-chip-remove]");
+    if (removeChip) {
+      editPersonaChips(removeChip);
+      return;
+    }
     const discard = event.target.closest("[data-discard-draft]");
     if (discard) {
       const form = discard.form;
@@ -7889,6 +8005,11 @@
     if (guildSelect) {
       serverPicker?.close();
       if (guildSelect.dataset.guildSelect !== state.guildId) {
+        if (
+          state.view === "personas" &&
+          !(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))
+        )
+          return;
         await selectGuild(guildSelect.dataset.guildSelect);
       }
       return;
@@ -8115,6 +8236,7 @@
       );
       if (editor) {
         initLocalEditForm(editor);
+        enhanceDashboard(editor);
         editor.querySelector("textarea")?.focus();
       }
       return;
@@ -8125,8 +8247,7 @@
       if (
         state.personaId !== nextPersona &&
         state.view === "personas" &&
-        state.personaPanel === "lorebook" &&
-        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
+        !(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))
       )
         return;
       state.view = "personas";
@@ -8144,11 +8265,7 @@
       const tab = personaPanel.dataset.personaPanel;
       const panel = tab === "knowledge" ? state.personaKnowledgePanel : tab;
       if (panel === state.personaPanel) return;
-      if (
-        state.personaPanel === "lorebook" &&
-        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
-      )
-        return;
+      if (!(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))) return;
       state.personaPanel = panel;
       state.memoryData = null;
       renderView();
@@ -8176,8 +8293,7 @@
       }
       if (
         state.view === "personas" &&
-        state.personaPanel === "lorebook" &&
-        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
+        !(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))
       )
         return;
       state.view = nav.dataset.nav;
@@ -8250,15 +8366,18 @@
   document.addEventListener("holdcomplete", handleDashboardAction);
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-persona-picker-sort]")) sortPersonaPicker(event.target.closest("dialog"));
     if (event.target.matches("[data-memory-channel-limit]"))
       event.target.form.querySelector("[data-memory-channel-picker]").hidden = !event.target.checked;
     if (event.target.matches("[data-persona-habit-style]")) {
-      event.target
-        .closest("[data-persona-habits]")
-        .querySelectorAll("[data-persona-habit-form]")
-        .forEach((form) => {
-          form.hidden = form.dataset.personaHabitForm !== event.target.value;
-        });
+      const select = event.target;
+      const style = select.value;
+      select.value = select.form.dataset.personaHabitForm;
+      select.dispatchEvent(new Event("input"));
+      for (const form of select.closest("[data-persona-habits]").querySelectorAll("[data-persona-habit-form]")) {
+        form.hidden = form.dataset.personaHabitForm !== style;
+        if (!form.hidden) form.querySelector("[data-persona-habit-style]").focus({ preventScroll: true });
+      }
       return;
     }
     if (event.target.matches("[data-personal-capability]")) {
@@ -8393,7 +8512,9 @@
     captureDraft(event.target.closest(editForms));
     const namingMode = event.target.closest("[data-naming-mode]");
     if (namingMode) {
-      namingMode.form.elements[namingMode.dataset.namingMode].disabled = namingMode.value !== "custom";
+      const input = namingMode.form.elements[namingMode.dataset.namingMode];
+      input.disabled = namingMode.value !== "custom";
+      input.closest(".field").hidden = input.disabled;
     }
     if (event.target.id === "memory-import-file" && event.target.files?.[0]) {
       await importMemories(event.target.files[0]);
@@ -9092,7 +9213,7 @@
           : section === "prompt"
             ? {
                 triggerWords: values.triggerWords
-                  ? parseTags(values.triggerWords.value)
+                  ? JSON.parse(values.triggerWords.value)
                   : currentPersona?.triggerWords || [],
                 personaPrompt: values.personaPrompt
                   ? values.personaPrompt.value || null
@@ -9115,7 +9236,7 @@
                             ]),
                           ),
                   }
-                : { physicalAppearanceTags: parseTags(values.physicalAppearanceTags.value) };
+                : { physicalAppearanceTags: JSON.parse(values.physicalAppearanceTags.value) };
       try {
         await withBusyForm(personaForm, async () => {
           await api(`/guilds/${state.guildId}/personas/${personaId}/${section}`, {

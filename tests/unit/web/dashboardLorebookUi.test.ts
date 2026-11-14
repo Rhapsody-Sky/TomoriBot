@@ -28,6 +28,37 @@ async function dashboardFunction(name: string): Promise<string> {
   return result;
 }
 
+describe("Persona section navigation", () => {
+  it("keeps a tracked card draft when navigation is canceled and clears it on discard", async () => {
+    const source = await dashboardFunction("confirmPersonaSectionChange");
+    const key = "persona-settings/77";
+    const otherKey = "persona-settings/89";
+    const drafts = new Map([
+      [key, []],
+      [otherKey, []],
+    ]);
+    let discard = false;
+    const confirm = runInNewContext(`(${source})`, {
+      state: { personaPanel: "settings" },
+      drafts,
+      ui: (name: string) => name,
+      confirmAction: async () => discard,
+    }) as (content: unknown) => Promise<boolean>;
+    const form = { dataset: { draftKey: key } };
+    const content = {
+      isConnected: true,
+      querySelector: (selector: string) => (selector === "form[data-changed]" ? form : null),
+      querySelectorAll: (selector: string) => (selector === "form[data-draft-key]" ? [form] : []),
+    };
+
+    expect(await confirm(content)).toBe(false);
+    expect(drafts.has(key)).toBe(true);
+    discard = true;
+    expect(await confirm(content)).toBe(true);
+    expect([...drafts.keys()]).toEqual([otherKey]);
+  });
+});
+
 describe("dashboard lorebook UI", () => {
   beforeAll(() => initializeLocalizer());
 

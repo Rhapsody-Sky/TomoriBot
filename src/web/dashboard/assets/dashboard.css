@@ -197,6 +197,15 @@ body[data-theme="dark"] .boot-logo {
   padding: var(--space-6);
 }
 
+[data-persona-reference] .art-preview {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+[data-persona-reference] .art-preview img {
+  max-inline-size: 100%;
+  object-fit: contain;
+}
+
 .persona-avatar-fallback,
 .avatar-fallback,
 .user-avatar-fallback,

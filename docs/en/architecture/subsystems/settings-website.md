@@ -167,6 +167,7 @@ application marks the card saved after its write succeeds.
 On Personas, the banner, dock and chat stay mounted during section changes.
 The application updates the selected controls and replaces the stage content.
 Switching personas keeps the section selected and updates the banner and chat.
+Leaving a Persona section with unsaved edits asks whether to discard them.
 
 `Your design` keeps preferences in browser storage when the user chooses to
 remember them on that device. Stored settings apply before the dashboard paints.

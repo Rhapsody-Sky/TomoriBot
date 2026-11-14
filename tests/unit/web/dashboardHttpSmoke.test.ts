@@ -132,8 +132,8 @@ describe("dashboard HTTP shell", () => {
     const response = await app.request("/settings/assets/app.js");
     const source = await response.text();
 
-    expect(source).toContain("Visual character prompt");
-    expect(source).toContain("This is not the persona's main conversation prompt");
+    expect(source).toContain('ui("persona_visual_prompt")');
+    expect(source).toContain('ui("persona_visual_prompt_hint")');
     expect(source).toContain("data-auto-grow");
     expect(source).toContain("resizeAutoGrowTextarea");
     expect(source).not.toContain("Core identity, behavior, speaking style, and boundaries");
