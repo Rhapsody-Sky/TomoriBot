@@ -51,6 +51,13 @@
 
   const saveAppearance = () => {
     applyAppearance();
+    const persona = state.overview?.personas.find((entry) => entry.personaId === state.personaId);
+    if (persona)
+      document.querySelectorAll(".app-main > .banner, .chat-fab, .chat-dock").forEach((region) => {
+        region.classList.toggle("tinted", appearance.personaColors);
+        if (appearance.personaColors) region.dataset.tint = personaTint(persona);
+        else delete region.dataset.tint;
+      });
     stopReducedPanelMotion();
     if (rememberDesign) setRememberDesign(true);
   };
@@ -58,7 +65,6 @@
   const syncAppearanceControls = () => {
     document.querySelectorAll("[data-palette-choice]").forEach((button) => {
       const isActive = button.dataset.paletteChoice === appearance.palette;
-      button.classList.toggle("is-active", isActive);
       button.setAttribute("aria-pressed", String(isActive));
     });
     const themeIcon = document.querySelector("[data-theme-toggle] span");
@@ -273,6 +279,7 @@
     lorebookData: null,
     lorebookImportReceipt: null,
     personaTestChats: {},
+    personaChatOpen: false,
     personaTestChatBusy: false,
     avatarRevision: 0,
     providerData: { personal: null, server: null },
@@ -496,6 +503,8 @@
     if (humanizerFields) humanizerFields.hidden = form.elements.humanizerMode.value === "inherit";
     resizeAutoGrowTextareas(form);
     form.dispatchEvent(new Event("dashboard:restore"));
+    if (form.dataset.fx === "track") form.dispatchEvent(new Event("input"));
+    updateChannelCounts(form.querySelector("[data-channel-selector]"));
   }
 
   function initDraftForms(root) {
@@ -508,6 +517,15 @@
           : `${state.guildId}/${form.dataset.settingsKey || (form.dataset.personaNaming ? `naming/${form.dataset.personaNaming}` : "stm-categories")}`;
       form.dataset.draftKey = key;
       formBaselines.set(form, formSnapshot(form));
+      if (form.dataset.fx === "track") {
+        window.TomoriFX.enhance(form);
+        window.TomoriFX.saved(form);
+        if (drafts.has(key)) {
+          restoreSnapshot(form, drafts.get(key));
+          captureDraft(form);
+        }
+        return;
+      }
       form.querySelectorAll(editSubmit).forEach((save) => {
         const discard = document.createElement("button");
         discard.type = "button";
@@ -565,13 +583,15 @@
       if (changed) drafts.set(form.dataset.draftKey, values);
       else drafts.delete(form.dataset.draftKey);
     }
+    if (form.dataset.fx === "track") return;
     setEditActions(form, changed);
   }
 
   function completeFormSave(form) {
     drafts.delete(form.dataset.draftKey);
     formBaselines.set(form, formSnapshot(form));
-    setEditActions(form, false);
+    if (form.dataset.fx === "track") window.TomoriFX.saved(form);
+    else setEditActions(form, false);
     form.querySelector(".form-error")?.remove();
   }
 
@@ -581,7 +601,7 @@
     message.className = "form-error";
     message.setAttribute("role", "alert");
     message.textContent = `${error.message} ${ui(partial ? "partial" : "retry")}`;
-    form.querySelector(".form-actions")?.before(message);
+    form.querySelector(".form-actions, .actions:has([data-edit-action])")?.before(message);
   }
 
   window.addEventListener("beforeunload", (event) => {
@@ -693,6 +713,7 @@
 
   function renderShell() {
     clearSearchSpotlight();
+    removeDockMenu(app);
     const guilds = state.session?.guilds || [];
     const selected = guilds.find((guild) => guild.id === state.guildId) || guilds[0];
     const user = state.session?.user;
@@ -703,23 +724,25 @@
       fxLocale = locale;
     }
     const collection = state.view === "personas";
+    if (!collection) delete document.body.dataset.chat;
     const serverIdentity = selected?.iconUrl
       ? `<img class="${collection ? "avatar" : "server-icon"}" src="${escapeHtml(selected.iconUrl)}" alt="">`
       : `<span class="${collection ? "avatar" : "server-icon server-icon-fallback"}">${escapeHtml((selected?.name || "?").slice(0, 1))}</span>`;
     const serverLabel = `<span${collection ? "" : ' class="server-label"'}><small>${escapeHtml(ui("server"))}</small><strong>${escapeHtml(selected?.name || ui("switch_server"))}</strong></span>${navigationIcon("arrow-up-down")}`;
     const serverButton = `<button class="button ${collection ? "server-switch" : "topbar-server-button"}" type="button" data-server-picker-open aria-haspopup="dialog" aria-label="${escapeHtml(ui("switch_server"))}">${serverIdentity}${serverLabel}</button>`;
     const navigationButton = `<button class="button icon ${collection ? "menu-toggle" : "mobile-nav-trigger"}" type="button" data-navigation-menu="dashboard-navigation" aria-label="${escapeHtml(ui("navigation_menu"))}">${navigationIcon("menu")}</button>`;
-    const brand = `<button class="${collection ? "button frame-brand" : "brand brand-button"}" type="button" data-nav="overview" aria-label="${escapeHtml(ui("nav_overview") || "Overview")}">
-      <img src="/settings/assets/tomori_companion_logo.svg" alt=""${collection ? "" : ' class="topbar-logo"'}>
-      <span${collection ? "" : ' class="brand-copy"'}><strong>TomoriBot</strong><small>companion control</small></span>
-    </button>`;
+    const brand = collection
+      ? `<a class="frame-brand" href="#overview" data-nav="overview" aria-label="${escapeHtml(ui("overview_title"))}"><img src="/settings/assets/tomori_companion_logo.svg" alt=""><span><strong>TomoriBot</strong><small>companion control</small></span></a>`
+      : '<button class="brand brand-button" type="button" data-nav="overview" aria-label="Open overview"><img src="/settings/assets/tomori_companion_logo.svg" alt="" class="topbar-logo"><span class="brand-copy"><strong>TomoriBot</strong><small>companion control</small></span></button>';
     const designButton = `<button class="button" id="design-trigger" type="button" popovertarget="design-settings" aria-label="${escapeHtml(ui("design_title"))}" data-tooltip="${escapeHtml(ui("design_title"))}"><span class="palette-orb" aria-hidden="true"></span><span class="${collection ? "design-label" : "design-trigger-label"}">${escapeHtml(ui("design_title"))}</span></button>`;
     app.innerHTML = `
       <div class="${collection ? "app-frame" : "dashboard-shell"}">
         <header class="topbar">
-          ${collection
-            ? `<div class="row">${navigationButton}${brand}</div>${serverButton}<div class="row topbar-end">${designButton}</div>`
-            : `${navigationButton}${brand}<div class="topbar-server-access">${serverButton}</div>${designButton}`}
+          ${
+            collection
+              ? `<div class="row">${navigationButton}${brand}</div>${serverButton}<div class="row topbar-end">${designButton}</div>`
+              : `${navigationButton}${brand}<div class="topbar-server-access">${serverButton}</div>${designButton}`
+          }
         </header>
         <div class="shell"><div class="sidebar-rail"><aside class="sidebar" data-variant="detailed">
           <nav class="nav-stack sidebar-sections" id="dashboard-navigation" aria-label="Dashboard">
@@ -776,16 +799,18 @@
             </div>
             <button class="button icon" type="button" data-server-picker-close aria-label="Close server selection">${navigationIcon("x")}</button>
           </header>
-          <div class="persona-picker-grid">
+          <div class="${collection ? "deck" : "persona-picker-grid"}">
             ${[...guilds]
               .sort((left, right) => Number(Boolean(right.isDirectMessage)) - Number(Boolean(left.isDirectMessage)))
               .map(
                 (guild) =>
-                  `<button class="persona-choice" aria-pressed="${guild.id === state.guildId}" type="button" data-guild-select="${escapeHtml(guild.id)}">
+                  `<button class="${collection ? "deck-card" : "persona-choice"}" ${collection ? "aria-current" : "aria-pressed"}="${guild.id === state.guildId}" type="button" data-guild-select="${escapeHtml(guild.id)}">
                   ${
-                    guild.iconUrl
-                      ? `<img src="${escapeHtml(guild.iconUrl)}" alt="" class="avatar">`
-                      : `<span class="avatar avatar-fallback">${escapeHtml((guild.name || "?").slice(0, 1))}</span>`
+                    collection
+                      ? personaSticker({ nickname: guild.name, avatarUrl: guild.iconUrl })
+                      : guild.iconUrl
+                        ? `<img src="${escapeHtml(guild.iconUrl)}" alt="" class="avatar">`
+                        : `<span class="avatar avatar-fallback">${escapeHtml((guild.name || "?").slice(0, 1))}</span>`
                   }
                   <span class="server-choice-copy"><strong>${escapeHtml(guild.name)}</strong><small>${guild.isDirectMessage ? escapeHtml(ui("direct_messages_owner")) : `${guild.memberCount ?? "?"} members`}</small></span>
                   <span class="server-choice-access">${guild.canManage ? "Manage" : "Member"}</span>
@@ -866,11 +891,11 @@
     return `<div id="design-settings" class="design-settings" popover role="dialog" aria-labelledby="design-title">
       <header class="panel-header"><div class="heading"><h2 id="design-title">${escapeHtml(ui("design_title"))}</h2><p>${escapeHtml(ui("design_hint"))}</p></div><button class="button  icon" type="button" popovertarget="design-settings" popovertargetaction="hide" aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header>
       <div class="stack"><div class="row"><button class="button " id="design-theme" type="button" data-theme-toggle>${escapeHtml(ui("design_light"))}</button><button class="button " type="button" data-surface-toggle aria-pressed="${appearance.surface === "glass"}">${escapeHtml(ui("design_glass"))}</button></div>
-      <div class="field"><span class="field-label">${escapeHtml(ui("design_palette"))}</span><div class="palette-list">${palettes.map((palette) => `<button class="palette-choice palette-${palette.id}" type="button" data-palette-choice="${palette.id}" aria-pressed="${appearance.palette === palette.id}"><span class="palette-orb" aria-hidden="true"></span><span>${palette.label}</span></button>`).join("")}</div></div>
+      <div class="field"><span class="field-label">${escapeHtml(ui("design_palette"))}</span><div class="palette-list">${palettes.map((palette) => `<button class="palette-choice" type="button" data-palette-choice="${palette.id}" aria-pressed="${appearance.palette === palette.id}"><span class="palette-orb" aria-hidden="true"></span><span>${palette.label}</span></button>`).join("")}</div></div>
       <label class="toggle">${fieldLabel(ui("design_persona_colors"))}<input type="checkbox" role="switch" data-design-persona-colors></label>
       <label class="field">${fieldLabel(ui("design_color_mode"))}<select data-design-setting="colorMode"><option value="colorful">${escapeHtml(ui("design_colorful"))}</option><option value="reduced">${escapeHtml(ui("design_reduced"))}</option></select></label>
-      <div class="preview-controls design-light"><label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-light-setting="angle" data-scrub></label>
-      <label class="field">${fieldLabel(ui("design_spread"))}<input type="range" min="50" max="500" step="10" data-light-setting="spread"></label><label class="field">${fieldLabel(ui("design_intensity"))}<input type="range" min="0" max="200" step="5" data-light-setting="intensity"></label></div>
+      <fieldset class="preview-controls design-light"><legend>${escapeHtml(ui("design_lighting"))}</legend><label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-light-setting="angle" data-scrub></label>
+      <label class="field">${fieldLabel(ui("design_spread"))}<input type="range" min="50" max="500" step="10" data-light-setting="spread"></label><label class="field">${fieldLabel(ui("design_intensity"))}<input type="range" min="0" max="200" step="5" data-light-setting="intensity"></label></fieldset>
       <label class="field">${fieldLabel(ui("design_layout"))}<select data-design-setting="layout"><option value="boxed">${escapeHtml(ui("design_layout_boxed"))}</option><option value="full">${escapeHtml(ui("design_layout_full"))}</option></select></label>
       <label class="field">${fieldLabel(ui("design_motion"))}<select data-design-setting="motion">${["full", "subtle", "off"].map((value) => `<option value="${value}">${escapeHtml(ui(`design_motion_${value}`))}</option>`).join("")}</select></label>
       <label class="toggle">${fieldLabel(ui("design_remember"), ui("design_remember_hint"))}<input type="checkbox" role="switch" data-design-remember${rememberDesign ? " checked" : ""}></label></div>
@@ -1096,7 +1121,7 @@
       const template = document.createElement("template");
       template.innerHTML = html;
       for (const element of template.content.querySelectorAll("label.field, label.toggle, h2, h3, legend")) {
-        if (element.closest(".entry-list, .chat")) continue;
+        if (element.closest(".entry-list, [data-persona-entries], .chat, .chat-dock")) continue;
         const title = settingSearchText(element);
         if (!title) continue;
         const hint = element.querySelector("small")?.textContent || "";
@@ -1415,7 +1440,7 @@
     if (!root) return;
     if (entry.dialog && !root.open) root.showModal();
     let target;
-    if (entry.personaHome) target = root.querySelector(".persona-focus");
+    if (entry.personaHome) target = root.querySelector(".banner");
     else if (entry.view === "channel-settings" && entry.channelTab !== "allowlist")
       target = root.querySelector("[data-channel-settings] .panel");
     else if (entry.name)
@@ -1427,9 +1452,9 @@
         (element) => settingSearchText(element) === entry.title && element.getClientRects().length,
       );
     if (!target && !entry.tag && !entry.name)
-      target = root.querySelector(entry.personaPanel ? ".persona-panel-content" : "h1");
+      target = root.querySelector(entry.personaPanel ? "[data-persona-content]" : "h1");
     if (!target) return;
-    if (target.matches("h2, h3, legend")) target = target.closest("fieldset, .panel") || target;
+    if (target.matches("h2, h3, legend")) target = target.closest("fieldset, .panel, .card") || target;
     pendingSearchDestination = null;
     target.scrollIntoView({ block: "center", behavior: "instant" });
     const control =
@@ -2462,13 +2487,14 @@
           ? `Shared facts for ${persona.nickname}. As an administrator, you can manage every entry.`
           : `Shared facts you personally taught ${persona.nickname}. Other members' entries remain hidden.`;
 
+    const collection = Boolean(persona);
     const transferAttributes = personal
       ? ""
       : ` aria-disabled="true" data-tooltip="${escapeHtml(ui("memory_server_transfer_unavailable"))}"`;
 
     return `
-      <section class="panel">
-        <header class="panel-header"><div class="heading"><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>
+      <section class="${collection ? "card" : "panel"}" data-memory-card>
+        <header class="${collection ? "card-head" : "panel-header"}"><div${collection ? "" : ' class="heading"'}>${collection ? `<h3>${escapeHtml(title)}</h3><p class="hint">${escapeHtml(copy)}</p>` : `<p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p>`}</div>
         <div class="actions">
           ${refreshButton("memory", ui("refresh_memories"))}
           <button class="button " data-memory-export type="button"${transferAttributes}>Export</button>
@@ -2480,7 +2506,7 @@
       ${
         serverWritesDisabled || personalCreationDisabled
           ? `<div class="notice info"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><p>Existing entries remain visible according to your access.</p></div>`
-          : `<form id="memory-compose-form" hidden>
+          : `<form id="memory-compose-form"${collection ? ' class="compose"' : ""} hidden>
               <div class="stack">
                 <label class="field">${fieldLabel("New memory", "Write one concise fact. Its visibility follows the memory scope shown above.")}<textarea name="content" rows="3" required placeholder="A concise fact Tomori should remember"></textarea></label>
                 ${personal ? "" : '<div class="subsection" data-memory-channel-scope hidden></div>'}
@@ -2489,11 +2515,11 @@
               <div class="actions"><button class="button" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
             </form>`
       }
-      <section id="memory-list" class="stack">${loadingBar(ui("memory_loading"))}</section></div></section>`;
+      <section id="memory-list" class="${collection ? "rows" : "stack"}">${loadingBar(ui("memory_loading"))}</section></div></section>`;
   }
 
   function setMemoryComposer(form, open) {
-    const trigger = form.closest(".panel").querySelector("[data-memory-add]");
+    const trigger = form.closest("[data-memory-card]").querySelector("[data-memory-add]");
     form.hidden = !open;
     trigger.hidden = open;
     trigger.setAttribute("aria-expanded", String(open));
@@ -2576,7 +2602,7 @@
       if (!isCurrent()) return;
       state.memoryData = data;
       if (memoryKind === "server") {
-        const panel = list.closest(".panel");
+        const panel = list.closest("[data-memory-card]");
         const form = panel.querySelector("#memory-compose-form");
         if (form?.hidden) renderMemoryChannelScope(form, data);
         const add = panel.querySelector("[data-memory-add]");
@@ -2592,9 +2618,12 @@
   function renderMemoryList() {
     const list = document.querySelector("#memory-list");
     if (!list) return;
+    const collection = state.view === "personas";
     const rows = state.memoryData?.memories || [];
     if (!rows.length) {
-      list.innerHTML = `<div class="empty"><strong>No memories in this scope.</strong><span>The first one you add will appear here.</span></div>`;
+      list.innerHTML = collection
+        ? `<p class="empty-note">${escapeHtml(ui("persona_memory_empty"))}</p>`
+        : '<div class="empty"><strong>No memories in this scope.</strong><span>The first one you add will appear here.</span></div>';
       return;
     }
     const serverWritesDisabled =
@@ -2603,11 +2632,11 @@
       !state.overview.memoryPolicy.serverMemoryTeachingEnabled;
     list.innerHTML = rows
       .map(
-        (memory) => `<article class="memory-row">
+        (memory) => `<article class="${collection ? "item" : "memory-row"}">
           <div class="stack">
             <span class="badge">#${memory.id}</span>
             <p>${escapeHtml(memory.content)}</p>
-            <div class="row hint">
+            <div class="${collection ? "item-meta" : "row hint"}">
               ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : ""}
               ${state.memoryKind === "server" && !state.overview.guild?.isDirectMessage ? `<span>${escapeHtml(memoryChannelSummary(memory, state.memoryData))}</span>` : ""}
               ${memory.updatedAt || memory.createdAt ? `<time>${escapeHtml(formatDate(memory.updatedAt || memory.createdAt))}</time>` : ""}
@@ -2617,7 +2646,7 @@
           ${
             memory.editable === false || serverWritesDisabled
               ? ""
-              : `<div class="actions">
+              : `<div class="${collection ? "item-actions" : "actions"}">
                   <button class="button  " data-memory-edit="${memory.id}" type="button">Edit</button>
                   <button class="button danger " data-memory-delete="${memory.id}" type="button">Delete</button>
                 </div>`
@@ -2707,7 +2736,7 @@
     if (!target) return;
     const guildId = state.guildId;
     const version = ++lorebookLoadVersion;
-    const currentView = target.querySelector(".mailbox")?.dataset.view || "list";
+    const currentView = target.querySelector("[data-lorebook-browser]")?.dataset.view || "list";
     const bookId = lineageId === 0 ? state.lorebookBookId : null;
     target.innerHTML = loadingBar(ui("lorebook_loading"));
     try {
@@ -2738,10 +2767,10 @@
             (selectedEntry.entry_id === selected?.entryId ? selected.section : "content"),
           false,
         );
-        target.querySelector(".mailbox").dataset.view = currentView;
+        target.querySelector("[data-lorebook-browser]").dataset.view = currentView;
       }
       if (pendingSearchDestination?.lorebookSection) {
-        target.querySelector(".mailbox").dataset.view = selectedEntry ? "detail" : "list";
+        target.querySelector("[data-lorebook-browser]").dataset.view = selectedEntry ? "detail" : "list";
         focusSearchDestination();
       }
     } catch (error) {
@@ -2766,8 +2795,8 @@
     return `<fieldset class="stack"><legend>${escapeHtml(ui("lorebook_channels"))}</legend><p class="hint">${escapeHtml(ui("lorebook_channels_hint"))} ${dependency}</p>${missing.length ? `<p class="hint">${escapeHtml(ui("lorebook_missing_channels"))}</p>` : ""}${renderChannelSelector("channelDiscIds", ids)}${missing.map((id) => `<input name="channelDiscIds" type="checkbox" value="${escapeHtml(id)}" data-missing-channel checked hidden>`).join("")}</fieldset>`;
   }
 
-  function lorebookEntry(entry) {
-    return `<button class="mail-item" type="button" data-lorebook-edit-entry="${entry.entry_id}" data-lorebook-editor-section="content" data-lorebook-search="${escapeHtml(`${entry.title} ${entry.content} ${entry.keys.join(" ")}`.toLowerCase())}" aria-current="false"><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.content)}</small><small>${escapeHtml(ui(entry.enabled ? "lorebook_enabled" : "lorebook_disabled"))}</small></button>`;
+  function lorebookEntry(entry, collection) {
+    return `<button class="${collection ? "item pick" : "mail-item"}" type="button" data-lorebook-edit-entry="${entry.entry_id}" data-lorebook-editor-section="content" data-lorebook-search="${escapeHtml(`${entry.title} ${entry.content} ${entry.keys.join(" ")}`.toLowerCase())}" aria-current="false">${collection ? "<div>" : ""}<strong>${escapeHtml(entry.title)}</strong><small${collection ? ' class="excerpt"' : ""}>${escapeHtml(entry.content)}</small><small>${escapeHtml(ui(entry.enabled ? "lorebook_enabled" : "lorebook_disabled"))}</small>${collection ? "</div>" : ""}</button>`;
   }
 
   function lorebookUsage(entry) {
@@ -2798,22 +2827,25 @@
     const lineageId = activeLorebookLineage();
     const prefix = `lorebook/${lineageId}/${lineageId === 0 ? state.lorebookBookId : 0}/${entry.entry_id}`;
     const canManage = state.overview.canManage;
-    const actions = `<div class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`;
+    const collection = lineageId !== 0;
+    const actions = collection
+      ? cardSaveActions(ui("lorebook_save"))
+      : `<div class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`;
     const deleteButton = `<button class="button danger hold-button" type="button" data-hold data-lorebook-delete-entry="${entryId}" data-confirm-title="${escapeHtml(ui("lorebook_delete_title").replace("{name}", () => entry.title))}" data-confirm-description="${escapeHtml(ui("lorebook_delete_entry_confirm"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>`;
     lorebookSelections.set(lorebookSelectionKey(lineageId), { entryId, section });
     let body;
     if (!canManage) {
       body = `<label class="field">${fieldLabel(ui("lorebook_content"))}<textarea rows="9" readonly>${escapeHtml(entry.content)}</textarea></label><p class="hint">${escapeHtml(lorebookUsage(entry))}</p>${lineageId === 0 ? "" : lorebookChannels(entry.channel_disc_ids, false)}`;
     } else if (section === "content") {
-      body = `<form class="entry-form" data-lorebook-form="content" data-entry-id="${entryId}" data-settings-key="${prefix}/content"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" value="${escapeHtml(entry.title)}" required></label><label class="field">${fieldLabel(ui("lorebook_content"))}<textarea name="content" maxlength="4000" rows="9" required>${escapeHtml(entry.content)}</textarea></label><label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_enabled"))}</span><input name="enabled" type="checkbox" role="switch"${entry.enabled ? " checked" : ""}></label><div class="actions form-actions entry-actions">${deleteButton}<button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div></form>`;
+      body = `<form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="content" data-entry-id="${entryId}" data-settings-key="${prefix}/content"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" value="${escapeHtml(entry.title)}" required></label><label class="field">${fieldLabel(ui("lorebook_content"))}<textarea name="content" maxlength="4000" rows="9" required>${escapeHtml(entry.content)}</textarea></label><label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_enabled"))}</span><input name="enabled" type="checkbox" role="switch"${entry.enabled ? " checked" : ""}></label>${collection ? `<div class="actions">${deleteButton}</div>${actions}` : `<div class="actions form-actions entry-actions">${deleteButton}<button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`}</form>`;
     } else if (section === "matching") {
       body = `<p class="hint">${escapeHtml(ui("lorebook_matching_hint"))}</p>
-        <form class="entry-form" data-lorebook-form="constant" data-entry-id="${entryId}" data-settings-key="${prefix}/constant"><label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_constant"))}<small>${escapeHtml(ui(entry.keys.length ? "lorebook_constant_hint" : "lorebook_constant_no_keys"))}</small></span><input name="constant" type="checkbox" role="switch"${entry.constant ? " checked" : ""}${entry.keys.length ? "" : " disabled"}></label>${entry.keys.length ? actions : ""}</form>
-        <form class="entry-form" data-lorebook-form="keys" data-entry-id="${entryId}" data-settings-key="${prefix}/keys" data-original-keys="${escapeHtml(JSON.stringify(entry.keys))}"><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_keys_hint"))}<textarea name="keys" rows="4">${escapeHtml(entry.keys.join("\n"))}</textarea></label><p class="hint">${escapeHtml(ui("lorebook_regex_hint"))}</p>${actions}</form>
-        ${lineageId === 0 ? "" : `<form class="entry-form" data-lorebook-form="entry-channels" data-entry-id="${entryId}" data-settings-key="${prefix}/channels" data-original-channels="${escapeHtml(JSON.stringify(entry.channel_disc_ids))}">${lorebookChannels(entry.channel_disc_ids, true)}${entry.legacy_channel_tags?.length ? `<p class="hint">${escapeHtml(ui("lorebook_pending_channels"))}: ${escapeHtml(entry.legacy_channel_tags.join(", "))}</p>` : ""}${actions}</form>`}`;
+        <form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="constant" data-entry-id="${entryId}" data-settings-key="${prefix}/constant"><label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_constant"))}<small>${escapeHtml(ui(entry.keys.length ? "lorebook_constant_hint" : "lorebook_constant_no_keys"))}</small></span><input name="constant" type="checkbox" role="switch"${entry.constant ? " checked" : ""}${entry.keys.length ? "" : " disabled"}></label>${entry.keys.length ? actions : ""}</form>
+        <form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="keys" data-entry-id="${entryId}" data-settings-key="${prefix}/keys" data-original-keys="${escapeHtml(JSON.stringify(entry.keys))}"><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_keys_hint"))}<textarea name="keys" rows="4">${escapeHtml(entry.keys.join("\n"))}</textarea></label><p class="hint">${escapeHtml(ui("lorebook_regex_hint"))}</p>${actions}</form>
+        ${lineageId === 0 ? "" : `<form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="entry-channels" data-entry-id="${entryId}" data-settings-key="${prefix}/channels" data-original-channels="${escapeHtml(JSON.stringify(entry.channel_disc_ids))}">${lorebookChannels(entry.channel_disc_ids, true)}${entry.legacy_channel_tags?.length ? `<p class="hint">${escapeHtml(ui("lorebook_pending_channels"))}: ${escapeHtml(entry.legacy_channel_tags.join(", "))}</p>` : ""}${actions}</form>`}`;
     } else {
       body = `<p class="hint">${escapeHtml(ui("lorebook_rules_hint"))}</p>${entry.constant ? `<p class="notice info">${escapeHtml(ui("lorebook_rules_always"))}</p>` : ""}
-        <form class="entry-form" data-lorebook-form="activation" data-entry-id="${entryId}" data-settings-key="${prefix}/activation" data-original-keys="${escapeHtml(JSON.stringify(entry.secondary_keys))}">
+        <form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="activation" data-entry-id="${entryId}" data-settings-key="${prefix}/activation" data-original-keys="${escapeHtml(JSON.stringify(entry.secondary_keys))}">
           <label class="field">${fieldLabel(ui("lorebook_secondary"), ui("lorebook_secondary_hint"))}<textarea name="secondaryKeys" rows="3">${escapeHtml(entry.secondary_keys.join("\n"))}</textarea></label>
           <label class="field">${fieldLabel(ui("lorebook_logic"), ui("lorebook_logic_hint"))}<select name="selectiveLogic">${["lorebook_logic_any", "lorebook_logic_not_all", "lorebook_logic_not_any", "lorebook_logic_all"].map((key, index) => `<option value="${index}"${entry.selective_logic === index ? " selected" : ""}>${escapeHtml(ui(key))}</option>`).join("")}</select></label>
           <div class="grid"><label class="field">${fieldLabel(ui("lorebook_scan"), ui("lorebook_scan_hint"))}<input type="number" name="scanDepth" min="1" max="100" value="${entry.scan_depth}" data-scrub required></label><label class="field">${fieldLabel(ui("lorebook_chance"), ui("lorebook_chance_hint"))}<input type="number" name="triggerChance" min="0" max="100" value="${entry.trigger_chance}" data-scrub required></label></div>
@@ -2822,19 +2854,21 @@
         </form>`;
     }
     const tabs = canManage
-      ? `<nav class="tabs" role="tablist" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${["content", "matching", "rules"].map((key) => `<button type="button" role="tab" data-lorebook-edit-entry="${entryId}" data-lorebook-editor-section="${key}" aria-selected="${key === section}" tabindex="${key === section ? 0 : -1}">${escapeHtml(ui({ content: "lorebook_content", matching: "lorebook_when_used", rules: "lorebook_additional_rules" }[key]))}</button>`).join("")}</nav>`
+      ? `<nav class="${collection ? "segmented" : "tabs"}"${collection ? ' data-fx="indicator"' : ""} role="tablist" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${["content", "matching", "rules"].map((key) => `<button type="button" role="tab" data-lorebook-edit-entry="${entryId}" data-lorebook-editor-section="${key}" aria-selected="${key === section}" tabindex="${key === section ? 0 : -1}">${escapeHtml(ui({ content: "lorebook_content", matching: "lorebook_when_used", rules: "lorebook_additional_rules" }[key]))}</button>`).join("")}</nav>`
       : "";
     const host = document.querySelector("#lorebook-editor-host");
     if (!host) return;
-    host.innerHTML = `<button class="button mail-back" type="button" data-lorebook-back>${navigationIcon("arrow-left")}${escapeHtml(ui("lorebook_back_entries"))}</button><header class="panel-header"><div class="heading"><h3>${escapeHtml(entry.title)}</h3></div></header>${tabs}<div class="stack">${body}</div>${canManage && section !== "content" ? `<div class="actions entry-actions">${deleteButton}</div>` : ""}`;
+    const content = `<button class="button ${collection ? "small" : "mail-back"}" type="button" data-lorebook-back>${navigationIcon("arrow-left")}${escapeHtml(ui("lorebook_back_entries"))}</button><header class="${collection ? "toolbar" : "panel-header"}"><div${collection ? "" : ' class="heading"'}><h3>${escapeHtml(entry.title)}</h3></div></header>${tabs}<div class="stack">${collection && !canManage ? `<section class="card">${body}</section>` : body}</div>${canManage && section !== "content" ? `<div class="actions entry-actions">${deleteButton}</div>` : ""}`;
+    if (collection) window.TomoriFX.swap(host, content);
+    else host.innerHTML = content;
     initDraftForms(host);
     window.TomoriControls?.enhance(host);
     window.TomoriFX?.enhance(host);
-    document.querySelectorAll(".mail-item[data-lorebook-edit-entry]").forEach((item) => {
+    document.querySelectorAll("[data-lorebook-search]").forEach((item) => {
       item.setAttribute("aria-current", String(Number(item.dataset.lorebookEditEntry) === entryId));
     });
     if (navigate) {
-      host.closest(".mailbox").dataset.view = "detail";
+      host.closest("[data-lorebook-browser]").dataset.view = "detail";
       host.querySelector("[data-lorebook-back]")?.focus({ preventScroll: true });
     }
   }
@@ -2892,24 +2926,24 @@
     `,
         )
       : "";
-    return `<div class="stack" data-lorebook-library><div class="mailbox${serverwide ? "" : " lorebook-mailbox-persona"}" data-view="list">
+    return `<div class="stack" data-lorebook-library><div class="${serverwide ? "mailbox" : "split"}" data-view="list" data-lorebook-browser>
       ${serverwide ? `<nav class="mail-folders" aria-label="${escapeHtml(ui("lorebooks"))}"><p class="hint">${escapeHtml(ui("lorebooks"))}</p>${lorebookChoices(data.books)}<footer class="actions entry-actions">${collectionActions}</footer></nav>` : ""}
-      <section class="mail-list" aria-label="${escapeHtml(name || ui("lorebooks"))}">
+      <section class="${serverwide ? "mail-list" : "card"}" aria-label="${escapeHtml(name || ui("lorebooks"))}">
         ${
           available
-            ? `<div class="mail-book-header" data-lorebook-book-summary><div class="heading"><h3>${escapeHtml(name)}</h3><small role="status" data-lorebook-results>${escapeHtml(ui("lorebook_entry_count").replace("{count}", String(data.entries.length)))}</small></div>${bookActions}</div>
+            ? `<div class="${serverwide ? "mail-book-header" : "card-head"}" data-lorebook-book-summary><div class="heading"><h3>${escapeHtml(name)}</h3><small role="status" data-lorebook-results>${escapeHtml(ui("lorebook_entry_count").replace("{count}", String(data.entries.length)))}</small></div>${bookActions}</div>
           ${book && canManage ? `<form class="entry-form" data-lorebook-form="book-rename" data-settings-key="${scopeKey}/rename" novalidate hidden><label class="field">${fieldLabel(ui("lorebook_book_name"))}<input name="name" maxlength="128" value="${escapeHtml(book.name)}" required aria-describedby="lorebook-name-error"><span class="error" id="lorebook-name-error" hidden></span></label><div class="actions form-actions entry-actions"><button class="button" type="button" data-lorebook-rename-cancel>${escapeHtml(ui("lorebook_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("lorebook_save_name"))}</button></div></form>` : ""}
           ${book && !book.enabled ? `<p class="notice warning">${escapeHtml(ui("lorebook_collection_paused"))}</p>` : ""}
           <label class="field inline"><span class="field-label">${escapeHtml(ui("lorebook_search"))}</span><input type="search" data-lorebook-search-input></label>
         ${state.lorebookImportReceipt?.key === scopeKey ? `<div class="notice success stack" role="status"><strong>${escapeHtml(ui("lorebook_import_receipt"))}</strong><span>${escapeHtml(state.lorebookImportReceipt.text)}</span></div>` : ""}
-        <div class="mail-items">${data.entries.map((entry) => lorebookEntry(entry)).join("")}</div>
+        <div class="${serverwide ? "mail-items" : "rows"}">${data.entries.map((entry) => lorebookEntry(entry, !serverwide)).join("")}</div>
         <div class="empty" data-lorebook-empty${data.entries.length ? " hidden" : ""}><strong>${escapeHtml(ui("lorebook_empty"))}</strong><p class="muted">${escapeHtml(ui("lorebook_empty_hint"))}</p></div>
         <div class="empty" data-lorebook-no-results hidden><strong>${escapeHtml(ui("lorebook_no_results"))}</strong><p class="muted">${escapeHtml(ui("lorebook_search_hint"))}</p></div>
         ${canManage ? `<footer class="actions entry-actions"><button class="button primary" type="button" data-lorebook-open="lorebook-entry-dialog" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("lorebook_new_entry"))}</button></footer>` : ""}`
             : `<div class="empty">${navigationIcon("book-open")}<h3>${escapeHtml(ui("lorebook_no_books"))}</h3><p class="muted">${escapeHtml(ui("lorebook_no_books_hint"))}</p></div>`
         }
       </section>
-      <article class="mail-detail" id="lorebook-editor-host" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}"><p class="hint">${escapeHtml(ui("lorebook_select_entry"))}</p></article>
+      <article class="${serverwide ? "mail-detail" : "col"}" id="lorebook-editor-host" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${serverwide ? `<p class="hint">${escapeHtml(ui("lorebook_select_entry"))}</p>` : `<section class="card"><p class="empty-note">${escapeHtml(ui("lorebook_select_entry"))}</p></section>`}</article>
     </div>
     ${canManage && serverwide ? lorebookDialog("lorebook-create-dialog", ui("lorebook_new_book"), `<p class="hint">${escapeHtml(ui("lorebook_create_hint"))}</p><form class="stack" data-lorebook-form="book-create" data-settings-key="lorebook/books/new"><label class="field">${fieldLabel(ui("lorebook_book_name"))}<input name="name" maxlength="128" required autofocus></label>${lorebookDialogActions("lorebook-create-dialog", ui("lorebook_new_book"))}</form>`) + lorebookDialog("lorebook-import-new-dialog", ui("lorebook_import_new"), `<form class="stack" data-lorebook-import-form data-lorebook-import-new><label class="field">${fieldLabel(ui("lorebook_book_name"))}<input name="name" maxlength="128" required autofocus></label><label class="field">${fieldLabel(ui("lorebook_import"))}<input name="file" type="file" accept=".json,application/json" required></label>${lorebookDialogActions("lorebook-import-new-dialog", ui("lorebook_import"))}</form>`) : ""}
     ${
@@ -3164,6 +3198,14 @@
     }
   }
 
+  function cardSaveActions(label) {
+    return `<div class="actions"><button class="button small" type="button" data-edit-action data-discard-draft hidden>${escapeHtml(ui("discard"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(label)}</button></div>`;
+  }
+
+  function personaCardHead(title, hint = "", actions = "") {
+    return `<header class="card-head"><div><h3>${escapeHtml(title)}</h3>${hint ? `<p class="hint">${escapeHtml(hint)}</p>` : ""}</div>${actions}</header>`;
+  }
+
   function renderPersonaHumanizer(persona) {
     const settings = state.overview.settings;
     const fields = settings?.catalog
@@ -3172,14 +3214,14 @@
     if (!fields?.length) return "";
     const override = persona.humanizerOverride;
     const values = override ?? settings.values.chat;
-    return `<form class="panel stack" data-persona-id="${persona.personaId}" data-persona-section="humanizer">
-      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_humanizer_title"))}</h2><p>${escapeHtml(ui("persona_humanizer_hint"))}</p></div></header>
+    return `<form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="humanizer">
+      <header class="card-head"><div><h3>${escapeHtml(ui("persona_humanizer_title"))}</h3><p>${escapeHtml(ui("persona_humanizer_hint"))}</p></div></header>
       <label class="field">${fieldLabel(ui("persona_humanizer_source"))}<select name="humanizerMode" data-persona-humanizer-mode>
         <option value="inherit"${override ? "" : " selected"}>${escapeHtml(ui("persona_humanizer_inherit"))}</option>
         <option value="custom"${override ? " selected" : ""}>${escapeHtml(ui("persona_humanizer_custom"))}</option>
       </select></label>
       <fieldset class="stack" data-persona-humanizer-fields${override ? "" : " hidden"}>${fields.map((field) => renderSettingField(field, values[field.key])).join("")}</fieldset>
-      <footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>
+      ${cardSaveActions(ui("persona_save"))}
     </form>`;
   }
 
@@ -3193,22 +3235,20 @@
     const habits = state.overview.personaNamingHabits;
     if (!habits) return "";
     const values = habits.values[persona.personaId];
-    return `<section class="panel stack" data-persona-habits="${persona.personaId}">
-      ${dashboardPanelHeading("persona_habits_title", "persona_habits_hint")}
-      <label class="field">${fieldLabel(ui("persona_habits_style"), ui("persona_habits_neutral_hint"))}
-        <select data-persona-habit-style>${habits.styles.map(({ value, label }) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}</select>
-      </label>
+    return `<div class="stack" data-persona-habits="${persona.personaId}">
+      <div class="toolbar"><label class="field">${fieldLabel(ui("persona_habits_style"), ui("persona_habits_neutral_hint"))}<select aria-label="${escapeHtml(ui("persona_habits_style"))}" data-persona-habit-style>${habits.styles.map(({ value, label }) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}</select></label></div>
       ${habits.styles
         .map(
           ({
             value: style,
-          }) => `<form class="stack" data-persona-habit-form="${escapeHtml(style)}" data-settings-key="persona-habits/${persona.personaId}/${escapeHtml(style)}"${style === "neutral" ? "" : " hidden"}>
+          }) => `<form class="card" data-fx="track" data-persona-habit-form="${escapeHtml(style)}" data-settings-key="persona-habits/${persona.personaId}/${escapeHtml(style)}"${style === "neutral" ? "" : " hidden"}>
+        ${personaCardHead(ui("persona_habits_title"), ui("persona_habits_hint"))}
         <div class="grid">${namingHabitFields.map(([name, group, label, hint]) => `<label class="field">${fieldLabel(ui(label), hint ? ui(hint) : undefined)}<input name="${name}" maxlength="${habits.maxLength}" value="${escapeHtml(values?.[group]?.[style] ?? "")}"></label>`).join("")}</div>
-        <footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></footer>
+        ${cardSaveActions(ui("save"))}
       </form>`,
         )
         .join("")}
-    </section>`;
+    </div>`;
   }
 
   async function savePersonaNamingHabits(form) {
@@ -3258,14 +3298,14 @@
     }
     if (!content.isConnected) return;
     content.innerHTML = entries.length
-      ? `<div class="entry-list">${entries
+      ? `<div class="rows">${entries
           .map(
-            ({ id, type, action, reason, count }) => `<article class="inline-entry"><div class="entry-read">
-        <div class="entry-copy" id="conditioning-${escapeHtml(id)}">
+            ({ id, type, action, reason, count }) => `<article class="item"><div class="row">
+        <div class="stack" id="conditioning-${escapeHtml(id)}">
           <div class="row hint"><span>${escapeHtml(ui(type === "reward" ? "persona_conditioning_reward" : "persona_conditioning_punishment"))} &middot; ${escapeHtml(action)}</span><span>${escapeHtml(ui("persona_conditioning_count").replace("{count}", String(count)))}</span></div>
-          <p class="read-text" dir="auto">${escapeHtml(reason)}</p>
+          <p class="clamp" dir="auto">${escapeHtml(reason)}</p>
         </div>
-        <div class="entry-actions"><button class="button danger" type="button" data-conditioning-remove="${escapeHtml(id)}" aria-describedby="conditioning-${escapeHtml(id)}" aria-haspopup="dialog">${escapeHtml(ui("persona_conditioning_remove"))}</button></div>
+        <div class="item-actions"><button class="button danger" type="button" data-conditioning-remove="${escapeHtml(id)}" aria-describedby="conditioning-${escapeHtml(id)}" aria-haspopup="dialog">${escapeHtml(ui("persona_conditioning_remove"))}</button></div>
       </div></article>`,
           )
           .join("")}</div>`
@@ -3317,11 +3357,11 @@
     const settings = state.overview.personaGuildSettings;
     const attg = settings?.values[personaId]?.attg;
     if (!attg) return "";
-    return `<form class="panel stack" data-persona-attg="${personaId}" data-settings-key="persona-attg/${personaId}">
-      ${dashboardPanelHeading("persona_attg_title", "persona_attg_hint")}
+    return `<form class="card" data-fx="track" data-persona-attg="${personaId}" data-settings-key="persona-attg/${personaId}">
+      ${personaCardHead(ui("persona_attg_title"), ui("persona_attg_hint"))}
       <div class="grid">${personaAttgFields.map(([name, key]) => `<label class="field">${fieldLabel(ui(key))}<input name="${name}" maxlength="${settings.attgMaxLength}" value="${escapeHtml(attg[name] ?? "")}"></label>`).join("")}
       <label class="field">${fieldLabel(ui("persona_attg_stars"), ui("persona_attg_stars_hint"))}<select name="nai_attg_stars"><option value="">${escapeHtml(ui("persona_attg_unrated"))}</option>${[1, 2, 3, 4, 5].map((stars) => `<option value="${stars}"${stars === attg.nai_attg_stars ? " selected" : ""}>${stars}</option>`).join("")}</select></label></div>
-      <footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>
+      ${cardSaveActions(ui("persona_save"))}
     </form>`;
   }
 
@@ -3344,8 +3384,8 @@
   }
 
   function personaSettingsPanel(key, hint, attributes, refresh = "") {
-    return `<section class="panel stack" ${attributes}>
-      ${dashboardPanelHeading(key, hint, refresh ? refreshButton(refresh, ui(key)) : "")}
+    return `<section class="${refresh ? "stack" : "card"}" ${attributes}>
+      ${refresh ? `<div class="toolbar"><p class="hint">${escapeHtml(ui(hint))}</p>${refreshButton(refresh, ui(key))}</div>` : personaCardHead(ui(key), ui(hint))}
       <div data-persona-panel-body>${loadingBar(ui(key))}</div>
     </section>`;
   }
@@ -3373,8 +3413,8 @@
       const unavailable = [...new Set([voice.selectedId, draftChoice])].filter(
         (id) => id && !voice.options.some((option) => option.id === id),
       );
-      body.innerHTML = `<form class="stack" data-persona-voice="${personaId}" data-voice-mode="${escapeHtml(voice.mode)}" data-settings-key="${escapeHtml(settingsKey)}">
-        <p class="hint">${escapeHtml(current)}</p>
+      body.innerHTML = `<form class="card" data-fx="track" data-persona-voice="${personaId}" data-voice-mode="${escapeHtml(voice.mode)}" data-settings-key="${escapeHtml(settingsKey)}">
+        ${personaCardHead(ui("persona_voice_title"), current)}
         <div class="grid"><label class="field">${fieldLabel(ui("persona_voice_priority"), ui("persona_voice_priority_hint"))}
           <select name="priority">${["design", "clone"].map((kind) => `<option value="${kind}"${kind === voice.priority ? " selected" : ""}>${escapeHtml(title(kind))}</option>`).join("")}</select></label>
         <label class="field">${fieldLabel(ui(voice.mode === "elevenlabs" ? "persona_voice_provider" : "persona_voice_sample"))}
@@ -3384,7 +3424,7 @@
           ${voice.catalogUnavailable ? `<small class="hint">${escapeHtml(ui("persona_voice_catalog_unavailable"))}</small>` : ""}</label></div>
         <label class="field">${fieldLabel(ui("persona_voice_design_prompt"), ui("persona_voice_design_hint"))}
           <textarea name="designPrompt" maxlength="${voice.maxLength}" rows="4">${escapeHtml(voice.designPrompt)}</textarea></label>
-        <footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>
+        ${cardSaveActions(ui("persona_save"))}
       </form>`;
       initDraftForms(host);
       enhanceDashboard(host);
@@ -3469,41 +3509,38 @@
   }
 
   function renderPersonaSettings(persona) {
-    const formHeader = (eyebrow, title, description) =>
-      `<header class="panel-header"><div class="heading"><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p></div></header>`;
-    const saveActions = `<footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>`;
+    const saveActions = cardSaveActions(ui("persona_save"));
     const attributes = persona.attributes || [];
     const dialogues = persona.sampleDialogues || [];
-    return `<div class="${state.overview.guild.isDirectMessage ? "stack" : "workspace"}">
-      <div class="stack">
+    return `<div class="stack">
         ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}">${loadingBar(ui("persona_model_loading"))}</div>` : ""}
         ${renderPersonaHumanizer(persona)}
-        <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="identity">
-          ${formHeader("Identity", "Display identity", "The name used by this persona in conversation.")}
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="identity">
+          ${personaCardHead("Display identity", "The name used by this persona in conversation.")}
           <label class="field">${fieldLabel("Nickname", "The name shown in messages, prompts, and dashboard views. A new name is also added as a trigger when room is available.")}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
           ${saveActions}
         </form>
 
         ${renderPersonaNamingHabits(persona)}
 
-        <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="prompt">
-          ${formHeader("Conversation", "Triggers", "Names and phrases that can activate this persona in conversation.")}
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
+          ${personaCardHead("Triggers", "Names and phrases that can activate this persona in conversation.")}
           <label class="field">${fieldLabel("Trigger words", "Comma-separated names or phrases that can activate this persona.")}<input name="triggerWords" value="${escapeHtml((persona.triggerWords || []).join(", "))}"></label>
           ${saveActions}
         </form>
 
-        <section class="panel" data-persona-id="${persona.personaId}">
-          <header class="panel-header"><div class="heading"><p class="eyebrow">Character</p><h2>Attributes</h2></div><button class="button" type="button" data-entry-add="attribute">${escapeHtml(ui("persona_add_attribute"))}</button></header>
-          <div class="entry-list">${attributes.map((attribute, index) => renderPersonaEntry(persona, "attribute", index, attribute)).join("")}${personaEntryDrafts.has(personaEntryKey(persona.personaId, "attribute", "new")) ? renderPersonaEntry(persona, "attribute", "new", { text: "", isPublic: false }) : ""}</div>
+        <section class="card" data-persona-id="${persona.personaId}">
+          <header class="card-head"><div><h3>Attributes</h3></div><button class="button" type="button" data-entry-add="attribute">${escapeHtml(ui("persona_add_attribute"))}</button></header>
+          <div class="rows" data-persona-entries>${attributes.map((attribute, index) => renderPersonaEntry(persona, "attribute", index, attribute)).join("")}${personaEntryDrafts.has(personaEntryKey(persona.personaId, "attribute", "new")) ? renderPersonaEntry(persona, "attribute", "new", { text: "", isPublic: false }) : ""}</div>
         </section>
 
-        <section class="panel" data-persona-id="${persona.personaId}">
-          <header class="panel-header"><div class="heading"><p class="eyebrow">Voice</p><h2>Sample dialogues</h2><p>Example exchanges teach the model how this persona tends to respond.</p></div><button class="button" type="button" data-entry-add="dialogue">${escapeHtml(ui("persona_add_dialogue"))}</button></header>
-          <div class="entry-list">${dialogues.map((dialogue, index) => renderPersonaEntry(persona, "dialogue", index, dialogue)).join("")}${personaEntryDrafts.has(personaEntryKey(persona.personaId, "dialogue", "new")) ? renderPersonaEntry(persona, "dialogue", "new", { input: "", output: "" }) : ""}</div>
+        <section class="card" data-persona-id="${persona.personaId}">
+          <header class="card-head"><div><h3>Sample dialogues</h3><p>Example exchanges teach the model how this persona tends to respond.</p></div><button class="button" type="button" data-entry-add="dialogue">${escapeHtml(ui("persona_add_dialogue"))}</button></header>
+          <div class="rows" data-persona-entries>${dialogues.map((dialogue, index) => renderPersonaEntry(persona, "dialogue", index, dialogue)).join("")}${personaEntryDrafts.has(personaEntryKey(persona.personaId, "dialogue", "new")) ? renderPersonaEntry(persona, "dialogue", "new", { input: "", output: "" }) : ""}</div>
         </section>
 
-        <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="context">
-          ${formHeader("Context", "Pinned context note", "Persistent context inserted at the configured depth.")}
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="context">
+          ${personaCardHead("Pinned context note", "Persistent context inserted at the configured depth.")}
           <label class="field">${fieldLabel("Context note", "Persona-specific context inserted into the assembled conversation.")}<textarea name="contextNote" rows="5">${escapeHtml(persona.contextNote || "")}</textarea></label>
           <label class="field">${fieldLabel("Depth", "How far back in the prompt the note is inserted.")}<input name="contextNoteDepth" type="number" min="0" max="100" value="${persona.contextNoteDepth || 0}"></label>
           ${saveActions}
@@ -3513,18 +3550,20 @@
         ${state.overview.personaGuildSettings ? personaSettingsPanel("persona_preset_title", "persona_preset_hint", "data-persona-preset-panel") : ""}
         ${
           persona.isAlter
-            ? `<section class="panel" data-persona-id="${persona.personaId}">
-                <header class="panel-header"><div class="heading"><p class="eyebrow">Danger zone</p><h2>Delete alter persona</h2><p>This removes the server's persona configuration. Memories remain governed by their own ownership and retention rules.</p></div>
+            ? `<section class="card" data-persona-id="${persona.personaId}">
+                <header class="card-head"><div><h3>Delete alter persona</h3><p>This removes the server's persona configuration. Memories remain governed by their own ownership and retention rules.</p></div>
                 </header><button class="button danger hold-button persona-delete-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>
               </section>`
             : ""
         }
-      </div>
-      ${renderPersonaTestChat(persona)}
     </div>`;
   }
 
   function renderPersonaEntry(persona, kind, index, saved) {
+    return `<article class="item" data-entry-kind="${kind}" data-entry-index="${index}" data-persona-id="${persona.personaId}">${renderPersonaEntryContent(persona, kind, index, saved)}</article>`;
+  }
+
+  function renderPersonaEntryContent(persona, kind, index, saved) {
     const key = personaEntryKey(persona.personaId, kind, index);
     const draft = personaEntryDrafts.get(key);
     const value = draft || saved;
@@ -3533,61 +3572,111 @@
       ? `<label class="field"><span class="field-label">${escapeHtml(ui("persona_attribute"))}</span><textarea name="text" rows="2" required>${escapeHtml(value.text)}</textarea></label><label class="toggle"><span class="field-label">${escapeHtml(ui("persona_attribute_public"))}</span><input name="isPublic" type="checkbox" role="switch"${value.isPublic ? " checked" : ""}></label>`
       : `<label class="field"><span class="field-label">${escapeHtml(ui("persona_dialogue_user"))}</span><textarea name="input" rows="3" required>${escapeHtml(value.input)}</textarea></label><label class="field"><span class="field-label">${escapeHtml(persona.nickname)}</span><textarea name="output" rows="3" required>${escapeHtml(value.output)}</textarea></label>`;
     const read = attributes
-      ? `<div class="entry-copy"><p class="read-text">${escapeHtml(saved.text)}</p>${saved.isPublic ? `<span class="entry-visibility">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span>` : ""}</div>`
-      : `<dl class="dialogue-copy"><dt>${escapeHtml(ui("persona_dialogue_user"))}</dt><dd class="read-text" data-read-field="user">${escapeHtml(saved.input)}</dd><dt>${escapeHtml(persona.nickname)}</dt><dd class="read-text" data-read-field="persona">${escapeHtml(saved.output)}</dd></dl>`;
-    return `<article class="inline-entry" data-entry-kind="${kind}" data-entry-index="${index}" data-persona-id="${persona.personaId}">${draft ? `<form class="entry-form" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}">${fields}<div class="actions"><button class="button" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `<div class="entry-read">${read}<div class="entry-actions"><button class="button" type="button" data-entry-edit>${escapeHtml(ui("persona_edit"))}</button><button class="button icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}" data-tooltip="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div></div>`}</article>`;
+      ? `<div class="stack"><p class="clamp">${escapeHtml(saved.text)}</p>${saved.isPublic ? `<span class="chip">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span>` : ""}</div>`
+      : `<dl class="stack"><dt>${escapeHtml(ui("persona_dialogue_user"))}</dt><dd class="clamp" data-read-field="user">${escapeHtml(saved.input)}</dd><dt>${escapeHtml(persona.nickname)}</dt><dd class="clamp" data-read-field="persona">${escapeHtml(saved.output)}</dd></dl>`;
+    return `${draft ? `<form class="stack" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}">${fields}<div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `<div class="row">${read}<div class="item-actions"><button class="button small" type="button" data-entry-edit>${escapeHtml(ui("persona_edit"))}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}" data-tooltip="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div></div>`}`;
+  }
+
+  function personaTint(persona) {
+    const preset = palettes.find(({ id }) => id === persona.nickname.toLowerCase());
+    return preset?.id || "tomori";
+  }
+
+  function personaTintAttribute(persona) {
+    return appearance.personaColors ? ` data-tint="${personaTint(persona)}"` : "";
+  }
+
+  function personaSticker(persona, variant = "") {
+    const avatar = personaAvatarUrl(persona);
+    const initial = persona.nickname.trim().slice(0, 1) || "?";
+    return `<span class="sticker${variant ? ` ${variant}` : ""}" aria-hidden="true">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" data-avatar-fallback="${escapeHtml(initial)}">` : escapeHtml(initial)}</span>`;
   }
 
   function renderPersonaTestChat(persona) {
-    if (state.overview.guild.isDirectMessage) return "";
     const chat = state.personaTestChats[persona.personaId] || [];
-    return `<aside class="panel chat persona-test-panel" data-persona-id="${persona.personaId}">
-        <header class="panel-header"><div class="heading"><p class="eyebrow">Private preview</p><h2>Test ${escapeHtml(persona.nickname)}</h2></div>
-          <button class="button" type="button" data-test-chat-reset="${persona.personaId}"${chat.length ? "" : " disabled"}>Reset</button>
-        </header>
-        <div class="messages test-chat-messages" role="log" aria-live="polite">
-          ${
-            chat.length
-              ? chat
-                  .map((message) => {
-                    const segments =
-                      message.role === "assistant" && message.segments?.length
-                        ? message.segments
-                        : [{ content: message.content, sprite: null }];
-                    return segments
-                      .map(
-                        (segment) => `<article class="bubble${message.role === "user" ? " user" : ""}">
-                        ${
-                          message.role === "user"
-                            ? "<span>You</span>"
-                            : `<div class="row">${personaAvatar(segment.sprite ? { nickname: segment.sprite.name, avatarUrl: segment.sprite.imageUrl } : persona)}<strong>${escapeHtml(segment.sprite?.displayName || persona.nickname)}</strong>${segment.sprite ? `<small>${escapeHtml(segment.sprite.name)}</small>` : ""}</div>`
-                        }
-                        <p>${escapeHtml(segment.content)}</p>
-                      </article>`,
-                      )
-                      .join("");
-                  })
-                  .join("")
-              : `<p class="hint">Start a clean test conversation.</p>`
-          }
-          ${state.personaTestChatBusy ? loadingBar(ui("persona_model_loading")) : ""}
-        </div>
+    const label = escapeHtml(ui("persona_test_open").replace("{name}", () => persona.nickname));
+    return `<aside class="chat-dock${appearance.personaColors ? " tinted" : ""}"${personaTintAttribute(persona)} id="persona-test-chat" data-persona-id="${persona.personaId}" aria-labelledby="persona-test-chat-title"${state.personaChatOpen ? "" : " hidden"}>
+      <header class="chat-head">
+        ${personaSticker(persona)}
+        <div class="who"><h2 id="persona-test-chat-title">${label}</h2><small>${escapeHtml(ui("persona_test_private"))}</small></div>
+        <button class="button small" type="button" data-test-chat-reset="${persona.personaId}"${chat.length ? "" : " disabled"}>${escapeHtml(ui("persona_test_reset"))}</button>
+        <button class="button icon" type="button" data-test-chat-close aria-label="${escapeHtml(ui("persona_test_close"))}">${navigationIcon("x")}</button>
+      </header>
+      <div class="chat-log" role="log" aria-live="polite">
+        ${
+          chat.length
+            ? chat
+                .map((message) => {
+                  if (message.role === "user")
+                    return `<div class="bubble-row me"><p class="speech">${escapeHtml(message.content)}</p></div>`;
+                  const segments = message.segments?.length
+                    ? message.segments
+                    : [{ content: message.content, sprite: null }];
+                  return segments
+                    .map(
+                      ({ content, sprite }) => `<div class="bubble-row">
+              ${personaSticker(sprite ? { nickname: sprite.name, avatarUrl: sprite.imageUrl } : persona, sprite ? "react" : "")}
+              <p class="speech">${escapeHtml(content)}${sprite ? `<span class="meta">${escapeHtml(sprite.displayName || persona.nickname)} · ${escapeHtml(sprite.name)}</span>` : ""}</p>
+            </div>`,
+                    )
+                    .join("");
+                })
+                .join("")
+            : `<p class="hint">${escapeHtml(ui("persona_test_empty"))}</p>`
+        }
+        ${state.personaTestChatBusy ? loadingBar(ui("persona_model_loading")) : ""}
+      </div>
+      <div class="chat-foot">
         <form class="composer" id="persona-test-chat-form" data-persona-id="${persona.personaId}">
-          <label class="sr-only" for="persona-test-input">Test message</label>
-          <textarea id="persona-test-input" name="message" rows="3" maxlength="4000" placeholder="Message ${escapeHtml(persona.nickname)}..." required${state.personaTestChatBusy ? " disabled" : ""}></textarea>
-          <div class="composer-footer"><span class="hint">${escapeHtml(ui("persona_test_configured_model"))}</span><button class="button primary" type="submit"${state.personaTestChatBusy ? " disabled" : ""}>Send</button></div>
+          <label class="sr-only" for="persona-test-input">${escapeHtml(ui("persona_test_message"))}</label>
+          <textarea id="persona-test-input" name="message" rows="3" maxlength="4000" required${state.personaTestChatBusy ? " disabled" : ""}></textarea>
+          <div class="composer-footer"><span class="hint">${escapeHtml(ui("persona_test_configured_model"))}</span><button class="button small primary" data-fx="spark" type="submit"${state.personaTestChatBusy ? " disabled" : ""}>${escapeHtml(ui("persona_test_send"))}</button></div>
         </form>
-      </aside>`;
+      </div>
+    </aside>`;
+  }
+
+  function syncPersonaChat(workspace, persona) {
+    const shell = workspace.closest(".shell");
+    shell.querySelector("#persona-test-chat")?.remove();
+    const visible = persona && state.overview.canManage && !state.overview.guild.isDirectMessage;
+    shell.classList.toggle("chat-open", Boolean(visible && state.personaChatOpen));
+    if (visible && state.personaChatOpen) document.body.dataset.chat = "open";
+    else delete document.body.dataset.chat;
+    if (!visible) return;
+    workspace.insertAdjacentHTML(
+      "beforeend",
+      `<button class="chat-fab${appearance.personaColors ? " tinted" : ""}"${personaTintAttribute(persona)} type="button" aria-expanded="${state.personaChatOpen}" aria-controls="persona-test-chat" data-test-chat-open${state.personaChatOpen ? " hidden" : ""}>${personaSticker(persona)}<span class="fab-label">${escapeHtml(ui("persona_test_open").replace("{name}", () => persona.nickname))}</span></button>`,
+    );
+    workspace.insertAdjacentHTML("afterend", renderPersonaTestChat(persona));
+    window.TomoriFX.enhance(shell.lastElementChild);
+    scrollTestChat();
+  }
+
+  function setPersonaChat(open) {
+    state.personaChatOpen = open;
+    document.querySelector(".app-frame > .shell")?.classList.toggle("chat-open", open);
+    if (open) document.body.dataset.chat = "open";
+    else delete document.body.dataset.chat;
+    const button = document.querySelector("[data-test-chat-open]");
+    const dock = document.querySelector("#persona-test-chat");
+    dock.hidden = !open;
+    button.hidden = open;
+    button.setAttribute("aria-expanded", String(open));
+    if (open) {
+      scrollTestChat();
+      (dock.querySelector("textarea:not(:disabled)") || dock.querySelector("[data-test-chat-close]")).focus({
+        preventScroll: true,
+      });
+    } else button.focus({ preventScroll: true });
   }
 
   function renderPersonaAppearance(persona) {
-    const formHeader = (eyebrow, title, description) =>
-      `<header class="panel-header"><div class="heading"><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p></div></header>`;
-    const saveActions = `<footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></footer>`;
+    const saveActions = cardSaveActions(ui("persona_save"));
 
     return `<div class="stack">
-      <section class="panel" data-persona-id="${persona.personaId}">
-        <header class="panel-header"><div class="heading"><p class="eyebrow">Portrait</p><h2>Persona avatar</h2><p>${persona.isAlter ? "Used by this persona's webhook messages." : "Updates TomoriBot's server-specific Discord avatar."}</p></div></header>
+      <section class="card" data-persona-id="${persona.personaId}">
+        <header class="card-head"><div><h3>Persona avatar</h3><p>${persona.isAlter ? "Used by this persona's webhook messages." : "Updates TomoriBot's server-specific Discord avatar."}</p></div></header>
         ${
           state.overview.guild.isDirectMessage
             ? personaAvatar(persona, "avatar")
@@ -3598,14 +3687,14 @@
         </label><button class="button" type="button" data-persona-avatar-remove="${persona.personaId}">Remove</button></div></div>`
         }
       </section>
-        ${state.overview.personaGuildSettings?.values[persona.personaId] ? `<section class="panel stack" data-persona-reference="${persona.personaId}">${renderPersonaReference(persona.personaId)}</section>` : ""}
-        <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="prompt">
-          ${formHeader("Image generation", "Visual character prompt", "A visual description Tomori can also use when generating images. This is not the persona's main conversation prompt.")}
+        ${state.overview.personaGuildSettings?.values[persona.personaId] ? `<section class="card" data-persona-reference="${persona.personaId}">${renderPersonaReference(persona.personaId)}</section>` : ""}
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
+          ${personaCardHead("Visual character prompt", "A visual description Tomori can also use when generating images. This is not the persona's main conversation prompt.")}
           <label class="field">${fieldLabel("Visual description", "Describe the character's stable visual identity, clothing, features, and other image-generation details.")}<textarea name="personaPrompt" rows="10">${escapeHtml(persona.personaPrompt || "")}</textarea></label>
           ${saveActions}
         </form>
-        <form class="panel" data-persona-id="${persona.personaId}" data-persona-section="appearance">
-          ${formHeader("Image generation", "Appearance tags", "Reusable visual traits added when this persona appears in generated images.")}
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="appearance">
+          ${personaCardHead("Appearance tags", "Reusable visual traits added when this persona appears in generated images.")}
           <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated visual traits reused when generating this persona.")}<input name="physicalAppearanceTags" value="${escapeHtml((persona.physicalAppearanceTags || []).join(", "))}"></label>
           ${saveActions}
         </form>
@@ -3615,8 +3704,8 @@
   function renderPersonaReference(personaId) {
     const saved = state.overview.personaGuildSettings.values[personaId].hasCharacterReference;
     const url = `${BASE}/guilds/${state.guildId}/personas/${personaId}/character-reference?v=${state.avatarRevision}`;
-    return `${dashboardPanelHeading("persona_reference_title", "persona_reference_hint")}
-      ${saved ? `<img class="character-reference-preview" src="${escapeHtml(url)}" alt="${escapeHtml(ui("persona_reference_title"))}">` : ""}
+    return `${personaCardHead(ui("persona_reference_title"), ui("persona_reference_hint"))}
+      ${saved ? `<div class="art-preview"><img src="${escapeHtml(url)}" alt="${escapeHtml(ui("persona_reference_title"))}"></div>` : ""}
       <div class="actions"><button class="button" type="button" data-persona-reference-upload>${escapeHtml(ui("character_reference_upload"))}</button>
       ${saved ? `<button class="button danger" type="button" data-persona-reference-remove aria-haspopup="dialog">${escapeHtml(ui("character_reference_remove"))}</button>` : ""}</div>
       <input type="file" data-persona-reference-file accept="image/*" hidden>`;
@@ -3650,8 +3739,8 @@
   function renderPersonaNaming(persona) {
     const { values, copy, maxLength } = state.overview.personaNaming;
     const preference = values[persona.personaId] || {};
-    return `<form class="panel" data-persona-naming="${persona.personaId}">
-      <header class="panel-header"><div class="heading"><h2>${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.description)}</p></div></header>
+    return `<form class="card" data-fx="track" data-persona-naming="${persona.personaId}">
+      <header class="card-head"><div><h3>${escapeHtml(copy.title)}</h3><p>${escapeHtml(copy.description)}</p></div></header>
       <p class="hint">${escapeHtml(copy.hint)}</p>
       <div class="grid">${["nickname", "prefix", "suffix"]
         .map((key) => {
@@ -3665,8 +3754,72 @@
         </fieldset>`;
         })
         .join("")}</div>
-      <div class="actions"><button class="button" type="submit" name="action" value="reset" formnovalidate>${escapeHtml(copy.reset)}</button><button class="button primary" type="submit">${escapeHtml(copy.save)}</button></div>
+      <div class="actions"><button class="button small" type="button" data-persona-naming-reset>${escapeHtml(copy.reset)}</button></div>
+      ${cardSaveActions(copy.save)}
     </form>`;
+  }
+
+  async function saveNamingOrCategories(namingForm, categoriesForm, reset) {
+    const form = namingForm || categoriesForm;
+    const overview = state.overview;
+    const guildId = state.guildId;
+    const data = namingForm ? overview.personaNaming : overview.settings.stmCategories;
+    const personaId = Number(namingForm?.dataset.personaNaming);
+    const payload = namingForm
+      ? Object.fromEntries(
+          ["nickname", "prefix", "suffix"].map((key) => {
+            const mode = reset ? "inherit" : form.elements[`${key}Mode`].value;
+            return [key, mode === "inherit" ? null : mode === "none" ? "" : form.elements[key].value];
+          }),
+        )
+      : {
+          categories: reset
+            ? []
+            : Array.from({ length: 5 }, (_, index) => ({
+                label: form.elements[`label${index}`].value.trim(),
+                description: form.elements[`description${index}`].value.trim(),
+              })).filter(({ label, description }) => label || description),
+        };
+    try {
+      await withBusyForm(form, async () => {
+        if (reset && !(await confirmAction(data.copy.resetTitle, data.copy.resetDetail))) return;
+        if (categoriesForm && !reset && !(await confirmAction(data.copy.confirm, data.copy.warning))) return;
+        const result = await api(
+          namingForm ? `/guilds/${guildId}/personas/${personaId}/naming` : `/guilds/${guildId}/stm/categories`,
+          { method: "PUT", body: JSON.stringify(payload) },
+        );
+        if (namingForm) {
+          const lineageId = overview.personas.find((persona) => persona.personaId === personaId)?.lineageId;
+          for (const persona of overview.personas.filter((entry) => entry.lineageId === lineageId)) {
+            data.values[persona.personaId] = result.preference;
+          }
+        } else {
+          data.values = result.categories;
+        }
+        completeFormSave(form);
+        if (state.overview === overview && form.isConnected) {
+          const workspace = form.closest("[data-dashboard-view]");
+          const scrollTop = workspace.scrollTop;
+          form.outerHTML = namingForm
+            ? renderPersonaNaming(overview.personas.find((persona) => persona.personaId === personaId))
+            : renderStmCategories();
+          initDraftForms(workspace);
+          enhanceDashboard(workspace);
+          resizeAutoGrowTextareas(document);
+          workspace.scrollTop = scrollTop;
+          workspace
+            .querySelector(
+              namingForm
+                ? "[data-persona-naming] button[type=submit]:not([value=reset])"
+                : "#stm-categories-form button[type=submit]:not([value=reset])",
+            )
+            ?.focus({ preventScroll: true });
+        }
+        toast(data.copy.saved);
+      });
+    } catch (error) {
+      showFormError(form, error);
+    }
   }
 
   function renderStmCategories() {
@@ -3686,29 +3839,77 @@
     </form>`;
   }
 
-  function renderPersonaPicker(personas, selectedId) {
-    return `<dialog id="persona-picker-dialog" class="wide" aria-labelledby="persona-picker-title"><header class="panel-header"><div class="heading"><h2 id="persona-picker-title">${escapeHtml(ui("persona_choose"))}</h2></div><button class="button icon" type="button" data-persona-picker-close aria-label="${escapeHtml(ui("persona_cancel"))}">${navigationIcon("x")}</button></header><div class="stack"><label class="field"><span class="field-label sr-only">${escapeHtml(ui("persona_search"))}</span><input type="search" data-persona-picker-search placeholder="${escapeHtml(ui("persona_search"))}"></label><div class="persona-picker-grid">
-      ${personas.map((entry) => `<button class="persona-choice" type="button" data-persona-search="${escapeHtml(entry.nickname.toLowerCase())}" data-persona-select="${entry.personaId}" aria-pressed="${entry.personaId === selectedId}">${personaAvatar(entry, "avatar")}<span><strong>${escapeHtml(entry.nickname)}</strong><small>${entry.isAlter ? "Alter" : "Main"} / #${entry.lineageId}</small></span></button>`).join("")}
-    </div></div></dialog>`;
+  function renderPersonaPicker(personas, selectedId, actions) {
+    if (!personas.length) return "";
+    return `<dialog id="persona-picker-dialog" class="collection" aria-labelledby="persona-picker-title">
+      <header class="collection-head">
+        <div class="collection-title"><h2 id="persona-picker-title">${escapeHtml(ui("persona_choose"))} <small>${personas.length}</small></h2>
+          <div class="row">${actions}<button class="button icon" type="button" data-persona-picker-close aria-label="${escapeHtml(ui("persona_cancel"))}">${navigationIcon("x")}</button></div></div>
+        <div class="collection-tools"><label class="field"><span class="sr-only">${escapeHtml(ui("persona_search"))}</span><input type="search" data-persona-picker-search placeholder="${escapeHtml(ui("persona_search"))}"></label></div>
+      </header>
+      <div class="collection-body"><div class="deck">${personas
+        .map(
+          (entry) =>
+            `<button class="deck-card" type="button" data-persona-search="${escapeHtml([entry.nickname, ...(entry.triggerWords || [])].join(" ").toLowerCase())}" data-persona-select="${entry.personaId}" aria-current="${entry.personaId === selectedId}">${personaSticker(entry)}<strong>${escapeHtml(entry.nickname)}</strong><small>${escapeHtml(ui(entry.isAlter ? "persona_alter_label" : "persona_main_label"))} / #${entry.lineageId}</small></button>`,
+        )
+        .join("")}</div></div>
+    </dialog>`;
+  }
+
+  function renderPersonaBanner(persona, personas, canAdd) {
+    const main = personas.find((entry) => !entry.isAlter);
+    const quickPicks = [...new Set([main, persona, ...personas].filter(Boolean))].slice(0, 3);
+    return `<section class="banner${appearance.personaColors ? " tinted" : ""}"${personaTintAttribute(persona)} aria-labelledby="persona-name">
+      <div class="banner-info">
+        <div class="stack">
+          <p class="crumb">${escapeHtml(ui("personas_title"))} <span class="kind">${escapeHtml(ui(persona.isAlter ? "persona_alter_label" : "persona_main_label"))}</span></p>
+          <h1 id="persona-name" data-fx="split">${escapeHtml(persona.nickname)}</h1>
+        </div>
+        <div class="quickbar">
+          <div class="quick" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui("persona_choose"))}">
+            ${quickPicks.map((entry) => `<button type="button" role="radio" aria-checked="${entry === persona}" aria-label="${escapeHtml(entry.nickname)}" data-persona-select="${entry.personaId}" tabindex="${entry === persona ? 0 : -1}">${personaSticker(entry)}</button>`).join("")}
+          </div>
+          ${canAdd ? `<button class="quick-add" type="button" aria-label="${escapeHtml(ui("persona_create"))}" data-persona-create-open><span class="sticker dashed">${navigationIcon("plus")}</span></button>` : ""}
+          <button class="button small" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_all").replace("{count}", String(personas.length)))}</button>
+        </div>
+      </div>
+      <div class="banner-art">${personaSticker(persona, "emblem")}</div>
+      ${
+        state.overview.canManage
+          ? `<div class="banner-menu">
+        <button class="button icon" type="button" popovertarget="persona-actions-menu" aria-label="${escapeHtml(ui("persona_actions"))}">${navigationIcon("ellipsis")}</button>
+        <div id="persona-actions-menu" class="action-menu" popover aria-label="${escapeHtml(ui("persona_actions"))}">
+          <button class="button" type="button" data-persona-export-format="png">${navigationIcon("download")}${escapeHtml(ui("persona_export_png"))}</button>
+          <button class="button" type="button" data-persona-export-format="json">${navigationIcon("download")}${escapeHtml(ui("persona_export_json"))}</button>
+          ${persona.isAlter ? "" : `<hr><button class="button" type="button" data-main-persona-change aria-haspopup="dialog">${escapeHtml(ui("persona_main_change"))}</button>`}
+        </div>
+      </div>`
+          : ""
+      }
+    </section>`;
+  }
+
+  function removeDockMenu(root) {
+    const menu = root.querySelector(".dock .more-pill")?.getAttribute("popovertarget");
+    if (menu) document.getElementById(menu)?.remove();
   }
 
   function renderPersonaWorkspace(workspace) {
+    removeDockMenu(workspace);
     const personas = (state.overview.personas || []).filter((persona) => persona.lineageId !== 0);
-    const personaActions =
-      state.overview.canManage && !state.overview.guild.isDirectMessage
-        ? `<button class="button secondary" type="button" data-persona-import-open>Import</button>
-         <button class="button primary" type="button" data-persona-create-open>New persona</button>`
-        : "";
+    const canAdd = state.overview.canManage && !state.overview.guild.isDirectMessage;
+    const personaActions = canAdd
+      ? `<button class="button small" type="button" data-persona-import-open>${escapeHtml(ui("persona_import_action"))}</button><button class="button small primary" type="button" data-persona-create-open>${escapeHtml(ui("persona_create"))}</button>`
+      : "";
     if (!personas.length) {
-      workspace.innerHTML = `${pageHeader("Persona workspace", "Personas", "Create or import an identity for this server.", personaActions)}
-        <div class="empty"><strong>No personas are available in this server.</strong></div>`;
+      workspace.innerHTML = `<section class="banner compact"><div class="banner-info"><h1>${escapeHtml(ui("personas_title"))}</h1><p class="banner-text">${escapeHtml(ui("persona_none"))}</p><div class="actions">${personaActions}</div></div></section>`;
+      syncPersonaChat(workspace, null);
       return;
     }
     if (!personas.some((persona) => persona.personaId === state.personaId)) {
       state.personaId = personas[0].personaId;
     }
     const persona = personas.find((entry) => entry.personaId === state.personaId) || personas[0];
-    const avatarUrl = personaAvatarUrl(persona);
     const knowledgeTabs = personaKnowledgeTabs();
     const isKnowledge = (panel) => knowledgeTabs.some(([key]) => key === panel);
     const primaryTabs = [
@@ -3732,8 +3933,8 @@
     const knowledgeActive = isKnowledge(panel);
     if (knowledgeActive) state.personaKnowledgePanel = panel;
     const primaryPanel = knowledgeActive ? "knowledge" : panel;
-    const renderTab = (key, label, selected) =>
-      `<button type="button" id="persona-tab-${key}" role="tab" aria-selected="${key === selected}"${key === selected ? ` aria-controls="persona-content-${key}"` : ""} data-persona-panel="${key}">${escapeHtml(label)}</button>`;
+    const renderTab = (key, label, selected, icon) =>
+      `<button type="button" id="persona-tab-${key}" role="tab" aria-selected="${key === selected}" tabindex="${key === selected ? 0 : -1}"${key === selected ? ` aria-controls="persona-content-${key}"` : ""} data-persona-panel="${key}">${icon ? navigationIcon(icon) : ""}<span>${escapeHtml(label)}</span></button>`;
     const memoryPanel = panel === "personal" || panel === "server";
     if (memoryPanel) {
       state.memoryKind = panel === "server" ? "server" : "personal";
@@ -3742,14 +3943,14 @@
     let body;
     switch (panel) {
       case "channels":
-        body = '<section class="panel stack" id="persona-channel-workspace"></section>';
+        body = '<section id="persona-channel-workspace"></section>';
         break;
       case "lorebook":
         body = '<div id="lorebook-workspace"></div>';
         break;
       case "conditioning":
-        body = `<section class="panel stack" data-persona-conditioning>
-          ${dashboardPanelHeading("persona_conditioning_title", "persona_conditioning_hint", refreshButton("conditioning", ui("persona_conditioning_title")))}
+        body = `<section class="card" data-persona-conditioning>
+          ${personaCardHead(ui("persona_conditioning_title"), ui("persona_conditioning_hint"), refreshButton("conditioning", ui("persona_conditioning_title")))}
           <div data-conditioning-entries></div>
         </section>`;
         break;
@@ -3766,54 +3967,27 @@
         body = personaSettingsPanel("persona_voice_title", "persona_voice_hint", "data-persona-voice-panel", "voice");
         break;
       case "sprites":
-        body = `<div class="${state.overview.guild.isDirectMessage ? "stack" : "workspace"}"><section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>${renderPersonaTestChat(persona)}</div>`;
+        body = `<section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>`;
         break;
       default:
         body = renderMemoryCollection({ personal: panel === "personal", persona });
     }
-    const content = `<div class="persona-panel-content" id="persona-content-${panel}" role="tabpanel" aria-labelledby="persona-tab-${panel}">${body}</div>`;
-
+    const icons = { knowledge: "brain", settings: "sliders-horizontal", voice: "mic", channels: "radio" };
+    const content = `<div id="persona-content-${panel}" data-persona-content role="tabpanel" aria-labelledby="persona-tab-${panel}">${body}</div>`;
+    const knowledgeControl = `<div class="toolbar"><nav class="segmented" data-fx="indicator" role="tablist" aria-label="${escapeHtml(ui("persona_knowledge"))}">${knowledgeTabs.map(([key, label]) => renderTab(key, ui(label), panel)).join("")}</nav></div>`;
     workspace.innerHTML = `
-      ${pageHeader(
-        "Persona workspace",
-        "Personas",
-        "Choose an identity, then work with the memories and settings that belong to its lineage.",
-        personaActions,
-      )}
-      ${renderPersonaPicker(personas, persona.personaId)}
-      ${state.overview.guild.isDirectMessage ? `<p class="hint">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
-      <section class="persona-focus" data-glow>
-        ${avatarUrl ? `<div class="persona-atmosphere" aria-hidden="true"><img src="${escapeHtml(avatarUrl)}" alt=""></div>` : ""}
-        <div class="persona-identity"><p class="eyebrow">${persona.isAlter ? "Alter persona" : "Main persona"}</p><h2>${escapeHtml(persona.nickname)}</h2>
-          <div class="persona-identity-actions">
-            <button class="button" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_choose"))}${navigationIcon("arrow-up-down")}</button>
-            ${
-              state.overview.canManage
-                ? `<button class="button" type="button" popovertarget="persona-actions-menu">${navigationIcon("ellipsis")}${escapeHtml(ui("persona_actions"))}</button>
-                <div id="persona-actions-menu" class="action-menu" popover aria-label="${escapeHtml(ui("persona_actions"))}">
-                  <button class="button" type="button" data-persona-export-format="png">${navigationIcon("download")}${escapeHtml(ui("persona_export_png"))}</button>
-                  <button class="button" type="button" data-persona-export-format="json">${navigationIcon("download")}${escapeHtml(ui("persona_export_json"))}</button>
-                  ${persona.isAlter ? "" : `<hr><button class="button" type="button" data-main-persona-change aria-haspopup="dialog">${escapeHtml(ui("persona_main_change"))}</button>`}
-                </div>`
-                : ""
-            }
-          </div>
-        </div>
-        <div class="persona-art">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(persona.nickname)}" data-avatar-fallback="${escapeHtml(persona.nickname.slice(0, 1))}">` : personaAvatar(persona)}</div>
-      </section>
-      <nav class="tabs tabs-parent${knowledgeActive ? " tabs-joined" : ""}" aria-label="${escapeHtml(persona.nickname)} workspace" role="tablist">
-        ${primaryTabs.map(([key, label]) => renderTab(key, label, primaryPanel)).join("")}
+      ${renderPersonaBanner(persona, personas, canAdd)}
+      ${renderPersonaPicker(personas, persona.personaId, personaActions)}
+      ${state.overview.guild.isDirectMessage ? `<p class="notice">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
+      <nav class="dock" data-fx="indicator" data-overflow aria-label="${escapeHtml(ui("personas_title"))}" role="tablist">
+        ${primaryTabs.map(([key, label]) => renderTab(key, label, primaryPanel, icons[key] || navigationIcons[key])).join("")}
       </nav>
       ${
         knowledgeActive
-          ? `<div class="persona-knowledge-panel" id="persona-content-knowledge" role="tabpanel" aria-labelledby="persona-tab-knowledge">
-        <nav class="tabs tabs-child" aria-label="${escapeHtml(ui("persona_knowledge"))}" role="tablist">
-          ${knowledgeTabs.map(([key, label]) => renderTab(key, ui(label), panel)).join("")}
-        </nav>
-        ${content}
-      </div>`
-          : content
+          ? `<section class="stage" id="persona-content-knowledge" role="tabpanel" aria-labelledby="persona-tab-knowledge">${knowledgeControl}${content}</section>`
+          : `<section class="stage">${content}</section>`
       }`;
+    syncPersonaChat(workspace, persona);
 
     if (panel === "channels") {
       renderPersonaChannels(workspace.querySelector("#persona-channel-workspace"), persona);
@@ -3862,7 +4036,7 @@
     try {
       const data = await api(`/guilds/${state.guildId}/channel-settings`);
       if (!host.isConnected) return;
-      host.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_channels"))}</h2><p>${escapeHtml(ui("persona_channels_hint"))}</p></div></header><form class="stack">${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p role="alert" hidden></p><footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("channel_apply"))}</button></footer></form>`;
+      host.innerHTML = `<form class="card" data-fx="track">${personaCardHead(ui("persona_channels"), ui("persona_channels_hint"))}${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p role="alert" hidden></p>${cardSaveActions(ui("channel_apply"))}</form>`;
       const form = host.querySelector("form");
       form.querySelector('[role="alert"]').className = "notice error";
       const selected = () => [...form.querySelectorAll('[name="personaChannels"]:checked')].map((input) => input.value);
@@ -3873,6 +4047,7 @@
         form.querySelector('[role="alert"]').textContent = ui("persona_channel_required");
       };
       form.addEventListener("change", validate);
+      form.addEventListener("dashboard:restore", validate);
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -3891,7 +4066,7 @@
       validate();
       enhanceDashboard(host);
     } catch (error) {
-      showFormError(host, error);
+      host.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
     }
   }
 
@@ -4028,10 +4203,10 @@
             `<option value="${option.id}"${option.id === data.selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`,
         )
         .join("");
-      target.innerHTML = `<form class="panel" data-persona-text-model="${personaId}">
-        <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_model_title"))}</h2><p>${escapeHtml(ui("persona_model_hint"))}</p></div></header>
+      target.innerHTML = `<form class="card" data-fx="track" data-persona-text-model="${personaId}">
+        <header class="card-head"><div><h3>${escapeHtml(ui("persona_model_title"))}</h3><p>${escapeHtml(ui("persona_model_hint"))}</p></div></header>
         <label class="field"><span class="field-label">${escapeHtml(ui("persona_model_label"))}</span><select name="modelId"><option value=""${data.selected === null ? " selected" : ""}>${escapeHtml(ui("persona_model_inherit"))}</option>${unavailable}${options}</select></label>
-        <footer class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("persona_model_save"))}</button></footer>
+        ${cardSaveActions(ui("persona_model_save"))}
       </form>`;
       enhanceDashboard(target);
       focusSearchDestination();
@@ -4074,6 +4249,36 @@
     input.after(error);
   }
 
+  function renderSpriteItem(personaId, sprite, limits) {
+    const draft = personaEntryDrafts.get(personaEntryKey(personaId, "sprite", sprite?.key || "new"));
+    if (!draft) {
+      if (!sprite) return "";
+      return `<div class="stack">
+        <button class="sticker-tile" type="button" data-sprite-edit>${personaSticker({ nickname: sprite.name, avatarUrl: sprite.imageUrl })}<strong>${escapeHtml(sprite.name)}</strong><small>${escapeHtml(sprite.instructions || "")}</small></button>
+        <div class="actions"><button class="button small danger hold-button" type="button" data-hold data-sprite-remove data-persona-id="${personaId}" data-sprite-key="${escapeHtml(sprite.key)}" data-confirm-title="${escapeHtml(ui("sprite_remove_title"))}" data-confirm-description="${escapeHtml(ui("sprite_remove_detail"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div>
+      </div>`;
+    }
+    const image = draft.preview || sprite?.imageUrl;
+    return `<form class="compose" data-sprite-form data-edit-baseline="${escapeHtml(JSON.stringify({ name: sprite?.name, instructions: sprite?.instructions, identity: sprite?.identity }))}"${draft.file ? " data-edit-file" : ""} novalidate data-persona-id="${personaId}"${sprite ? ` data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
+      ${image ? `<div class="sticker"><img src="${escapeHtml(image)}" alt="${escapeHtml(draft.name || "")}" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></div>` : ""}
+      <label class="field" data-upload-zone>${fieldLabel(ui("sprite_file"))}<input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif"></label>
+      <label class="field">${fieldLabel(ui("sprite_name"), ui("sprite_name_hint"))}<input name="name" maxlength="${limits.name}" value="${escapeHtml(draft.name || "")}" required></label>
+      <label class="field">${fieldLabel(ui("sprite_instructions"), ui("sprite_instructions_hint"))}<textarea name="instructions" maxlength="${limits.instructions}" rows="3">${escapeHtml(draft.instructions || "")}</textarea></label>
+      <label class="toggle"><span class="field-label">${escapeHtml(ui("sprite_identity"))}<small>${escapeHtml(ui("sprite_identity_hint"))}</small></span><input type="checkbox" role="switch" name="identity"${draft.identity ? " checked" : ""}></label>
+      <div class="actions"><button class="button small" type="button" data-sprite-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
+    </form>`;
+  }
+
+  function updateSpriteItem(root, personaId, spriteKey) {
+    const sprite = root._sprites.find((entry) => entry.key === spriteKey);
+    const host = root.querySelector(
+      sprite ? `[data-sprite-item="${CSS.escape(sprite.key)}"]` : "[data-sprite-new-host]",
+    );
+    window.TomoriFX.swap(host, renderSpriteItem(personaId, sprite, root._spriteLimits));
+    enhanceDashboard(host);
+    return host;
+  }
+
   async function loadSprites(personaId) {
     const version = ++spriteLoadVersion;
     const guildId = state.guildId;
@@ -4087,34 +4292,19 @@
       const data = await api(`/guilds/${guildId}/personas/${personaId}/sprites`);
       if (!current()) return;
       const root = document.querySelector("#sprite-workspace");
-      const editor = (sprite) => {
-        const key = personaEntryKey(personaId, "sprite", sprite?.key || "new");
-        const draft = personaEntryDrafts.get(key);
-        const value = draft || sprite || {};
-        const image = draft?.preview || sprite?.imageUrl;
-        return `<form class="sprite-card" data-sprite-form data-edit-baseline="${escapeHtml(JSON.stringify({ name: sprite?.name, instructions: sprite?.instructions, identity: sprite?.identity }))}"${draft?.file ? " data-edit-file" : ""} novalidate data-persona-id="${personaId}" ${sprite ? `data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
-          <div class="sprite-image" ${draft ? "data-upload-zone" : ""}>${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(value.name || "")}" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span>` : ""}${draft ? `<label class="media-upload sprite-image-upload"><span class="media-overlay">${escapeHtml(ui("sprite_file"))}</span><input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif" aria-label="${escapeHtml(ui("sprite_file"))}"></label>` : ""}</div>
-          ${
-            draft
-              ? `<div class="entry-form sprite-form"><label class="field">${fieldLabel(ui("sprite_name"), ui("sprite_name_hint"))}<input name="name" maxlength="${data.limits.name}" value="${escapeHtml(value.name || "")}" required></label>
-          <label class="field">${fieldLabel(ui("sprite_instructions"), ui("sprite_instructions_hint"))}<textarea name="instructions" maxlength="${data.limits.instructions}" rows="3">${escapeHtml(value.instructions || "")}</textarea></label>
-          <label class="toggle"><span class="field-label">${escapeHtml(ui("sprite_identity"))}<small>${escapeHtml(ui("sprite_identity_hint"))}</small></span><input type="checkbox" role="switch" name="identity" ${value.identity ? "checked" : ""}></label>
-          <div class="sprite-actions"><button class="button" type="button" data-sprite-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></div>`
-              : `<div class="sprite-copy"><h3>${escapeHtml(sprite.name)}</h3><p class="hint read-text">${escapeHtml(sprite.instructions || "")}</p></div><div class="sprite-actions"><button class="button" type="button" data-sprite-edit>${escapeHtml(ui("persona_edit"))}</button><button class="button danger hold-button" type="button" data-hold data-sprite-remove data-confirm-title="${escapeHtml(ui("sprite_remove_title"))}" data-confirm-description="${escapeHtml(ui("sprite_remove_detail"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div>`
-          }
-        </form>`;
-      };
-      let panel = root.querySelector(":scope > section.panel");
+      let panel = root.querySelector(":scope > .card");
       if (!panel) {
         panel = document.createElement("section");
-        panel.className = "panel";
+        panel.className = "card";
         root.replaceChildren(panel);
       }
-      panel.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("sprites"))} <small>${data.sprites.length} / ${data.limits.count}</small></h2><p>${escapeHtml(ui("sprites_hint"))}</p></div><div class="actions"><button class="button" type="button" popovertarget="sprite-actions">${navigationIcon("ellipsis")}${escapeHtml(ui("sprite_actions"))}</button><div id="sprite-actions" class="action-menu" popover aria-label="${escapeHtml(ui("sprite_actions"))}"><button class="button" type="button" data-sprite-new>${escapeHtml(ui("sprite_add"))}</button><button type="button" class="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button type="button" class="button" data-sprite-export ${data.sprites.length ? "" : "disabled"}>${escapeHtml(ui("sprite_export"))}</button></div><input type="file" accept=".zip,application/zip" data-sprite-archive hidden></div></header>
+      panel.innerHTML = `<header class="card-head"><div><h3>${escapeHtml(ui("sprites"))} <small>${data.sprites.length} / ${data.limits.count}</small></h3><p class="hint">${escapeHtml(ui("sprites_hint"))}</p></div><div class="actions"><button class="button" type="button" popovertarget="sprite-actions">${navigationIcon("ellipsis")}${escapeHtml(ui("sprite_actions"))}</button><div id="sprite-actions" class="action-menu" popover aria-label="${escapeHtml(ui("sprite_actions"))}"><button class="button" type="button" data-sprite-new>${escapeHtml(ui("sprite_add"))}</button><button type="button" class="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button type="button" class="button" data-sprite-export ${data.sprites.length ? "" : "disabled"}>${escapeHtml(ui("sprite_export"))}</button></div><input type="file" accept=".zip,application/zip" data-sprite-archive hidden></div></header>
         ${data.inherited ? `<p class="hint">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
         ${data.sprites.length ? "" : `<p class="hint">${escapeHtml(ui("sprite_empty"))}</p>`}
-        <div class="entry-list sprite-grid">${data.sprites.map(editor).join("")}${personaEntryDrafts.has(personaEntryKey(personaId, "sprite", "new")) ? editor(null) : ""}</div>`;
+        <div data-sprite-new-host></div><div class="sticker-grid">${data.sprites.map((sprite) => `<div data-sprite-item="${escapeHtml(sprite.key)}">${renderSpriteItem(personaId, sprite, data.limits)}</div>`).join("")}</div>`;
       root._sprites = data.sprites;
+      root._spriteLimits = data.limits;
+      if (personaEntryDrafts.has(personaEntryKey(personaId, "sprite", "new"))) updateSpriteItem(root, personaId, "new");
       enhanceDashboard(root);
     } catch (error) {
       if (!current()) return;
@@ -4157,6 +4347,17 @@
           : `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(id)}" checked></label>`,
       )
       .join("");
+    const collection = state.view === "personas" && !single;
+    if (collection) {
+      const rows = [...groups.values()]
+        .map(
+          (group) =>
+            `<button class="channel-group" type="button" data-channel-group aria-expanded="true" >${navigationIcon("chevron-down")}${escapeHtml(group.name)}<span class="n">${group.channels.filter((channel) => selected.has(String(channel.id))).length} / ${group.channels.length}</span></button>
+        <div>${group.channels.map((channel) => `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span><input type="checkbox" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}></label>`).join("")}</div>`,
+        )
+        .join("");
+      return `<div class="stack" data-channel-selector><label class="field">${fieldLabel(ui("channel_search"))}<input type="search" data-channel-filter></label><div class="actions"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div><div class="channels">${preserved}${rows}<p data-channel-empty class="hint"${rows ? " hidden" : ""}>${escapeHtml(ui("channel_empty"))}</p></div></div>`;
+    }
     const rows =
       preserved +
       [...groups.values()]
@@ -4724,6 +4925,10 @@
       selector.querySelectorAll("[data-channel-search]").forEach((row) => {
         row.hidden = !row.dataset.channelSearch.includes(query);
       });
+      selector.querySelectorAll("[data-channel-group]").forEach((heading) => {
+        heading.hidden = !heading.nextElementSibling.querySelector("[data-channel-search]:not([hidden])");
+        heading.nextElementSibling.hidden = !query && heading.getAttribute("aria-expanded") === "false";
+      });
       selector.querySelectorAll(".channel-category").forEach((heading) => {
         let row = heading.nextElementSibling;
         let visible = false;
@@ -4746,6 +4951,12 @@
       renderChannelSettings(tab.closest("[data-dashboard-view]"));
       return;
     }
+    const category = event.target.closest("[data-channel-group]");
+    if (category) {
+      const expanded = category.getAttribute("aria-expanded") === "true";
+      category.setAttribute("aria-expanded", String(!expanded));
+      category.nextElementSibling.hidden = expanded;
+    }
     const button = event.target.closest("[data-channel-select]");
     if (button) {
       const selector = button.closest("[data-channel-selector]");
@@ -4753,8 +4964,16 @@
         input.checked = button.dataset.channelSelect === "all";
       });
       selector.dispatchEvent(new Event("change", { bubbles: true }));
+      updateChannelCounts(selector);
     }
   });
+
+  function updateChannelCounts(selector) {
+    selector?.querySelectorAll("[data-channel-group]").forEach((heading) => {
+      const inputs = [...heading.nextElementSibling.querySelectorAll("input")];
+      heading.querySelector(".n").textContent = `${inputs.filter((input) => input.checked).length} / ${inputs.length}`;
+    });
+  }
 
   function renderSettings(workspace) {
     if (!state.overview.settings) {
@@ -5896,6 +6115,7 @@
     state.personaPanel = "personal";
     state.personaKnowledgePanel = "personal";
     state.personaTestChats = {};
+    state.personaChatOpen = false;
     state.personaTestChatBusy = false;
     renderBootScreen();
     try {
@@ -6593,16 +6813,18 @@
 
   function scrollTestChat() {
     requestAnimationFrame(() => {
-      const messages = document.querySelector(".test-chat-messages");
+      const messages = document.querySelector("#persona-test-chat .chat-log");
       if (messages) messages.scrollTop = messages.scrollHeight;
     });
   }
 
   function updatePersonaTestChat(personaId) {
-    const panel = document.querySelector(`.persona-test-panel[data-persona-id="${personaId}"]`);
+    const panel = document.querySelector(`#persona-test-chat[data-persona-id="${personaId}"]`);
     const persona = state.overview?.personas.find((entry) => entry.personaId === personaId);
     if (panel && persona) {
-      panel.outerHTML = renderPersonaTestChat(persona);
+      const template = document.createElement("template");
+      template.innerHTML = renderPersonaTestChat(persona);
+      window.TomoriFX.swap(panel, template.content.firstElementChild.innerHTML);
       scrollTestChat();
     }
   }
@@ -6652,6 +6874,10 @@
       }
       if (!(image instanceof HTMLImageElement) || !image.dataset.avatarFallback) return;
       const fallback = document.createElement("span");
+      if (image.parentElement.classList.contains("sticker")) {
+        image.replaceWith(document.createTextNode(image.dataset.avatarFallback));
+        return;
+      }
       fallback.className = `${image.className} persona-avatar-fallback`;
       fallback.textContent = image.dataset.avatarFallback;
       image.replaceWith(fallback);
@@ -6677,6 +6903,34 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       openSettingsSearch();
+      return;
+    }
+    const picker = event.target.closest?.("#persona-picker-dialog");
+    if (picker && event.key === "/" && event.target.type !== "search") {
+      event.preventDefault();
+      picker.querySelector("[data-persona-picker-search]").focus();
+      return;
+    }
+    const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
+    const current = event.target.closest?.(
+      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section]",
+    );
+    if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
+      const index = items.indexOf(current);
+      const next =
+        items[
+          event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? items.length - 1
+              : (index + (event.key === "ArrowRight" ? 1 : -1) + items.length) % items.length
+        ];
+      if (next) {
+        event.preventDefault();
+        if (group.matches(".quick, .dock, .segmented")) next.click();
+        else next.focus();
+      }
       return;
     }
     const historyPoint = event.target.closest?.("[data-history-index]");
@@ -6726,6 +6980,7 @@
       return;
     }
     captureDraft(event.target.closest(editForms));
+    updateChannelCounts(event.target.closest("[data-channel-selector]"));
     if (event.target.matches("[data-persona-picker-search]")) {
       const query = event.target.value.trim().toLowerCase();
       document.querySelectorAll("[data-persona-search]").forEach((choice) => {
@@ -6887,8 +7142,8 @@
     const lorebookRetry = event.target.closest("[data-lorebook-retry]");
     if (lorebookRetry) return loadLorebooks(Number(lorebookRetry.dataset.lorebookRetry));
     if (event.target.closest("[data-lorebook-back]")) {
-      document.querySelector("#lorebook-workspace .mailbox").dataset.view = "list";
-      document.querySelector('.mail-item[aria-current="true"]')?.focus({ preventScroll: true });
+      document.querySelector("#lorebook-workspace [data-lorebook-browser]").dataset.view = "list";
+      document.querySelector('[data-lorebook-search][aria-current="true"]')?.focus({ preventScroll: true });
       return;
     }
     const renameBook = event.target.closest("[data-lorebook-rename], [data-lorebook-rename-cancel]");
@@ -6911,7 +7166,7 @@
     if (bookChoice) {
       bookChoice.closest("dialog")?.close();
       state.lorebookBookId = Number(bookChoice.dataset.lorebookSelect);
-      document.querySelector("#lorebook-workspace .mailbox").dataset.view = "list";
+      document.querySelector("#lorebook-workspace [data-lorebook-browser]").dataset.view = "list";
       await loadLorebooks(0);
       const picker = document.querySelector("[data-lorebook-library-trigger]");
       const focus = picker?.getClientRects().length
@@ -6922,12 +7177,14 @@
     }
     const entryEditor = event.target.closest("[data-lorebook-edit-entry]");
     if (entryEditor) {
-      const sectionChange = Boolean(entryEditor.closest(".tabs"));
-      openLorebookEditor(
-        Number(entryEditor.dataset.lorebookEditEntry),
-        entryEditor.dataset.lorebookEditorSection,
-        !sectionChange,
-      );
+      const pending = document.querySelector("#lorebook-editor-host [data-changed]");
+      const entryId = Number(entryEditor.dataset.lorebookEditEntry);
+      if (pending && state.view === "personas" && Number(pending.dataset.entryId) !== entryId) {
+        if (!(await confirmAction(ui("discard_title"), ui("leave_detail")))) return;
+        drafts.delete(pending.dataset.draftKey);
+      }
+      const sectionChange = entryEditor.matches('[role="tab"]');
+      openLorebookEditor(entryId, entryEditor.dataset.lorebookEditorSection, !sectionChange);
       if (sectionChange) {
         const host = document.querySelector("#lorebook-editor-host");
         const picker = host.querySelector(".tab-selection");
@@ -6999,7 +7256,8 @@
     const spriteAction = event.target.closest("[data-sprite-edit], [data-sprite-cancel], [data-sprite-new]");
     if (spriteAction) {
       const form = spriteAction.closest("[data-sprite-form]");
-      const spriteKey = form?.dataset.spriteKey || "new";
+      const spriteKey =
+        form?.dataset.spriteKey || spriteAction.closest("[data-sprite-item]")?.dataset.spriteItem || "new";
       const key = personaEntryKey(state.personaId, "sprite", spriteKey);
       if (spriteAction.hasAttribute("data-sprite-cancel")) {
         const draft = personaEntryDrafts.get(key);
@@ -7009,7 +7267,11 @@
         const sprite = document.querySelector("#sprite-workspace")._sprites.find((item) => item.key === spriteKey);
         personaEntryDrafts.set(key, sprite ? { ...sprite } : { name: "", instructions: "", identity: false });
       }
-      await loadSprites(state.personaId);
+      const host = updateSpriteItem(document.querySelector("#sprite-workspace"), state.personaId, spriteKey);
+      (
+        host.querySelector('[name="name"], [data-sprite-edit]') ||
+        document.querySelector('[popovertarget="sprite-actions"]')
+      )?.focus({ preventScroll: true });
       return;
     }
     if (event.target.closest("[data-sprite-import]")) {
@@ -7019,17 +7281,19 @@
     const spriteRemove = event.target.closest("[data-sprite-remove]");
     if (spriteRemove) {
       if (event.type !== "holdcomplete") return;
-      const form = spriteRemove.closest("[data-sprite-form]");
-      const personaId = Number(form.dataset.personaId);
-      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites?key=${encodeURIComponent(form.dataset.spriteKey)}`;
+      const personaId = Number(spriteRemove.dataset.personaId);
+      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites?key=${encodeURIComponent(spriteRemove.dataset.spriteKey)}`;
+      spriteRemove.disabled = true;
       try {
-        await withBusyForm(form, async () => {
+        await withBusyForm(spriteRemove, async () => {
           const result = await api(path, { method: "DELETE" });
           await refreshPersonas(personaId, result.message);
         });
       } catch (error) {
         spriteRemove.dispatchEvent(new Event("holdreset"));
         toast(error.message, "error");
+      } finally {
+        spriteRemove.disabled = false;
       }
       return;
     }
@@ -7090,12 +7354,18 @@
       }
       return;
     }
+    const namingReset = event.target.closest("[data-persona-naming-reset]");
+    if (namingReset) {
+      await saveNamingOrCategories(namingReset.form, null, true);
+      return;
+    }
     const discard = event.target.closest("[data-discard-draft]");
     if (discard) {
       const form = discard.form;
       const panel = discard.closest("[data-channel-panel]") || form;
       if (await confirmAction(ui("discard_title"), ui("discard_detail"))) {
         restoreSnapshot(panel, formBaselines.get(form));
+        if (form.matches("#persona-channel-workspace form")) form.dispatchEvent(new Event("change"));
         if (form.matches("[data-channel-settings]")) form.dispatchEvent(new Event("change", { bubbles: true }));
         captureDraft(form);
         enhanceDashboard(form);
@@ -7222,10 +7492,12 @@
       return;
     }
     if (event.target.closest("[data-persona-create-open]")) {
+      document.querySelector("#persona-picker-dialog[open]")?.close();
       document.querySelector("#persona-create-dialog")?.showModal();
       return;
     }
     if (event.target.closest("[data-persona-import-open]")) {
+      document.querySelector("#persona-picker-dialog[open]")?.close();
       document.querySelector("#persona-import-dialog")?.showModal();
       return;
     }
@@ -7264,6 +7536,10 @@
     if (personaDelete) {
       if (event.type !== "holdcomplete") return;
       await removePersona(Number(personaDelete.dataset.personaDelete));
+      return;
+    }
+    if (event.target.closest("[data-test-chat-open], [data-test-chat-close]")) {
+      setPersonaChat(Boolean(event.target.closest("[data-test-chat-open]")));
       return;
     }
     const chatReset = event.target.closest("[data-test-chat-reset]");
@@ -7323,12 +7599,12 @@
         );
       if (entry) {
         if (index === "new" && !personaEntryDrafts.has(key)) entry.remove();
-        else entry.outerHTML = renderPersonaEntry(persona, kind, index, collection[Number(index)]);
+        else window.TomoriFX.swap(entry, renderPersonaEntryContent(persona, kind, index, collection[Number(index)]));
       } else if (!document.querySelector(`[data-entry-kind="${kind}"][data-entry-index="new"]`)) {
         entryAdd
           .closest("section")
-          .querySelector(".entry-list")
-          .insertAdjacentHTML("beforeend", renderPersonaEntry(persona, kind, index, {}));
+          .querySelector("[data-persona-entries]")
+          .insertAdjacentHTML("afterbegin", renderPersonaEntry(persona, kind, index, {}));
       }
       const editor = document.querySelector(
         `[data-entry-kind="${kind}"][data-entry-index="${index}"] [data-persona-entry-form]`,
@@ -7344,8 +7620,9 @@
       state.view = "personas";
       state.personaId = Number(personaSelect.dataset.personaSelect);
       state.memoryData = null;
+      const fromQuickBar = Boolean(personaSelect.closest(".quick"));
       renderView();
-      focusNavigation("[data-persona-picker-open]");
+      focusNavigation(fromQuickBar ? '.quick [aria-checked="true"]' : "[data-persona-picker-open]");
       return;
     }
     const personaPanel = event.target.closest("[data-persona-panel]");
@@ -7389,7 +7666,7 @@
     }
     const memoryAdd = event.target.closest("[data-memory-add]");
     if (memoryAdd) {
-      setMemoryComposer(memoryAdd.closest(".panel").querySelector("#memory-compose-form"), true);
+      setMemoryComposer(memoryAdd.closest("[data-memory-card]").querySelector("#memory-compose-form"), true);
       return;
     }
     const memoryCancel = event.target.closest("[data-memory-cancel]");
@@ -7554,7 +7831,13 @@
         if (draft.preview) URL.revokeObjectURL(draft.preview);
         draft.file = file;
         draft.preview = URL.createObjectURL(file);
-        await loadSprites(Number(form.dataset.personaId));
+        form.dataset.editFile = "";
+        captureDraft(form);
+        updateSpriteItem(
+          document.querySelector("#sprite-workspace"),
+          Number(form.dataset.personaId),
+          form.dataset.spriteKey || "new",
+        );
       }
       return;
     }
@@ -7796,8 +8079,9 @@
       const personaId = Number(form.dataset.personaId);
       const content = form.elements.message.value.trim();
       if (!content) return;
-      const history = [...(state.personaTestChats[personaId] || []).slice(-23), { role: "user", content }];
-      state.personaTestChats[personaId] = history;
+      const chats = state.personaTestChats;
+      const history = [...(chats[personaId] || []).slice(-23), { role: "user", content }];
+      chats[personaId] = history;
       state.personaTestChatBusy = true;
       updatePersonaTestChat(personaId);
       try {
@@ -7805,15 +8089,17 @@
           method: "POST",
           body: JSON.stringify({ personaId, messages: history.map(({ role, content }) => ({ role, content })) }),
         });
-        state.personaTestChats[personaId] = [
+        chats[personaId] = [
           ...history,
           { role: "assistant", content: result.content, segments: result.segments },
         ].slice(-24);
       } catch (error) {
         toast(error.message, "error");
       } finally {
-        state.personaTestChatBusy = false;
-        updatePersonaTestChat(state.personaId);
+        if (state.personaTestChats === chats) {
+          state.personaTestChatBusy = false;
+          updatePersonaTestChat(state.personaId);
+        }
       }
       return;
     }
@@ -8097,66 +8383,7 @@
     const categoriesForm = event.target.closest("#stm-categories-form");
     if (namingForm || categoriesForm) {
       event.preventDefault();
-      const form = namingForm || categoriesForm;
-      const overview = state.overview;
-      const guildId = state.guildId;
-      const data = namingForm ? overview.personaNaming : overview.settings.stmCategories;
-      const reset = event.submitter?.value === "reset";
-      const personaId = Number(namingForm?.dataset.personaNaming);
-      const payload = namingForm
-        ? Object.fromEntries(
-            ["nickname", "prefix", "suffix"].map((key) => {
-              const mode = reset ? "inherit" : form.elements[`${key}Mode`].value;
-              return [key, mode === "inherit" ? null : mode === "none" ? "" : form.elements[key].value];
-            }),
-          )
-        : {
-            categories: reset
-              ? []
-              : Array.from({ length: 5 }, (_, index) => ({
-                  label: form.elements[`label${index}`].value.trim(),
-                  description: form.elements[`description${index}`].value.trim(),
-                })).filter(({ label, description }) => label || description),
-          };
-      try {
-        await withBusyForm(form, async () => {
-          if (reset && !(await confirmAction(data.copy.resetTitle, data.copy.resetDetail))) return;
-          if (categoriesForm && !reset && !(await confirmAction(data.copy.confirm, data.copy.warning))) return;
-          const result = await api(
-            namingForm ? `/guilds/${guildId}/personas/${personaId}/naming` : `/guilds/${guildId}/stm/categories`,
-            { method: "PUT", body: JSON.stringify(payload) },
-          );
-          if (namingForm) {
-            const lineageId = overview.personas.find((persona) => persona.personaId === personaId)?.lineageId;
-            for (const persona of overview.personas.filter((entry) => entry.lineageId === lineageId)) {
-              data.values[persona.personaId] = result.preference;
-            }
-          } else {
-            data.values = result.categories;
-          }
-          completeFormSave(form);
-          if (state.overview === overview && form.isConnected) {
-            const workspace = form.closest("[data-dashboard-view]");
-            const scrollTop = workspace.scrollTop;
-            form.outerHTML = namingForm
-              ? renderPersonaNaming(overview.personas.find((persona) => persona.personaId === personaId))
-              : renderStmCategories();
-            initDraftForms(workspace);
-            resizeAutoGrowTextareas(document);
-            workspace.scrollTop = scrollTop;
-            workspace
-              .querySelector(
-                namingForm
-                  ? "[data-persona-naming] button[type=submit]:not([value=reset])"
-                  : "#stm-categories-form button[type=submit]:not([value=reset])",
-              )
-              ?.focus({ preventScroll: true });
-          }
-          toast(data.copy.saved);
-        });
-      } catch (error) {
-        showFormError(form, error);
-      }
+      await saveNamingOrCategories(namingForm, categoriesForm, event.submitter?.value === "reset");
       return;
     }
 
@@ -8355,14 +8582,18 @@
                   }
                 : { physicalAppearanceTags: parseTags(values.physicalAppearanceTags.value) };
       try {
-        await api(`/guilds/${state.guildId}/personas/${personaId}/${section}`, {
-          method: "PATCH",
-          body: JSON.stringify(payload),
+        await withBusyForm(personaForm, async () => {
+          await api(`/guilds/${state.guildId}/personas/${personaId}/${section}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+          completeFormSave(personaForm);
+          toast(ui("persona_saved"));
+          state.overview = await api(`/guilds/${state.guildId}/overview`);
+          renderView();
         });
-        toast("Persona section saved");
-        state.overview = await api(`/guilds/${state.guildId}/overview`);
-        renderView();
       } catch (error) {
+        if (personaForm.isConnected) showFormError(personaForm, error);
         toast(error.message, "error");
       }
     }

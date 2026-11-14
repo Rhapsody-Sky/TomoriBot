@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
@@ -137,38 +137,42 @@ describe("dashboard connections", () => {
     expect(filter(personaEntries, "Juno triggerWords")).toEqual([personaEntries[1], personaEntries[0]]);
   });
 
-  it("keeps the measured Sprites panel when opening and closing an editor", async () => {
-    const source = await dashboardFunction("loadSprites");
-    const panel = { className: "", innerHTML: "" };
-    let mounted: typeof panel | null = null;
-    const replaceChildren = mock((child: typeof panel) => {
-      mounted = child;
-    });
+  it("swaps only the selected sprite when opening an editor", async () => {
+    const render = await dashboardFunction("renderSpriteItem");
+    const update = await dashboardFunction("updateSpriteItem");
+    const sprite = { key: "smile", name: "Smile", instructions: "", identity: false };
     const drafts = new Map<string, object>();
-    const load = runInNewContext(`let spriteLoadVersion = 0; ${source}; loadSprites`, {
-      state: { guildId: "1", personaId: 2, view: "personas", personaPanel: "sprites" },
-      api: async () => ({ sprites: [], limits: { count: 5, name: 32, instructions: 200 } }),
-      document: {
-        querySelector: () => ({ querySelector: () => mounted, replaceChildren }),
-        createElement: () => panel,
+    const tile = { innerHTML: "" };
+    const untouched = { innerHTML: "Other sprite" };
+    const root = {
+      _sprites: [sprite, { ...sprite, key: "greet", name: "Greet" }],
+      _spriteLimits: { count: 5, name: 32, instructions: 200 },
+      querySelector: (selector: string) => (selector === '[data-sprite-item="smile"]' ? tile : untouched),
+    };
+    const swap = runInNewContext(`${render}; ${update}; updateSpriteItem`, {
+      CSS: { escape: String },
+      window: {
+        TomoriFX: {
+          swap: (host: typeof tile, markup: string) => {
+            host.innerHTML = markup;
+          },
+        },
       },
       personaEntryDrafts: drafts,
       personaEntryKey: (_personaId: number, _kind: string, key: string) => key,
       escapeHtml: String,
       ui: String,
-      navigationIcon: () => "",
+      personaSticker: () => "",
       fieldLabel: String,
       enhanceDashboard: () => {},
-    }) as (id: number) => Promise<void>;
-    await load(2);
-    expect(panel.innerHTML).not.toContain("data-sprite-form");
-    drafts.set("new", { name: "Juno", instructions: "", identity: false });
-    await load(2);
-    expect(panel.innerHTML).toContain("data-sprite-form");
+    }) as (root: unknown, personaId: number, key: string) => typeof tile;
+    drafts.set(sprite.key, { ...sprite, instructions: "Draft instructions" });
+    expect(swap(root, 2, sprite.key)).toBe(tile);
+    expect(tile.innerHTML).toContain("Draft instructions");
     drafts.clear();
-    await load(2);
-    expect(panel.innerHTML).not.toContain("data-sprite-form");
-    expect(replaceChildren).toHaveBeenCalledTimes(1);
+    swap(root, 2, sprite.key);
+    expect(tile.innerHTML).not.toContain("data-sprite-form");
+    expect(untouched.innerHTML).toBe("Other sprite");
   });
 
   it("reveals save and discard only while a form differs from its baseline", async () => {

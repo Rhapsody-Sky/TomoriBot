@@ -165,14 +165,8 @@ body[data-theme="dark"] .boot-logo {
   margin-bottom: var(--space-4);
 }
 
-.persona-knowledge-panel {
-  display: flow-root;
-}
-
-.persona-panel-content {
-  display: grid;
-  gap: var(--space-4);
-  margin-top: var(--space-4);
+.app-main > .stage {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .persona-avatar-fallback,
@@ -185,25 +179,10 @@ body[data-theme="dark"] .boot-logo {
   color: var(--primary);
 }
 
-.persona-art > .persona-avatar-fallback {
-  width: 100%;
-  height: 100%;
-  font-size: var(--page-title);
-}
-
 .avatar-upload > .persona-avatar-fallback {
   width: 100%;
   aspect-ratio: 1;
   font-size: var(--page-title);
-}
-
-.sprite-image-upload {
-  position: absolute;
-  inset: 0;
-}
-
-.lorebook-mailbox-persona {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
 }
 
 .provider-toolbar {
@@ -271,11 +250,6 @@ body[data-theme="dark"] .boot-logo {
   padding-block: 0;
 }
 
-.persona-panel-content .actions button[type="submit"] {
-  min-height: var(--input-height);
-  padding: 6px var(--space-3);
-}
-
 .moderation-table th,
 .moderation-table td {
   overflow-wrap: anywhere;
@@ -317,7 +291,6 @@ body[data-theme="dark"] .boot-logo {
   }
 }
 
-.persona-panel-content .actions,
 .mailbox .actions {
   align-self: stretch;
   justify-content: flex-end;
@@ -411,7 +384,7 @@ body[data-theme="dark"] .boot-logo {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible) {
+  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible, .card *) {
     position: relative;
     isolation: isolate;
     animation:
@@ -419,7 +392,7 @@ body[data-theme="dark"] .boot-logo {
       edit-action-label 180ms ease-out 720ms backwards;
   }
 
-  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible)::before {
+  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible, .card *)::before {
     position: absolute;
     inset: 0;
     z-index: -1;
@@ -431,11 +404,11 @@ body[data-theme="dark"] .boot-logo {
     animation: edit-action-color 290ms ease-out 610ms;
   }
 
-  [data-edit-action].primary {
+  [data-edit-action].primary:not(.card *) {
     --edit-action-color: var(--gradient-primary);
   }
 
-  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible)::after {
+  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible, .card *)::after {
     position: absolute;
     inset: -1px;
     border: 1px solid var(--primary);
@@ -539,10 +512,6 @@ body[data-theme="dark"] .boot-logo {
   .overview-stat-grid .avatar {
     width: 48px;
     height: 48px;
-  }
-
-  .lorebook-mailbox-persona {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

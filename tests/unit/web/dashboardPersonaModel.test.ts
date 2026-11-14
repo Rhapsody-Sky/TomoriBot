@@ -24,9 +24,12 @@ describe("dashboard persona text model", () => {
         personaTestChatBusy: false,
         overview: { guild: { isDirectMessage: false }, modelSummary: { text: { name: "server-primary" } } },
       },
-      ui: (key: string) => key,
+      ui: (key: string) => (key === "persona_test_open" ? "Chat with {name}" : key),
       escapeHtml: (value: string) => value,
-      personaAvatar: () => "",
+      appearance: { personaColors: false },
+      personaTintAttribute: () => "",
+      personaSticker: () => "",
+      navigationIcon: () => "",
     }) as (persona: unknown) => string;
     const html = render({ personaId: 2, nickname: "Juno" });
     expect(html).toContain("persona_test_configured_model");
@@ -46,6 +49,7 @@ describe("dashboard persona text model", () => {
       api: () => new Promise((resolve) => pending.push(resolve)),
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,
+      cardSaveActions: () => "",
     }) as (personaId: number) => Promise<void>;
     const old = load(1);
     state.personaId = 2;

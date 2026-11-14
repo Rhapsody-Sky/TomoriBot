@@ -14,7 +14,7 @@
     const stored = JSON.parse(localStorage.getItem(designStorageKey));
     if (stored && typeof stored === "object" && !Array.isArray(stored)) storedDesign = stored;
   } catch {}
-  let rememberDesign = storedDesign !== null;
+  const rememberDesign = storedDesign !== null;
 
   const appearance = {
     palette: palettes.some(({ id }) => id === storedDesign?.palette) ? storedDesign.palette : "tomori",

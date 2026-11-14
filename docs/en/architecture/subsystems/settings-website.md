@@ -158,14 +158,16 @@ editing other fields; filtering the choices does not delete stored assignments.
 Desktop tab bars keep the tabs that fit and offer the remainder through More.
 At the mobile breakpoint, the section picker shows all tabs.
 
-The dashboard uses the shared UI kit in `assets/ui-kit.css`. Application layout
-adapters live in `assets/dashboard.css`; `assets/controls.js` and
-`assets/controls.css` connect kit controls to native form fields. The legacy
-`app.css` and `companion.css` are not loaded. The control enhancer runs after rendering a workspace or
-replacing an asynchronous section. It preserves native field names and values
-for the existing form handlers; it does not observe the whole document.
-Appearance preferences stay in browser storage, including separate light and
-dark lighting values. They never change server settings.
+The dashboard uses the shared UI kit in `assets/ui-kit.css`. Personas uses the
+Collection frame, dock and cards from `assets/collection.css`. Both kit enhancers
+run after rendering a workspace or replacing asynchronous content.
+`TomoriControls` preserves native form fields for the existing handlers.
+`TomoriFX` controls when a Collection card shows Save and Discard, and the
+application marks the card saved after its write succeeds.
+
+`Your design` keeps preferences in browser storage when the user chooses to
+remember them on that device. Stored settings apply before the dashboard paints.
+Persona colors affect the persona banner and test chat.
 
 Persona attributes, sample dialogues and sprites have separate read and edit
 states. Cancel discards the entry draft; Save uses the existing persona API.
@@ -232,9 +234,10 @@ and the mobile navigation drawer move the existing navigation elements rather
 than maintaining a second set of links.
 Channel-scope help links open the Memory settings group and focus Channel-scoped
 memory on the selected server.
-Persona settings and Sprites share the same test-chat history. Sending or
-resetting the chat leaves the editor inputs intact. Save sprite descriptions
-before testing them; the model uses the saved configuration.
+Server managers open the private test chat from the persona page. The dock stays
+available while switching sections. Each persona has its own history for the
+current workspace session. Test messages use its saved configuration and the
+configured text model.
 
 Attribute and sample-dialogue editing uses the existing preset import limits in
 `src/types/preset/presetExport.ts`. This keeps imported personas editable even
@@ -273,11 +276,9 @@ permissions, channel-memory enablement, STM behavior and category definitions. R
 review belongs to Conversation > Output; thought logs and prompt snapshots belong
 to Notices & diagnostics.
 
-At widths up to 980 pixels, a bottom navigation bar provides Overview, Personas,
-My settings and More. More opens the remaining permitted destinations in a modal
-bottom sheet. Server settings and persona sections use the same sheet pattern,
-with the current section shown above the content. Escape, the close button or a
-tap outside dismisses the sheet. Desktop keeps the sidebar and inline tabs.
+The mobile navigation drawer uses the same permitted destinations as the desktop
+sidebar. On Personas, the dock keeps the current section visible and puts sections
+that do not fit under More. Knowledge views use the segmented control below it.
 Navigation icons are bundled Lucide assets with their license alongside them;
 the dashboard does not fetch icons from an external service.
 
