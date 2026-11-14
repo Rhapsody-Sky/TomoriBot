@@ -100,6 +100,29 @@ interface StatWindow {
   through?: Date | string;
 }
 
+function tokenPriceCatalog() {
+  return sql`SELECT llm_codename,
+      MAX(input_price_per_million) AS input_price_per_million,
+      MAX(output_price_per_million) AS output_price_per_million
+    FROM (
+      SELECT llm_codename, input_price_per_million, output_price_per_million FROM llms
+      UNION ALL
+      SELECT 'decision:' || decision_model_id::text AS llm_codename,
+        input_price_per_million, output_price_per_million FROM decision_models
+    ) prices
+    GROUP BY llm_codename`;
+}
+
+function estimatedTokenCost() {
+  return sql`COALESCE(SUM(
+    sc.count * CASE sc.metric
+      WHEN 'tokens_in' THEN COALESCE(l.input_price_per_million, 0)
+      WHEN 'tokens_out' THEN COALESCE(l.output_price_per_million, 0)
+      ELSE 0
+    END / 1000000.0
+  ), 0)`;
+}
+
 /** One persona's message share for a user, ordered by count desc. */
 export interface PersonaAffinityEntry {
   lineageId: number;
@@ -803,33 +826,12 @@ class StatRepository implements IRepository<null> {
     try {
       const from = windowFloor(args.from);
       const [row] = await sql`
-        SELECT COALESCE(
-          SUM(
-            sc.count
-            * CASE sc.metric
-                WHEN 'tokens_in'  THEN COALESCE(l.input_price_per_million, 0)
-                WHEN 'tokens_out' THEN COALESCE(l.output_price_per_million, 0)
-                ELSE 0
-              END
-            / 1000000.0
-          ), 0
-        ) AS cost
+        SELECT ${estimatedTokenCost()} AS cost
         FROM stat_counters sc
         -- A codename can exist once per provider. stat_counters stores only the
         -- codename, so collapse pricing to one conservative row before joining;
         -- otherwise every matching provider duplicates the token counter row.
-        LEFT JOIN (
-          SELECT llm_codename,
-            MAX(input_price_per_million) AS input_price_per_million,
-            MAX(output_price_per_million) AS output_price_per_million
-          FROM (
-            SELECT llm_codename, input_price_per_million, output_price_per_million FROM llms
-            UNION ALL
-            SELECT 'decision:' || decision_model_id::text AS llm_codename,
-              input_price_per_million, output_price_per_million FROM decision_models
-          ) prices
-          GROUP BY llm_codename
-        ) l ON l.llm_codename = sc.metric_key
+        LEFT JOIN (${tokenPriceCatalog()}) l ON l.llm_codename = sc.metric_key
         WHERE sc.metric IN ('tokens_in', 'tokens_out')
           AND (${args.userId ?? null}::int IS NULL OR sc.user_id = ${args.userId ?? null})
           AND (${args.serverId ?? null}::int IS NULL OR sc.server_id = ${args.serverId ?? null})
@@ -1164,15 +1166,23 @@ class StatRepository implements IRepository<null> {
 
   async getServerDailyModelTokenUsage(
     args: { serverId: number } & StatWindow,
-  ): Promise<Array<{ date: string; model: string; inputTokens: number; outputTokens: number }> | null> {
+  ): Promise<Array<{ date: string; model: string; inputTokens: number; outputTokens: number; cost: number }> | null> {
     try {
       const rows = await sql<
-        { date: string; model: string; input_tokens: number | string; output_tokens: number | string }[]
+        {
+          date: string;
+          model: string;
+          input_tokens: number | string;
+          output_tokens: number | string;
+          cost: number | string;
+        }[]
       >`
         SELECT bucket::text AS date, metric_key AS model,
           SUM(CASE WHEN metric = 'tokens_in' THEN count ELSE 0 END) AS input_tokens,
-          SUM(CASE WHEN metric = 'tokens_out' THEN count ELSE 0 END) AS output_tokens
-        FROM stat_counters
+          SUM(CASE WHEN metric = 'tokens_out' THEN count ELSE 0 END) AS output_tokens,
+          ${estimatedTokenCost()} AS cost
+        FROM stat_counters sc
+        LEFT JOIN (${tokenPriceCatalog()}) l ON l.llm_codename = sc.metric_key
         WHERE server_id = ${args.serverId} AND metric IN ('tokens_in', 'tokens_out')
           AND bucket >= ${windowFloor(args.from)}::date
           AND bucket <= COALESCE(${args.through ? windowFloor(args.through) : null}::date, 'infinity'::date)
@@ -1183,6 +1193,7 @@ class StatRepository implements IRepository<null> {
         model: row.model,
         inputTokens: Number(row.input_tokens),
         outputTokens: Number(row.output_tokens),
+        cost: Number(row.cost),
       }));
     } catch (error) {
       log.error("StatRepository.getServerDailyModelTokenUsage: failed", error);
@@ -1657,15 +1668,7 @@ class StatRepository implements IRepository<null> {
         SELECT COALESCE(MAX(l.display_name), sc.metric_key) AS model,
           COALESCE(SUM(CASE WHEN sc.metric = 'tokens_in'  THEN sc.count ELSE 0 END), 0) AS in_tokens,
           COALESCE(SUM(CASE WHEN sc.metric = 'tokens_out' THEN sc.count ELSE 0 END), 0) AS out_tokens,
-          COALESCE(SUM(
-            sc.count
-            * CASE sc.metric
-                WHEN 'tokens_in'  THEN COALESCE(l.input_price_per_million, 0)
-                WHEN 'tokens_out' THEN COALESCE(l.output_price_per_million, 0)
-                ELSE 0
-              END
-            / 1000000.0
-          ), 0) AS cost
+          ${estimatedTokenCost()} AS cost
         FROM stat_counters sc
         LEFT JOIN (
           SELECT llm_codename,

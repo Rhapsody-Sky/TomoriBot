@@ -691,13 +691,13 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("StatRepository — regression", () => {
     await testSql`
       INSERT INTO stat_counters (server_id, user_id, persona_lineage_id, metric, metric_key, bucket, count)
       VALUES
-        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_in', 'model-a', ${dayOffset(2)}::date, 100),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_in', ${TEST_MODEL}, ${dayOffset(2)}::date, 100),
         (${refs.serverId}, ${altUserId}, ${lineageB}, 'tokens_in', 'model-b', ${dayOffset(2)}::date, 200),
-        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_out', 'model-a', ${dayOffset(2)}::date, 30),
-        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_out', 'model-a', ${dayOffset(0)}::date, 20),
-        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_in', 'model-a', ${dayOffset(3)}::date, 999),
-        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'model_used', 'model-a', ${dayOffset(0)}::date, 999),
-        (${other.server_id}, ${refs.userId}, ${lineageA}, 'tokens_in', 'model-a', ${dayOffset(0)}::date, 999)
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_out', ${TEST_MODEL}, ${dayOffset(2)}::date, 30),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_out', ${TEST_MODEL}, ${dayOffset(0)}::date, 20),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'tokens_in', ${TEST_MODEL}, ${dayOffset(3)}::date, 999),
+        (${refs.serverId}, ${refs.userId}, ${lineageA}, 'model_used', ${TEST_MODEL}, ${dayOffset(0)}::date, 999),
+        (${other.server_id}, ${refs.userId}, ${lineageA}, 'tokens_in', ${TEST_MODEL}, ${dayOffset(0)}::date, 999)
     `;
     expect(await statRepository.getServerDailyTokenUsage({ serverId: refs.serverId, from: dayOffset(2) })).toEqual([
       { date: dayOffset(2), inputTokens: 300, outputTokens: 30 },
@@ -732,6 +732,13 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("StatRepository — regression", () => {
     });
     expect(modelHistory).not.toBeNull();
     expect(modelHistory?.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0)).toBe(350);
+    expect(modelHistory?.find((row) => row.model === TEST_MODEL && row.date === dayOffset(2))?.cost).toBeCloseTo(
+      0.0016,
+    );
+    expect(modelHistory?.find((row) => row.model === "model-b")?.cost).toBe(0);
+    expect(modelHistory?.reduce((sum, row) => sum + row.cost, 0)).toBeCloseTo(
+      await statRepository.getEstimatedCost({ serverId: refs.serverId, from: dayOffset(2) }),
+    );
     expect(new Set(modelHistory?.map((row) => row.model)).size).toBe(2);
     expect(history?.reduce((sum, day) => sum + day.inputTokens + day.outputTokens, 0)).toBe(1349);
     expect(await statRepository.getServerDailyTokenUsage({ serverId: refs.serverId, from: dayOffset(-1) })).toEqual([]);

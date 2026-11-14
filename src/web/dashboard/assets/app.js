@@ -300,7 +300,7 @@
     serverStats: null,
     serverStatsLoading: false,
     serverStatsError: "",
-    statsTimeframe: "all_time",
+    statsTimeframe: "month",
     statsRange: null,
     statsRangeEditing: false,
     statsHistoryModel: null,
@@ -1599,6 +1599,8 @@
 
     if (!state.serverStats && !state.serverStatsLoading && !state.serverStatsError) {
       loadServerStats();
+    } else {
+      updateServerStatsSection();
     }
   }
 
@@ -1756,9 +1758,34 @@
     return `<strong>${escapeHtml(historyPointLabel(point))}</strong><div class="row"><span>${escapeHtml(ui("stats_input"))}: <b>${number(point.inputTokens)}</b></span><span>${escapeHtml(ui("stats_output"))}: <b>${number(point.outputTokens)}</b></span><span>${escapeHtml(ui("stats_total_tokens"))}: <b>${number(point.inputTokens + point.outputTokens)}</b></span></div>`;
   }
 
+  function statsTrendBuckets(history, selectedModel) {
+    if (!history) return [];
+    const dayMs = 86400000;
+    const start = Date.parse(history.from);
+    const dayCount = (Date.parse(history.through) - start) / dayMs + 1;
+    if (dayCount < 7) return [];
+    const size = Math.min(dayCount, 30);
+    const points = Array.from({ length: size }, () => ({ inputTokens: 0, outputTokens: 0, cost: 0 }));
+    const bucketFor = (date) => points[Math.floor((((Date.parse(date) - start) / dayMs) * size) / dayCount)];
+    const tokenRows =
+      selectedModel === null ? history.days : history.models.filter((row) => row.model === selectedModel);
+    for (const row of tokenRows) {
+      const point = bucketFor(row.date);
+      if (!point) continue;
+      point.inputTokens += row.inputTokens;
+      point.outputTokens += row.outputTokens;
+    }
+    for (const row of history.models ?? []) {
+      if (selectedModel !== null && row.model !== selectedModel) continue;
+      const point = bucketFor(row.date);
+      if (point) point.cost += row.cost;
+    }
+    return points;
+  }
+
   function renderStatsTile(label, value, scope, values = []) {
     let sparkline = "";
-    if (values.length >= 7 && values.length <= 30 && values.some(Boolean)) {
+    if (values.length) {
       const min = Math.min(...values);
       const range = Math.max(...values) - min || 1;
       const points = values
@@ -1848,27 +1875,30 @@
     });
   }
 
-  function renderServerStats() {
-    const timeframeOptions = [
-      ["today", ui("stats_today")],
-      ["week", ui("stats_week")],
-      ["month", ui("stats_month")],
-      ["year", ui("stats_year")],
-      ["all_time", ui("stats_all_time")],
-      ["custom", ui("stats_custom")],
-    ];
-    const models = [...new Set((state.serverStats?.history?.models || []).map((entry) => entry.model))].sort();
-    if (!models.includes(state.statsHistoryModel)) state.statsHistoryModel = null;
-    const timeframeControls = `<div class="toolbar">
-      <label class="field"><span class="field-label sr-only">${escapeHtml(ui("stats_timeframe"))}</span><select data-history-timeframe>
-      ${timeframeOptions
-        .map(
-          ([value, label]) =>
-            `<option value="${value}" ${state.statsTimeframe === value ? "selected" : ""}>${escapeHtml(label)}</option>`,
-        )
-        .join("")}</select></label>
+  const statsPeriods = {
+    week: "stats_week",
+    month: "stats_month",
+    quarter: "stats_quarter",
+    today: "stats_today",
+    year: "stats_year",
+    all_time: "stats_all_time",
+    custom: "stats_custom",
+  };
+
+  function renderStatsToolbar() {
+    const presets = ["week", "month", "quarter"];
+    const extras = ["today", "year", "all_time", "custom"];
+    return `<div class="toolbar">
+      <div class="segmented" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui("stats_timeframe"))}">
+        ${presets.map((period) => `<button type="button" role="radio" data-history-timeframe="${period}" aria-checked="false" tabindex="-1">${escapeHtml(ui(statsPeriods[period]))}</button>`).join("")}
+        <button type="button" role="radio" data-history-timeframe-extra aria-checked="false" tabindex="-1" hidden></button>
+      </div>
       <div class="actions">
-        <label class="field"><span class="field-label sr-only">${escapeHtml(ui("stats_history_model_filter"))}</span><select data-history-model ${state.serverStats?.history?.models ? "" : "disabled"}><option value="">${escapeHtml(ui("stats_server_total"))}</option>${models.map((model) => `<option value="${escapeHtml(`model:${model}`)}" ${state.statsHistoryModel === model ? "selected" : ""}>${escapeHtml(model || "(unknown)")}</option>`).join("")}</select></label>
+        <label class="field"><span class="field-label sr-only">${escapeHtml(ui("stats_history_model_filter"))}</span><select data-history-model disabled><option value="">${escapeHtml(ui("stats_server_total"))}</option></select></label>
+        <button class="button icon" type="button" popovertarget="stats-period-menu" aria-label="${escapeHtml(ui("stats_more_periods"))}" data-tooltip="${escapeHtml(ui("stats_more_periods"))}">${navigationIcon("ellipsis")}</button>
+        <div class="action-menu" id="stats-period-menu" popover aria-label="${escapeHtml(ui("stats_more_periods"))}">
+          ${extras.map((period) => `<button class="button" type="button" data-stats-period-option="${period}" data-action-menu-preserve-focus>${escapeHtml(ui(statsPeriods[period]))}</button>`).join("")}
+        </div>
         ${refreshButton("stats", ui("stats_refresh"))}
       </div>
     </div>
@@ -1877,24 +1907,24 @@
       <div class="grid"><label class="field">${fieldLabel(ui("stats_from"))}<input type="date" name="from" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.from || ""}"></label><label class="field">${fieldLabel(ui("stats_through"))}<input type="date" name="through" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.through || ""}"></label></div>
       <div class="actions"><button class="button small" type="button" data-stats-range-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("stats_apply_range"))}</button></div>
     </form>
-    ${state.statsTimeframe === "custom" && state.statsRange && !state.statsRangeEditing ? `<div class="toolbar"><p class="hint">${escapeHtml(historyPointLabel({ date: state.statsRange.from, through: state.statsRange.through }))} (UTC)</p><button class="button small" type="button" data-stats-range-edit>${escapeHtml(ui("stats_edit_range"))}</button></div>` : ""}`;
+    <div class="toolbar" data-stats-range-summary hidden><p class="hint"></p><button class="button small" type="button" data-stats-range-edit>${escapeHtml(ui("stats_edit_range"))}</button></div>`;
+  }
 
-    let content = loadingBar(ui("stats_loading"));
-    if (state.serverStatsError) {
-      content = `<section class="card"><div class="card-head"><div><h3>${escapeHtml(ui("stats_error"))}</h3><p class="hint">${escapeHtml(state.serverStatsError)}</p></div><button class="button small" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></div></section>`;
-    } else if (state.serverStats) {
-      const stats = state.serverStats;
-      const { totals } = stats;
-      const usage = statsModelUsage(stats, state.statsHistoryModel);
-      const selectedLabel = state.statsHistoryModel ?? ui("stats_server_total");
-      const history =
-        stats.history && state.statsHistoryModel !== null
-          ? { ...stats.history, days: stats.history.models.filter((entry) => entry.model === state.statsHistoryModel) }
-          : stats.history;
-      const series = history ? buildUsageHistory(history) : null;
-      const points = series?.points || [];
-      content = `
-        ${state.serverStatsLoading ? loadingBar(ui("stats_loading")) : ""}
+  function renderStatsContent() {
+    if (state.serverStatsError)
+      return `<section class="card"><div class="card-head"><div><h3>${escapeHtml(ui("stats_error"))}</h3><p class="hint">${escapeHtml(state.serverStatsError)}</p></div><button class="button small" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></div></section>`;
+    if (!state.serverStats) return "";
+    const stats = state.serverStats;
+    const { totals } = stats;
+    const usage = statsModelUsage(stats, state.statsHistoryModel);
+    const selectedLabel = state.statsHistoryModel ?? ui("stats_server_total");
+    const history =
+      stats.history && state.statsHistoryModel !== null
+        ? { ...stats.history, days: stats.history.models.filter((entry) => entry.model === state.statsHistoryModel) }
+        : stats.history;
+    const series = history ? buildUsageHistory(history) : null;
+    const points = statsTrendBuckets(stats.history, state.statsHistoryModel);
+    return `
         ${stats.history?.models === null ? `<p class="notice">${escapeHtml(ui("stats_history_filter_error"))}</p>` : ""}
         <div class="stat-grid framed">
           ${renderStatsTile(
@@ -1915,7 +1945,12 @@
             selectedLabel,
             points.map((point) => point.inputTokens + point.outputTokens),
           )}
-          ${renderStatsTile(ui("stats_cost"), usage.cost === null ? "-" : formatUsd(usage.cost), usage.cost === null ? ui("stats_cost_unavailable") : selectedLabel)}
+          ${renderStatsTile(
+            ui("stats_cost"),
+            usage.cost === null ? "-" : formatUsd(usage.cost),
+            usage.cost === null ? ui("stats_cost_unavailable") : selectedLabel,
+            usage.cost !== null && stats.history?.models ? points.map((point) => point.cost) : [],
+          )}
         </div>
         ${renderUsageHistory(stats, usage, series)}
         <div class="split">
@@ -1941,49 +1976,79 @@
           ${renderStatsRanking(ui("stats_commands"), stats.topCommands, ui("stats_use_unit"))}
         </div>
         ${renderModelUsage(stats, state.statsHistoryModel)}`;
-    }
+  }
 
+  function renderServerStats() {
     return `<section class="stage" data-server-stats aria-labelledby="overview-stats-title" aria-busy="${state.serverStatsLoading}">
       <h2 class="sr-only" id="overview-stats-title">${escapeHtml(ui("stats_title"))}</h2>
-      ${timeframeControls}
-      ${content}
+      ${renderStatsToolbar()}
+      <div data-stats-loading hidden>${loadingBar(ui("stats_loading"))}</div>
+      <div class="stage" data-stats-content></div>
     </section>`;
   }
 
-  function updateServerStatsSection() {
+  function updateServerStatsSection(refreshContent = true) {
     if (state.view !== "overview") return;
     const current = document.querySelector("[data-server-stats]");
     if (!current) return;
-    const focusedFilter = current.contains(document.activeElement)
-      ? document.activeElement.closest(".toolbar .field")?.querySelector("select") || document.activeElement
-      : null;
-    const focusSelector = focusedFilter?.matches("[data-history-model]")
-      ? "[data-history-model]"
-      : focusedFilter?.matches("[data-history-timeframe]")
-        ? "[data-history-timeframe]"
-        : focusedFilter?.matches("[data-stats-refresh]")
-          ? "[data-stats-refresh]"
-          : null;
-    const template = document.createElement("template");
-    template.innerHTML = renderServerStats();
-    const next = template.content.firstElementChild;
-    if (next) {
-      current.replaceWith(next);
-      enhanceDashboard(next);
+    const timeframe = state.statsTimeframe;
+    const extra = current.querySelector("[data-history-timeframe-extra]");
+    const preset = current.querySelector(`[data-history-timeframe="${timeframe}"]`);
+    extra.hidden = Boolean(preset);
+    if (!preset) extra.textContent = ui(timeframe === "custom" ? "stats_custom_short" : statsPeriods[timeframe]);
+    for (const button of current.querySelectorAll('[role="radio"]')) {
+      const checked = button === (preset || extra);
+      button.setAttribute("aria-checked", String(checked));
+      button.tabIndex = checked ? 0 : -1;
     }
-    if (focusSelector) {
-      const select = next?.querySelector(focusSelector);
-      (select?.closest(".field")?.querySelector(".select-trigger") || select)?.focus({ preventScroll: true });
+
+    const form = current.querySelector("#stats-range-form");
+    const wasHidden = form.hidden;
+    form.hidden = !state.statsRangeEditing;
+    if (wasHidden && !form.hidden) {
+      form.elements.from.value = state.statsRange?.from ?? "";
+      form.elements.through.value = state.statsRange?.through ?? "";
     }
+    const summary = current.querySelector("[data-stats-range-summary]");
+    summary.hidden = timeframe !== "custom" || !form.hidden;
+    if (!summary.hidden) {
+      summary.querySelector(".hint").textContent =
+        `${historyPointLabel({ date: state.statsRange.from, through: state.statsRange.through })} (UTC)`;
+    }
+
+    current.setAttribute("aria-busy", String(state.serverStatsLoading));
+    current.querySelector("[data-stats-loading]").hidden = !state.serverStatsLoading;
+    const select = current.querySelector("[data-history-model]");
+    const modelHistory = state.serverStats?.history?.models;
+    select.disabled = state.serverStatsLoading || !modelHistory;
+    if (!refreshContent) return;
+    if (!state.serverStatsLoading) {
+      const models = [...new Set((modelHistory || []).map((entry) => entry.model))].sort();
+      if (!models.includes(state.statsHistoryModel)) state.statsHistoryModel = null;
+      if (
+        select.options.length !== models.length + 1 ||
+        models.some((model, index) => select.options[index + 1].value !== `model:${model}`)
+      ) {
+        select.innerHTML = `<option value="">${escapeHtml(ui("stats_server_total"))}</option>${models.map((model) => `<option value="${escapeHtml(`model:${model}`)}">${escapeHtml(model || "(unknown)")}</option>`).join("")}`;
+      }
+      select.value = state.statsHistoryModel === null ? "" : `model:${state.statsHistoryModel}`;
+    }
+    const content = current.querySelector("[data-stats-content]");
+    content.innerHTML = renderStatsContent();
+    enhanceDashboard(content);
   }
 
+  let statsRequest;
+
   async function loadServerStats() {
+    const request = {};
+    statsRequest = request;
     const guildId = state.guildId;
     const timeframe = state.statsTimeframe;
     const range = state.statsRange;
     state.serverStatsLoading = true;
     state.serverStatsError = "";
-    updateServerStatsSection();
+    updateServerStatsSection(false);
     try {
       const query = new URLSearchParams({ timeframe });
       if (timeframe === "custom" && range) {
@@ -1991,15 +2056,15 @@
         query.set("through", range.through);
       }
       const response = await api(`/guilds/${guildId}/stats?${query}`);
-      if (state.guildId !== guildId || state.statsTimeframe !== timeframe || state.statsRange !== range) return;
+      if (statsRequest !== request || state.guildId !== guildId) return;
       state.serverStats = response.stats;
       const art = state.view === "overview" && document.querySelector("[data-overview-art]");
       if (art) art.innerHTML = renderOverviewArt();
     } catch (error) {
-      if (state.guildId !== guildId || state.statsTimeframe !== timeframe || state.statsRange !== range) return;
+      if (statsRequest !== request || state.guildId !== guildId) return;
       state.serverStatsError = error.message;
     } finally {
-      if (state.guildId === guildId && state.statsTimeframe === timeframe && state.statsRange === range) {
+      if (statsRequest === request && state.guildId === guildId) {
         state.serverStatsLoading = false;
         updateServerStatsSection();
       }
@@ -7728,7 +7793,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section], [data-design-choice]",
+      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section], [data-design-choice], [data-history-timeframe], [data-history-timeframe-extra]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
@@ -7744,7 +7809,12 @@
       if (next) {
         event.preventDefault();
         if (group.matches(".quick, .dock, .segmented")) next.click();
-        if (next.isConnected && (group.matches(".deck") || next.hasAttribute("data-design-choice"))) next.focus();
+        if (
+          next.isConnected &&
+          (group.matches(".deck") ||
+            next.matches("[data-design-choice], [data-history-timeframe], [data-history-timeframe-extra]"))
+        )
+          next.focus();
       }
       return;
     }
@@ -7934,17 +8004,35 @@
       }
       return;
     }
-    if (event.target.closest("[data-stats-range-cancel], [data-stats-range-edit]")) {
-      state.statsRangeEditing = !!event.target.closest("[data-stats-range-edit]");
-      updateServerStatsSection();
+    const statsPeriod = event.target.closest("[data-history-timeframe], [data-stats-period-option]");
+    if (statsPeriod) {
+      const period = statsPeriod.dataset.historyTimeframe ?? statsPeriod.dataset.statsPeriodOption;
+      state.statsRangeEditing = period === "custom";
+      if (!state.statsRangeEditing && state.statsTimeframe !== period) {
+        state.statsTimeframe = period;
+        void loadServerStats();
+      } else {
+        updateServerStatsSection(false);
+      }
+      if (state.statsRangeEditing) {
+        document.querySelector('#stats-range-form input[name="from"]')?.focus();
+      } else if (statsPeriod.hasAttribute("data-stats-period-option")) {
+        document.querySelector("[data-history-timeframe-extra]")?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    const editStatsRange =
+      event.target.closest("[data-stats-range-edit]") ||
+      (state.statsTimeframe === "custom" && event.target.closest("[data-history-timeframe-extra]"));
+    if (editStatsRange || event.target.closest("[data-stats-range-cancel]")) {
+      state.statsRangeEditing = Boolean(editStatsRange);
+      updateServerStatsSection(false);
       if (state.statsRangeEditing) {
         document.querySelector('#stats-range-form input[name="from"]')?.focus();
       } else {
-        const timeframe = document.querySelector("[data-history-timeframe]");
         (
-          document.querySelector("[data-stats-range-edit]") ||
-          timeframe?.closest(".field")?.querySelector(".select-trigger") ||
-          timeframe
+          document.querySelector("[data-stats-range-summary]:not([hidden]) [data-stats-range-edit]") ||
+          document.querySelector('[data-server-stats] [aria-checked="true"]')
         )?.focus({ preventScroll: true });
       }
       return;
@@ -8695,24 +8783,6 @@
       updateServerStatsSection();
       return;
     }
-    if (event.target.matches("[data-history-timeframe]")) {
-      if (event.target.value === "custom") {
-        state.statsRangeEditing = true;
-        updateServerStatsSection();
-        document.querySelector('#stats-range-form input[name="from"]')?.focus();
-        return;
-      }
-      const wasEditing = state.statsRangeEditing;
-      state.statsRangeEditing = false;
-      if (event.target.value !== state.statsTimeframe) {
-        state.statsTimeframe = event.target.value;
-        state.serverStatsError = "";
-        loadServerStats();
-      } else if (wasEditing) {
-        updateServerStatsSection();
-      }
-      return;
-    }
     if (event.target.matches('[data-sprite-form] input[type="file"]')) {
       const { form, files } = event.target;
       const preview = form.querySelector("[data-sprite-preview]");
@@ -8809,7 +8879,8 @@
       state.statsRange = { from: from.value, through: through.value };
       state.statsTimeframe = "custom";
       state.statsRangeEditing = false;
-      await loadServerStats();
+      void loadServerStats();
+      document.querySelector("[data-stats-range-edit]")?.focus({ preventScroll: true });
       return;
     }
     if (event.target.classList.contains("is-saving")) {

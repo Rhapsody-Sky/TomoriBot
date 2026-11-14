@@ -181,7 +181,7 @@ export interface DashboardTranscriptionSelection {
   modelId: number;
 }
 
-export type DashboardStatsTimeframe = "today" | "week" | "month" | "year" | "all_time" | "custom";
+export type DashboardStatsTimeframe = "today" | "week" | "month" | "quarter" | "year" | "all_time" | "custom";
 
 export interface DashboardServerStats {
   timeframe: DashboardStatsTimeframe;
@@ -189,7 +189,7 @@ export interface DashboardServerStats {
     from: string;
     through: string;
     days: Array<{ date: string; inputTokens: number; outputTokens: number }>;
-    models: Array<{ date: string; model: string; inputTokens: number; outputTokens: number }> | null;
+    models: Array<{ date: string; model: string; inputTokens: number; outputTokens: number; cost: number }> | null;
   } | null;
   totals: {
     messages: number;
@@ -213,6 +213,7 @@ function resolveStatsWindow(timeframe: DashboardStatsTimeframe): string | undefi
   const floor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   if (timeframe === "week") floor.setUTCDate(floor.getUTCDate() - 6);
   if (timeframe === "month") floor.setUTCDate(floor.getUTCDate() - 29);
+  if (timeframe === "quarter") floor.setUTCDate(floor.getUTCDate() - 89);
   if (timeframe === "year") floor.setUTCFullYear(floor.getUTCFullYear() - 1);
   return floor.toISOString().split("T")[0];
 }

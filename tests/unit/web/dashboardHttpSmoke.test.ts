@@ -348,9 +348,9 @@ describe("dashboard HTTP shell", () => {
         through: "2024-03-02",
         days: [],
         models: [
-          { date: "2024-03-01", model: "sample/model-f", inputTokens: 20, outputTokens: 4 },
-          { date: "2024-03-02", model: "sample/model-f", inputTokens: 30, outputTokens: 6 },
-          { date: "2024-03-01", model: "sample/model-a", inputTokens: 200, outputTokens: 20 },
+          { date: "2024-03-01", model: "sample/model-f", inputTokens: 20, outputTokens: 4, cost: 0.01 },
+          { date: "2024-03-02", model: "sample/model-f", inputTokens: 30, outputTokens: 6, cost: 0.02 },
+          { date: "2024-03-01", model: "sample/model-a", inputTokens: 200, outputTokens: 20, cost: 0.03 },
         ],
       },
     };
@@ -370,6 +370,42 @@ describe("dashboard HTTP shell", () => {
     expect(filteredCells).toEqual(["50", "10", "60", "-"]);
     expect(filtered).toContain(localizedCopy("en-US", "general.dashboard.interface_stats_cost_unavailable"));
     expect(filtered).not.toContain('style="');
+  });
+
+  it("keeps the complete selected period and model-specific costs in the tile trends", async () => {
+    const source = await Bun.file("src/web/dashboard/assets/app.js").text();
+    const ast = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    let declaration = "";
+    const walk = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === "statsTrendBuckets") declaration = node.getText(ast);
+      ts.forEachChild(node, walk);
+    };
+    walk(ast);
+    const build = runInNewContext(`${declaration}\nstatsTrendBuckets`) as (
+      history: NonNullable<DashboardServerStats["history"]>,
+      model: string | null,
+    ) => Array<{ inputTokens: number; outputTokens: number; cost: number }>;
+    const history = {
+      from: "2024-01-01",
+      through: "2024-03-30",
+      days: [
+        { date: "2024-01-01", inputTokens: 100, outputTokens: 4 },
+        { date: "2024-03-30", inputTokens: 10, outputTokens: 40 },
+      ],
+      models: [
+        { date: "2024-01-01", model: "a", inputTokens: 100, outputTokens: 4, cost: 2 },
+        { date: "2024-03-30", model: "b", inputTokens: 10, outputTokens: 40, cost: 5 },
+      ],
+    };
+    const all = build(history, null);
+    expect(all).toHaveLength(30);
+    expect(all[0]).toEqual({ inputTokens: 100, outputTokens: 4, cost: 2 });
+    expect(all[1]).toEqual({ inputTokens: 0, outputTokens: 0, cost: 0 });
+    expect(all.at(-1)).toEqual({ inputTokens: 10, outputTokens: 40, cost: 5 });
+    const model = build(history, "a");
+    expect(model[0]).toEqual({ inputTokens: 100, outputTokens: 4, cost: 2 });
+    expect(model.at(-1)).toEqual({ inputTokens: 0, outputTokens: 0, cost: 0 });
+    expect(build({ ...history, through: history.from }, null)).toEqual([]);
   });
 });
 

@@ -404,7 +404,7 @@ body[data-theme="dark"] .boot-logo {
   padding-top: var(--space-4);
 }
 
-[data-server-stats] > .stat-grid.framed {
+[data-stats-content] > .stat-grid.framed {
   margin: 0;
 }
 
@@ -420,6 +420,10 @@ body[data-theme="dark"] .boot-logo {
 
 [data-server-stats] .share-line {
   overflow-wrap: anywhere;
+}
+
+[data-stats-range-summary][hidden] {
+  display: none;
 }
 
 [data-usage-history] .chart-plot {
