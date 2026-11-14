@@ -385,7 +385,7 @@
   const draftForms =
     "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], #stm-categories-form";
   const localEditForms =
-    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-sprite-form], [data-spotlight-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], [data-personal-model], [data-personal-parameters], #fallback-form, #memory-edit-form";
+    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-spotlight-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], [data-personal-model], [data-personal-parameters], #fallback-form, #memory-edit-form";
   const editForms = `${draftForms}, ${localEditForms}`;
   const editSubmit = 'button[type="submit"]:not([value="reset"]), button[value="save"]:not([type])';
   const drafts = new Map();
@@ -933,7 +933,16 @@
           "control_hold_confirmed",
         ].map((key) => [key, ui(key)]),
       ),
-      (button) => confirmAction(button.dataset.confirmTitle, button.dataset.confirmDescription),
+      (button) =>
+        button.matches("[data-sprite-remove]")
+          ? confirmSpriteAction(
+              button.form,
+              button.dataset.confirmTitle,
+              button.dataset.confirmDescription,
+              ui("sprite_delete_action"),
+              true,
+            )
+          : confirmAction(button.dataset.confirmTitle, button.dataset.confirmDescription),
     );
     window.TomoriControls?.enhance(container);
     window.TomoriFX?.enhance(container);
@@ -2646,9 +2655,14 @@
           ${
             memory.editable === false || serverWritesDisabled
               ? ""
-              : `<div class="${collection ? "item-actions" : "actions"}">
-                  <button class="button  " data-memory-edit="${memory.id}" type="button">Edit</button>
-                  <button class="button danger " data-memory-delete="${memory.id}" type="button">Delete</button>
+              : collection
+                ? `<div class="item-actions">
+                    <button class="button small icon" data-memory-edit="${memory.id}" type="button" aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button>
+                    <button class="button small icon danger" data-memory-delete="${memory.id}" type="button" aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button>
+                  </div>`
+                : `<div class="actions">
+                    <button class="button" data-memory-edit="${memory.id}" type="button">Edit</button>
+                    <button class="button danger" data-memory-delete="${memory.id}" type="button">Delete</button>
                 </div>`
           }
         </article>`,
@@ -3216,11 +3230,11 @@
     const values = override ?? settings.values.chat;
     return `<form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="humanizer">
       <header class="card-head"><div><h3>${escapeHtml(ui("persona_humanizer_title"))}</h3><p>${escapeHtml(ui("persona_humanizer_hint"))}</p></div></header>
-      <label class="field">${fieldLabel(ui("persona_humanizer_source"))}<select name="humanizerMode" data-persona-humanizer-mode>
+      <div class="stack"><label class="field">${fieldLabel(ui("persona_humanizer_source"))}<select name="humanizerMode" data-persona-humanizer-mode>
         <option value="inherit"${override ? "" : " selected"}>${escapeHtml(ui("persona_humanizer_inherit"))}</option>
         <option value="custom"${override ? " selected" : ""}>${escapeHtml(ui("persona_humanizer_custom"))}</option>
       </select></label>
-      <fieldset class="stack" data-persona-humanizer-fields${override ? "" : " hidden"}>${fields.map((field) => renderSettingField(field, values[field.key])).join("")}</fieldset>
+      <fieldset class="stack" data-persona-humanizer-fields${override ? "" : " hidden"}>${fields.map((field) => renderSettingField(field, values[field.key])).join("")}</fieldset></div>
       ${cardSaveActions(ui("persona_save"))}
     </form>`;
   }
@@ -3300,20 +3314,24 @@
     content.innerHTML = entries.length
       ? `<div class="rows">${entries
           .map(
-            ({ id, type, action, reason, count }) => `<article class="item"><div class="row">
-        <div class="stack" id="conditioning-${escapeHtml(id)}">
-          <div class="row hint"><span>${escapeHtml(ui(type === "reward" ? "persona_conditioning_reward" : "persona_conditioning_punishment"))} &middot; ${escapeHtml(action)}</span><span>${escapeHtml(ui("persona_conditioning_count").replace("{count}", String(count)))}</span></div>
-          <p class="clamp" dir="auto">${escapeHtml(reason)}</p>
+            ({ id, type, action, reason, count }) => `<article class="item">
+        <div id="conditioning-${escapeHtml(id)}">
+          <div class="item-meta"><span>${escapeHtml(ui(type === "reward" ? "persona_conditioning_reward" : "persona_conditioning_punishment"))} &middot; ${escapeHtml(action)}</span><span>${escapeHtml(ui("persona_conditioning_count").replace("{count}", String(count)))}</span></div>
+          <p dir="auto">${escapeHtml(reason)}</p>
         </div>
-        <div class="item-actions"><button class="button danger" type="button" data-conditioning-remove="${escapeHtml(id)}" aria-describedby="conditioning-${escapeHtml(id)}" aria-haspopup="dialog">${escapeHtml(ui("persona_conditioning_remove"))}</button></div>
-      </div></article>`,
+        <div class="item-actions"><button class="button small icon danger" type="button" data-conditioning-remove="${escapeHtml(id)}" aria-label="${escapeHtml(ui("persona_conditioning_remove"))}" aria-describedby="conditioning-${escapeHtml(id)}" aria-haspopup="dialog">${navigationIcon("trash-2")}</button></div>
+      </article>`,
           )
           .join("")}</div>`
       : `<p class="hint">${escapeHtml(ui("persona_conditioning_empty"))}</p>`;
     content.querySelectorAll("[data-conditioning-remove]").forEach((button) => {
       button.onclick = async () => {
         if (
-          !(await confirmAction(ui("persona_conditioning_remove_title"), ui("persona_conditioning_remove_hint"))) ||
+          !(await confirmAction(
+            ui("persona_conditioning_remove_title"),
+            ui("persona_conditioning_remove_hint"),
+            ui("persona_conditioning_remove"),
+          )) ||
           !button.isConnected
         )
           return;
@@ -3383,18 +3401,18 @@
     toast(ui("persona_attg_saved"));
   }
 
-  function personaSettingsPanel(key, hint, attributes, refresh = "") {
-    return `<section class="${refresh ? "stack" : "card"}" ${attributes}>
-      ${refresh ? `<div class="toolbar"><p class="hint">${escapeHtml(ui(hint))}</p>${refreshButton(refresh, ui(key))}</div>` : personaCardHead(ui(key), ui(hint))}
+  function personaSettingsPanel(key, hint, attributes) {
+    return `<section class="card" ${attributes}>
+      ${personaCardHead(ui(key), ui(hint))}
       <div data-persona-panel-body>${loadingBar(ui(key))}</div>
     </section>`;
   }
 
   async function loadPersonaVoice(host, personaId) {
     const body = host.querySelector("[data-persona-panel-body]");
-    const refresh = host.querySelector("[data-voice-refresh]");
-    refresh.disabled = true;
-    body.innerHTML = loadingBar(ui("persona_voice_title"));
+    if (body.hasAttribute("aria-busy")) return;
+    body.setAttribute("aria-busy", "true");
+    body.innerHTML = `<section class="card">${personaCardHead(ui("persona_voice_title"), ui("persona_voice_hint"))}${loadingBar(ui("persona_voice_title"))}</section>`;
     try {
       const voice = await api(`/guilds/${state.guildId}/personas/${personaId}/voice`);
       if (!host.isConnected) return;
@@ -3414,8 +3432,8 @@
         (id) => id && !voice.options.some((option) => option.id === id),
       );
       body.innerHTML = `<form class="card" data-fx="track" data-persona-voice="${personaId}" data-voice-mode="${escapeHtml(voice.mode)}" data-settings-key="${escapeHtml(settingsKey)}">
-        ${personaCardHead(ui("persona_voice_title"), current)}
-        <div class="grid"><label class="field">${fieldLabel(ui("persona_voice_priority"), ui("persona_voice_priority_hint"))}
+        ${personaCardHead(ui("persona_voice_title"), current, refreshButton("voice", ui("persona_voice_title")))}
+        <div class="stack"><div class="grid"><label class="field">${fieldLabel(ui("persona_voice_priority"), ui("persona_voice_priority_hint"))}
           <select name="priority">${["design", "clone"].map((kind) => `<option value="${kind}"${kind === voice.priority ? " selected" : ""}>${escapeHtml(title(kind))}</option>`).join("")}</select></label>
         <label class="field">${fieldLabel(ui(voice.mode === "elevenlabs" ? "persona_voice_provider" : "persona_voice_sample"))}
           <select name="assignment" data-searchable><option value="">${escapeHtml(ui("persona_voice_unassigned"))}</option>
@@ -3423,16 +3441,20 @@
           ${voice.options.map(({ id, label }) => `<option value="${escapeHtml(id)}"${id === voice.selectedId ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>
           ${voice.catalogUnavailable ? `<small class="hint">${escapeHtml(ui("persona_voice_catalog_unavailable"))}</small>` : ""}</label></div>
         <label class="field">${fieldLabel(ui("persona_voice_design_prompt"), ui("persona_voice_design_hint"))}
-          <textarea name="designPrompt" maxlength="${voice.maxLength}" rows="4">${escapeHtml(voice.designPrompt)}</textarea></label>
+          <textarea name="designPrompt" maxlength="${voice.maxLength}" rows="4">${escapeHtml(voice.designPrompt)}</textarea></label></div>
         ${cardSaveActions(ui("persona_save"))}
       </form>`;
+      host.querySelector("[data-voice-refresh]").onclick = () => loadPersonaVoice(host, personaId);
       initDraftForms(host);
       enhanceDashboard(host);
       focusSearchDestination();
     } catch (error) {
-      if (host.isConnected) body.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+      if (host.isConnected) {
+        body.innerHTML = `<section class="card">${personaCardHead(ui("persona_voice_title"), "", refreshButton("voice", ui("persona_voice_title")))}<p class="notice error" role="alert">${escapeHtml(error.message)}</p></section>`;
+        host.querySelector("[data-voice-refresh]").onclick = () => loadPersonaVoice(host, personaId);
+      }
     } finally {
-      refresh.disabled = false;
+      body.removeAttribute("aria-busy");
     }
   }
 
@@ -3541,8 +3563,10 @@
 
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="context">
           ${personaCardHead("Pinned context note", "Persistent context inserted at the configured depth.")}
-          <label class="field">${fieldLabel("Context note", "Persona-specific context inserted into the assembled conversation.")}<textarea name="contextNote" rows="5">${escapeHtml(persona.contextNote || "")}</textarea></label>
-          <label class="field">${fieldLabel("Depth", "How far back in the prompt the note is inserted.")}<input name="contextNoteDepth" type="number" min="0" max="100" value="${persona.contextNoteDepth || 0}"></label>
+          <div class="stack">
+            <label class="field">${fieldLabel("Context note", "Persona-specific context inserted into the assembled conversation.")}<textarea name="contextNote" rows="5">${escapeHtml(persona.contextNote || "")}</textarea></label>
+            <label class="field">${fieldLabel("Depth", "How far back in the prompt the note is inserted.")}<input name="contextNoteDepth" type="number" min="0" max="100" value="${persona.contextNoteDepth || 0}"></label>
+          </div>
           ${saveActions}
         </form>
 
@@ -3551,8 +3575,7 @@
         ${
           persona.isAlter
             ? `<section class="card" data-persona-id="${persona.personaId}">
-                <header class="card-head"><div><h3>Delete alter persona</h3><p>This removes the server's persona configuration. Memories remain governed by their own ownership and retention rules.</p></div>
-                </header><button class="button danger hold-button persona-delete-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>
+                <header class="card-head"><div><h3>Delete alter persona</h3><p class="hint">This removes the server's persona configuration. Memories remain governed by their own ownership and retention rules.</p></div><div class="actions"><button class="button danger hold-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div></header>
               </section>`
             : ""
         }
@@ -3572,9 +3595,9 @@
       ? `<label class="field"><span class="field-label">${escapeHtml(ui("persona_attribute"))}</span><textarea name="text" rows="2" required>${escapeHtml(value.text)}</textarea></label><label class="toggle"><span class="field-label">${escapeHtml(ui("persona_attribute_public"))}</span><input name="isPublic" type="checkbox" role="switch"${value.isPublic ? " checked" : ""}></label>`
       : `<label class="field"><span class="field-label">${escapeHtml(ui("persona_dialogue_user"))}</span><textarea name="input" rows="3" required>${escapeHtml(value.input)}</textarea></label><label class="field"><span class="field-label">${escapeHtml(persona.nickname)}</span><textarea name="output" rows="3" required>${escapeHtml(value.output)}</textarea></label>`;
     const read = attributes
-      ? `<div class="stack"><p class="clamp">${escapeHtml(saved.text)}</p>${saved.isPublic ? `<span class="chip">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span>` : ""}</div>`
-      : `<dl class="stack"><dt>${escapeHtml(ui("persona_dialogue_user"))}</dt><dd class="clamp" data-read-field="user">${escapeHtml(saved.input)}</dd><dt>${escapeHtml(persona.nickname)}</dt><dd class="clamp" data-read-field="persona">${escapeHtml(saved.output)}</dd></dl>`;
-    return `${draft ? `<form class="stack" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}">${fields}<div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `<div class="row">${read}<div class="item-actions"><button class="button small" type="button" data-entry-edit>${escapeHtml(ui("persona_edit"))}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}" data-tooltip="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div></div>`}`;
+      ? `<div><p>${escapeHtml(saved.text)}</p>${saved.isPublic ? `<div class="item-meta"><span class="chip">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span></div>` : ""}</div>`
+      : `<dl class="stack"><div><dt class="hint">${escapeHtml(ui("persona_dialogue_user"))}</dt><dd data-read-field="user">${escapeHtml(saved.input)}</dd></div><div><dt class="hint">${escapeHtml(persona.nickname)}</dt><dd data-read-field="persona">${escapeHtml(saved.output)}</dd></div></dl>`;
+    return `${draft ? `<form class="stack" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}">${fields}<div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div></form>` : `${read}<div class="item-actions"><button class="button small icon" type="button" data-entry-edit aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div>`}`;
   }
 
   function personaTint(persona) {
@@ -3674,20 +3697,23 @@
   function renderPersonaAppearance(persona) {
     const saveActions = cardSaveActions(ui("persona_save"));
 
-    return `<div class="stack">
-      <section class="card" data-persona-id="${persona.personaId}">
-        <header class="card-head"><div><h3>Persona avatar</h3><p>${persona.isAlter ? "Used by this persona's webhook messages." : "Updates TomoriBot's server-specific Discord avatar."}</p></div></header>
-        ${
-          state.overview.guild.isDirectMessage
-            ? personaAvatar(persona, "avatar")
-            : `<div class="media-settings"><div class="media-item"><label class="avatar-upload media-upload" data-upload-zone>
-          ${personaAvatar(persona, "avatar")}
-          <span class="media-overlay">Change avatar</span>
-          <input id="persona-avatar-file-${persona.personaId}" data-persona-avatar-file="${persona.personaId}" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" aria-label="Change avatar">
-        </label><button class="button" type="button" data-persona-avatar-remove="${persona.personaId}">Remove</button></div></div>`
-        }
-      </section>
+    const avatarActions = state.overview.guild.isDirectMessage
+      ? ""
+      : `<div class="actions">
+          ${personaAvatarUrl(persona) ? `<button class="button small danger" type="button" data-persona-avatar-remove="${persona.personaId}" aria-haspopup="dialog">${escapeHtml(ui("persona_avatar_remove"))}</button>` : ""}
+          <button class="button small" type="button" data-persona-avatar-choose="${persona.personaId}">${navigationIcon("image")}${escapeHtml(ui("persona_avatar_change"))}</button>
+        </div>`;
+
+    return `<div class="split">
+      <div class="col">
+        <section class="card" data-persona-id="${persona.personaId}">
+          ${personaCardHead(ui("persona_avatar_title"), "", avatarActions)}
+          <div class="art-preview" role="img" aria-label="${escapeHtml(persona.nickname)}">${personaSticker(persona)}</div>
+          <input id="persona-avatar-file-${persona.personaId}" data-persona-avatar-file="${persona.personaId}" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" hidden>
+        </section>
         ${state.overview.personaGuildSettings?.values[persona.personaId] ? `<section class="card" data-persona-reference="${persona.personaId}">${renderPersonaReference(persona.personaId)}</section>` : ""}
+      </div>
+      <div class="col">
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
           ${personaCardHead("Visual character prompt", "A visual description Tomori can also use when generating images. This is not the persona's main conversation prompt.")}
           <label class="field">${fieldLabel("Visual description", "Describe the character's stable visual identity, clothing, features, and other image-generation details.")}<textarea name="personaPrompt" rows="10">${escapeHtml(persona.personaPrompt || "")}</textarea></label>
@@ -3698,16 +3724,19 @@
           <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated visual traits reused when generating this persona.")}<input name="physicalAppearanceTags" value="${escapeHtml((persona.physicalAppearanceTags || []).join(", "))}"></label>
           ${saveActions}
         </form>
+      </div>
     </div>`;
   }
 
   function renderPersonaReference(personaId) {
     const saved = state.overview.personaGuildSettings.values[personaId].hasCharacterReference;
     const url = `${BASE}/guilds/${state.guildId}/personas/${personaId}/character-reference?v=${state.avatarRevision}`;
-    return `${personaCardHead(ui("persona_reference_title"), ui("persona_reference_hint"))}
+    const actions = `<div class="actions">
+      ${saved ? `<button class="button small danger" type="button" data-persona-reference-remove aria-haspopup="dialog">${escapeHtml(ui("character_reference_remove"))}</button>` : ""}
+      <button class="button small" type="button" data-persona-reference-upload>${navigationIcon("image")}${escapeHtml(ui("character_reference_upload"))}</button>
+    </div>`;
+    return `${personaCardHead(ui("persona_reference_title"), ui("persona_reference_hint"), actions)}
       ${saved ? `<div class="art-preview"><img src="${escapeHtml(url)}" alt="${escapeHtml(ui("persona_reference_title"))}"></div>` : ""}
-      <div class="actions"><button class="button" type="button" data-persona-reference-upload>${escapeHtml(ui("character_reference_upload"))}</button>
-      ${saved ? `<button class="button danger" type="button" data-persona-reference-remove aria-haspopup="dialog">${escapeHtml(ui("character_reference_remove"))}</button>` : ""}</div>
       <input type="file" data-persona-reference-file accept="image/*" hidden>`;
   }
 
@@ -3859,6 +3888,12 @@
   function renderPersonaBanner(persona, personas, canAdd) {
     const main = personas.find((entry) => !entry.isAlter);
     const quickPicks = [...new Set([main, persona, ...personas].filter(Boolean))].slice(0, 3);
+    const avatar = personaAvatarUrl(persona);
+    const initial = escapeHtml(persona.nickname.trim().slice(0, 1) || "?");
+    const art = `<div class="card-stack" aria-hidden="true">
+      <span class="back b1">✦</span><span class="back b2">✦</span>
+      ${avatar ? `<span class="front"><img src="${escapeHtml(avatar)}" alt="" data-avatar-fallback="${initial}"></span>` : `<span class="front mono" data-label="${escapeHtml(persona.nickname)}">${initial}</span>`}
+    </div>`;
     return `<section class="banner${appearance.personaColors ? " tinted" : ""}"${personaTintAttribute(persona)} aria-labelledby="persona-name">
       <div class="banner-info">
         <div class="stack">
@@ -3873,7 +3908,7 @@
           <button class="button small" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_all").replace("{count}", String(personas.length)))}</button>
         </div>
       </div>
-      <div class="banner-art">${personaSticker(persona, "emblem")}</div>
+      <div class="banner-art">${art}</div>
       ${
         state.overview.canManage
           ? `<div class="banner-menu">
@@ -3964,7 +3999,7 @@
         body = renderPersonaAppearance(persona);
         break;
       case "voice":
-        body = personaSettingsPanel("persona_voice_title", "persona_voice_hint", "data-persona-voice-panel", "voice");
+        body = `<div data-persona-voice-panel><div data-persona-panel-body><section class="card">${personaCardHead(ui("persona_voice_title"), ui("persona_voice_hint"), refreshButton("voice", ui("persona_voice_title")))}${loadingBar(ui("persona_voice_title"))}</section></div></div>`;
         break;
       case "sprites":
         body = `<section id="sprite-workspace">${loadingBar(ui("sprite_loading"))}</section>`;
@@ -4249,34 +4284,109 @@
     input.after(error);
   }
 
-  function renderSpriteItem(personaId, sprite, limits) {
-    const draft = personaEntryDrafts.get(personaEntryKey(personaId, "sprite", sprite?.key || "new"));
-    if (!draft) {
-      if (!sprite) return "";
-      return `<div class="stack">
-        <button class="sticker-tile" type="button" data-sprite-edit>${personaSticker({ nickname: sprite.name, avatarUrl: sprite.imageUrl })}<strong>${escapeHtml(sprite.name)}</strong><small>${escapeHtml(sprite.instructions || "")}</small></button>
-        <div class="actions"><button class="button small danger hold-button" type="button" data-hold data-sprite-remove data-persona-id="${personaId}" data-sprite-key="${escapeHtml(sprite.key)}" data-confirm-title="${escapeHtml(ui("sprite_remove_title"))}" data-confirm-description="${escapeHtml(ui("sprite_remove_detail"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div>
-      </div>`;
-    }
-    const image = draft.preview || sprite?.imageUrl;
-    return `<form class="compose" data-sprite-form data-edit-baseline="${escapeHtml(JSON.stringify({ name: sprite?.name, instructions: sprite?.instructions, identity: sprite?.identity }))}"${draft.file ? " data-edit-file" : ""} novalidate data-persona-id="${personaId}"${sprite ? ` data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
-      ${image ? `<div class="sticker"><img src="${escapeHtml(image)}" alt="${escapeHtml(draft.name || "")}" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></div>` : ""}
-      <label class="field" data-upload-zone>${fieldLabel(ui("sprite_file"))}<input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif"></label>
-      <label class="field">${fieldLabel(ui("sprite_name"), ui("sprite_name_hint"))}<input name="name" maxlength="${limits.name}" value="${escapeHtml(draft.name || "")}" required></label>
-      <label class="field">${fieldLabel(ui("sprite_instructions"), ui("sprite_instructions_hint"))}<textarea name="instructions" maxlength="${limits.instructions}" rows="3">${escapeHtml(draft.instructions || "")}</textarea></label>
-      <label class="toggle"><span class="field-label">${escapeHtml(ui("sprite_identity"))}<small>${escapeHtml(ui("sprite_identity_hint"))}</small></span><input type="checkbox" role="switch" name="identity"${draft.identity ? " checked" : ""}></label>
-      <div class="actions"><button class="button small" type="button" data-sprite-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
-    </form>`;
+  function renderSpriteTile(sprite) {
+    return `<button class="sticker-tile" type="button" data-sprite-edit="${escapeHtml(sprite.key)}" aria-haspopup="dialog">
+      ${personaSticker({ nickname: sprite.name, avatarUrl: sprite.imageUrl })}
+      <strong>${escapeHtml(sprite.name)}</strong>
+      ${sprite.instructions ? `<small>${escapeHtml(sprite.instructions)}</small>` : ""}
+    </button>`;
   }
 
-  function updateSpriteItem(root, personaId, spriteKey) {
-    const sprite = root._sprites.find((entry) => entry.key === spriteKey);
-    const host = root.querySelector(
-      sprite ? `[data-sprite-item="${CSS.escape(sprite.key)}"]` : "[data-sprite-new-host]",
+  function renderSpriteDialog(personaId, sprite, limits) {
+    return `<dialog class="wide" id="sprite-editor" aria-labelledby="sprite-editor-title">
+      <header class="panel-header">
+        <div class="heading"><h2 id="sprite-editor-title">${escapeHtml(ui(sprite ? "sprite_editor_title" : "sprite_add"))}</h2></div>
+        <button class="button icon" type="button" data-sprite-cancel aria-label="${escapeHtml(ui("persona_cancel"))}">${navigationIcon("x")}</button>
+      </header>
+      <form data-sprite-form novalidate data-persona-id="${personaId}"${sprite ? ` data-sprite-key="${escapeHtml(sprite.key)}"` : ""}>
+        <div class="stack">
+          <div class="split">
+            <div class="stack">
+              <label class="field">${fieldLabel(ui("sprite_name"), ui("sprite_name_hint"))}<input name="name" maxlength="${limits.name}" value="${escapeHtml(sprite?.name || "")}" required autofocus></label>
+              <label class="field">${fieldLabel(ui("sprite_instructions"), ui("sprite_instructions_hint"))}<textarea name="instructions" maxlength="${limits.instructions}" rows="4">${escapeHtml(sprite?.instructions || "")}</textarea></label>
+              <label class="toggle"><span class="field-label"><strong>${escapeHtml(ui("sprite_identity"))}</strong><small>${escapeHtml(ui("sprite_identity_hint"))}</small></span><input type="checkbox" name="identity"${sprite?.identity ? " checked" : ""}></label>
+            </div>
+            <div class="stack">
+              <div class="art-preview">${sprite?.imageUrl ? `<span class="sticker"><img src="${escapeHtml(sprite.imageUrl)}" alt="" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></span>` : `<span class="sticker dashed" aria-hidden="true">${navigationIcon("image")}</span>`}</div>
+              <label class="field">${fieldLabel(ui("sprite_file"), ui("sprite_file_hint"))}<input type="file" name="file" accept="image/png,image/jpeg,image/gif,.png,.jpg,.jpeg,.gif"></label>
+            </div>
+          </div>
+          <p class="notice error" role="alert" data-sprite-error hidden></p>
+        </div>
+        <section class="notice warning stack" data-sprite-confirm hidden>
+          <strong data-sprite-confirm-title></strong><p data-sprite-confirm-detail></p>
+          <div class="actions"><button class="button" type="button" data-sprite-confirm-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button" type="button" data-sprite-confirm-accept></button></div>
+        </section>
+        <footer class="actions" data-sprite-actions>
+          ${sprite ? `<button class="button danger hold-button" type="button" data-hold data-sprite-remove data-confirm-title="${escapeHtml(ui("sprite_remove_title"))}" data-confirm-description="${escapeHtml(ui("sprite_remove_detail"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>` : ""}
+          <button class="button" type="button" data-sprite-cancel>${escapeHtml(ui("persona_cancel"))}</button>
+          <button class="button primary" type="submit">${escapeHtml(ui(sprite ? "sprite_edit" : "sprite_add"))}</button>
+        </footer>
+      </form>
+    </dialog>`;
+  }
+
+  function openSpriteDialog(trigger) {
+    const root = document.querySelector("#sprite-workspace");
+    const sprite = root._sprites.find((entry) => entry.key === trigger.dataset.spriteEdit);
+    if (trigger.hasAttribute("data-sprite-edit") && !sprite) return;
+    root.insertAdjacentHTML("beforeend", renderSpriteDialog(state.personaId, sprite, root._spriteLimits));
+    const dialog = root.querySelector("#sprite-editor");
+    dialog.querySelector("form")._spriteImageLimit = root._spriteLimits.imageBytes;
+    dialog.addEventListener(
+      "close",
+      () => {
+        dialog.remove();
+        if (trigger.isConnected) trigger.focus({ preventScroll: true });
+      },
+      { once: true },
     );
-    window.TomoriFX.swap(host, renderSpriteItem(personaId, sprite, root._spriteLimits));
-    enhanceDashboard(host);
-    return host;
+    dialog.addEventListener("cancel", (event) => {
+      if (dialog.querySelector("[aria-busy=true]")) event.preventDefault();
+      else if (!dialog.querySelector("[data-sprite-confirm]").hidden) {
+        event.preventDefault();
+        dialog.querySelector("[data-sprite-confirm-cancel]").click();
+      }
+    });
+    enhanceDashboard(dialog);
+    dialog.showModal();
+  }
+
+  function confirmSpriteAction(form, title, detail, label, danger = false) {
+    const panel = form.querySelector("[data-sprite-confirm]");
+    const actions = form.querySelector("[data-sprite-actions]");
+    const cancel = panel.querySelector("[data-sprite-confirm-cancel]");
+    const accept = panel.querySelector("[data-sprite-confirm-accept]");
+    form.querySelector("[data-sprite-error]").hidden = true;
+    const dialog = form.closest("dialog");
+    const trigger = document.activeElement;
+    const close = dialog.querySelector("header [data-sprite-cancel]");
+    panel.querySelector("[data-sprite-confirm-title]").textContent = title;
+    panel.querySelector("[data-sprite-confirm-detail]").textContent = detail;
+    accept.textContent = label;
+    accept.classList.toggle("danger", danger);
+    accept.classList.toggle("primary", !danger);
+    const fields = form.querySelector(".split");
+    fields.inert = true;
+    close.disabled = true;
+    actions.hidden = true;
+    panel.hidden = false;
+    cancel.focus();
+    return new Promise((resolve) => {
+      const finish = (event) => {
+        for (const control of [cancel, accept]) control.removeEventListener("click", finish);
+        dialog.removeEventListener("close", finish);
+        panel.hidden = true;
+        fields.inert = false;
+        close.disabled = false;
+        actions.hidden = false;
+        if (dialog.open) trigger?.focus({ preventScroll: true });
+        resolve(event.currentTarget === accept);
+      };
+      cancel.addEventListener("click", finish);
+      accept.addEventListener("click", finish);
+      dialog.addEventListener("close", finish, { once: true });
+    });
   }
 
   async function loadSprites(personaId) {
@@ -4298,13 +4408,18 @@
         panel.className = "card";
         root.replaceChildren(panel);
       }
-      panel.innerHTML = `<header class="card-head"><div><h3>${escapeHtml(ui("sprites"))} <small>${data.sprites.length} / ${data.limits.count}</small></h3><p class="hint">${escapeHtml(ui("sprites_hint"))}</p></div><div class="actions"><button class="button" type="button" popovertarget="sprite-actions">${navigationIcon("ellipsis")}${escapeHtml(ui("sprite_actions"))}</button><div id="sprite-actions" class="action-menu" popover aria-label="${escapeHtml(ui("sprite_actions"))}"><button class="button" type="button" data-sprite-new>${escapeHtml(ui("sprite_add"))}</button><button type="button" class="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button type="button" class="button" data-sprite-export ${data.sprites.length ? "" : "disabled"}>${escapeHtml(ui("sprite_export"))}</button></div><input type="file" accept=".zip,application/zip" data-sprite-archive hidden></div></header>
-        ${data.inherited ? `<p class="hint">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
-        ${data.sprites.length ? "" : `<p class="hint">${escapeHtml(ui("sprite_empty"))}</p>`}
-        <div data-sprite-new-host></div><div class="sticker-grid">${data.sprites.map((sprite) => `<div data-sprite-item="${escapeHtml(sprite.key)}">${renderSpriteItem(personaId, sprite, data.limits)}</div>`).join("")}</div>`;
+      const actions = `<button class="button small" type="button" data-sprite-import>${escapeHtml(ui("sprite_import"))}</button><button class="button small" type="button" data-sprite-export${data.sprites.length ? "" : " disabled"}>${escapeHtml(ui("sprite_export"))}</button>`;
+      panel.innerHTML = `<header class="card-head"><div><h3>${escapeHtml(ui("sprites"))}<small>${data.sprites.length} / ${data.limits.count}</small></h3></div><div class="actions">${actions}</div></header>
+        <input type="file" accept=".zip,application/zip" data-sprite-archive hidden>
+        <div class="stack">
+          ${data.inherited ? `<p class="notice info">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
+          ${data.sprites.length ? "" : `<p class="empty-note">${escapeHtml(ui("sprite_empty"))}</p>`}
+          <div class="sticker-grid">${data.sprites.map(renderSpriteTile).join("")}
+            <button class="sticker-tile" type="button" data-sprite-new aria-haspopup="dialog"><span class="sticker dashed" aria-hidden="true">${navigationIcon("plus")}</span><strong>${escapeHtml(ui("sprite_add"))}</strong></button>
+          </div>
+        </div>`;
       root._sprites = data.sprites;
       root._spriteLimits = data.limits;
-      if (personaEntryDrafts.has(personaEntryKey(personaId, "sprite", "new"))) updateSpriteItem(root, personaId, "new");
       enhanceDashboard(root);
     } catch (error) {
       if (!current()) return;
@@ -6142,11 +6257,12 @@
     toast(message);
   }
 
-  function confirmAction(title, message) {
+  function confirmAction(title, message, label = ui("confirm_action")) {
     const dialog = document.querySelector("#confirm-dialog");
     if (!dialog?.showModal) return Promise.resolve(window.confirm(message));
     dialog.querySelector("#confirm-title").textContent = title;
     dialog.querySelector("#confirm-message").textContent = message;
+    dialog.querySelector('button[value="confirm"]').textContent = label;
     dialog.returnValue = "cancel";
     dialog.showModal();
     return new Promise((resolve) => {
@@ -6830,10 +6946,18 @@
   }
 
   async function removePersonaAvatar(personaId) {
-    if (!(await confirmAction("Remove avatar?", "The persona will return to its default avatar."))) return;
+    if (
+      !(await confirmAction(
+        ui("persona_avatar_remove_title"),
+        ui("persona_avatar_remove_detail"),
+        ui("persona_avatar_remove"),
+      ))
+    )
+      return;
     try {
       await api(`/guilds/${state.guildId}/personas/${personaId}/avatar`, { method: "DELETE" });
-      await refreshPersonas(personaId, "Avatar removed");
+      await refreshPersonas(personaId, ui("persona_avatar_removed"));
+      document.querySelector(`[data-persona-avatar-choose="${personaId}"]`)?.focus({ preventScroll: true });
     } catch (error) {
       toast(error.message, "error");
     }
@@ -6874,7 +6998,7 @@
       }
       if (!(image instanceof HTMLImageElement) || !image.dataset.avatarFallback) return;
       const fallback = document.createElement("span");
-      if (image.parentElement.classList.contains("sticker")) {
+      if (image.parentElement.matches(".sticker, .card-stack .front")) {
         image.replaceWith(document.createTextNode(image.dataset.avatarFallback));
         return;
       }
@@ -6998,18 +7122,7 @@
           : { input: entryForm.elements.input.value, output: entryForm.elements.output.value },
       );
     }
-    const spriteForm = event.target.closest("[data-sprite-form]");
-    if (spriteForm?.elements.name) {
-      if (event.target === spriteForm.elements.name) setSpriteFieldError(event.target, "");
-      const key = personaEntryKey(spriteForm.dataset.personaId, "sprite", spriteForm.dataset.spriteKey || "new");
-      const draft = personaEntryDrafts.get(key);
-      if (draft)
-        Object.assign(draft, {
-          name: spriteForm.elements.name.value,
-          instructions: spriteForm.elements.instructions.value,
-          identity: spriteForm.elements.identity.checked,
-        });
-    }
+    if (event.target.matches("[data-sprite-form] input[name=name]")) setSpriteFieldError(event.target, "");
     if (event.target.matches('[data-lorebook-form="book-rename"] input[name="name"]')) {
       event.target.removeAttribute("aria-invalid");
       const error = event.target.form.querySelector(".error");
@@ -7106,7 +7219,11 @@
       if (personaReferenceAction.hasAttribute("data-persona-reference-upload")) {
         host.querySelector("[data-persona-reference-file]").click();
       } else if (
-        (await confirmAction(ui("persona_reference_remove_title"), ui("persona_reference_remove_hint"))) &&
+        (await confirmAction(
+          ui("persona_reference_remove_title"),
+          ui("persona_reference_remove_hint"),
+          ui("character_reference_remove"),
+        )) &&
         host.isConnected
       ) {
         await savePersonaReference(host, null);
@@ -7253,25 +7370,15 @@
       return;
     }
     if (event.target.closest("[data-sprite-retry]")) return loadSprites(state.personaId);
-    const spriteAction = event.target.closest("[data-sprite-edit], [data-sprite-cancel], [data-sprite-new]");
-    if (spriteAction) {
-      const form = spriteAction.closest("[data-sprite-form]");
-      const spriteKey =
-        form?.dataset.spriteKey || spriteAction.closest("[data-sprite-item]")?.dataset.spriteItem || "new";
-      const key = personaEntryKey(state.personaId, "sprite", spriteKey);
-      if (spriteAction.hasAttribute("data-sprite-cancel")) {
-        const draft = personaEntryDrafts.get(key);
-        if (draft?.preview) URL.revokeObjectURL(draft.preview);
-        personaEntryDrafts.delete(key);
-      } else if (!personaEntryDrafts.has(key)) {
-        const sprite = document.querySelector("#sprite-workspace")._sprites.find((item) => item.key === spriteKey);
-        personaEntryDrafts.set(key, sprite ? { ...sprite } : { name: "", instructions: "", identity: false });
-      }
-      const host = updateSpriteItem(document.querySelector("#sprite-workspace"), state.personaId, spriteKey);
-      (
-        host.querySelector('[name="name"], [data-sprite-edit]') ||
-        document.querySelector('[popovertarget="sprite-actions"]')
-      )?.focus({ preventScroll: true });
+    const spriteCancel = event.target.closest("[data-sprite-cancel]");
+    if (spriteCancel) {
+      const dialog = spriteCancel.closest("dialog");
+      if (!dialog.querySelector("[aria-busy=true]")) dialog.close();
+      return;
+    }
+    const spriteTile = event.target.closest("[data-sprite-edit], [data-sprite-new]");
+    if (spriteTile) {
+      if (!document.querySelector("#sprite-editor[open]")) openSpriteDialog(spriteTile);
       return;
     }
     if (event.target.closest("[data-sprite-import]")) {
@@ -7281,19 +7388,24 @@
     const spriteRemove = event.target.closest("[data-sprite-remove]");
     if (spriteRemove) {
       if (event.type !== "holdcomplete") return;
-      const personaId = Number(spriteRemove.dataset.personaId);
-      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites?key=${encodeURIComponent(spriteRemove.dataset.spriteKey)}`;
-      spriteRemove.disabled = true;
+      const form = spriteRemove.form;
+      const personaId = Number(form.dataset.personaId);
+      const path = `/guilds/${state.guildId}/personas/${personaId}/sprites?key=${encodeURIComponent(form.dataset.spriteKey)}`;
+      const error = form.querySelector("[data-sprite-error]");
+      error.hidden = true;
       try {
-        await withBusyForm(spriteRemove, async () => {
+        await withBusyForm(form, async () => {
           const result = await api(path, { method: "DELETE" });
+          form.closest("dialog").close();
           await refreshPersonas(personaId, result.message);
+          document.querySelector('[data-persona-panel="sprites"]')?.focus({ preventScroll: true });
         });
-      } catch (error) {
-        spriteRemove.dispatchEvent(new Event("holdreset"));
-        toast(error.message, "error");
-      } finally {
-        spriteRemove.disabled = false;
+      } catch (failure) {
+        if (form.isConnected) {
+          error.textContent = failure.message;
+          error.hidden = false;
+          spriteRemove.dispatchEvent(new Event("holdreset"));
+        } else toast(failure.message, "error");
       }
       return;
     }
@@ -7823,22 +7935,20 @@
       return;
     }
     if (event.target.matches('[data-sprite-form] input[type="file"]')) {
-      const form = event.target.closest("[data-sprite-form]");
-      const key = personaEntryKey(form.dataset.personaId, "sprite", form.dataset.spriteKey || "new");
-      const draft = personaEntryDrafts.get(key);
-      const file = event.target.files[0];
-      if (draft && file) {
-        if (draft.preview) URL.revokeObjectURL(draft.preview);
-        draft.file = file;
-        draft.preview = URL.createObjectURL(file);
-        form.dataset.editFile = "";
-        captureDraft(form);
-        updateSpriteItem(
-          document.querySelector("#sprite-workspace"),
-          Number(form.dataset.personaId),
-          form.dataset.spriteKey || "new",
-        );
-      }
+      const { form, files } = event.target;
+      const preview = form.querySelector(".art-preview");
+      const file = files[0];
+      if (!file || file.size > form._spriteImageLimit) return;
+      const reader = new FileReader();
+      reader.addEventListener(
+        "load",
+        () => {
+          if (!preview.isConnected || reader.result === null || event.target.files[0] !== file) return;
+          preview.innerHTML = `<span class="sticker"><img src="${escapeHtml(reader.result)}" alt="" data-sprite-image><span hidden>${escapeHtml(ui("sprite_image_missing"))}</span></span>`;
+        },
+        { once: true },
+      );
+      reader.readAsDataURL(file);
       return;
     }
     if (event.target.matches("[data-sprite-archive]")) {
@@ -7963,25 +8073,32 @@
       const editing = form.hasAttribute("data-sprite-key");
       const path = `/guilds/${state.guildId}/personas/${personaId}/sprites${editing ? `?key=${encodeURIComponent(form.dataset.spriteKey)}` : ""}`;
       const body = new FormData(form);
+      const file = form.elements.file.files[0];
       body.set("identity", String(form.elements.identity.checked));
-      const key = personaEntryKey(personaId, "sprite", form.dataset.spriteKey || "new");
-      const draft = personaEntryDrafts.get(key);
-      if (draft?.file) body.set("file", draft.file);
-      else body.delete("file");
-      if (!editing && !draft?.file) {
-        toast(ui("sprite_file_hint"), "error");
+      if (!file) body.delete("file");
+      const error = form.querySelector("[data-sprite-error]");
+      error.hidden = true;
+      if (!editing && !file) {
+        error.textContent = ui("sprite_file_hint");
+        error.hidden = false;
+        form.elements.file.focus();
         return;
       }
+      if (!form.querySelector("[data-sprite-confirm]").hidden || form.hasAttribute("aria-busy")) return;
+      if (!editing && !(await confirmSpriteAction(form, ui("sprite_add"), ui("sprite_add_detail"), ui("sprite_add"))))
+        return;
       try {
         await withBusyForm(form, async () => {
-          if (!editing && !(await confirmAction(ui("sprite_add"), ui("sprite_add_detail")))) return;
           const result = await api(path, { method: editing ? "PUT" : "POST", body });
-          if (draft?.preview) URL.revokeObjectURL(draft.preview);
-          personaEntryDrafts.delete(key);
+          form.closest("dialog").close();
           await refreshPersonas(personaId, result.message);
+          document.querySelector('[data-persona-panel="sprites"]')?.focus({ preventScroll: true });
         });
-      } catch (error) {
-        toast(error.message, "error");
+      } catch (failure) {
+        if (form.isConnected) {
+          error.textContent = failure.message;
+          error.hidden = false;
+        } else toast(failure.message, "error");
       }
       return;
     }

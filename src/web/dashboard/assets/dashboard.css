@@ -169,6 +169,15 @@ body[data-theme="dark"] .boot-logo {
   grid-template-columns: minmax(0, 1fr);
 }
 
+[data-sprite-form] > .actions > [data-sprite-remove] {
+  margin-inline-end: auto;
+}
+
+[data-sprite-form] .art-preview {
+  min-height: 0;
+  padding: var(--space-6);
+}
+
 .persona-avatar-fallback,
 .avatar-fallback,
 .user-avatar-fallback,
@@ -294,10 +303,6 @@ body[data-theme="dark"] .boot-logo {
 .mailbox .actions {
   align-self: stretch;
   justify-content: flex-end;
-}
-
-.persona-delete-button {
-  width: 100%;
 }
 
 .mail-list {

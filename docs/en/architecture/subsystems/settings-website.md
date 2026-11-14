@@ -169,8 +169,9 @@ application marks the card saved after its write succeeds.
 remember them on that device. Stored settings apply before the dashboard paints.
 Persona colors affect the persona banner and test chat.
 
-Persona attributes, sample dialogues and sprites have separate read and edit
-states. Cancel discards the entry draft; Save uses the existing persona API.
+Persona attributes and sample dialogues open in place. Sprite tiles open an
+editor dialog with an image preview, independent Save and a hold button for
+deletion. A failed sprite write keeps the editor open with its input intact.
 Lorebooks use a book list, entry list and selected-entry editor. Content,
 matching rules and activation settings retain their individual save operations.
 

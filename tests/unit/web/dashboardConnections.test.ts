@@ -137,42 +137,33 @@ describe("dashboard connections", () => {
     expect(filter(personaEntries, "Juno triggerWords")).toEqual([personaEntries[1], personaEntries[0]]);
   });
 
-  it("swaps only the selected sprite when opening an editor", async () => {
-    const render = await dashboardFunction("renderSpriteItem");
-    const update = await dashboardFunction("updateSpriteItem");
-    const sprite = { key: "smile", name: "Smile", instructions: "", identity: false };
-    const drafts = new Map<string, object>();
-    const tile = { innerHTML: "" };
-    const untouched = { innerHTML: "Other sprite" };
-    const root = {
-      _sprites: [sprite, { ...sprite, key: "greet", name: "Greet" }],
-      _spriteLimits: { count: 5, name: 32, instructions: 200 },
-      querySelector: (selector: string) => (selector === '[data-sprite-item="smile"]' ? tile : untouched),
-    };
-    const swap = runInNewContext(`${render}; ${update}; updateSpriteItem`, {
-      CSS: { escape: String },
-      window: {
-        TomoriFX: {
-          swap: (host: typeof tile, markup: string) => {
-            host.innerHTML = markup;
-          },
-        },
-      },
-      personaEntryDrafts: drafts,
-      personaEntryKey: (_personaId: number, _kind: string, key: string) => key,
+  it("puts sprite editing and deletion in the dialog and keeps the tile a single action", async () => {
+    const tileSource = await dashboardFunction("renderSpriteTile");
+    const dialogSource = await dashboardFunction("renderSpriteDialog");
+    const shared = {
       escapeHtml: String,
       ui: String,
+      navigationIcon: () => "",
       personaSticker: () => "",
       fieldLabel: String,
-      enhanceDashboard: () => {},
-    }) as (root: unknown, personaId: number, key: string) => typeof tile;
-    drafts.set(sprite.key, { ...sprite, instructions: "Draft instructions" });
-    expect(swap(root, 2, sprite.key)).toBe(tile);
-    expect(tile.innerHTML).toContain("Draft instructions");
-    drafts.clear();
-    swap(root, 2, sprite.key);
-    expect(tile.innerHTML).not.toContain("data-sprite-form");
-    expect(untouched.innerHTML).toBe("Other sprite");
+    };
+    const sprite = { key: "smile", name: "Smile", instructions: "When greeting someone", identity: true };
+    const tile = runInNewContext(`(${tileSource})`, shared) as (sprite: unknown) => string;
+    const dialog = runInNewContext(`(${dialogSource})`, shared) as (
+      personaId: number,
+      sprite: unknown,
+      limits: { name: number; instructions: number },
+    ) => string;
+    const tileHtml = tile(sprite);
+    const editHtml = dialog(2, sprite, { name: 32, instructions: 200 });
+    const createHtml = dialog(2, undefined, { name: 32, instructions: 200 });
+
+    expect(tileHtml).toContain('data-sprite-edit="smile"');
+    expect(tileHtml).toContain(sprite.instructions);
+    expect(tileHtml).not.toContain("data-sprite-remove");
+    expect(editHtml).toContain('data-sprite-key="smile"');
+    expect(editHtml).toContain("data-hold data-sprite-remove");
+    expect(createHtml).not.toContain("data-sprite-remove");
   });
 
   it("reveals save and discard only while a form differs from its baseline", async () => {

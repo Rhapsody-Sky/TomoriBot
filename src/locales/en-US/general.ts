@@ -706,8 +706,7 @@ export default {
       interface_sprites: "Sprites",
       interface_sprites_hint:
         "Alternate portraits Tomori can select during a conversation. Each sprite belongs to this persona.",
-      interface_sprite_inherited:
-        "These sprites come from a shared preset. Editing them creates an independent copy of this persona; the shared preset is not changed.",
+      interface_sprite_inherited: "Editing sprites from this shared preset creates a local copy for this persona.",
       interface_sprite_name: "Sprite name",
       interface_sprite_name_hint:
         "The label Tomori uses to select this sprite. Colons, parentheses and line breaks are not allowed.",
@@ -721,6 +720,15 @@ export default {
         "PNG, JPEG or GIF. Images are converted to PNG. Leave empty when editing to keep the current image.",
       interface_sprite_add: "Add sprite",
       interface_sprite_edit: "Save sprite",
+      interface_sprite_editor_title: "Edit sprite",
+      interface_sprite_delete_action: "Delete sprite",
+      interface_persona_avatar_title: "Persona avatar",
+      interface_persona_avatar_change: "Change avatar",
+      interface_persona_avatar_remove: "Remove avatar",
+      interface_persona_avatar_remove_title: "Remove avatar?",
+      interface_persona_avatar_remove_detail: "The persona will return to its default avatar.",
+      interface_persona_avatar_removed: "Avatar removed",
+      interface_confirm_action: "Confirm",
       interface_sprite_remove: "Delete",
       interface_sprite_remove_title: "Delete sprite?",
       interface_sprite_remove_detail: "This removes the sprite and its persona-owned image. It cannot be undone.",
