@@ -169,6 +169,25 @@ body[data-theme="dark"] .boot-logo {
   grid-template-columns: minmax(0, 1fr);
 }
 
+[data-persona-summary] {
+  gap: var(--space-3);
+}
+
+[data-persona-art] > .sparkle {
+  inset-block-start: 18%;
+  inset-inline-start: 12%;
+}
+
+[data-persona-art] > .sparkle.s2 {
+  inset-block-start: 34%;
+  inset-inline: auto 10%;
+}
+
+[data-persona-art] > .sparkle.s3 {
+  inset-block: auto 16%;
+  inset-inline-start: 20%;
+}
+
 [data-sprite-form] > .actions > [data-sprite-remove] {
   margin-inline-end: auto;
 }

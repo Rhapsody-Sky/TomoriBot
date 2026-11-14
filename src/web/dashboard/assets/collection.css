@@ -787,7 +787,7 @@ body[data-theme="light"] .sticker {
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 40%, transparent);
 }
 
-.dock button {
+.dock > button {
   position: relative;
   z-index: 1;
   display: inline-flex;
@@ -806,23 +806,23 @@ body[data-theme="light"] .sticker {
   transition: color var(--dur-fast);
 }
 
-.dock button .glyph {
+.dock > button .glyph {
   width: 18px;
   height: 18px;
   transition: scale var(--dur-base) var(--spring);
 }
 
-.dock button[aria-selected="true"] {
+.dock > button[aria-selected="true"] {
   color: var(--ink);
 }
 
-.dock button[aria-selected="true"] .glyph {
+.dock > button[aria-selected="true"] .glyph {
   color: var(--primary);
   scale: 1.15;
 }
 
 @media (hover: hover) {
-  .dock button:hover {
+  .dock > button:hover {
     color: var(--ink);
   }
 }

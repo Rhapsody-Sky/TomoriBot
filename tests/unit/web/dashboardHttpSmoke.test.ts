@@ -105,6 +105,7 @@ describe("dashboard HTTP shell", () => {
       ["design.js", "application/javascript"],
       ["fx.js", "application/javascript"],
       ["navigation-icons.svg", "image/svg+xml"],
+      ["persona-art-tomori.png", "image/png"],
       ["tomoribot_logo.png", "image/png"],
       ["tomori_companion_logo.svg", "image/svg+xml"],
       ["tomori_texture5.png", "image/png"],

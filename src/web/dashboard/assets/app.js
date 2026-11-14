@@ -78,15 +78,27 @@
     if (surfaceButton) surfaceButton.setAttribute("aria-pressed", String(appearance.surface === "glass"));
     const personaColors = document.querySelector("[data-design-persona-colors]");
     if (personaColors) personaColors.checked = appearance.personaColors;
-    for (const key of ["colorMode", "motion", "layout"]) {
-      const input = document.querySelector(`[data-design-setting="${key}"]`);
-      if (input) input.value = appearance[key];
-    }
+    document.querySelectorAll("[data-design-choice]").forEach((button) => {
+      const selected = appearance[button.dataset.designChoice] === button.value;
+      button.setAttribute("aria-checked", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    const motion = document.querySelector('[data-design-setting="motion"]');
+    if (motion) motion.value = appearance.motion;
+    const light = appearance.lighting[appearance.theme];
     for (const key of ["angle", "spread", "intensity"]) {
       const input = document.querySelector(`[data-light-setting="${key}"]`);
-      if (input) input.value = appearance.lighting[document.body.dataset.theme][key];
+      if (input) input.value = light[key];
     }
+    updateDesignLightLabels(light);
   };
+
+  function updateDesignLightLabels(light) {
+    const spread = document.querySelector("[data-design-light-spread]");
+    const intensity = document.querySelector("[data-design-light-intensity]");
+    if (spread) spread.value = `${(light.spread / 100).toLocaleString()}×`;
+    if (intensity) intensity.value = `${light.intensity}%`;
+  }
 
   window.addEventListener("storage", (event) => {
     if (!rememberDesign || event.newValue !== null || event.storageArea !== localStorage) return;
@@ -713,7 +725,6 @@
 
   function renderShell() {
     clearSearchSpotlight();
-    removeDockMenu(app);
     const guilds = state.session?.guilds || [];
     const selected = guilds.find((guild) => guild.id === state.guildId) || guilds[0];
     const user = state.session?.user;
@@ -888,15 +899,35 @@
   }
 
   function renderDesignSettings() {
+    const choices = (
+      field,
+      label,
+      options,
+    ) => `<div class="field"><span class="field-label">${escapeHtml(ui(label))}</span>
+      <div class="segmented fill" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui(label))}">${options
+        .map(
+          ([value, key]) =>
+            `<button type="button" role="radio" aria-checked="${appearance[field] === value}" tabindex="${appearance[field] === value ? 0 : -1}" data-design-choice="${field}" value="${value}">${escapeHtml(ui(key))}</button>`,
+        )
+        .join("")}</div></div>`;
     return `<div id="design-settings" class="design-settings" popover role="dialog" aria-labelledby="design-title">
       <header class="panel-header"><div class="heading"><h2 id="design-title">${escapeHtml(ui("design_title"))}</h2><p>${escapeHtml(ui("design_hint"))}</p></div><button class="button  icon" type="button" popovertarget="design-settings" popovertargetaction="hide" aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header>
-      <div class="stack"><div class="row"><button class="button " id="design-theme" type="button" data-theme-toggle>${escapeHtml(ui("design_light"))}</button><button class="button " type="button" data-surface-toggle aria-pressed="${appearance.surface === "glass"}">${escapeHtml(ui("design_glass"))}</button></div>
+      <div class="stack"><div class="row"><button class="button small" id="design-theme" type="button" data-theme-toggle>${escapeHtml(ui("design_light"))}</button><button class="button small" type="button" data-surface-toggle aria-pressed="${appearance.surface === "glass"}">${escapeHtml(ui("design_glass"))}</button></div>
       <div class="field"><span class="field-label">${escapeHtml(ui("design_palette"))}</span><div class="palette-list">${palettes.map((palette) => `<button class="palette-choice" type="button" data-palette-choice="${palette.id}" aria-pressed="${appearance.palette === palette.id}"><span class="palette-orb" aria-hidden="true"></span><span>${palette.label}</span></button>`).join("")}</div></div>
       <label class="toggle">${fieldLabel(ui("design_persona_colors"))}<input type="checkbox" role="switch" data-design-persona-colors></label>
-      <label class="field">${fieldLabel(ui("design_color_mode"))}<select data-design-setting="colorMode"><option value="colorful">${escapeHtml(ui("design_colorful"))}</option><option value="reduced">${escapeHtml(ui("design_reduced"))}</option></select></label>
-      <fieldset class="preview-controls design-light"><legend>${escapeHtml(ui("design_lighting"))}</legend><label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-light-setting="angle" data-scrub></label>
-      <label class="field">${fieldLabel(ui("design_spread"))}<input type="range" min="50" max="500" step="10" data-light-setting="spread"></label><label class="field">${fieldLabel(ui("design_intensity"))}<input type="range" min="0" max="200" step="5" data-light-setting="intensity"></label></fieldset>
-      <label class="field">${fieldLabel(ui("design_layout"))}<select data-design-setting="layout"><option value="boxed">${escapeHtml(ui("design_layout_boxed"))}</option><option value="full">${escapeHtml(ui("design_layout_full"))}</option></select></label>
+      ${choices("colorMode", "design_color_mode", [
+        ["colorful", "design_colorful"],
+        ["reduced", "design_reduced"],
+      ])}
+      <fieldset class="stack design-light"><legend>${escapeHtml(ui("design_lighting"))}</legend>
+        <label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-unit="°" data-light-setting="angle" data-scrub></label>
+        <label class="field"><span class="field-label range-label">${escapeHtml(ui("design_spread"))}<output data-design-light-spread></output></span><input type="range" min="50" max="500" step="10" data-light-setting="spread"></label>
+        <label class="field"><span class="field-label range-label">${escapeHtml(ui("design_intensity"))}<output data-design-light-intensity></output></span><input type="range" min="0" max="200" step="5" data-light-setting="intensity"></label>
+      </fieldset>
+      ${choices("layout", "design_layout", [
+        ["boxed", "design_layout_boxed"],
+        ["full", "design_layout_full"],
+      ])}
       <label class="field">${fieldLabel(ui("design_motion"))}<select data-design-setting="motion">${["full", "subtle", "off"].map((value) => `<option value="${value}">${escapeHtml(ui(`design_motion_${value}`))}</option>`).join("")}</select></label>
       <label class="toggle">${fieldLabel(ui("design_remember"), ui("design_remember_hint"))}<input type="checkbox" role="switch" data-design-remember${rememberDesign ? " checked" : ""}></label></div>
       <div class="actions form-actions"><button class="button " type="button" data-design-reset>${escapeHtml(ui("design_reset"))}</button></div>
@@ -1012,7 +1043,8 @@
       link.setAttribute("aria-current", link.dataset.nav === state.view ? "location" : "false");
     });
     if (drawer.open) drawer.close();
-    document.querySelector(".sidebar-rail").append(sidebar);
+    const rail = document.querySelector(".sidebar-rail");
+    if (sidebar.parentElement !== rail) rail.append(sidebar);
     window.TomoriControls?.enhanceTabs(document.querySelector("[data-dashboard-view]"));
   }
 
@@ -1035,8 +1067,15 @@
   function renderView() {
     const workspace = document.querySelector("[data-dashboard-view]");
     if (!workspace) return;
-    if (workspace.dataset.dashboardView !== state.view) return renderShell();
+    if (workspace.dataset.dashboardView !== state.view) {
+      const collection = state.view === "personas";
+      if (collection !== workspace.classList.contains("app-main")) return renderShell();
+      clearSearchSpotlight();
+      workspace.dataset.dashboardView = state.view;
+      workspace.scrollTop = 0;
+    }
     if (state.view === "site-admin" && state.session?.user.isGlobalAdmin) {
+      initNavigationMenus();
       window.TomoriSite.renderAdmin(workspace, {
         api,
         escapeHtml,
@@ -2501,16 +2540,36 @@
       ? ""
       : ` aria-disabled="true" data-tooltip="${escapeHtml(ui("memory_server_transfer_unavailable"))}"`;
 
+    const add =
+      serverWritesDisabled || personalCreationDisabled
+        ? ""
+        : `<button class="button primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false"${personal ? "" : " disabled"}${collection ? ' data-fx="spark"' : ""}>${collection ? navigationIcon("plus") : ""}${escapeHtml(ui("memory_add"))}</button>`;
+    const transfers = `<button class="button" data-memory-export type="button"${transferAttributes}>${escapeHtml(ui("persona_memory_export") || "Export")}</button>
+      <button class="button" data-memory-import type="button"${transferAttributes}>${escapeHtml(ui("persona_memory_import") || "Import")}</button>`;
+    const actions = collection
+      ? `<div data-persona-memory-actions hidden>
+          <button class="button icon" type="button" popovertarget="persona-memory-menu" aria-label="${escapeHtml(ui("persona_memory_actions"))}">${navigationIcon("ellipsis")}</button>
+          <div class="action-menu" id="persona-memory-menu" popover aria-label="${escapeHtml(ui("persona_memory_actions"))}">
+            <button class="button" type="button" data-memory-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_memories"))}</button>
+            ${transfers}
+          </div>
+          ${add}
+        </div>`
+      : `<div class="actions">${refreshButton("memory", ui("refresh_memories"))}${transfers}${add}</div>`;
+
     return `
+      ${collection ? '<div class="split">' : ""}
       <section class="${collection ? "card" : "panel"}" data-memory-card>
-        <header class="${collection ? "card-head" : "panel-header"}"><div${collection ? "" : ' class="heading"'}>${collection ? `<h3>${escapeHtml(title)}</h3><p class="hint">${escapeHtml(copy)}</p>` : `<p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p>`}</div>
-        <div class="actions">
-          ${refreshButton("memory", ui("refresh_memories"))}
-          <button class="button " data-memory-export type="button"${transferAttributes}>Export</button>
-          <button class="button " data-memory-import type="button"${transferAttributes}>Import</button>
-          ${serverWritesDisabled || personalCreationDisabled ? "" : `<button class="button primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false"${personal ? "" : " disabled"}>${escapeHtml(ui("memory_add"))}</button>`}
+        <header class="${collection ? "card-head" : "panel-header"}">
+          ${
+            collection
+              ? `<div><h3>${escapeHtml(title)}</h3><p class="hint">${escapeHtml(copy)}</p></div>
+              <label class="field"><span class="sr-only">${escapeHtml(ui("persona_memories_search"))}</span><input type="search" data-persona-memory-search placeholder="${escapeHtml(ui("persona_memories_search"))}"></label>`
+              : `<div class="heading"><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>`
+          }
+          ${actions}
           <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
-        </div></header>
+        </header>
       <div class="stack">
       ${
         serverWritesDisabled || personalCreationDisabled
@@ -2524,11 +2583,25 @@
               <div class="actions"><button class="button" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
             </form>`
       }
-      <section id="memory-list" class="${collection ? "rows" : "stack"}">${loadingBar(ui("memory_loading"))}</section></div></section>`;
+      <section id="memory-list" class="${collection ? "rows" : "stack"}">${loadingBar(ui("memory_loading"))}</section></div></section>
+      ${
+        collection
+          ? `<aside class="card" data-persona-memory-summary hidden>
+        ${personaCardHead(ui("persona_memory_summary"))}
+        <div class="stack">
+          <div class="stats"><div><strong data-persona-memory-total></strong><small>${escapeHtml(ui(personal ? "persona_personal_memory" : "persona_server_memory"))}</small></div><div><strong>#${persona.lineageId}</strong><small>${escapeHtml(ui("persona_main_lineage"))}</small></div></div>
+          <div class="field" data-persona-memory-capacity hidden>
+            <span class="field-label">${escapeHtml(ui("persona_memory_capacity"))}<small data-persona-memory-usage></small></span>
+            <div class="progress-track" role="progressbar" aria-label="${escapeHtml(ui("persona_memory_capacity"))}" aria-valuemin="0"><div class="progress-fill"></div></div>
+          </div>
+        </div>
+      </aside></div>`
+          : ""
+      }`;
   }
 
   function setMemoryComposer(form, open) {
-    const trigger = form.closest("[data-memory-card]").querySelector("[data-memory-add]");
+    const trigger = document.querySelector("[data-memory-add]");
     form.hidden = !open;
     trigger.hidden = open;
     trigger.setAttribute("aria-expanded", String(open));
@@ -2614,24 +2687,54 @@
         const panel = list.closest("[data-memory-card]");
         const form = panel.querySelector("#memory-compose-form");
         if (form?.hidden) renderMemoryChannelScope(form, data);
-        const add = panel.querySelector("[data-memory-add]");
+        const add = document.querySelector("[data-memory-add]");
         if (add) add.disabled = false;
       }
-      renderMemoryList();
+      renderMemoryList(true);
+      const summary = list.closest(".split")?.querySelector("[data-persona-memory-summary]");
+      if (summary) updatePersonaMemorySummary(summary, data, memoryKind);
     } catch (error) {
       if (!isCurrent()) return;
       list.innerHTML = `<div class="empty"><strong>Memories could not be loaded.</strong><span>${escapeHtml(error.message)}</span></div>`;
     }
   }
 
-  function renderMemoryList() {
+  function updatePersonaMemorySummary(summary, data, kind) {
+    const count = data.memories.length;
+    const limit =
+      kind === "personal"
+        ? data.limits.maxPersonalMemories
+        : data.mode === "all"
+          ? data.limits.maxServerMemories
+          : null;
+    const total = summary.querySelector("[data-persona-memory-total]");
+    total.textContent = String(count);
+    if (summary.hidden) window.TomoriFX.count(total);
+    const capacity = summary.querySelector("[data-persona-memory-capacity]");
+    capacity.hidden = !limit;
+    if (limit) {
+      const progress = capacity.querySelector(".progress-track");
+      progress.setAttribute("aria-valuemax", String(limit));
+      progress.setAttribute("aria-valuenow", String(Math.min(count, limit)));
+      progress.firstElementChild.style.setProperty("--progress", `${Math.min((count / limit) * 100, 100)}%`);
+      capacity.querySelector("[data-persona-memory-usage]").textContent =
+        `${formatStatNumber(count)} / ${formatStatNumber(limit)}`;
+    }
+    summary.hidden = false;
+  }
+
+  function renderMemoryList(animate = false) {
     const list = document.querySelector("#memory-list");
     if (!list) return;
     const collection = state.view === "personas";
-    const rows = state.memoryData?.memories || [];
+    const memories = state.memoryData?.memories || [];
+    const query = document.querySelector("[data-persona-memory-search]")?.value.trim().toLowerCase();
+    const rows = query
+      ? memories.filter((memory) => [memory.content, ...(memory.tags || [])].join(" ").toLowerCase().includes(query))
+      : memories;
     if (!rows.length) {
       list.innerHTML = collection
-        ? `<p class="empty-note">${escapeHtml(ui("persona_memory_empty"))}</p>`
+        ? `<div class="empty-note"><span class="mark" aria-hidden="true">✦</span><p>${escapeHtml(ui(query ? "persona_memories_no_matches" : "persona_memory_empty"))}</p></div>`
         : '<div class="empty"><strong>No memories in this scope.</strong><span>The first one you add will appear here.</span></div>';
       return;
     }
@@ -2642,8 +2745,8 @@
     list.innerHTML = rows
       .map(
         (memory) => `<article class="${collection ? "item" : "memory-row"}">
-          <div class="stack">
-            <span class="badge">#${memory.id}</span>
+          <div${collection ? "" : ' class="stack"'}>
+            ${collection ? "" : `<span class="badge">#${memory.id}</span>`}
             <p>${escapeHtml(memory.content)}</p>
             <div class="${collection ? "item-meta" : "row hint"}">
               ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : ""}
@@ -2668,6 +2771,7 @@
         </article>`,
       )
       .join("");
+    if (collection && animate && !query) window.TomoriFX.stagger(list);
   }
 
   function memoryChannelSummary(memory, data) {
@@ -3601,6 +3705,8 @@
   }
 
   function personaTint(persona) {
+    const art = personaArt.get(persona.lineageId);
+    if (art) return art;
     const preset = palettes.find(({ id }) => id === persona.nickname.toLowerCase());
     return preset?.id || "tomori";
   }
@@ -3662,6 +3768,7 @@
   function syncPersonaChat(workspace, persona) {
     const shell = workspace.closest(".shell");
     shell.querySelector("#persona-test-chat")?.remove();
+    workspace.querySelector(".chat-fab")?.remove();
     const visible = persona && state.overview.canManage && !state.overview.guild.isDirectMessage;
     shell.classList.toggle("chat-open", Boolean(visible && state.personaChatOpen));
     if (visible && state.personaChatOpen) document.body.dataset.chat = "open";
@@ -3876,90 +3983,214 @@
           <div class="row">${actions}<button class="button icon" type="button" data-persona-picker-close aria-label="${escapeHtml(ui("persona_cancel"))}">${navigationIcon("x")}</button></div></div>
         <div class="collection-tools"><label class="field"><span class="sr-only">${escapeHtml(ui("persona_search"))}</span><input type="search" data-persona-picker-search placeholder="${escapeHtml(ui("persona_search"))}"></label></div>
       </header>
-      <div class="collection-body"><div class="deck">${personas
-        .map(
-          (entry) =>
-            `<button class="deck-card" type="button" data-persona-search="${escapeHtml([entry.nickname, ...(entry.triggerWords || [])].join(" ").toLowerCase())}" data-persona-select="${entry.personaId}" aria-current="${entry.personaId === selectedId}">${personaSticker(entry)}<strong>${escapeHtml(entry.nickname)}</strong><small>${escapeHtml(ui(entry.isAlter ? "persona_alter_label" : "persona_main_label"))} / #${entry.lineageId}</small></button>`,
-        )
-        .join("")}</div></div>
+      <div class="collection-body"><div class="deck">${renderPersonaPickerTiles(personas, selectedId)}</div></div>
     </dialog>`;
   }
 
-  function renderPersonaBanner(persona, personas, canAdd) {
-    const main = personas.find((entry) => !entry.isAlter);
-    const quickPicks = [...new Set([main, persona, ...personas].filter(Boolean))].slice(0, 3);
+  function renderPersonaPickerTiles(personas, selectedId) {
+    return personas
+      .map(
+        (entry) =>
+          `<button class="deck-card" type="button" data-persona-search="${escapeHtml([entry.nickname, ...(entry.triggerWords || [])].join(" ").toLowerCase())}" data-persona-select="${entry.personaId}" aria-current="${entry.personaId === selectedId}">${personaSticker(entry)}<strong>${escapeHtml(entry.nickname)}</strong><small>${escapeHtml(ui(entry.isAlter ? "persona_alter_label" : "persona_main_label"))} / #${entry.lineageId}</small></button>`,
+      )
+      .join("");
+  }
+
+  const personaArt = new Map([
+    [4, "tomori"],
+    [50, "nerine"],
+    [1770, "aphel"],
+    [3585, "lilya"],
+  ]);
+
+  function renderPersonaArt(persona) {
+    const art = personaArt.get(persona.lineageId);
+    if (art) {
+      return `<div class="art-stage" data-persona-portrait><img class="art-full" src="/settings/assets/persona-art-${art}.png" alt="${escapeHtml(persona.nickname)}" data-fx="tilt" data-fx-tilt="10"></div>`;
+    }
     const avatar = personaAvatarUrl(persona);
     const initial = escapeHtml(persona.nickname.trim().slice(0, 1) || "?");
-    const art = `<div class="card-stack" aria-hidden="true">
-      <span class="back b1">✦</span><span class="back b2">✦</span>
+    return `<div class="card-stack" data-persona-portrait aria-hidden="true">
+      <span class="back b1">✦</span><span class="back b2">✧</span>
       ${avatar ? `<span class="front"><img src="${escapeHtml(avatar)}" alt="" data-avatar-fallback="${initial}"></span>` : `<span class="front mono" data-label="${escapeHtml(persona.nickname)}">${initial}</span>`}
     </div>`;
-    return `<section class="banner${appearance.personaColors ? " tinted" : ""}"${personaTintAttribute(persona)} aria-labelledby="persona-name">
-      <div class="banner-info">
-        <div class="stack">
-          <p class="crumb">${escapeHtml(ui("personas_title"))} <span class="kind">${escapeHtml(ui(persona.isAlter ? "persona_alter_label" : "persona_main_label"))}</span></p>
-          <h1 id="persona-name" data-fx="split">${escapeHtml(persona.nickname)}</h1>
-        </div>
-        <div class="quickbar">
-          <div class="quick" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui("persona_choose"))}">
-            ${quickPicks.map((entry) => `<button type="button" role="radio" aria-checked="${entry === persona}" aria-label="${escapeHtml(entry.nickname)}" data-persona-select="${entry.personaId}" tabindex="${entry === persona ? 0 : -1}">${personaSticker(entry)}</button>`).join("")}
-          </div>
-          ${canAdd ? `<button class="quick-add" type="button" aria-label="${escapeHtml(ui("persona_create"))}" data-persona-create-open><span class="sticker dashed">${navigationIcon("plus")}</span></button>` : ""}
-          <button class="button small" type="button" data-persona-picker-open aria-haspopup="dialog">${escapeHtml(ui("persona_all").replace("{count}", String(personas.length)))}</button>
-        </div>
-      </div>
-      <div class="banner-art">${art}</div>
-      ${
-        state.overview.canManage
-          ? `<div class="banner-menu">
-        <button class="button icon" type="button" popovertarget="persona-actions-menu" aria-label="${escapeHtml(ui("persona_actions"))}">${navigationIcon("ellipsis")}</button>
-        <div id="persona-actions-menu" class="action-menu" popover aria-label="${escapeHtml(ui("persona_actions"))}">
-          <button class="button" type="button" data-persona-export-format="png">${navigationIcon("download")}${escapeHtml(ui("persona_export_png"))}</button>
-          <button class="button" type="button" data-persona-export-format="json">${navigationIcon("download")}${escapeHtml(ui("persona_export_json"))}</button>
-          ${persona.isAlter ? "" : `<hr><button class="button" type="button" data-main-persona-change aria-haspopup="dialog">${escapeHtml(ui("persona_main_change"))}</button>`}
-        </div>
-      </div>`
-          : ""
-      }
-    </section>`;
   }
 
-  function removeDockMenu(root) {
-    const menu = root.querySelector(".dock .more-pill")?.getAttribute("popovertarget");
-    if (menu) document.getElementById(menu)?.remove();
-  }
-
-  function renderPersonaWorkspace(workspace) {
-    removeDockMenu(workspace);
-    const personas = (state.overview.personas || []).filter((persona) => persona.lineageId !== 0);
-    const canAdd = state.overview.canManage && !state.overview.guild.isDirectMessage;
-    const personaActions = canAdd
-      ? `<button class="button small" type="button" data-persona-import-open>${escapeHtml(ui("persona_import_action"))}</button><button class="button small primary" type="button" data-persona-create-open>${escapeHtml(ui("persona_create"))}</button>`
+  function mountPersonaPage(workspace, personas, persona, primaryTabs, knowledgeTabs, canAdd) {
+    const addActions = `<button class="button" type="button" data-persona-create-open data-fx="spark">${navigationIcon("plus")}${escapeHtml(ui("persona_create"))}</button>
+      <button class="button" type="button" data-persona-import-open>${navigationIcon("download")}${escapeHtml(ui("persona_import_action"))}</button>`;
+    const pickerActions = canAdd
+      ? `<button class="button small" type="button" data-persona-import-open>${navigationIcon("download")}${escapeHtml(ui("persona_import_action"))}</button><button class="button small primary" type="button" data-persona-create-open data-fx="spark">${navigationIcon("plus")}${escapeHtml(ui("persona_create"))}</button>`
       : "";
-    if (!personas.length) {
-      workspace.innerHTML = `<section class="banner compact"><div class="banner-info"><h1>${escapeHtml(ui("personas_title"))}</h1><p class="banner-text">${escapeHtml(ui("persona_none"))}</p><div class="actions">${personaActions}</div></div></section>`;
+    if (!persona) {
+      workspace.innerHTML = `<section class="banner compact"><div class="banner-info"><h1>${escapeHtml(ui("personas_title"))}</h1><p class="banner-text">${escapeHtml(ui("persona_none"))}</p>${canAdd ? `<div class="actions">${pickerActions}</div>` : ""}</div></section>`;
       syncPersonaChat(workspace, null);
       return;
     }
-    if (!personas.some((persona) => persona.personaId === state.personaId)) {
-      state.personaId = personas[0].personaId;
+    const tab = ([key, label, icon]) =>
+      `<button type="button" id="persona-tab-${key}" role="tab" aria-selected="false" tabindex="-1" data-persona-panel="${key}">${icon ? navigationIcon(icon) : ""}${escapeHtml(label)}</button>`;
+    workspace.innerHTML = `
+      <section class="banner" data-persona-banner aria-labelledby="persona-name">
+        <div class="banner-info">
+          <div class="stack" data-persona-summary>
+            <p class="crumb">${escapeHtml(ui("personas_title"))} <span class="kind" data-persona-kind></span></p>
+            <h1 id="persona-name"></h1>
+            <p class="banner-text" data-persona-description hidden></p>
+            <div class="chips" data-persona-chips hidden></div>
+          </div>
+          <div class="quickbar">
+            <div class="quick" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui("persona_choose"))}"></div>
+            ${
+              canAdd
+                ? `<button class="quick-add" type="button" popovertarget="persona-add-menu" aria-label="${escapeHtml(ui("persona_create"))}"><span class="sticker dashed">${navigationIcon("plus")}</span></button>
+              <div class="action-menu" popover id="persona-add-menu" aria-label="${escapeHtml(ui("persona_create"))}">${addActions}</div>`
+                : ""
+            }
+            <button class="button small" type="button" data-persona-picker-open aria-haspopup="dialog">${navigationIcon("layout-grid")}<span></span></button>
+          </div>
+        </div>
+        <div class="banner-art" data-persona-art>
+          <div data-persona-portrait></div>
+          <span class="sparkle" aria-hidden="true">✦</span>
+          <span class="sparkle s2" aria-hidden="true">✧</span>
+          <span class="sparkle s3" aria-hidden="true">✦</span>
+        </div>
+        ${
+          state.overview.canManage
+            ? `<div class="banner-menu">
+          <button class="button icon" type="button" popovertarget="persona-actions-menu" aria-label="${escapeHtml(ui("persona_actions"))}">${navigationIcon("ellipsis")}</button>
+          <div id="persona-actions-menu" class="action-menu" popover aria-label="${escapeHtml(ui("persona_actions"))}">
+            <button class="button" type="button" data-persona-export-format="png">${navigationIcon("download")}${escapeHtml(ui("persona_export_png"))}</button>
+            <button class="button" type="button" data-persona-export-format="json">${navigationIcon("download")}${escapeHtml(ui("persona_export_json"))}</button>
+            <hr data-persona-main-only><button class="button" type="button" data-persona-main-change data-persona-main-only aria-haspopup="dialog">${escapeHtml(ui("persona_main_change"))}</button>
+          </div>
+        </div>`
+            : ""
+        }
+      </section>
+      ${state.overview.guild.isDirectMessage ? `<p class="notice">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
+      <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${escapeHtml(ui("personas_title"))}">${primaryTabs.map(tab).join("")}</nav>
+      <section class="stage" data-persona-stage role="tabpanel">
+        <div class="toolbar" data-persona-knowledge-toolbar>
+          <nav class="segmented" data-fx="indicator" role="tablist" aria-label="${escapeHtml(ui("persona_knowledge"))}">${knowledgeTabs.map(([key, label]) => tab([key, ui(label)])).join("")}</nav>
+          <div class="actions" data-persona-stage-actions hidden></div>
+        </div>
+        <div data-persona-content></div>
+      </section>
+      ${renderPersonaPicker(personas, persona.personaId, pickerActions)}`;
+  }
+
+  function updatePersonaBanner(workspace, persona, personas) {
+    const banner = workspace.querySelector("[data-persona-banner]");
+    const personaChanged = banner.dataset.personaId !== String(persona.personaId);
+    const revision = String(state.avatarRevision);
+    const refreshed = banner.dataset.avatarRevision !== revision;
+    const visualChanged = personaChanged || refreshed;
+    if (visualChanged) {
+      const swap = banner.dataset.personaId !== undefined && personaChanged;
+      banner.dataset.personaId = persona.personaId;
+      banner.dataset.avatarRevision = revision;
+      banner.classList.toggle("tinted", appearance.personaColors);
+      if (appearance.personaColors) banner.dataset.tint = personaTint(persona);
+      else delete banner.dataset.tint;
+      banner.querySelector("[data-persona-kind]").textContent = ui(
+        persona.isAlter ? "persona_alter_label" : "persona_main_label",
+      );
+      banner.querySelectorAll("[data-persona-main-only]").forEach((action) => {
+        action.hidden = persona.isAlter;
+      });
+      const description = banner.querySelector("[data-persona-description]");
+      description.textContent = persona.attributes?.find((attribute) => attribute.isPublic)?.text || "";
+      description.hidden = !description.textContent;
+      const chips = banner.querySelector("[data-persona-chips]");
+      const trigger = persona.triggerWords?.at(-1);
+      chips.innerHTML = trigger
+        ? `<span class="chip tone">${escapeHtml(ui("persona_trigger_chip").replace("{trigger}", () => trigger))}</span>`
+        : "";
+      chips.hidden = !trigger;
+      const art = banner.querySelector("[data-persona-art]");
+      const portrait = art.querySelector("[data-persona-portrait]");
+      portrait.outerHTML = renderPersonaArt(persona);
+      const heading = banner.querySelector("#persona-name");
+      if (heading.textContent !== persona.nickname) window.TomoriFX.split(heading, persona.nickname);
+      if (swap) {
+        banner.classList.remove("is-swapping");
+        void banner.offsetWidth;
+        banner.classList.add("is-swapping");
+      }
+      syncPersonaChat(workspace, persona);
     }
+    const quick = banner.querySelector(".quick");
+    const currentButtons = [...quick.querySelectorAll("button[data-persona-select]")];
+    const main = personas.find((entry) => !entry.isAlter);
+    const preserve = currentButtons.some((button) => Number(button.dataset.personaSelect) === persona.personaId);
+    const current = new Map(personas.map((entry) => [entry.personaId, entry]));
+    const picks = preserve
+      ? currentButtons.map((button) => current.get(Number(button.dataset.personaSelect))).filter(Boolean)
+      : [...new Set([main, persona, ...personas].filter(Boolean))].slice(0, 4);
+    const keys = picks.map((entry) => String(entry.personaId)).join(",");
+    if (keys !== currentButtons.map((button) => button.dataset.personaSelect).join(",")) {
+      for (const button of currentButtons) button.remove();
+      quick.insertAdjacentHTML(
+        "beforeend",
+        picks
+          .map(
+            (entry) =>
+              `<button type="button" role="radio" aria-label="${escapeHtml(entry.nickname)}" data-persona-select="${entry.personaId}">${personaSticker(entry)}</button>`,
+          )
+          .join(""),
+      );
+    } else if (refreshed) {
+      currentButtons.forEach((button, index) => {
+        button.setAttribute("aria-label", picks[index].nickname);
+        button.innerHTML = personaSticker(picks[index]);
+      });
+    }
+    quick.querySelectorAll("button").forEach((button) => {
+      const active = Number(button.dataset.personaSelect) === persona.personaId;
+      button.setAttribute("aria-checked", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    banner.querySelector("[data-persona-picker-open] span").textContent = ui("persona_all").replace(
+      "{count}",
+      String(personas.length),
+    );
+    const picker = workspace.querySelector("#persona-picker-dialog");
+    if (picker.dataset.revision !== revision && !picker.open) {
+      picker.querySelector(".deck").innerHTML = renderPersonaPickerTiles(personas, persona.personaId);
+      picker.querySelector(".collection-title small").textContent = String(personas.length);
+      picker.dataset.revision = revision;
+    }
+    picker.querySelectorAll("[data-persona-select]").forEach((button) => {
+      button.setAttribute("aria-current", String(Number(button.dataset.personaSelect) === persona.personaId));
+    });
+  }
+
+  function renderPersonaWorkspace(workspace) {
+    const personas = (state.overview.personas || []).filter((persona) => persona.lineageId !== 0);
+    const canAdd = state.overview.canManage && !state.overview.guild.isDirectMessage;
     const persona = personas.find((entry) => entry.personaId === state.personaId) || personas[0];
     const knowledgeTabs = personaKnowledgeTabs();
     const isKnowledge = (panel) => knowledgeTabs.some(([key]) => key === panel);
-    const primaryTabs = [
-      ["knowledge", ui("persona_knowledge")],
-      ["preferences", state.overview.personaNaming.copy.tab],
-    ];
+    const primaryTabs = [["knowledge", ui("persona_knowledge"), "brain"]];
     if (state.overview.canManage) {
-      primaryTabs.push(["settings", "Persona settings"]);
-      if (!state.overview.guild.isDirectMessage) primaryTabs.push(["channels", ui("persona_channels")]);
       primaryTabs.push(
-        ["appearance", "Appearance & image prompt"],
-        ["voice", ui("persona_voice_title")],
-        ["sprites", ui("sprites")],
+        ["settings", ui("persona_settings_tab"), "user-round"],
+        ["sprites", ui("sprites"), "palette"],
+        ["appearance", ui("persona_appearance_tab"), "image"],
+        ["voice", ui("persona_voice_title"), "mic"],
       );
+      if (!state.overview.guild.isDirectMessage) primaryTabs.push(["channels", ui("persona_channels"), "radio"]);
     }
+    primaryTabs.push(["preferences", state.overview.personaNaming.copy.tab, "sliders-horizontal"]);
+    const mountKey = JSON.stringify([canAdd, primaryTabs, knowledgeTabs]);
+    const banner = workspace.querySelector("[data-persona-banner]");
+    if (!persona || !banner || workspace.dataset.personaMount !== mountKey) {
+      mountPersonaPage(workspace, personas, persona, primaryTabs, knowledgeTabs, canAdd);
+      workspace.dataset.personaMount = mountKey;
+    }
+    if (!persona) return;
+    state.personaId = persona.personaId;
     if (!isKnowledge(state.personaKnowledgePanel)) state.personaKnowledgePanel = "personal";
     if (!isKnowledge(state.personaPanel) && !primaryTabs.some(([key]) => key === state.personaPanel)) {
       state.personaPanel = "personal";
@@ -3968,8 +4199,40 @@
     const knowledgeActive = isKnowledge(panel);
     if (knowledgeActive) state.personaKnowledgePanel = panel;
     const primaryPanel = knowledgeActive ? "knowledge" : panel;
-    const renderTab = (key, label, selected, icon) =>
-      `<button type="button" id="persona-tab-${key}" role="tab" aria-selected="${key === selected}" tabindex="${key === selected ? 0 : -1}"${key === selected ? ` aria-controls="persona-content-${key}"` : ""} data-persona-panel="${key}">${icon ? navigationIcon(icon) : ""}<span>${escapeHtml(label)}</span></button>`;
+    const stage = workspace.querySelector("[data-persona-stage]");
+    const toolbar = stage.querySelector("[data-persona-knowledge-toolbar]");
+    const content = stage.querySelector("[data-persona-content]");
+    workspace.querySelectorAll("[data-persona-panel]").forEach((button) => {
+      const section = button.closest(".dock");
+      const selected = button.dataset.personaPanel === (section ? primaryPanel : state.personaKnowledgePanel);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      if (selected) button.setAttribute("aria-controls", section ? "persona-stage" : `persona-content-${panel}`);
+      else button.removeAttribute("aria-controls");
+    });
+    toolbar.hidden = !knowledgeActive;
+    const stageActions = stage.querySelector("[data-persona-stage-actions]");
+    stageActions.hidden = true;
+    stageActions.replaceChildren();
+    stage.id = "persona-stage";
+    stage.setAttribute("aria-labelledby", `persona-tab-${primaryPanel}`);
+    content.id = `persona-content-${panel}`;
+    if (knowledgeActive) {
+      content.setAttribute("role", "tabpanel");
+      content.setAttribute("aria-labelledby", `persona-tab-${panel}`);
+    } else {
+      content.removeAttribute("role");
+      content.removeAttribute("aria-labelledby");
+    }
+    if (knowledgeActive) {
+      const segments = toolbar.querySelector(".segmented");
+      const active = segments.querySelector('[aria-selected="true"]');
+      const left = active.offsetLeft;
+      const right = left + active.offsetWidth;
+      if (left < segments.scrollLeft) segments.scrollLeft = left;
+      else if (right > segments.scrollLeft + segments.clientWidth) segments.scrollLeft = right - segments.clientWidth;
+    }
+    updatePersonaBanner(workspace, persona, personas);
     const memoryPanel = panel === "personal" || panel === "server";
     if (memoryPanel) {
       state.memoryKind = panel === "server" ? "server" : "personal";
@@ -4007,23 +4270,20 @@
       default:
         body = renderMemoryCollection({ personal: panel === "personal", persona });
     }
-    const icons = { knowledge: "brain", settings: "sliders-horizontal", voice: "mic", channels: "radio" };
-    const content = `<div id="persona-content-${panel}" data-persona-content role="tabpanel" aria-labelledby="persona-tab-${panel}">${body}</div>`;
-    const knowledgeControl = `<div class="toolbar"><nav class="segmented" data-fx="indicator" role="tablist" aria-label="${escapeHtml(ui("persona_knowledge"))}">${knowledgeTabs.map(([key, label]) => renderTab(key, ui(label), panel)).join("")}</nav></div>`;
-    workspace.innerHTML = `
-      ${renderPersonaBanner(persona, personas, canAdd)}
-      ${renderPersonaPicker(personas, persona.personaId, personaActions)}
-      ${state.overview.guild.isDirectMessage ? `<p class="notice">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
-      <nav class="dock" data-fx="indicator" data-overflow aria-label="${escapeHtml(ui("personas_title"))}" role="tablist">
-        ${primaryTabs.map(([key, label]) => renderTab(key, label, primaryPanel, icons[key] || navigationIcons[key])).join("")}
-      </nav>
-      ${
-        knowledgeActive
-          ? `<section class="stage" id="persona-content-knowledge" role="tabpanel" aria-labelledby="persona-tab-knowledge">${knowledgeControl}${content}</section>`
-          : `<section class="stage">${content}</section>`
-      }`;
-    syncPersonaChat(workspace, persona);
+    content.innerHTML = body;
+    const memoryActions = content.querySelector("[data-persona-memory-actions]");
+    if (memoryActions) {
+      stageActions.append(...memoryActions.children);
+      stageActions.hidden = false;
+    }
+    const previous = stage.dataset.panel;
+    stage.dataset.panel = panel;
+    if (previous !== panel || stage.dataset.personaId !== String(persona.personaId))
+      window.TomoriFX.stagger(
+        content.firstElementChild?.matches(".stack, .split") ? content.firstElementChild : content,
+      );
 
+    stage.dataset.personaId = persona.personaId;
     if (panel === "channels") {
       renderPersonaChannels(workspace.querySelector("#persona-channel-workspace"), persona);
     } else if (panel === "lorebook") {
@@ -4320,7 +4580,7 @@
         <footer class="actions" data-sprite-actions>
           ${sprite ? `<button class="button danger hold-button" type="button" data-hold data-sprite-remove data-confirm-title="${escapeHtml(ui("sprite_remove_title"))}" data-confirm-description="${escapeHtml(ui("sprite_remove_detail"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>` : ""}
           <button class="button" type="button" data-sprite-cancel>${escapeHtml(ui("persona_cancel"))}</button>
-          <button class="button primary" type="submit">${escapeHtml(ui(sprite ? "sprite_edit" : "sprite_add"))}</button>
+          <button class="button primary" data-fx="spark" type="submit">${escapeHtml(ui(sprite ? "sprite_edit" : "sprite_add"))}</button>
         </footer>
       </form>
     </dialog>`;
@@ -4415,12 +4675,13 @@
           ${data.inherited ? `<p class="notice info">${escapeHtml(ui("sprite_inherited"))}</p>` : ""}
           ${data.sprites.length ? "" : `<p class="empty-note">${escapeHtml(ui("sprite_empty"))}</p>`}
           <div class="sticker-grid">${data.sprites.map(renderSpriteTile).join("")}
-            <button class="sticker-tile" type="button" data-sprite-new aria-haspopup="dialog"><span class="sticker dashed" aria-hidden="true">${navigationIcon("plus")}</span><strong>${escapeHtml(ui("sprite_add"))}</strong></button>
+            <button class="sticker-tile" type="button" data-fx="spark" data-sprite-new aria-haspopup="dialog"><span class="sticker dashed" aria-hidden="true">${navigationIcon("plus")}</span><strong>${escapeHtml(ui("sprite_add"))}</strong></button>
           </div>
         </div>`;
       root._sprites = data.sprites;
       root._spriteLimits = data.limits;
       enhanceDashboard(root);
+      window.TomoriFX.stagger(root.querySelector(".sticker-grid"));
     } catch (error) {
       if (!current()) return;
       document.querySelector("#sprite-workspace").innerHTML =
@@ -6940,7 +7201,11 @@
     if (panel && persona) {
       const template = document.createElement("template");
       template.innerHTML = renderPersonaTestChat(persona);
-      window.TomoriFX.swap(panel, template.content.firstElementChild.innerHTML);
+      panel.querySelector(".chat-log").replaceChildren(...template.content.querySelector(".chat-log").childNodes);
+      panel.querySelector("[data-test-chat-reset]").disabled = !state.personaTestChats[personaId]?.length;
+      const form = panel.querySelector("form");
+      form.elements.message.disabled = state.personaTestChatBusy;
+      form.querySelector('button[type="submit"]').disabled = state.personaTestChatBusy;
       scrollTestChat();
     }
   }
@@ -7037,7 +7302,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section]",
+      "[data-persona-select], [data-persona-panel], [data-lorebook-editor-section], [data-design-choice]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
@@ -7053,7 +7318,7 @@
       if (next) {
         event.preventDefault();
         if (group.matches(".quick, .dock, .segmented")) next.click();
-        else next.focus();
+        if (next.isConnected && (group.matches(".deck") || next.hasAttribute("data-design-choice"))) next.focus();
       }
       return;
     }
@@ -7099,12 +7364,18 @@
   document.addEventListener("input", (event) => {
     const lighting = event.target.closest("[data-light-setting]");
     if (lighting?.validity.valid) {
-      appearance.lighting[appearance.theme][lighting.dataset.lightSetting] = Number(lighting.value);
+      const light = appearance.lighting[appearance.theme];
+      light[lighting.dataset.lightSetting] = Number(lighting.value);
       saveAppearance();
+      updateDesignLightLabels(light);
       return;
     }
     captureDraft(event.target.closest(editForms));
     updateChannelCounts(event.target.closest("[data-channel-selector]"));
+    if (event.target.matches("[data-persona-memory-search]")) {
+      if (state.memoryData) renderMemoryList();
+      return;
+    }
     if (event.target.matches("[data-persona-picker-search]")) {
       const query = event.target.value.trim().toLowerCase();
       document.querySelectorAll("[data-persona-search]").forEach((choice) => {
@@ -7526,6 +7797,13 @@
       syncAppearanceControls();
       return;
     }
+    const designChoice = event.target.closest("[data-design-choice]");
+    if (designChoice) {
+      appearance[designChoice.dataset.designChoice] = designChoice.value;
+      saveAppearance();
+      syncAppearanceControls();
+      return;
+    }
     if (event.target.closest("[data-design-reset]")) {
       Object.assign(appearance, {
         theme: "dark",
@@ -7667,6 +7945,7 @@
     if (event.target.closest("[data-persona-picker-open]")) {
       const dialog = document.querySelector("#persona-picker-dialog");
       dialog.showModal();
+      window.TomoriFX.stagger(dialog.querySelector(".deck"));
       dialog.querySelector("[data-persona-picker-search]").focus();
       return;
     }
@@ -7730,6 +8009,8 @@
     const personaSelect = event.target.closest("[data-persona-select]");
     if (personaSelect) {
       state.view = "personas";
+      personaSelect.closest("dialog")?.close();
+      if (state.personaId === Number(personaSelect.dataset.personaSelect)) return;
       state.personaId = Number(personaSelect.dataset.personaSelect);
       state.memoryData = null;
       const fromQuickBar = Boolean(personaSelect.closest(".quick"));
@@ -7763,9 +8044,13 @@
     const nav = event.target.closest("[data-nav]");
     if (nav) {
       event.preventDefault();
+      if (state.view === nav.dataset.nav) {
+        document.querySelector("#navigation-sheet[open]")?.close();
+        return;
+      }
       state.view = nav.dataset.nav;
       state.memoryData = null;
-      renderShell();
+      renderView();
       focusNavigation(`.nav-stack [data-nav="${state.view}"]`);
       return;
     }
@@ -7778,7 +8063,7 @@
     }
     const memoryAdd = event.target.closest("[data-memory-add]");
     if (memoryAdd) {
-      setMemoryComposer(memoryAdd.closest("[data-memory-card]").querySelector("#memory-compose-form"), true);
+      setMemoryComposer(document.getElementById("memory-compose-form"), true);
       return;
     }
     const memoryCancel = event.target.closest("[data-memory-cancel]");
@@ -8196,6 +8481,7 @@
       const personaId = Number(form.dataset.personaId);
       const content = form.elements.message.value.trim();
       if (!content) return;
+      form.reset();
       const chats = state.personaTestChats;
       const history = [...(chats[personaId] || []).slice(-23), { role: "user", content }];
       chats[personaId] = history;
@@ -8705,9 +8991,7 @@
             body: JSON.stringify(payload),
           });
           completeFormSave(personaForm);
-          toast(ui("persona_saved"));
-          state.overview = await api(`/guilds/${state.guildId}/overview`);
-          renderView();
+          await refreshPersonas(null, ui("persona_saved"));
         });
       } catch (error) {
         if (personaForm.isConnected) showFormError(personaForm, error);

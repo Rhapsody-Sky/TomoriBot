@@ -200,7 +200,7 @@
     menu.popover = "";
     menu.setAttribute("aria-label", copy.moreLabel);
     nav.append(more);
-    document.body.append(menu);
+    nav.append(menu);
     const tabs = () => [...nav.querySelectorAll(':scope > [role="tab"]')];
 
     function measure() {
@@ -228,6 +228,7 @@
             proxy.type = "button";
             proxy.className = "button";
             proxy.dataset.proxy = String(items.indexOf(b));
+            proxy.dataset.actionMenuPreserveFocus = "";
             proxy.innerHTML = b.innerHTML;
             return proxy;
           }),
@@ -238,13 +239,19 @@
       const proxy = event.target.closest("[data-proxy]");
       if (!proxy) return;
       menu.hidePopover();
-      tabs()[Number(proxy.dataset.proxy)].click();
-      requestAnimationFrame(measure);
+      const tab = tabs()[Number(proxy.dataset.proxy)];
+      tab.click();
+      requestAnimationFrame(() => {
+        if (!tab.isConnected) return;
+        measure();
+        tab.focus({ preventScroll: true });
+      });
     });
     new ResizeObserver(() => measure()).observe(nav);
     new MutationObserver(() => requestAnimationFrame(measure)).observe(nav, { subtree: true, attributeFilter: ["aria-selected"] });
     document.fonts?.ready.then(measure);
     measure();
+    window.TomoriControls?.enhance(nav);
   }
 
   // ---- track: save actions that appear on change -------------------------------------------
