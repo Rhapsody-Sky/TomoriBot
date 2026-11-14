@@ -124,6 +124,9 @@ const dashboardAssets = {
   "dashboard.css": { path: "src/web/dashboard/assets/dashboard.css", contentType: "text/css; charset=utf-8" },
   "controls.css": { path: "src/web/dashboard/assets/controls.css", contentType: "text/css; charset=utf-8" },
   "controls.js": { path: "src/web/dashboard/assets/controls.js", contentType: "application/javascript; charset=utf-8" },
+  "collection.css": { path: "src/web/dashboard/assets/collection.css", contentType: "text/css; charset=utf-8" },
+  "design.js": { path: "src/web/dashboard/assets/design.js", contentType: "application/javascript; charset=utf-8" },
+  "fx.js": { path: "src/web/dashboard/assets/fx.js", contentType: "application/javascript; charset=utf-8" },
   "app.css": { path: "src/web/dashboard/assets/app.css", contentType: "text/css; charset=utf-8" },
   "companion.css": { path: "src/web/dashboard/assets/companion.css", contentType: "text/css; charset=utf-8" },
   "app.js": { path: "src/web/dashboard/assets/app.js", contentType: "application/javascript; charset=utf-8" },
@@ -638,6 +641,9 @@ export function createDashboardApp(client: Client) {
         assetName === "ui-kit.css" ||
         assetName === "dashboard.css" ||
         assetName === "controls.css" ||
+        assetName === "collection.css" ||
+        assetName === "design.js" ||
+        assetName === "fx.js" ||
         assetName === "app.js" ||
         assetName === "app.css" ||
         assetName === "companion.css" ||
@@ -1048,6 +1054,11 @@ export function createDashboardApp(client: Client) {
           "design_motion_subtle",
           "design_motion_off",
           "design_reset",
+          "design_persona_colors",
+          "design_layout",
+          "design_layout_boxed",
+          "design_layout_full",
+          "control_more_sections",
           "control_adjust",
           "control_drop_file",
           "control_choose_file",

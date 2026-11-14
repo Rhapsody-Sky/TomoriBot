@@ -11,8 +11,10 @@ export function renderDashboardHtml(content?: string): string {
     <link rel="stylesheet" href="/settings/assets/ui-kit.css?v=3">
     <link rel="stylesheet" href="/settings/assets/dashboard.css?v=5">
     <link rel="stylesheet" href="/settings/assets/controls.css?v=3">
+    <link rel="stylesheet" href="/settings/assets/collection.css">
   </head>
-  <body data-palette="tomori" data-theme="dark" data-motion="full" data-surface="glass" data-color-mode="colorful" data-halftone="on">
+  <body data-palette="tomori" data-theme="dark" data-motion="full" data-surface="glass" data-color-mode="colorful" data-halftone="on" data-layout="boxed">
+    ${content === undefined ? '<script src="/settings/assets/design.js"></script>' : ""}
     <div class="bg-field" aria-hidden="true">
       <div class="bg-halftone"></div>
       <div class="bg-halftone warm"></div>
@@ -38,6 +40,7 @@ export function renderDashboardHtml(content?: string): string {
     </div>
     <div id="toast-region" class="toasts" role="status"></div>
     <script src="/settings/assets/controls.js" defer></script>
+    <script src="/settings/assets/fx.js" defer></script>
     ${content === undefined ? '<script src="/settings/assets/site.js" defer></script>' : ""}
     ${content === undefined ? '<script src="/settings/assets/app.js?v=2" defer></script>' : ""}
   </body>

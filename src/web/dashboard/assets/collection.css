@@ -1,0 +1,2480 @@
+/* Tomori UI: Collection layer.
+   The design language of the dashboard redesign ("sticker collection"). Load it after
+   tomori-ui.css and tomori-ui.controls.css. It adds classes and never changes a base class.
+
+   Layout rules (see docs/foundations/collection.md)
+   - One frame edge: every box starts on it (banner, dock pills, segmented track, cards).
+   - One text edge: text inside a box starts at frame edge + --pad. Nothing floats between the two.
+   - One framed level: banners and cards. Navigation pills are controls, not containers.
+   - Proportions in phi (1.618): banner info : art, main : side column.
+   - The head of a region owns its actions, on the right, primary last.
+   - One decorative motif: the sticker. Halftone dots and ✦ sparkles are its texture. */
+
+/* ==========================================================================================
+   Tokens
+   ========================================================================================== */
+
+/* Hue and chroma are registered numbers, so a tinted area morphs when its palette changes. */
+@property --h { syntax: "<number>"; inherits: true; initial-value: 28; }
+@property --c { syntax: "<number>"; inherits: true; initial-value: 0.16; }
+@property --ah { syntax: "<number>"; inherits: true; initial-value: 90; }
+@property --ac { syntax: "<number>"; inherits: true; initial-value: 0.16; }
+@property --kh { syntax: "<number>"; inherits: true; initial-value: 8; }
+@property --kc { syntax: "<number>"; inherits: true; initial-value: 0.15; }
+
+:root {
+  --pad: var(--space-6); /* inner padding of every frame; text edge = frame edge + pad */
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --text-display: clamp(2.1rem, 1.3rem + 2.4vw, 2.9rem);
+  --text-section: 1.416rem; /* 0.875rem x phi */
+}
+
+/* Defined on body, where --ink exists; on :root it would resolve to nothing. */
+body {
+  --dots: radial-gradient(circle, color-mix(in oklch, var(--ink) 16%, transparent) 1.2px, transparent 1.6px) 0 0 / 12px 12px;
+}
+
+/* ==========================================================================================
+   Persona colour: local, never page-wide
+   The page keeps the user's palette. Only an element with .tinted and data-tint takes a persona's
+   palette. The colour tokens are declared again so they are computed from the local numbers.
+   The numbers repeat the palettes of tomori-ui.css; `bun run check` keeps them equal.
+   ========================================================================================== */
+.tinted {
+  --primary: oklch(0.8 var(--c) var(--h));
+  --primary-soft: oklch(0.3 calc(var(--c) * 0.5) var(--h));
+  --primary-glow: oklch(0.72 var(--c) var(--h));
+  --primary-base: oklch(0.68 var(--c) var(--h));
+  --primary-deep: oklch(0.84 calc(var(--c) * 0.85) var(--h));
+  --accent: oklch(0.86 calc(var(--ac) * 0.8) var(--ah));
+  --accent-soft: oklch(0.32 calc(var(--ac) * 0.5) var(--ah));
+  --accent-base: oklch(0.78 var(--ac) var(--ah));
+  --pink: oklch(0.8 var(--kc) var(--kh));
+  --pink-soft: oklch(0.32 calc(var(--kc) * 0.5) var(--kh));
+  --line-primary: oklch(0.68 var(--c) var(--h) / 0.35);
+  --line-accent: oklch(0.68 var(--ac) var(--ah) / 0.35);
+  --gradient-primary: linear-gradient(var(--light-angle), var(--primary), var(--accent));
+  --gradient-reward: linear-gradient(90deg, var(--primary-glow), var(--accent-base));
+  --gradient-affection: linear-gradient(120deg, var(--accent-base), var(--pink), var(--lavender));
+  transition:
+    --h 700ms var(--ease-out),
+    --c 700ms var(--ease-out),
+    --ah 700ms var(--ease-out),
+    --ac 700ms var(--ease-out),
+    --kh 700ms var(--ease-out),
+    --kc 700ms var(--ease-out);
+}
+
+body[data-theme="light"] .tinted {
+  --primary: oklch(0.47 var(--c) var(--h));
+  --primary-soft: oklch(0.93 calc(var(--c) * 0.38) var(--h));
+  --primary-glow: oklch(0.8 var(--c) var(--h));
+  --primary-base: oklch(0.72 var(--c) var(--h));
+  --primary-deep: oklch(0.55 calc(var(--c) * 1.05) var(--h));
+  --accent: oklch(0.46 calc(var(--ac) * 0.8) var(--ah));
+  --accent-soft: oklch(0.94 calc(var(--ac) * 0.4) var(--ah));
+  --pink: oklch(0.75 var(--kc) var(--kh));
+  --pink-soft: oklch(0.93 calc(var(--kc) * 0.35) var(--kh));
+}
+
+.tinted[data-tint="tomori"] { --h: 28; --c: 0.16; --ah: 90; --ac: 0.16; --kh: 8; --kc: 0.15; }
+.tinted[data-tint="lilya"] { --h: 195; --c: 0.12; --ah: 78; --ac: 0.15; --kh: 12; --kc: 0.14; }
+.tinted[data-tint="aphel"] { --h: 350; --c: 0.13; --ah: 80; --ac: 0.13; --kh: 22; --kc: 0.13; }
+.tinted[data-tint="nerine"] { --h: 145; --c: 0.12; --ah: 82; --ac: 0.14; --kh: 12; --kc: 0.13; }
+.tinted[data-tint="zaya"] { --h: 300; --c: 0.15; --ah: 196; --ac: 0.12; --kh: 330; --kc: 0.14; }
+.tinted[data-tint="temari"] { --h: 250; --c: 0.14; --ah: 240; --ac: 0.025; --kh: 260; --kc: 0.1; }
+.tinted[data-tint="locke"] { --h: 20; --c: 0.16; --ah: 85; --ac: 0.12; --kh: 8; --kc: 0.14; }
+
+/* ==========================================================================================
+   Frame: top bar, sidebar and a scrolling main column that fill the window
+   ========================================================================================== */
+.app-frame {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100dvh;
+}
+
+.app-frame > .topbar {
+  z-index: var(--z-nav);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.app-frame > .shell,
+.app-frame > .shell > .sidebar-rail {
+  min-height: 0;
+}
+
+/* above the main column, so the navigation's scrollbar can lie on the rail's divider */
+.app-frame > .shell > .sidebar-rail {
+  position: relative;
+  z-index: 1;
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar {
+  position: static;
+  height: 100%;
+  max-height: none;
+  overflow: visible;
+}
+
+/* Sidebar rhythm: every icon and label sits on one inset, groups are 24px apart,
+   labels sit 8px above their links. */
+.app-frame > .shell > .sidebar-rail > .sidebar {
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-2);
+}
+
+/* The navigation scrolls up to the rail's divider and 4px past it: the thin scrollbar sits on the
+   line instead of beside the links. The gutter is kept, so links do not move when it appears. */
+.app-frame > .shell > .sidebar-rail > .sidebar .sidebar-sections {
+  margin-inline-end: calc(var(--space-2) * -1 - 4px);
+  padding: var(--space-1);
+  padding-inline-end: var(--space-2);
+  scrollbar-gutter: stable;
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar .sidebar-sections > .button:not(.sidebar-search) {
+  margin-bottom: var(--space-3);
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar .group-label {
+  padding: 0 var(--space-3) var(--space-2);
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar .sidebar-group + .sidebar-group {
+  margin-block-start: var(--space-6);
+  padding-block-start: 0;
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar .sidebar-group-links {
+  gap: 2px;
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar a {
+  padding: 10px var(--space-3);
+}
+
+.app-frame > .shell > .sidebar-rail > .sidebar .sidebar-context {
+  margin-inline: var(--space-1);
+}
+
+.sidebar-search {
+  justify-content: flex-start;
+  width: 100%;
+  margin-bottom: var(--space-6);
+  padding-inline: var(--space-3);
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.frame-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.frame-brand img {
+  width: 40px;
+  height: 40px;
+}
+
+body[data-theme="dark"] .frame-brand img {
+  filter: invert(1);
+}
+
+.frame-brand small {
+  display: block;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.server-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 52px;
+  padding: 6px var(--space-4) 6px 6px;
+  border-radius: var(--radius-lg);
+}
+
+.server-switch .avatar {
+  width: 40px;
+  height: 40px;
+}
+
+.server-switch span {
+  display: grid;
+  text-align: start;
+  line-height: 1.3;
+}
+
+.server-switch small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.topbar-end {
+  justify-self: end;
+}
+
+.menu-toggle {
+  display: none;
+}
+
+.legal-links {
+  display: flex;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.legal-links a {
+  color: var(--muted);
+}
+
+/* The main column scrolls over its full width, so the scrollbar sits at the window's edge.
+   Boxed (default) centres the content at 1180px with padding; data-layout="full" on body
+   uses the whole column. */
+.app-main {
+  --boxed: 1180px;
+  container: content / inline-size;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-8) max(var(--space-6), calc((100% - var(--boxed)) / 2));
+  overflow-y: auto;
+  /* Reserve the scrollbar's room, so a long section does not narrow the page when it appears. */
+  scrollbar-gutter: stable;
+}
+
+body[data-layout="full"] .app-main {
+  padding-inline: var(--space-6);
+}
+
+/* room below the content, so the floating chat button never covers the last card */
+.app-main:has(.chat-fab) {
+  padding-block-end: calc(var(--space-6) * 2 + 56px);
+}
+
+/* ==========================================================================================
+   Sticker: the one decorative motif
+   --sh sets its hue, --tilt its angle. Sizes come from where it is used.
+   ========================================================================================== */
+.sticker {
+  --tilt: -3deg;
+  --sh: var(--h);
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  aspect-ratio: 1;
+  border: 4px solid #fff;
+  border-radius: 28%;
+  background: linear-gradient(150deg, oklch(0.7 0.13 var(--sh)), oklch(0.48 0.12 var(--sh)));
+  box-shadow: 0 6px 0 -2px color-mix(in oklch, var(--primary) 45%, transparent), 0 12px 24px #0005;
+  color: #fff;
+  font-weight: 800;
+  overflow: hidden;
+  rotate: var(--tilt);
+  transition:
+    rotate var(--dur-base) var(--spring),
+    scale var(--dur-base) var(--spring);
+}
+
+.sticker img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+body[data-theme="light"] .sticker {
+  box-shadow: 0 6px 0 -2px color-mix(in oklch, var(--primary) 30%, transparent), 0 10px 20px #3c285022;
+}
+
+/* a place for a sticker that does not exist yet */
+.sticker.dashed {
+  border-style: dashed;
+  border-color: var(--strong-line);
+  background: none;
+  box-shadow: none;
+  color: var(--muted);
+}
+
+/* small stickers inside rows, bubbles and buttons: flat, upright */
+.sticker.flat {
+  --tilt: 0deg;
+  border-width: 2px;
+  box-shadow: none;
+}
+
+/* ==========================================================================================
+   Banner: the head of a page about one character, or a compact head for other pages
+   ========================================================================================== */
+.banner {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: minmax(0, 1.618fr) minmax(0, 1fr); /* info : art = phi : 1 */
+  min-height: 260px;
+  margin-bottom: var(--space-6);
+  border-radius: var(--radius-xl);
+  background:
+    radial-gradient(
+      90% 120% at 82% 100%,
+      color-mix(in oklch, var(--primary) calc(84% * var(--light-intensity)), transparent),
+      transparent calc(41% * var(--light-spread))
+    ),
+    radial-gradient(
+      60% 80% at 100% 0%,
+      color-mix(in oklch, var(--pink) calc(60% * var(--light-intensity)), transparent),
+      transparent calc(47% * var(--light-spread))
+    ),
+    linear-gradient(var(--glass-angle), var(--paper) 30%, color-mix(in oklch, var(--accent) calc(28% * var(--light-intensity)), var(--paper)));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--primary) 32%, transparent),
+    0 20px 44px #0004;
+}
+
+/* halftone dots fade in toward the art: the brand texture */
+.banner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--dots);
+  mask-image: linear-gradient(100deg, transparent 35%, #000 85%);
+}
+
+.banner-info {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  align-content: space-between;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--pad);
+}
+
+.banner h1 {
+  font-size: var(--text-display);
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.banner-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  max-width: 54ch;
+  color: var(--ink-2);
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--label-size);
+  font-weight: 700;
+}
+
+.kind {
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--gradient-reward);
+  color: oklch(0.22 0.04 var(--h));
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+/* the actions menu of the banner, in its top right corner */
+.banner-menu {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 3;
+}
+
+/* art: a full body that steps out of the frame, a card stack, or a big sticker */
+.banner-art {
+  position: relative;
+  display: grid;
+  place-items: end center;
+  min-width: 0;
+}
+
+/* the circle behind a sticker or card stack; a figure brings its own (.art-stage) */
+.banner-art::before {
+  content: "";
+  position: absolute;
+  bottom: 10%;
+  width: min(78%, 230px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, var(--primary-glow), color-mix(in oklch, var(--primary) 30%, transparent) 70%);
+  opacity: calc(0.35 + var(--light-intensity) * 0.4);
+}
+
+.banner-art:has(.art-stage)::before {
+  content: none;
+}
+
+.banner-art > .sticker {
+  --tilt: 4deg;
+  align-self: center;
+  width: min(62%, 168px);
+  border-width: 6px;
+  font-size: 3.4rem;
+}
+
+/* The figure and its circle: the circle is drawn by the figure's wrapper, so it is centred on
+   the figure at every size. The figure steps out above the banner. */
+.art-stage {
+  position: relative;
+  display: grid;
+  place-items: end center;
+  margin-top: calc(var(--space-8) * -1);
+}
+
+.art-stage::before {
+  content: "";
+  position: absolute;
+  top: 52%;
+  left: 50%;
+  height: 74%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, var(--primary-glow), color-mix(in oklch, var(--primary) 30%, transparent) 70%);
+  opacity: calc(0.35 + var(--light-intensity) * 0.4);
+  translate: -50% -50%;
+}
+
+.art-full {
+  position: relative;
+  height: 300px;
+  object-fit: contain;
+  object-position: bottom;
+  filter: drop-shadow(0 12px 18px #0006);
+  transform: perspective(900px) rotateY(var(--ry, 0deg)) rotateX(var(--rx, 0deg));
+  transition: transform var(--dur-slow) var(--ease-out);
+}
+
+/* Card stack: a character without full-body art. Back cards are sprites or dotted colour cards. */
+.card-stack {
+  position: relative;
+  align-self: end;
+  width: min(58%, 190px);
+  aspect-ratio: 1;
+  margin-top: calc(var(--space-6) * -1);
+  margin-bottom: var(--space-6);
+}
+
+.card-stack > * {
+  position: absolute;
+  inset: 0;
+  border: 5px solid #fff;
+  border-radius: 26%;
+  box-shadow: 0 14px 30px #0006;
+  overflow: hidden;
+  transition:
+    rotate var(--dur-slow) var(--spring),
+    translate var(--dur-slow) var(--spring);
+}
+
+.card-stack .back {
+  display: grid;
+  place-items: center;
+  background: var(--dots), linear-gradient(150deg, oklch(0.72 0.12 var(--sh)), oklch(0.5 0.12 var(--sh)));
+  color: #fff;
+  font-size: 1.6rem;
+}
+
+.card-stack .b1 {
+  rotate: -14deg;
+  translate: -34% 6%;
+  scale: 0.78;
+}
+
+.card-stack .b2 {
+  rotate: 12deg;
+  translate: 32% 3%;
+  scale: 0.78;
+}
+
+.card-stack .front {
+  display: grid;
+  place-items: center;
+  rotate: -2deg;
+  background: linear-gradient(150deg, oklch(0.7 0.13 var(--sh)), oklch(0.46 0.12 var(--sh)));
+  color: #fff;
+  font-size: 4.4rem;
+  font-weight: 800;
+}
+
+.card-stack .back img,
+.card-stack .front img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* monogram cards get the halftone and a name label so they look made, not missing */
+.card-stack .front.mono {
+  background: var(--dots), radial-gradient(circle at 30% 25%, oklch(0.8 0.12 var(--sh)), oklch(0.45 0.13 var(--sh)) 75%);
+  text-shadow: 0 4px 0 oklch(0.35 0.1 var(--sh));
+}
+
+.card-stack .front.mono::after {
+  content: attr(data-label);
+  position: absolute;
+  bottom: 10%;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: #fff;
+  color: oklch(0.35 0.1 var(--sh));
+  font-size: var(--text-xs);
+  text-shadow: none;
+}
+
+@media (hover: hover) {
+  .card-stack:hover .b1 {
+    rotate: -18deg;
+    translate: -44% 2%;
+  }
+
+  .card-stack:hover .b2 {
+    rotate: 17deg;
+    translate: 42% 0;
+  }
+
+  .card-stack:hover .front {
+    rotate: 0deg;
+  }
+}
+
+.sparkle {
+  position: absolute;
+  z-index: 1;
+  color: #fff;
+  font-size: 1.1rem;
+  text-shadow: 0 0 10px var(--primary-glow);
+  pointer-events: none;
+  animation: twinkle 3.6s ease-in-out infinite;
+}
+
+.sparkle.s2 {
+  animation-delay: -1.2s;
+  font-size: 0.8rem;
+}
+
+.sparkle.s3 {
+  animation-delay: -2.4s;
+  font-size: 1.4rem;
+}
+
+/* Quick bar: switch between a few characters without leaving the banner */
+.quickbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.quick {
+  position: relative;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.quick > .fx-indicator {
+  border-radius: 34%;
+  box-shadow: 0 0 0 3px var(--primary), 0 0 18px color-mix(in oklch, var(--primary) 60%, transparent);
+}
+
+.quick button,
+.quick-add {
+  position: relative;
+  z-index: 1;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 34%;
+  background: none;
+}
+
+.quick .sticker,
+.quick-add .sticker {
+  width: 100%;
+  border-width: 2px;
+  box-shadow: none;
+  font-size: 1rem;
+}
+
+.quick button:nth-child(odd) .sticker {
+  --tilt: -4deg;
+}
+
+.quick button:nth-child(even) .sticker {
+  --tilt: 3deg;
+}
+
+.quick button[aria-checked="true"] .sticker,
+.quick-add .sticker {
+  --tilt: 0deg;
+}
+
+@media (hover: hover) {
+  .quick button:hover .sticker {
+    --tilt: 0deg;
+    scale: 1.08;
+  }
+
+  .quick-add:hover .sticker {
+    border-color: var(--primary);
+    color: var(--primary);
+    scale: 1.08;
+  }
+}
+
+/* Compact banner: pages that are not about one character. An emblem instead of art. */
+.banner.compact {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
+.banner.compact .banner-info {
+  gap: var(--space-3);
+}
+
+/* a page's description is read in full, at every width */
+.banner.compact .banner-text {
+  display: block;
+  overflow: visible;
+}
+
+.banner.compact .banner-art {
+  place-items: center;
+  padding: var(--pad);
+}
+
+/* the circle is centred on the emblem */
+.banner.compact .banner-art::before {
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  width: 180px;
+  translate: -50% -50%;
+}
+
+/* .banner-art > .sticker sizes a character's sticker; the emblem keeps its own size */
+.banner-art > .sticker.emblem {
+  --tilt: 6deg;
+  width: 132px;
+  margin: var(--space-6);
+  border-width: 5px;
+  font-size: inherit;
+}
+
+.emblem .glyph {
+  width: 56px;
+  height: 56px;
+}
+
+/* a new character arrives: art rises in, text fades up */
+.banner.is-swapping .banner-art > :not(.sparkle) {
+  animation: art-in 620ms var(--spring) both;
+}
+
+.banner.is-swapping .banner-text,
+.banner.is-swapping .chips {
+  animation: fade-up 420ms var(--ease-out) both;
+}
+
+/* ==========================================================================================
+   Chips: small facts and tags
+   ========================================================================================== */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklch, var(--ink) 8%, transparent);
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chip .glyph {
+  width: 14px;
+  height: 14px;
+  color: var(--primary);
+}
+
+.chip.tone {
+  background: color-mix(in oklch, var(--primary) 16%, transparent);
+  color: var(--primary);
+}
+
+.chip.off {
+  background: color-mix(in oklch, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
+/* the remove button of a chip */
+.chip-x {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-inline-end: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in oklch, currentColor 20%, transparent);
+  color: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+/* ==========================================================================================
+   Navigation inside a page
+   Level 1: the dock, icon pills that are never boxed. Level 2: segmented, a control with a track.
+   ========================================================================================== */
+.dock {
+  position: relative;
+  display: flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+  padding: 2px 0; /* pills start on the frame edge */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.dock[data-overflow] {
+  overflow: hidden;
+}
+
+.dock > .fx-indicator {
+  border-radius: var(--radius-pill);
+  background: linear-gradient(135deg, color-mix(in oklch, var(--primary) 26%, transparent), color-mix(in oklch, var(--accent) 18%, transparent));
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 40%, transparent);
+}
+
+.dock button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  font-size: var(--label-size);
+  font-weight: 800;
+  white-space: nowrap;
+  transition: color var(--dur-fast);
+}
+
+.dock button .glyph {
+  width: 18px;
+  height: 18px;
+  transition: scale var(--dur-base) var(--spring);
+}
+
+.dock button[aria-selected="true"] {
+  color: var(--ink);
+}
+
+.dock button[aria-selected="true"] .glyph {
+  color: var(--primary);
+  scale: 1.15;
+}
+
+@media (hover: hover) {
+  .dock button:hover {
+    color: var(--ink);
+  }
+}
+
+/* "More": TomoriFX adds it to a [data-overflow] row when not every pill fits */
+.more-pill {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  min-height: 44px;
+  margin-inline-start: auto;
+  padding: 0 var(--space-3);
+  border: 1px dashed var(--strong-line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  font-size: var(--label-size);
+  font-weight: 800;
+}
+
+.more-pill .glyph {
+  width: 18px;
+  height: 18px;
+}
+
+.more-pill[hidden] {
+  display: none;
+}
+
+.segmented {
+  position: relative;
+  display: inline-flex;
+  justify-self: start;
+  gap: 2px;
+  max-width: 100%;
+  padding: 4px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklch, var(--ink) 7%, transparent);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.segmented > .fx-indicator {
+  border-radius: var(--radius-pill);
+  background: var(--paper);
+  box-shadow: 0 2px 10px #0003, inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent);
+}
+
+.segmented button {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--label-size);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.segmented button:is([aria-selected="true"], [aria-checked="true"]) {
+  color: var(--primary);
+}
+
+.segmented .count {
+  margin-inline-start: 6px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+/* a segmented control that fills its row, e.g. in a settings popover */
+.segmented.fill {
+  display: flex;
+}
+
+.segmented.fill button {
+  flex: 1;
+}
+
+/* ==========================================================================================
+   Stage: the content under the dock
+   ========================================================================================== */
+.stage {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* sub-navigation on the left, the section's actions on the right */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 44px;
+}
+
+.toolbar .actions {
+  margin: 0 0 0 auto;
+}
+
+/* plain text in a toolbar sits on the text edge, like text inside cards */
+.toolbar > .hint {
+  max-width: 60ch;
+  padding-inline-start: var(--pad);
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.618fr) minmax(0, 1fr); /* main : side = phi : 1 */
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.split > .col {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+@container content (max-width: 860px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ==========================================================================================
+   Card: the one framed level inside a page
+   ========================================================================================== */
+.card {
+  min-width: 0;
+  padding: var(--pad);
+  border-radius: var(--radius-xl);
+  background: var(--surface-fill);
+  backdrop-filter: blur(var(--surface-blur));
+  box-shadow: inset 0 0 0 1px var(--line), 0 10px 30px #0000001f;
+}
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.card-head h3 {
+  font-size: var(--item-title);
+}
+
+.card-head h3 small {
+  margin-inline-start: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.card-head .hint {
+  margin-top: 2px;
+}
+
+.card-head .field {
+  flex: 1 1 180px;
+  max-width: 260px;
+  margin: 0;
+}
+
+/* rows: separated by space and a hover surface, never by lines */
+.rows {
+  display: grid;
+  gap: var(--space-1);
+  margin-inline: calc(var(--space-3) * -1);
+}
+
+.item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  transition: background-color var(--dur-fast);
+}
+
+.item p {
+  max-width: none;
+}
+
+.item .actions {
+  margin: 0;
+}
+
+.item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.item-meta .chip {
+  padding: 1px 8px;
+}
+
+/* row actions appear on hover and focus; always visible on touch */
+.item-actions {
+  display: flex;
+  gap: var(--space-1);
+  opacity: 0;
+  translate: 6px 0;
+  transition:
+    opacity var(--dur-fast),
+    translate var(--dur-base) var(--spring);
+}
+
+.item:is(:hover, :focus-within) {
+  background: color-mix(in oklch, var(--ink) 6%, transparent);
+}
+
+.item:is(:hover, :focus-within) .item-actions {
+  opacity: 1;
+  translate: 0 0;
+}
+
+@media (hover: none) {
+  .item-actions {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* a row that was just added glows once */
+.item.is-new {
+  animation: glow-in 1.4s var(--ease-out);
+}
+
+.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* big numbers in a card */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.stats div {
+  display: grid;
+  gap: 2px;
+}
+
+.stats strong {
+  font-size: var(--text-section);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  background: var(--gradient-reward);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.stats small {
+  color: var(--muted);
+}
+
+/* empty state with a bobbing ✦ */
+.empty-note {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+}
+
+.empty-note .mark {
+  color: var(--accent);
+  font-size: 2.2rem;
+  animation: bob 3.2s ease-in-out infinite;
+}
+
+.empty-note p {
+  color: var(--muted);
+}
+
+/* a row with a sticker in front and a value at the end: rankings, recent activity */
+.item.lead {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.item.lead .sticker {
+  --tilt: 0deg;
+  width: 40px;
+  border-width: 2px;
+  box-shadow: none;
+  font-size: 0.9rem;
+}
+
+.item.lead .progress-track {
+  margin-top: 6px;
+}
+
+.item.lead b {
+  font-variant-numeric: tabular-nums;
+}
+
+/* a row that selects something: the whole row is a button */
+.item.pick {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.item.pick[aria-current="true"] {
+  background: color-mix(in oklch, var(--primary) 14%, transparent);
+  box-shadow: inset 3px 0 var(--primary);
+}
+
+.excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--hint-size);
+}
+
+/* many independent cards of different heights, e.g. groups of settings */
+.card-columns {
+  columns: 2 360px;
+  column-gap: var(--space-4);
+}
+
+.card-columns > .card {
+  break-inside: avoid;
+  margin-bottom: var(--space-4);
+}
+
+/* Stat tiles on a Collection page: framed like cards, with a trend line */
+.stat-grid.framed {
+  margin-bottom: var(--space-4);
+}
+
+.stat-grid.framed .stat-tile {
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--surface-fill);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.stat-grid.framed .stat-copy {
+  padding: var(--pad) var(--pad) var(--space-2);
+}
+
+.delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--success);
+  font-weight: 800;
+}
+
+.delta .glyph {
+  width: 14px;
+  height: 14px;
+}
+
+.delta.down {
+  color: var(--danger);
+}
+
+.delta.down .glyph {
+  rotate: 180deg;
+  scale: -1 1;
+}
+
+@container content (max-width: 860px) {
+  .stat-grid.framed {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* art shown for reference on dots: a full-body image or a sticker */
+.art-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  border-radius: var(--radius-lg);
+  background:
+    var(--dots),
+    radial-gradient(circle at 50% 60%, color-mix(in oklch, var(--primary) 30%, transparent), transparent 70%);
+}
+
+.art-preview img {
+  max-height: 340px;
+  filter: drop-shadow(0 10px 16px #0005);
+}
+
+.art-preview .sticker {
+  width: 150px;
+}
+
+/* ==========================================================================================
+   Browser: collections, their items and one selected item side by side (lorebooks)
+   ========================================================================================== */
+.browser {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr) minmax(0, 1.618fr); /* items : editor = 1 : phi */
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.browser-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--muted);
+  font-weight: 700;
+  text-align: start;
+}
+
+.browser-link small {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.browser-link .glyph {
+  width: 18px;
+  height: 18px;
+  color: var(--primary);
+}
+
+.browser-link[aria-pressed="true"] {
+  background: color-mix(in oklch, var(--primary) 16%, transparent);
+  color: var(--ink);
+  box-shadow: inset 3px 0 var(--primary);
+}
+
+/* the collections move above as a wrapping row, then everything stacks */
+@container content (max-width: 980px) {
+  .browser {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
+  }
+
+  .browser > .browser-nav {
+    grid-column: 1 / -1;
+  }
+
+  .browser > .browser-nav .rows {
+    display: flex;
+    flex-wrap: wrap;
+  }
+}
+
+@container content (max-width: 700px) {
+  .browser {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ==========================================================================================
+   Editing in place
+   ========================================================================================== */
+.compose {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent);
+  animation: fade-up 300ms var(--ease-out);
+}
+
+.edit-pair {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--ink) 5%, transparent);
+}
+
+.compose .actions,
+.edit-pair .actions {
+  margin: 0;
+}
+
+.edit-pair textarea,
+.item textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 6px 11px;
+  border: 1px solid var(--strong-line);
+  border-radius: var(--control-radius);
+  background: var(--input);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* a field that differs from the saved value (set by data-fx="track") */
+.is-changed > .field-label,
+.toggle.is-changed > .field-label strong {
+  color: var(--warning);
+}
+
+/* ==========================================================================================
+   Saving: a form's Save and Discard appear when something changed (data-fx="track")
+   ========================================================================================== */
+
+/* the row takes no room while its edit actions are hidden */
+.actions:has(> [data-edit-action]):not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+/* a card that grows or shrinks to new content (TomoriFX) */
+.card[data-resizing] {
+  overflow: clip;
+}
+
+/* content that TomoriFX.swap() just put in place */
+.fx-swap-run > * {
+  animation: swap-in 220ms var(--ease-out) both;
+}
+
+/* The buttons draw themselves: outline from the left, then the colour, then the label. */
+@media (prefers-reduced-motion: no-preference) {
+  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible) {
+    position: relative;
+    isolation: isolate;
+    animation:
+      edit-action-surface 900ms linear,
+      edit-action-label 180ms ease-out 720ms backwards;
+  }
+
+  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--edit-action-color, var(--input));
+    visibility: hidden;
+    pointer-events: none;
+    animation: edit-action-color 290ms ease-out 610ms;
+  }
+
+  [data-edit-action].primary {
+    --edit-action-color: var(--gradient-primary);
+  }
+
+  body[data-motion="full"] [data-edit-action]:not([hidden], :focus-visible)::after {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border: 1px solid var(--primary);
+    border-radius: inherit;
+    pointer-events: none;
+    animation: edit-action-outline 580ms ease-out 320ms both;
+  }
+}
+
+@keyframes edit-action-outline {
+  0% {
+    clip-path: inset(0 100% 0 0);
+  }
+
+  43% {
+    opacity: 1;
+    clip-path: inset(0);
+  }
+
+  100% {
+    opacity: 0;
+    clip-path: inset(0);
+  }
+}
+
+@keyframes edit-action-surface {
+  from,
+  to {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+@keyframes edit-action-color {
+  from {
+    visibility: visible;
+    clip-path: inset(0 100% 0 0);
+  }
+
+  to {
+    visibility: visible;
+    clip-path: inset(0);
+  }
+}
+
+@keyframes edit-action-label {
+  from {
+    color: transparent;
+  }
+}
+
+@keyframes swap-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ==========================================================================================
+   Sticker grid: sprites, expressions, anything shown as a set of stickers
+   ========================================================================================== */
+.sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: var(--space-6) var(--space-4);
+}
+
+.sticker-tile {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: center;
+  align-content: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: center;
+}
+
+.sticker-tile .sticker {
+  width: 100%;
+  max-width: 132px;
+}
+
+.sticker-tile:nth-child(odd) .sticker {
+  --tilt: -3deg;
+}
+
+.sticker-tile:nth-child(even) .sticker {
+  --tilt: 3deg;
+}
+
+@media (hover: hover) {
+  .sticker-tile:hover .sticker {
+    --tilt: 0deg;
+    scale: 1.05;
+  }
+}
+
+.sticker-tile small {
+  max-width: 24ch;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+/* ==========================================================================================
+   Collection: picking one of many characters in a dialog
+   ========================================================================================== */
+dialog.collection {
+  width: min(980px, calc(100% - 32px));
+  height: min(780px, calc(100dvh - 48px));
+  padding: 0;
+  overflow: hidden;
+}
+
+dialog.collection[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.collection-head {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--pad) var(--pad) var(--space-4);
+}
+
+.collection-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.collection-title h2 {
+  font-size: var(--text-section);
+}
+
+.collection-title h2 small {
+  margin-inline-start: var(--space-2);
+  color: var(--muted);
+  font-size: var(--label-size);
+}
+
+.collection-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.collection-tools > .field {
+  flex: 1 1 240px;
+  margin: 0;
+}
+
+.collection-tools > .field:last-child {
+  flex: 0 1 190px;
+}
+
+.collection-body {
+  overflow-y: auto;
+  padding: var(--space-2) var(--pad) var(--pad);
+}
+
+.collection-body h3 {
+  margin: var(--space-6) 0 var(--space-3);
+  color: var(--muted);
+  font-size: var(--label-size);
+}
+
+.collection-body h3:first-child {
+  margin-top: 0;
+}
+
+.deck {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+  gap: var(--space-3);
+}
+
+.deck-card {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: none;
+  color: var(--ink);
+  text-align: center;
+  content-visibility: auto;
+  contain-intrinsic-size: 124px 168px;
+}
+
+.deck-card .sticker {
+  width: 80px;
+  font-size: 1.6rem;
+}
+
+.deck-card:nth-child(3n) .sticker {
+  --tilt: 3deg;
+}
+
+.deck-card:nth-child(3n + 1) .sticker {
+  --tilt: -2deg;
+}
+
+.deck-card strong {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deck-card small {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.deck-card[aria-current="true"] {
+  background: color-mix(in oklch, var(--primary) 16%, transparent);
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+.deck-card .fav {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  color: var(--pink);
+}
+
+@media (hover: hover) {
+  .deck-card:hover {
+    background: color-mix(in oklch, var(--ink) 6%, transparent);
+  }
+
+  .deck-card:hover .sticker {
+    --tilt: 0deg;
+    scale: 1.06;
+  }
+}
+
+/* ==========================================================================================
+   Channel picker: Discord-style list of channels in collapsible categories
+   ========================================================================================== */
+.channels {
+  display: grid;
+  gap: 2px;
+  max-height: 520px;
+  overflow-y: auto;
+  margin-inline: calc(var(--space-3) * -1);
+  padding-inline: var(--space-3);
+}
+
+.channel-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  margin-top: var(--space-4);
+  padding: var(--space-1) 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.channel-group:first-child {
+  margin-top: 0;
+}
+
+.channel-group .glyph {
+  width: 14px;
+  height: 14px;
+  transition: rotate var(--dur-base) var(--spring);
+}
+
+.channel-group[aria-expanded="false"] .glyph {
+  rotate: -90deg;
+}
+
+.channel-group .n {
+  margin-inline-start: auto;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.channel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast),
+    color var(--dur-fast);
+}
+
+.channel .hash {
+  width: 18px;
+  color: var(--muted);
+  font-size: 1.15rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.channel .name {
+  flex: 1;
+  min-width: 0;
+}
+
+.channel .name strong {
+  display: block;
+  font-weight: 700;
+}
+
+.channel .name small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channel input {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 2px solid var(--strong-line);
+  border-radius: 6px;
+  background: transparent;
+  transition:
+    background-color var(--dur-fast),
+    border-color var(--dur-fast),
+    scale var(--dur-base) var(--spring);
+}
+
+.channel input::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  translate: 0 -1px;
+  rotate: -45deg;
+  scale: 0;
+  transition: scale var(--dur-base) var(--spring);
+}
+
+.channel input:checked {
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.channel input:checked::after {
+  scale: 1;
+}
+
+.channel input:active {
+  scale: 0.85;
+}
+
+.channel:hover {
+  background: color-mix(in oklch, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+
+.channel:has(input:checked) {
+  background: color-mix(in oklch, var(--primary) 14%, transparent);
+  color: var(--ink);
+}
+
+.channel:has(input:checked) .hash {
+  color: var(--primary);
+}
+
+/* ==========================================================================================
+   Chat: a try-out chat docked next to the work, opened from a floating button
+   ========================================================================================== */
+
+/* the chat is a third column of the frame on wide windows */
+@media (min-width: 1101px) {
+  .app-frame > .shell.chat-open {
+    grid-template-columns: 220px minmax(0, 1fr) clamp(340px, 30vw, 420px);
+  }
+
+  body[data-chat="open"] .toasts {
+    right: calc(clamp(340px, 30vw, 420px) + var(--space-6));
+  }
+}
+
+.chat-dock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr); /* long model names or words never widen the dock */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  border-inline-start: 1px solid var(--line-primary);
+  background: var(--surface-fill);
+  backdrop-filter: blur(var(--surface-blur));
+  box-shadow: -8px 0 24px #0003;
+  animation: dock-in 360ms var(--spring);
+}
+
+.chat-dock[hidden] {
+  display: none;
+}
+
+/* fixed rows, so the log keeps the free space when the draft note is hidden */
+.chat-dock > .chat-head {
+  grid-row: 1;
+}
+
+.chat-dock > .draft-note {
+  grid-row: 2;
+}
+
+.chat-dock > .chat-log {
+  grid-row: 3;
+}
+
+.chat-dock > .chat-foot {
+  grid-row: 4;
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+}
+
+.chat-head .sticker {
+  --tilt: -3deg;
+  width: 44px;
+  border-width: 3px;
+  font-size: 1rem;
+}
+
+.chat-head .who {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-head small {
+  display: block;
+  color: var(--muted);
+}
+
+/* "testing your unsaved changes" */
+.draft-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-4) var(--space-2);
+  padding: 6px 6px 6px var(--space-3);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklch, var(--warning) 16%, transparent);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.draft-note span:first-child {
+  color: var(--warning);
+}
+
+.draft-note .button {
+  margin-inline-start: auto;
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--dots);
+}
+
+.chat-log .bubble-row {
+  animation: fade-up 320ms var(--ease-out) both;
+}
+
+.chat-log .empty-note {
+  margin: auto 0;
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--paper) 80%, transparent);
+}
+
+.chat-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+/* the kit's compact select inside the composer footer */
+.composer-model {
+  margin: 0;
+}
+
+/* dialogue: bubbles with their own surface, readable on the dotted log */
+.talk {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.bubble-row {
+  display: flex;
+  align-items: end;
+  gap: var(--space-2);
+}
+
+.bubble-row .sticker {
+  --tilt: 0deg;
+  width: 30px;
+  border-width: 2px;
+  box-shadow: none;
+  font-size: 0.75rem;
+}
+
+.bubble-row.me {
+  justify-content: flex-end;
+}
+
+.speech {
+  max-width: 85%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 18px 18px 18px 6px;
+  background: color-mix(in oklch, var(--primary) 20%, var(--paper));
+  box-shadow: 0 1px 0 color-mix(in oklch, var(--ink) 6%, transparent), 0 4px 12px #0002;
+  overflow-wrap: anywhere;
+}
+
+.bubble-row.me .speech {
+  border-radius: 18px 18px 6px 18px;
+  background: color-mix(in oklch, var(--ink) 9%, var(--paper));
+}
+
+.speech .meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--text-2xs);
+}
+
+/* the character reacts with a big sprite sticker next to its reply */
+.bubble-row .sticker.react {
+  --tilt: -4deg;
+  align-self: flex-start;
+  width: 76px;
+  border-width: 3px;
+  box-shadow: 0 4px 0 -1px color-mix(in oklch, var(--primary) 45%, transparent), 0 8px 16px #0005;
+  animation: pop-in 480ms var(--spring) both;
+}
+
+/* a line in the log that says what changed since the last reply */
+.chat-event {
+  align-self: center;
+  max-width: 90%;
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklch, var(--accent) 22%, var(--paper));
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  font-weight: 800;
+  text-align: center;
+}
+
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: var(--space-3);
+}
+
+.typing i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: dot 1s ease-in-out infinite;
+}
+
+.typing i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.starter {
+  padding: 6px 12px;
+  border: 1px solid color-mix(in oklch, var(--primary) 40%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-align: start;
+}
+
+/* the floating button that opens the chat; hidden while the chat is open */
+.chat-fab {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: var(--z-toast);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 52px;
+  padding: 5px var(--space-4) 5px 5px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--gradient-primary);
+  color: var(--bg);
+  font-weight: 800;
+  box-shadow: 0 10px 28px color-mix(in oklch, var(--primary) 35%, #0000), 0 4px 12px #0005;
+  transition:
+    translate var(--dur-base) var(--spring),
+    box-shadow var(--dur-base);
+  animation: bar-in 480ms var(--spring) both;
+}
+
+.chat-fab[hidden] {
+  display: none;
+}
+
+.chat-fab .sticker {
+  --tilt: -4deg;
+  width: 42px;
+  border-width: 2px;
+  box-shadow: none;
+  font-size: 0.9rem;
+}
+
+@media (hover: hover) {
+  .chat-fab:hover {
+    translate: 0 -3px;
+    box-shadow: 0 14px 34px color-mix(in oklch, var(--primary) 45%, #0000), 0 6px 14px #0005;
+  }
+
+  .chat-fab:hover .sticker {
+    --tilt: 0deg;
+  }
+}
+
+/* toasts sit above the button */
+body:has(.chat-fab:not([hidden])) .toasts {
+  bottom: calc(var(--space-6) + 68px);
+}
+
+/* narrower windows: inside the frame, the chat floats over the right side but the page stays usable */
+@media (max-width: 1100px) {
+  .app-frame .chat-dock {
+    position: fixed;
+    inset: 77px 0 0 auto;
+    z-index: var(--z-toast);
+    width: min(420px, 100%);
+    height: auto;
+    border-radius: var(--radius-xl) 0 0 0;
+    box-shadow: -12px 0 40px #0006;
+  }
+}
+
+/* ==========================================================================================
+   "Your design" additions: lighting controls
+   ========================================================================================== */
+.design-settings .palette-orb {
+  background: var(--swatch-color, var(--palette-primary));
+}
+
+.design-light {
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--ink) 5%, transparent);
+}
+
+.design-light legend {
+  float: left;
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  margin-bottom: var(--space-1);
+}
+
+.design-light legend small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* ==========================================================================================
+   Micro-interactions (TomoriFX)
+   ========================================================================================== */
+.fx-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  pointer-events: none;
+  transition:
+    transform var(--dur-slow) var(--spring),
+    width var(--dur-slow) var(--spring),
+    height var(--dur-slow) var(--spring),
+    opacity var(--dur-fast);
+}
+
+.fx-word {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.fx-split-run .fx-char {
+  display: inline-block;
+  animation: rise 520ms var(--spring) both;
+  animation-delay: calc(var(--i) * 30ms);
+}
+
+.fx-stagger-run > * {
+  animation: fade-up 420ms var(--ease-out) both;
+  animation-delay: calc(min(var(--i), 12) * 35ms);
+}
+
+/* The burst needs a positioned host; :where keeps fixed or absolute hosts (the chat button) as they are. */
+:where([data-fx~="spark"]) {
+  position: relative;
+}
+
+[data-fx~="spark"] {
+  overflow: visible;
+}
+
+.fx-burst {
+  position: absolute;
+  z-index: 5;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.fx-burst i {
+  position: absolute;
+  top: -0.5em;
+  left: -0.5em;
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-style: normal;
+  animation: burst 640ms var(--ease-out) forwards;
+}
+
+.fx-burst i:nth-child(3n) {
+  color: var(--pink);
+}
+
+.fx-burst i:nth-child(3n + 1) {
+  color: var(--primary-glow);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    translate: 0 0.45em;
+    rotate: 8deg;
+    filter: blur(4px);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+
+@keyframes burst {
+  to {
+    opacity: 0;
+    transform: rotate(var(--a)) translateX(var(--d)) rotate(90deg) scale(0.4);
+  }
+}
+
+@keyframes art-in {
+  from {
+    opacity: 0;
+    translate: 0 30px;
+    scale: 0.94;
+  }
+}
+
+@keyframes twinkle {
+  50% {
+    opacity: 0.25;
+    scale: 0.6;
+    rotate: 45deg;
+  }
+}
+
+@keyframes bob {
+  50% {
+    translate: 0 -6px;
+    rotate: 12deg;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    scale: 0.4;
+    rotate: -20deg;
+  }
+}
+
+@keyframes dot {
+  40% {
+    translate: 0 -5px;
+    background: var(--primary);
+  }
+}
+
+@keyframes glow-in {
+  from {
+    background: color-mix(in oklch, var(--primary) 26%, transparent);
+  }
+}
+
+@keyframes dock-in {
+  from {
+    opacity: 0;
+    translate: 32px 0;
+  }
+}
+
+@keyframes bar-in {
+  from {
+    opacity: 0;
+    translate: -50% 24px;
+  }
+}
+
+/* ==========================================================================================
+   Motion levels and colour mode
+   ========================================================================================== */
+body:not([data-motion="full"]) .sparkle,
+body:not([data-motion="full"]) .empty-note .mark {
+  animation: none;
+}
+
+body[data-motion="off"],
+body[data-motion="off"] *,
+body[data-motion="off"] *::before,
+body[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-indicator,
+  .art-full,
+  .sticker {
+    transition: none;
+  }
+}
+
+/* Reduced: surfaces go neutral; colour stays for accents, selection and the character's art. */
+body[data-color-mode="reduced"] .banner {
+  background:
+    radial-gradient(
+      70% 110% at 82% 100%,
+      color-mix(in oklch, var(--primary) calc(30% * var(--light-intensity)), transparent),
+      transparent calc(41% * var(--light-spread))
+    ),
+    var(--paper);
+  box-shadow: inset 0 0 0 1px var(--line), 0 12px 30px #0003;
+}
+
+body[data-color-mode="reduced"] .banner::before,
+body[data-color-mode="reduced"] .chat-log {
+  background-image: none;
+}
+
+body[data-color-mode="reduced"] .sticker {
+  box-shadow: 0 8px 18px #0004;
+}
+
+body[data-color-mode="reduced"] .speech {
+  background: var(--paper);
+}
+
+body[data-color-mode="reduced"] .bubble-row.me .speech {
+  background: color-mix(in oklch, var(--ink) 7%, var(--paper));
+}
+
+/* ==========================================================================================
+   Narrow screens
+   ========================================================================================== */
+@media (max-width: 800px) {
+  :root {
+    --pad: var(--space-4);
+  }
+
+  .app-frame {
+    display: block;
+    height: auto;
+  }
+
+  .app-frame > .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  /* Labels leave the screen but stay as the accessible name of their control. */
+  .frame-brand span,
+  .design-label,
+  .chat-fab .fab-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .menu-toggle {
+    display: inline-flex;
+  }
+
+  .server-switch {
+    justify-self: stretch;
+  }
+
+  .app-main {
+    height: auto;
+    padding: var(--space-8) var(--space-4) var(--space-6);
+  }
+
+  /* the art gets its own row on top and still steps out of the frame */
+  .banner {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+    margin-top: var(--space-6);
+  }
+
+  .banner-art {
+    order: -1;
+    height: 190px;
+  }
+
+  .banner-art > .sticker {
+    width: 128px;
+    margin-top: var(--space-6);
+  }
+
+  .banner-info {
+    padding-top: var(--space-2);
+  }
+
+  /* phones get the same text: a character's line may run one line longer */
+  .banner-text {
+    -webkit-line-clamp: 3;
+  }
+
+  .art-full {
+    height: 220px;
+  }
+
+  .card-stack {
+    width: 150px;
+    margin-bottom: var(--space-2);
+  }
+
+  /* three quick picks plus add and "All" fit on one line */
+  .quickbar {
+    flex-wrap: nowrap;
+  }
+
+  .quick button:nth-child(n + 5) {
+    display: none;
+  }
+
+  /* compact: no figure steps out, and the emblem stays a small mark beside the title */
+  .banner.compact {
+    grid-template-columns: minmax(0, 1fr) auto;
+    margin-top: 0;
+  }
+
+  .banner.compact .banner-art {
+    order: 0;
+    height: auto;
+    padding: var(--space-4);
+  }
+
+  .banner.compact .emblem {
+    width: 84px;
+    margin: 0;
+    border-width: 4px;
+  }
+
+  .banner.compact .emblem .glyph {
+    width: 36px;
+    height: 36px;
+  }
+
+  .banner.compact .banner-art::before {
+    width: 116px;
+  }
+
+  .toolbar .actions {
+    margin-left: 0;
+  }
+
+  .collection-title {
+    flex-wrap: wrap;
+  }
+
+  .collection-title h2 {
+    white-space: nowrap;
+  }
+
+  dialog.collection {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+
+  .deck {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+
+  .deck-card .sticker {
+    width: 64px;
+  }
+
+  .app-frame .chat-dock {
+    inset: 0;
+    width: 100%;
+    border-radius: 0;
+  }
+
+  /* the chat button becomes a round sticker */
+  .chat-fab {
+    right: var(--space-4);
+    bottom: var(--space-4);
+    padding: 5px;
+  }
+
+  .chat-fab .sticker {
+    width: 48px;
+  }
+}
+
+@media (max-width: 480px) {
+  .banner.compact .emblem {
+    width: 60px;
+    border-width: 3px;
+  }
+
+  .banner.compact .emblem .glyph {
+    width: 28px;
+    height: 28px;
+  }
+
+  .banner.compact .banner-art::before {
+    width: 84px;
+  }
+}

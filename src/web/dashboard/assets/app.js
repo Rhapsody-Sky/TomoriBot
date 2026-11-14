@@ -2,15 +2,6 @@
   const BASE = "/settings/api";
   const app = document.querySelector("#app");
   const toastRegion = document.querySelector("#toast-region");
-  const palettes = [
-    { id: "lilya", label: "Lilya", color: "oklch(.72 .12 195)" },
-    { id: "aphel", label: "Aphel", color: "oklch(.72 .13 350)" },
-    { id: "nerine", label: "Nerine", color: "oklch(.72 .12 145)" },
-    { id: "tomori", label: "Tomori", color: "oklch(.72 .16 28)" },
-    { id: "zaya", label: "Zaya", color: "oklch(.72 .15 300)" },
-    { id: "locke", label: "Locke", color: "oklch(.43 .16 20)" },
-    { id: "temari", label: "Temari", color: "oklch(.55 .17 250)" },
-  ];
   const loginMessages = [
     "Not today satan",
     "Vibing",
@@ -45,46 +36,8 @@
   ];
   const loginMessage = loginMessages[Math.floor(Math.random() * loginMessages.length)];
 
-  const designStorageKey = "tomoribot.dashboard.rememberedDesign";
-  let storedDesign = null;
-  try {
-    const stored = JSON.parse(localStorage.getItem(designStorageKey));
-    if (stored && typeof stored === "object" && !Array.isArray(stored)) storedDesign = stored;
-  } catch {}
-  let rememberDesign = storedDesign !== null;
-
-  const appearance = {
-    palette: palettes.some(({ id }) => id === storedDesign?.palette) ? storedDesign.palette : "tomori",
-    theme: storedDesign?.theme === "light" ? "light" : "dark",
-    surface: storedDesign?.surface === "solid" ? "solid" : "glass",
-    colorMode: storedDesign?.colorMode === "reduced" ? "reduced" : "colorful",
-    motion: ["subtle", "off"].includes(storedDesign?.motion) ? storedDesign.motion : "full",
-    lighting: { dark: { angle: 350, spread: 150, intensity: 50 }, light: { angle: 45, spread: 300, intensity: 50 } },
-  };
-  for (const theme of ["dark", "light"]) {
-    for (const [key, min, max] of [
-      ["angle", 0, 359],
-      ["spread", 50, 500],
-      ["intensity", 0, 200],
-    ]) {
-      const value = storedDesign?.lighting?.[theme]?.[key];
-      if (Number.isFinite(value) && value >= min && value <= max) appearance.lighting[theme][key] = value;
-    }
-  }
-
-  const applyAppearance = () => {
-    document.body.dataset.palette = palettes.some((palette) => palette.id === appearance.palette)
-      ? appearance.palette
-      : "tomori";
-    document.body.dataset.theme = appearance.theme === "light" ? "light" : "dark";
-    document.body.dataset.surface = appearance.surface === "solid" ? "solid" : "glass";
-    document.body.dataset.colorMode = appearance.colorMode === "reduced" ? "reduced" : "colorful";
-    document.body.dataset.motion = ["full", "subtle", "off"].includes(appearance.motion) ? appearance.motion : "full";
-    const light = appearance.lighting[document.body.dataset.theme];
-    document.body.style.setProperty("--glass-angle", `${(light.angle + 180) % 360}deg`);
-    document.body.style.setProperty("--light-spread", light.spread / 100);
-    document.body.style.setProperty("--light-intensity", light.intensity / 100);
-  };
+  const { palettes, designStorageKey, appearance, applyAppearance, remembered } = window.TomoriDesign;
+  let rememberDesign = remembered;
 
   function setRememberDesign(remember) {
     try {
@@ -117,7 +70,9 @@
     }
     const surfaceButton = document.querySelector("[data-surface-toggle]");
     if (surfaceButton) surfaceButton.setAttribute("aria-pressed", String(appearance.surface === "glass"));
-    for (const key of ["colorMode", "motion"]) {
+    const personaColors = document.querySelector("[data-design-persona-colors]");
+    if (personaColors) personaColors.checked = appearance.personaColors;
+    for (const key of ["colorMode", "motion", "layout"]) {
       const input = document.querySelector(`[data-design-setting="${key}"]`);
       if (input) input.value = appearance[key];
     }
@@ -126,8 +81,6 @@
       if (input) input.value = appearance.lighting[document.body.dataset.theme][key];
     }
   };
-
-  applyAppearance();
 
   window.addEventListener("storage", (event) => {
     if (!rememberDesign || event.newValue !== null || event.storageArea !== localStorage) return;
@@ -736,37 +689,44 @@
     state.publicSite = await api("/site");
   }
 
+  let fxLocale;
+
   function renderShell() {
     clearSearchSpotlight();
     const guilds = state.session?.guilds || [];
     const selected = guilds.find((guild) => guild.id === state.guildId) || guilds[0];
     const user = state.session?.user;
+    const fxCopy = { more: ui("control_more"), moreLabel: ui("control_more_sections") };
+    const locale = JSON.stringify(fxCopy);
+    if (locale !== fxLocale) {
+      window.TomoriFX?.configure(fxCopy);
+      fxLocale = locale;
+    }
+    const collection = state.view === "personas";
+    const serverIdentity = selected?.iconUrl
+      ? `<img class="${collection ? "avatar" : "server-icon"}" src="${escapeHtml(selected.iconUrl)}" alt="">`
+      : `<span class="${collection ? "avatar" : "server-icon server-icon-fallback"}">${escapeHtml((selected?.name || "?").slice(0, 1))}</span>`;
+    const serverLabel = `<span${collection ? "" : ' class="server-label"'}><small>${escapeHtml(ui("server"))}</small><strong>${escapeHtml(selected?.name || ui("switch_server"))}</strong></span>${navigationIcon("arrow-up-down")}`;
+    const serverButton = `<button class="button ${collection ? "server-switch" : "topbar-server-button"}" type="button" data-server-picker-open aria-haspopup="dialog" aria-label="${escapeHtml(ui("switch_server"))}">${serverIdentity}${serverLabel}</button>`;
+    const navigationButton = `<button class="button icon ${collection ? "menu-toggle" : "mobile-nav-trigger"}" type="button" data-navigation-menu="dashboard-navigation" aria-label="${escapeHtml(ui("navigation_menu"))}">${navigationIcon("menu")}</button>`;
+    const brand = `<button class="${collection ? "button frame-brand" : "brand brand-button"}" type="button" data-nav="overview" aria-label="${escapeHtml(ui("nav_overview") || "Overview")}">
+      <img src="/settings/assets/tomori_companion_logo.svg" alt=""${collection ? "" : ' class="topbar-logo"'}>
+      <span${collection ? "" : ' class="brand-copy"'}><strong>TomoriBot</strong><small>companion control</small></span>
+    </button>`;
+    const designButton = `<button class="button" id="design-trigger" type="button" popovertarget="design-settings" aria-label="${escapeHtml(ui("design_title"))}" data-tooltip="${escapeHtml(ui("design_title"))}"><span class="palette-orb" aria-hidden="true"></span><span class="${collection ? "design-label" : "design-trigger-label"}">${escapeHtml(ui("design_title"))}</span></button>`;
     app.innerHTML = `
-      <div class="dashboard-shell">
+      <div class="${collection ? "app-frame" : "dashboard-shell"}">
         <header class="topbar">
-          <button class="button icon mobile-nav-trigger" type="button" data-navigation-menu="dashboard-navigation" aria-label="${escapeHtml(ui("navigation_menu"))}">${navigationIcon("menu")}</button>
-          <button class="brand brand-button" type="button" data-nav="overview" aria-label="Open overview">
-            <img src="/settings/assets/tomori_companion_logo.svg" alt="" class="topbar-logo">
-            <span class="brand-copy"><strong>TomoriBot</strong><small>companion control</small></span>
-          </button>
-          <div class="topbar-server-access">
-            <button class="button topbar-server-button" type="button" data-server-picker-open aria-haspopup="dialog" aria-label="${escapeHtml(ui("switch_server"))}">
-              ${
-                selected?.iconUrl
-                  ? `<img class="server-icon" src="${escapeHtml(selected.iconUrl)}" alt="">`
-                  : `<span class="server-icon server-icon-fallback">${escapeHtml((selected?.name || "?").slice(0, 1))}</span>`
-              }
-              <span class="server-label"><small>${escapeHtml(ui("server"))}</small><strong>${escapeHtml(selected?.name || ui("switch_server"))}</strong></span>${navigationIcon("arrow-up-down")}
-            </button>
-          </div>
-          <button class="button" id="design-trigger" type="button" popovertarget="design-settings" aria-label="${escapeHtml(ui("design_title"))}" data-tooltip="${escapeHtml(ui("design_title"))}"><span class="palette-orb" aria-hidden="true"></span><span class="design-trigger-label">${escapeHtml(ui("design_title"))}</span></button>
+          ${collection
+            ? `<div class="row">${navigationButton}${brand}</div>${serverButton}<div class="row topbar-end">${designButton}</div>`
+            : `${navigationButton}${brand}<div class="topbar-server-access">${serverButton}</div>${designButton}`}
         </header>
         <div class="shell"><div class="sidebar-rail"><aside class="sidebar" data-variant="detailed">
           <nav class="nav-stack sidebar-sections" id="dashboard-navigation" aria-label="Dashboard">
             ${
               state.overview
                 ? `
-            <button class="button" type="button" data-settings-search-open aria-haspopup="dialog">${escapeHtml(ui("settings_search"))}</button>
+            <button class="button${collection ? " sidebar-search" : ""}" type="button" data-settings-search-open aria-haspopup="dialog">${collection ? navigationIcon("search") : ""}${escapeHtml(ui("settings_search"))}</button>
             <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_global"))}</h2><div class="sidebar-group-links">
             ${navButton("profile", ui("my_settings"))}
             ${navButton("personal-memory", "Global memory")}
@@ -803,7 +763,7 @@
             <a class="button" href="/settings/logout">${navigationIcon("log-out")}${escapeHtml(ui("log_out"))}</a>
           </section>
         </aside></div>
-        <main class="dashboard-page" id="workspace"></main>
+        <main class="${collection ? "app-main" : "dashboard-page"}" id="${collection ? "main" : "workspace"}" data-dashboard-view="${state.view}"></main>
         </div>
       </div>
       <dialog id="navigation-sheet" class="sidebar-drawer" aria-labelledby="navigation-sheet-title"><header class="sidebar-drawer-heading"><h2 id="navigation-sheet-title">${escapeHtml(ui("navigation_menu"))}</h2><button class="button icon" type="button" data-navigation-close aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header><div class="sidebar-drawer-body"></div></dialog>
@@ -907,9 +867,11 @@
       <header class="panel-header"><div class="heading"><h2 id="design-title">${escapeHtml(ui("design_title"))}</h2><p>${escapeHtml(ui("design_hint"))}</p></div><button class="button  icon" type="button" popovertarget="design-settings" popovertargetaction="hide" aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header>
       <div class="stack"><div class="row"><button class="button " id="design-theme" type="button" data-theme-toggle>${escapeHtml(ui("design_light"))}</button><button class="button " type="button" data-surface-toggle aria-pressed="${appearance.surface === "glass"}">${escapeHtml(ui("design_glass"))}</button></div>
       <div class="field"><span class="field-label">${escapeHtml(ui("design_palette"))}</span><div class="palette-list">${palettes.map((palette) => `<button class="palette-choice palette-${palette.id}" type="button" data-palette-choice="${palette.id}" aria-pressed="${appearance.palette === palette.id}"><span class="palette-orb" aria-hidden="true"></span><span>${palette.label}</span></button>`).join("")}</div></div>
+      <label class="toggle">${fieldLabel(ui("design_persona_colors"))}<input type="checkbox" role="switch" data-design-persona-colors></label>
       <label class="field">${fieldLabel(ui("design_color_mode"))}<select data-design-setting="colorMode"><option value="colorful">${escapeHtml(ui("design_colorful"))}</option><option value="reduced">${escapeHtml(ui("design_reduced"))}</option></select></label>
-      <div class="preview-controls"><label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-light-setting="angle" data-scrub></label>
+      <div class="preview-controls design-light"><label class="field">${fieldLabel(ui("design_angle"), ui("design_angle_hint"))}<input type="number" min="0" max="359" step="1" data-light-setting="angle" data-scrub></label>
       <label class="field">${fieldLabel(ui("design_spread"))}<input type="range" min="50" max="500" step="10" data-light-setting="spread"></label><label class="field">${fieldLabel(ui("design_intensity"))}<input type="range" min="0" max="200" step="5" data-light-setting="intensity"></label></div>
+      <label class="field">${fieldLabel(ui("design_layout"))}<select data-design-setting="layout"><option value="boxed">${escapeHtml(ui("design_layout_boxed"))}</option><option value="full">${escapeHtml(ui("design_layout_full"))}</option></select></label>
       <label class="field">${fieldLabel(ui("design_motion"))}<select data-design-setting="motion">${["full", "subtle", "off"].map((value) => `<option value="${value}">${escapeHtml(ui(`design_motion_${value}`))}</option>`).join("")}</select></label>
       <label class="toggle">${fieldLabel(ui("design_remember"), ui("design_remember_hint"))}<input type="checkbox" role="switch" data-design-remember${rememberDesign ? " checked" : ""}></label></div>
       <div class="actions form-actions"><button class="button " type="button" data-design-reset>${escapeHtml(ui("design_reset"))}</button></div>
@@ -949,6 +911,7 @@
       (button) => confirmAction(button.dataset.confirmTitle, button.dataset.confirmDescription),
     );
     window.TomoriControls?.enhance(container);
+    window.TomoriFX?.enhance(container);
     window.TomoriControls?.enhanceTabs(container);
     container.querySelectorAll("[data-palette-choice]").forEach((button) => {
       button.style.setProperty(
@@ -1016,7 +979,7 @@
     });
     if (drawer.open) drawer.close();
     document.querySelector(".sidebar-rail").append(sidebar);
-    window.TomoriControls?.enhanceTabs(document.querySelector("#workspace"));
+    window.TomoriControls?.enhanceTabs(document.querySelector("[data-dashboard-view]"));
   }
 
   function openNavigationSheet() {
@@ -1036,8 +999,9 @@
   }
 
   function renderView() {
-    const workspace = document.querySelector("#workspace");
+    const workspace = document.querySelector("[data-dashboard-view]");
     if (!workspace) return;
+    if (workspace.dataset.dashboardView !== state.view) return renderShell();
     if (state.view === "site-admin" && state.session?.user.isGlobalAdmin) {
       window.TomoriSite.renderAdmin(workspace, {
         api,
@@ -1447,7 +1411,7 @@
       pendingSearchDestination = null;
       return;
     }
-    const root = entry.dialog ? document.getElementById(entry.dialog) : document.getElementById("workspace");
+    const root = entry.dialog ? document.getElementById(entry.dialog) : document.querySelector("[data-dashboard-view]");
     if (!root) return;
     if (entry.dialog && !root.open) root.showModal();
     let target;
@@ -2764,6 +2728,7 @@
       target.innerHTML = renderLorebooks(lineageId, data);
       initDraftForms(target);
       window.TomoriControls?.enhance(target);
+      window.TomoriFX?.enhance(target);
       const selected = lorebookSelections.get(lorebookSelectionKey(lineageId));
       const selectedEntry = data.entries.find((entry) => entry.entry_id === selected?.entryId) || data.entries[0];
       if (selectedEntry) {
@@ -2864,6 +2829,7 @@
     host.innerHTML = `<button class="button mail-back" type="button" data-lorebook-back>${navigationIcon("arrow-left")}${escapeHtml(ui("lorebook_back_entries"))}</button><header class="panel-header"><div class="heading"><h3>${escapeHtml(entry.title)}</h3></div></header>${tabs}<div class="stack">${body}</div>${canManage && section !== "content" ? `<div class="actions entry-actions">${deleteButton}</div>` : ""}`;
     initDraftForms(host);
     window.TomoriControls?.enhance(host);
+    window.TomoriFX?.enhance(host);
     document.querySelectorAll(".mail-item[data-lorebook-edit-entry]").forEach((item) => {
       item.setAttribute("aria-current", String(Number(item.dataset.lorebookEditEntry) === entryId));
     });
@@ -4777,7 +4743,7 @@
     const tab = event.target.closest("[data-channel-tab]");
     if (tab) {
       channelTab = tab.dataset.channelTab;
-      renderChannelSettings(tab.closest("#workspace"));
+      renderChannelSettings(tab.closest("[data-dashboard-view]"));
       return;
     }
     const button = event.target.closest("[data-channel-select]");
@@ -5870,7 +5836,7 @@
     } catch (error) {
       if (!current()) return false;
       toast(error.message, "error");
-      const workspace = document.querySelector("#workspace");
+      const workspace = document.querySelector("[data-dashboard-view]");
       const expectedView = scope === "personal" ? "personal-providers" : "server-providers";
       if (workspace && state.view === expectedView)
         workspace.innerHTML = `<div class="empty"><strong>${escapeHtml(error.message)}</strong></div>`;
@@ -7185,6 +7151,8 @@
         surface: "glass",
         colorMode: "colorful",
         motion: "full",
+        layout: "boxed",
+        personaColors: true,
         lighting: {
           dark: { angle: 350, spread: 150, intensity: 50 },
           light: { angle: 45, spread: 300, intensity: 50 },
@@ -7514,6 +7482,11 @@
     if (event.target.matches("[data-design-remember]")) {
       setRememberDesign(event.target.checked);
       event.target.checked = rememberDesign;
+      return;
+    }
+    if (event.target.matches("[data-design-persona-colors]")) {
+      appearance.personaColors = event.target.checked;
+      saveAppearance();
       return;
     }
     if (event.target.matches("[data-design-setting]")) {
@@ -8163,7 +8136,7 @@
           }
           completeFormSave(form);
           if (state.overview === overview && form.isConnected) {
-            const workspace = form.closest("#workspace");
+            const workspace = form.closest("[data-dashboard-view]");
             const scrollTop = workspace.scrollTop;
             form.outerHTML = namingForm
               ? renderPersonaNaming(overview.personas.find((persona) => persona.personaId === personaId))
@@ -8221,7 +8194,7 @@
           completeFormSave(allowlistForm);
         });
         state.overview = await api(`/guilds/${state.guildId}/overview`);
-        renderChannelSettings(allowlistForm.closest("#workspace"));
+        renderChannelSettings(allowlistForm.closest("[data-dashboard-view]"));
         toast(ui("channel_saved"));
       } catch (error) {
         showFormError(allowlistForm, error, saved);

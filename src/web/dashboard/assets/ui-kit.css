@@ -715,6 +715,24 @@ main {
   flex: none;
 }
 
+/* Compact button for dense rows, cards and toolbars. The containers below shrink their buttons
+   the same way, so existing markup keeps working without the class. */
+.button.small,
+.entry-actions .button,
+.sprite-actions .button,
+.media-item > .button {
+  min-height: var(--input-height);
+  padding: 6px var(--space-3);
+}
+
+.button.small.icon,
+.entry-actions .button.icon,
+.media-item > .button.icon {
+  width: var(--input-height);
+  height: var(--input-height);
+  padding: 0;
+}
+
 .icon svg {
   width: 20px;
   height: 20px;
@@ -4087,17 +4105,6 @@ body[data-color-mode="reduced"][data-palette][data-theme="light"] {
   gap: var(--space-2);
 }
 
-.entry-actions .button {
-  height: var(--input-height);
-  min-height: var(--input-height);
-  padding: 6px var(--space-3);
-}
-
-.entry-actions .button.icon {
-  width: var(--input-height);
-  padding: 0;
-}
-
 .dialogue-copy {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -4355,11 +4362,6 @@ body[data-color-mode="reduced"][data-palette][data-theme="light"] {
   gap: var(--space-2);
 }
 
-.sprite-actions .button {
-  min-height: var(--input-height);
-  padding: 6px var(--space-3);
-}
-
 .sprite-actions .hold-button {
   min-width: 0;
   flex: 1;
@@ -4387,17 +4389,6 @@ body[data-color-mode="reduced"][data-palette][data-theme="light"] {
   justify-items: start;
   gap: var(--space-2);
   min-width: 0;
-}
-
-.media-item > .button {
-  min-height: var(--input-height);
-  padding: 6px var(--space-3);
-}
-
-.media-item > .button.icon {
-  width: var(--input-height);
-  height: var(--input-height);
-  padding: 0;
 }
 
 .media-item > .artwork-upload {
