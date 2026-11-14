@@ -1886,6 +1886,7 @@
   };
 
   function renderStatsToolbar() {
+    const today = new Date().toISOString().slice(0, 10);
     return `<div class="toolbar" data-stats-filters>
       <div class="segmented" data-fx="indicator" data-overflow role="tablist" aria-label="${escapeHtml(ui("stats_timeframe"))}">
         ${Object.entries(statsPeriods)
@@ -1904,9 +1905,12 @@
       </div>
     </div>
     <div class="stage" id="overview-period-content" role="tabpanel">
-    <form class="card" id="stats-range-form" ${state.statsRangeEditing ? "" : "hidden"}>
-      <div class="card-head"><div><h3>${escapeHtml(ui("stats_edit_range"))}</h3><p class="hint">${escapeHtml(ui("stats_range_hint"))}</p></div></div>
-      <div class="grid"><label class="field">${fieldLabel(ui("stats_from"))}<input type="date" name="from" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.from || ""}"></label><label class="field">${fieldLabel(ui("stats_through"))}<input type="date" name="through" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.through || ""}"></label></div>
+    <form class="toolbar" id="stats-range-form" aria-label="${escapeHtml(ui("stats_custom"))}" ${state.statsRangeEditing ? "" : "hidden"}>
+      <p class="sr-only" id="stats-range-hint">${escapeHtml(ui("stats_range_hint"))}</p>
+      <div class="row">
+        <label class="field">${fieldLabel(ui("stats_from"))}<input type="date" name="from" required max="${today}" value="${state.statsRange?.from || ""}" aria-describedby="stats-range-hint"></label>
+        <label class="field">${fieldLabel(ui("stats_through"))}<input type="date" name="through" required max="${today}" value="${state.statsRange?.through || ""}" aria-describedby="stats-range-hint"></label>
+      </div>
       <div class="actions"><button class="button small" type="button" data-stats-range-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("stats_apply_range"))}</button></div>
     </form>
     <div class="toolbar" data-stats-range-summary hidden><p class="hint"></p><button class="button small" type="button" data-stats-range-edit>${escapeHtml(ui("stats_edit_range"))}</button></div>`;
