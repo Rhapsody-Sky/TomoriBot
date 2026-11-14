@@ -618,6 +618,10 @@ body[data-theme="dark"] .boot-logo {
   overflow-y: auto;
 }
 
+:is([data-channel-personas], [data-channel-persona-options], [data-channel-persona-preview]) .sticker {
+  width: var(--space-8);
+}
+
 .channel-choices {
   max-height: 560px;
   overflow-y: auto;
