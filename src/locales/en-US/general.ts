@@ -24,7 +24,7 @@ export default {
       site_show_in_sidebar: "Show in sidebar",
       site_page_title: "Page title",
       site_content: "Page content",
-      site_save: "Save changes",
+      site_save: "Save",
       site_saved: "Saved",
       site_add_link: "Add link",
       site_link_title: "Link label",
@@ -141,7 +141,7 @@ export default {
       interface_channel_disable: "Disable for selected",
       interface_channel_batch_hint:
         "Only settings you change are applied to the selected channels. Keep unchanged preserves each channel's current value.",
-      interface_channel_apply: "Apply changes",
+      interface_channel_apply: "Save",
       interface_channel_saved: "Channel settings saved",
       interface_persona_channels: "Allowed channels",
       interface_channel_personas: "Allowed personas",
@@ -1184,9 +1184,9 @@ export default {
       interface_fallback: "Server provider fallback",
       interface_fallback_hint:
         "Allow a failed personal route to use the server's providers. This is separate from your personal model chain and applies across servers. Each server's BYOK policy still applies.",
-      interface_save: "Save changes",
+      interface_save: "Save",
       interface_unsaved: "Unsaved changes",
-      interface_discard: "Discard changes",
+      interface_discard: "Discard",
       interface_discard_title: "Discard unsaved changes?",
       interface_discard_detail: "The edits in this panel will be replaced by the last loaded values.",
       interface_refresh_detail:
@@ -1286,7 +1286,7 @@ export default {
       interface_stats_showing: "Showing:",
       style_default: "Default",
       memory: "Memory",
-      save: "Save changes",
+      save: "Save",
       reset_defaults: "Restore defaults",
       naming_tab: "My preferences",
       naming_title: "How this persona addresses you",

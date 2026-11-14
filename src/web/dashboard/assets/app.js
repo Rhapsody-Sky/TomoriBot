@@ -397,7 +397,7 @@
   const draftForms =
     "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], #stm-categories-form";
   const localEditForms =
-    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-spotlight-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], [data-personal-model], [data-personal-parameters], #fallback-form, #memory-edit-form";
+    "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-spotlight-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], [data-personal-model], [data-personal-parameters], #fallback-form, #memory-compose-form, #memory-edit-form";
   const editForms = `${draftForms}, ${localEditForms}`;
   const editSubmit = 'button[type="submit"]:not([value="reset"]), button[value="save"]:not([type])';
   const drafts = new Map();
@@ -569,9 +569,13 @@
       const visible =
         changed &&
         (!form.matches("[data-channel-settings]") || channelHasChanges(form, button.closest("[data-channel-panel]")));
-      if (button.hidden === visible) button.hidden = !visible;
       const discard = button.previousElementSibling;
-      if (discard?.hasAttribute("data-discard-draft") && discard.hidden === visible) discard.hidden = !visible;
+      const hasDiscard = discard?.hasAttribute("data-discard-draft");
+      if (button.hidden !== visible && (!hasDiscard || discard.hidden !== visible)) return;
+      window.TomoriFX.reflowActions(button.parentElement, () => {
+        button.hidden = !visible;
+        if (hasDiscard) discard.hidden = !visible;
+      });
     });
   }
 
@@ -858,7 +862,7 @@
           <input name="memoryId" type="hidden">
           <div class="actions">
             <button type="button" class="button " data-dialog-close="memory-dialog">Cancel</button>
-            <button value="save" class="button primary">Save changes</button>
+            <button value="save" class="button primary" data-edit-action hidden>${escapeHtml(ui("save"))}</button>
           </div>
         </form>
       </dialog>
@@ -2588,7 +2592,7 @@
                 ${personal ? "" : '<div class="subsection" data-memory-channel-scope hidden></div>'}
                 ${personal ? `<label class="field">${fieldLabel("Tags", ui("memory_personal_tags_hint"))}<input name="tags" placeholder="preference, character"></label>` : ""}
               </div>
-              <div class="actions"><button class="button" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("persona_save"))}</button></div>
+              <div class="actions"><button class="button small" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></div>
             </form>`
       }
       <section id="memory-list" class="${collection ? "rows" : "stack"}">${loadingBar(ui("memory_loading"))}</section></div></section>
@@ -2614,6 +2618,7 @@
     trigger.hidden = open;
     trigger.setAttribute("aria-expanded", String(open));
     if (open) {
+      completeFormSave(form);
       form.elements.content.focus();
     } else {
       form.reset();
@@ -3460,8 +3465,8 @@
     }
   }
 
-  function cardSaveActions(label) {
-    return `<div class="actions"><button class="button small" type="button" data-edit-action data-discard-draft hidden>${escapeHtml(ui("discard"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(label)}</button></div>`;
+  function cardSaveActions(label, leading = "") {
+    return `<div class="actions">${leading}<button class="button small" type="button" data-edit-action data-discard-draft hidden>${escapeHtml(ui("discard"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(label)}</button></div>`;
   }
 
   function personaCardHead(title, hint = "", actions = "") {
@@ -4069,8 +4074,7 @@
         </div>`;
         })
         .join("")}</div>
-      <div class="actions"><button class="button small" type="button" data-persona-naming-reset>${escapeHtml(copy.reset)}</button></div>
-      ${cardSaveActions(copy.save)}
+      ${cardSaveActions(copy.save, `<button class="button small" type="button" data-action-leading data-persona-naming-reset>${escapeHtml(copy.reset)}</button>`)}
     </form><aside class="card">${personaCardHead(ui("persona_naming_defaults"))}<div class="stack"><p class="hint">${escapeHtml(copy.description)}</p><p class="hint">${escapeHtml(copy.hint)}</p></div></aside></div>`;
   }
 
@@ -4534,7 +4538,7 @@
     try {
       const data = await api(`/guilds/${state.guildId}/channel-settings`);
       if (!host.isConnected) return;
-      host.innerHTML = `<div class="split"><form class="card" data-fx="track">${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p class="notice error" role="alert" hidden></p>${cardSaveActions(ui("channel_apply"))}</form><aside class="card">${personaCardHead(ui("persona_channel_behavior"))}<p class="hint">${escapeHtml(ui("persona_channels_hint"))}</p></aside></div>`;
+      host.innerHTML = `<div class="split"><form class="card" data-fx="track"><div class="stack">${renderChannelSelector("personaChannels", [...personaChannelSelection(data, persona.personaId)], false, state.overview.channels, { preserveMissing: true })}<p class="notice error" role="alert" hidden></p></div>${cardSaveActions(ui("channel_apply"))}</form><aside class="card">${personaCardHead(ui("persona_channel_behavior"))}<p class="hint">${escapeHtml(ui("persona_channels_hint"))}</p></aside></div>`;
       const form = host.querySelector("form");
       const selected = () => [...form.querySelectorAll('[name="personaChannels"]:checked')].map((input) => input.value);
       const validate = () => {
@@ -4950,14 +4954,14 @@
         )
         .join("");
       const search = escapeHtml(ui("channel_search"));
-      const controls = `<div class="actions"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
+      const controls = `<div class="row"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
       const count = channelSelectionCount(
         channels.filter((channel) => selected.has(String(channel.id))).length,
         channels.length,
       );
       return `<div data-channel-selector>
         <header class="card-head"><h3>${escapeHtml(ui(name === "personaChannels" ? "persona_channels" : "memory_channels"))}<small data-persona-channel-total>${escapeHtml(count)}</small></h3><label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label></header>
-        ${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div>${controls}
+        <div class="stack">${controls}${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div>
       </div>`;
     }
     const rows =
@@ -5072,7 +5076,7 @@
             )
             .join("")}
         </div>
-        <div class="actions form-actions"><button class="button primary" type="submit">Save changes</button></div>
+        <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
       </form>`;
   }
 

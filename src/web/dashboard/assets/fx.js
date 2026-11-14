@@ -261,6 +261,26 @@
   const baselines = new WeakMap();
   const fieldsOf = (form) => [...form.querySelectorAll("input[name], select[name], textarea[name]")];
   const stateOf = (el) => `${el.name}=${el.type === "checkbox" || el.type === "radio" ? el.checked : el.value}`;
+  const actionMoves = new WeakMap();
+
+  function reflowActions(row, update) {
+    if (!row) return update();
+    const controls = [...row.children].filter((control) => !control.hidden && !control.hasAttribute("data-edit-action"));
+    const before = controls.map((control) => control.getBoundingClientRect());
+    controls.forEach((control) => actionMoves.get(control)?.cancel());
+    update();
+    if (still()) return;
+    controls.forEach((control, index) => {
+      const after = control.getBoundingClientRect();
+      const x = before[index].left - after.left;
+      const y = before[index].top - after.top;
+      if (!before[index].width || !after.width || (Math.abs(x) < 1 && Math.abs(y) < 1)) return;
+      actionMoves.set(control, control.animate(
+        [{ translate: `${x}px ${y}px` }, { translate: "0 0" }],
+        { duration: 320, easing: "cubic-bezier(.22,.61,.36,1)" },
+      ));
+    });
+  }
 
   function updateTrack(form) {
     const base = baselines.get(form);
@@ -271,9 +291,14 @@
     fields.forEach((el, index) => el.closest(".field, .toggle")?.classList.toggle("is-changed", now[index] !== base[index]));
     const was = form.hasAttribute("data-changed");
     form.toggleAttribute("data-changed", changed);
-    form.querySelectorAll("[data-edit-action]").forEach((button) => {
-      if (button.hidden === changed) button.hidden = !changed;
-    });
+    const actions = [...form.querySelectorAll("[data-edit-action]")].filter((button) => button.hidden === changed);
+    for (const row of new Set(actions.map((button) => button.parentElement))) {
+      reflowActions(row, () => {
+        for (const button of actions) {
+          if (button.parentElement === row) button.hidden = !changed;
+        }
+      });
+    }
     if (was !== changed) form.dispatchEvent(new CustomEvent("fx:change", { bubbles: true, detail: { changed } }));
   }
 
@@ -438,6 +463,7 @@
     stagger,
     count,
     saved,
+    reflowActions,
     swap,
     place: placeIndicator,
   };

@@ -238,6 +238,7 @@ describe("dashboard connections", () => {
     const drafts = new Map();
     const capture = runInNewContext(`${actionsSource}; ${captureSource}; captureDraft`, {
       editSubmit: "button",
+      window: { TomoriFX: { reflowActions: (_row: unknown, update: () => void) => update() } },
       drafts,
       formBaselines: new Map([[form, snapshot()]]),
       formSnapshot: snapshot,
