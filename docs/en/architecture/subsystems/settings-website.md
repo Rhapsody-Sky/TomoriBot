@@ -183,8 +183,9 @@ scope. The full-width editor saves content, triggers, advanced rules and channel
 scope in separate cards. Returning to the list restores the filter and asks
 about unsaved edits.
 
-Overview summarizes the persona count and the most active persona for the selected
-period. A searchable picker opens individual persona workspaces. Statistics
+Overview shows the persona count in the server banner and ranks personas by
+interactions in the selected period. The Personas shortcut opens the workspace,
+where the searchable picker switches between personas. Statistics
 stay scoped to the selected server and period. Model usage separates input and
 output tokens and groups models outside the top five as Other models when all
 models are selected. The model filter applies to token totals, chart, shares and

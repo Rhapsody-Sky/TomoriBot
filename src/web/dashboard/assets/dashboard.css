@@ -169,16 +169,17 @@ body[data-theme="dark"] .boot-logo {
   grid-template-columns: minmax(0, 1fr);
 }
 
-[data-persona-summary] {
+[data-persona-summary],
+[data-overview-summary] {
   gap: var(--space-3);
 }
 
-[data-persona-art] > .sparkle {
+:is([data-persona-art], [data-overview-art]) > .sparkle {
   inset-block-start: 18%;
   inset-inline-start: 12%;
 }
 
-[data-persona-art] > .sparkle.s2 {
+:is([data-persona-art], [data-overview-art]) > .sparkle.s2 {
   inset-block-start: 34%;
   inset-inline: auto 10%;
 }
@@ -403,37 +404,30 @@ body[data-theme="dark"] .boot-logo {
   padding-top: var(--space-4);
 }
 
-.overview-stat-grid {
-  align-items: stretch;
+[data-server-stats] > .stat-grid.framed {
+  margin: 0;
 }
 
-.server-stats-section {
-  grid-template-columns: minmax(0, 1fr);
+[data-server-stats] .toolbar .actions {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
-.overview-stat-grid .stat-copy {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  height: 100%;
-  min-height: 140px;
-  padding: var(--space-4);
+[data-server-stats] .toolbar .actions .field {
+  flex: 1;
+  min-width: 0;
 }
 
-.overview-stat-grid .avatar {
-  width: 72px;
-  height: 72px;
-  object-fit: cover;
-  flex: none;
+[data-server-stats] .share-line {
+  overflow-wrap: anywhere;
 }
 
-.usage-history-panel .chart-plot {
+[data-usage-history] .chart-plot {
   gap: 2px;
   min-width: 0;
 }
 
-.usage-history-panel .chart-column {
+[data-usage-history] .chart-column {
   min-width: 0;
 }
 
@@ -570,43 +564,8 @@ body[data-theme="dark"] .boot-logo {
   }
 }
 
-@media (max-width: 650px) {
-  .overview-stat-grid .avatar {
-    width: 48px;
-    height: 48px;
-  }
-}
-
-.activity-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.activity-ranking-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--space-3);
-}
-
-.server-activity-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: var(--space-4);
-}
-
-.server-activity-list dd {
-  margin: var(--space-2) 0;
-  font-size: 1.5rem;
-  font-weight: 700;
-}
-
 .model-share-cell {
   min-width: 140px;
-}
-
-@media (max-width: 800px) {
-  .activity-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 .channel-workspace .channel-default-collapsed {
   border-bottom: 0;

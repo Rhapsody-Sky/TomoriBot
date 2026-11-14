@@ -53,7 +53,7 @@
     applyAppearance();
     const persona = state.overview?.personas.find((entry) => entry.personaId === state.personaId);
     if (persona)
-      document.querySelectorAll(".app-main > .banner, .chat-fab, .chat-dock").forEach((region) => {
+      document.querySelectorAll("[data-persona-banner], .chat-fab, .chat-dock").forEach((region) => {
         region.classList.toggle("tinted", appearance.personaColors);
         if (appearance.personaColors) region.dataset.tint = personaTint(persona);
         else delete region.dataset.tint;
@@ -745,8 +745,7 @@
       window.TomoriFX?.configure(fxCopy);
       fxLocale = locale;
     }
-    const collection = state.view === "personas";
-    if (!collection) delete document.body.dataset.chat;
+    const collection = usesCollectionFrame();
     const serverIdentity = selected?.iconUrl
       ? `<img class="${collection ? "avatar" : "server-icon"}" src="${escapeHtml(selected.iconUrl)}" alt="">`
       : `<span class="${collection ? "avatar" : "server-icon server-icon-fallback"}">${escapeHtml((selected?.name || "?").slice(0, 1))}</span>`;
@@ -1003,6 +1002,9 @@
     container.querySelectorAll("[data-share-value]").forEach((bar) => {
       bar.style.width = `${bar.dataset.shareValue}%`;
     });
+    container.querySelectorAll("[data-progress-value]").forEach((bar) => {
+      bar.style.setProperty("--progress", `${bar.dataset.progressValue}%`);
+    });
   }
 
   function pageHeader(eyebrow, title, copy, actions = "") {
@@ -1075,12 +1077,16 @@
     }
   }
 
+  function usesCollectionFrame() {
+    return state.view === "personas" || state.view === "overview";
+  }
+
   function renderView() {
     const workspace = document.querySelector("[data-dashboard-view]");
     if (!workspace) return;
+    if (state.view !== "personas") delete document.body.dataset.chat;
     if (workspace.dataset.dashboardView !== state.view) {
-      const collection = state.view === "personas";
-      if (collection !== workspace.classList.contains("app-main")) return renderShell();
+      if (usesCollectionFrame() !== workspace.classList.contains("app-main")) return renderShell();
       clearSearchSpotlight();
       workspace.dataset.dashboardView = state.view;
       workspace.scrollTop = 0;
@@ -1568,9 +1574,27 @@
   }
 
   function renderOverview(workspace) {
-    const overview = state.overview;
+    const { guild, personas, canManage } = state.overview;
     workspace.innerHTML = `
-      ${pageHeader(ui("overview_title"), overview.guild.name, ui("overview_hint"))}
+      <section class="banner" aria-labelledby="overview-server-name">
+        <div class="banner-info">
+          <div class="stack" data-overview-summary>
+            <p class="crumb">${escapeHtml(ui("overview_title"))}</p>
+            <h1 id="overview-server-name" data-fx="split">${escapeHtml(guild.name)}</h1>
+            <p class="banner-text">${escapeHtml(ui("overview_hint"))}</p>
+            <div class="chips">
+              ${!guild.isDirectMessage && guild.memberCount != null ? `<span class="chip">${navigationIcon("users-round")}${escapeHtml(ui(guild.memberCount === 1 ? "overview_member_count_one" : "overview_member_count").replace("{count}", new Intl.NumberFormat().format(guild.memberCount)))}</span>` : ""}
+              <span class="chip">${navigationIcon("user-round")}${escapeHtml(ui(personas.length === 1 ? "overview_persona_count_one" : "overview_persona_count").replace("{count}", new Intl.NumberFormat().format(personas.length)))}</span>
+            </div>
+          </div>
+          <div class="quickbar">
+            <a class="button small" href="#personas" data-nav="personas">${navigationIcon("users-round")}${escapeHtml(ui("overview_personas"))}</a>
+            ${canManage ? `<a class="button small" href="#settings" data-nav="settings">${navigationIcon("sliders-horizontal")}${escapeHtml(ui("nav_server_settings"))}</a>` : ""}
+          </div>
+        </div>
+        <div class="banner-art" data-overview-art aria-hidden="true">${renderOverviewArt()}</div>
+      </section>
+      <svg class="sr-only" width="0" height="0" aria-hidden="true"><defs><linearGradient id="spark-reward" x1="0" x2="1"><stop offset="0" stop-color="var(--primary)"></stop><stop offset="1" stop-color="var(--accent)"></stop></linearGradient></defs></svg>
       ${renderServerStats()}`;
 
     if (!state.serverStats && !state.serverStatsLoading && !state.serverStatsError) {
@@ -1578,20 +1602,45 @@
     }
   }
 
-  function renderStatsRanking(title, eyebrow, entries, valueFormatter) {
-    return `<section class="panel activity-ranking">
-      <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(eyebrow)}</p><h3>${escapeHtml(title)}</h3></div></div>
-      <div class="stack">
+  function renderOverviewArt() {
+    const personas = state.overview.personas;
+    const active = (state.serverStats?.personas || [])
+      .map((entry) => personas.find((persona) => persona.lineageId === entry.lineageId))
+      .filter(Boolean);
+    const [front, backLeft, backRight] = [...new Set([...active, ...personas])];
+    if (!front) return "";
+    const card = (persona, variant) => {
+      if (!persona) return "";
+      const avatar = personaAvatarUrl(persona);
+      const initial = persona.nickname.trim().slice(0, 1) || "?";
+      return `<span class="${variant}${variant === "front" && !avatar ? " mono" : ""}" data-label="${escapeHtml(persona.nickname)}">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" data-avatar-fallback="${escapeHtml(initial)}">` : escapeHtml(initial)}</span>`;
+    };
+    return `<div class="card-stack">${card(backLeft, "back b1")}${card(backRight, "back b2")}${card(front, "front")}</div>
+      <span class="sparkle">✦</span><span class="sparkle s2">✧</span>`;
+  }
+
+  function renderStatsRanking(title, entries, unit, personas = null) {
+    const top = entries[0]?.count || 1;
+    return `<section class="card">
+      <div class="card-head"><div><h3>${escapeHtml(title)}</h3><p class="hint">${escapeHtml(ui("stats_top_five"))}</p></div>
+        ${personas ? `<a class="button small" href="#personas" data-nav="personas">${escapeHtml(ui("overview_personas"))}</a>` : ""}
+      </div>
+      <div class="rows" data-fx="stagger">
         ${
           entries.length
             ? entries
-                .map(
-                  (entry, index) => `<div class="activity-ranking-row">
-                    <span class="hint">${index + 1}</span>
-                    <div class="heading"><strong>${escapeHtml(entry.name)}</strong>
-                    <span class="hint">${escapeHtml(valueFormatter(entry))}</span></div>
-                  </div>`,
-                )
+                .map((entry) => {
+                  const name = escapeHtml(entry.name);
+                  const value = `${formatStatNumber(entry.count)} ${escapeHtml(unit)}`;
+                  if (!personas)
+                    return `<div class="item"><div><p><strong>${name}</strong></p></div><b>${value}</b></div>`;
+                  const persona = personas.find((candidate) => candidate.lineageId === entry.lineageId);
+                  return `<article class="item lead">
+                    ${personaSticker(persona ?? { nickname: entry.name }, "flat")}
+                    <div><p><strong>${name}</strong></p><div class="progress-track" aria-hidden="true"><div class="progress-fill" data-progress-value="${(entry.count / top) * 100}"></div></div></div>
+                    <b>${value}</b>
+                  </article>`;
+                })
                 .join("")
             : `<p class="hint">${escapeHtml(ui("stats_empty"))}</p>`
         }
@@ -1635,25 +1684,27 @@
       const share = totalTokens > 0 ? Math.min(100, (tokens / totalTokens) * 100) : 0;
       return `<tr>
         <th scope="row"><strong>${escapeHtml(model.name)}</strong></th>
-        <td class="model-share-cell" data-label="${escapeHtml(ui("stats_model_share"))}">${total ? "" : `<span>${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(share)}%</span><div class="share-track" aria-hidden="true"><span data-share-value="${share}"></span></div>`}</td>
-        <td data-label="${escapeHtml(ui("stats_input"))}">${exactNumber(model.inputTokens)}</td>
-        <td data-label="${escapeHtml(ui("stats_output"))}">${exactNumber(model.outputTokens)}</td>
-        <td data-label="${escapeHtml(ui("stats_total_tokens"))}">${exactNumber(tokens)}</td>
-        <td data-label="${escapeHtml(ui("stats_cost"))}">${model.cost === null ? `<span title="${escapeHtml(ui("stats_cost_unavailable"))}">-</span>` : formatUsd(model.cost)}</td>
+        <td class="num model-share-cell" data-label="${escapeHtml(ui("stats_model_share"))}">${total ? "" : `<span>${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(share)}%</span><div class="share-track" aria-hidden="true"><span data-share-value="${share}"></span></div>`}</td>
+        <td class="num" data-label="${escapeHtml(ui("stats_input"))}">${exactNumber(model.inputTokens)}</td>
+        <td class="num" data-label="${escapeHtml(ui("stats_output"))}">${exactNumber(model.outputTokens)}</td>
+        <td class="num" data-label="${escapeHtml(ui("stats_total_tokens"))}">${exactNumber(tokens)}</td>
+        <td class="num" data-label="${escapeHtml(ui("stats_cost"))}">${model.cost === null ? `<span title="${escapeHtml(ui("stats_cost_unavailable"))}">-</span>` : formatUsd(model.cost)}</td>
       </tr>`;
     };
-    return `<section class="panel model-usage-section">
-      <div class="panel-header"><div class="heading"><h3>${escapeHtml(ui("stats_models"))}</h3><p>${escapeHtml(ui("stats_models_hint"))}</p></div></div>
+    return `<section class="card">
+      <div class="card-head"><div><h3>${escapeHtml(ui("stats_models"))}</h3><p class="hint">${escapeHtml(ui("stats_models_hint"))}</p></div></div>
+      <div class="stack">
       ${
         models.length
           ? `<div class="table-wrap"><table><caption>${escapeHtml(ui("stats_models"))}</caption>
-        <thead><tr><th scope="col">${escapeHtml(ui("stats_model"))}</th><th scope="col">${escapeHtml(ui("stats_model_share"))}</th><th scope="col">${escapeHtml(ui("stats_input"))}</th><th scope="col">${escapeHtml(ui("stats_output"))}</th><th scope="col">${escapeHtml(ui("stats_total_tokens"))}</th><th scope="col">${escapeHtml(ui("stats_cost"))}</th></tr></thead>
+        <thead><tr><th scope="col">${escapeHtml(ui("stats_model"))}</th>${["stats_model_share", "stats_input", "stats_output", "stats_total_tokens", "stats_cost"].map((key) => `<th class="num" scope="col">${escapeHtml(ui(key))}</th>`).join("")}</tr></thead>
         <tbody>${models.map((model) => row(model)).join("")}</tbody>
         <tfoot>${row({ name: selectedModel ?? ui("stats_server_total"), inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cost: usage.cost }, true)}</tfoot>
       </table></div>`
           : `<p class="hint">${escapeHtml(ui("stats_empty"))}</p>`
       }
       <p class="hint">${escapeHtml(ui("stats_tokens_hint"))} ${escapeHtml(ui("stats_cost_hint"))}</p>
+      </div>
     </section>`;
   }
 
@@ -1705,23 +1756,34 @@
     return `<strong>${escapeHtml(historyPointLabel(point))}</strong><div class="row"><span>${escapeHtml(ui("stats_input"))}: <b>${number(point.inputTokens)}</b></span><span>${escapeHtml(ui("stats_output"))}: <b>${number(point.outputTokens)}</b></span><span>${escapeHtml(ui("stats_total_tokens"))}: <b>${number(point.inputTokens + point.outputTokens)}</b></span></div>`;
   }
 
-  function renderUsageHistory(stats) {
-    if (!stats.history)
-      return `<div class="usage-history-panel"><h3>${escapeHtml(ui("stats_history"))}</h3><p class="hint">${escapeHtml(ui("stats_history_error"))}</p><button class="button" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></div>`;
-    const history =
-      state.statsHistoryModel === null
-        ? stats.history
-        : { ...stats.history, days: stats.history.models.filter((entry) => entry.model === state.statsHistoryModel) };
-    const { points, monthly, peakDay } = buildUsageHistory(history);
+  function renderStatsTile(label, value, scope, values = []) {
+    let sparkline = "";
+    if (values.length >= 7 && values.length <= 30 && values.some(Boolean)) {
+      const min = Math.min(...values);
+      const range = Math.max(...values) - min || 1;
+      const points = values
+        .map(
+          (count, i) =>
+            `${((i / (values.length - 1)) * 100).toFixed(1)},${(36 - ((count - min) / range) * 30).toFixed(1)}`,
+        )
+        .join(" ");
+      sparkline = `<svg class="sparkline" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true"><polygon class="spark-area" points="0,40 ${points} 100,40"></polygon><polyline points="${points}"></polyline></svg>`;
+    }
+    return `<div class="stat-tile"><div class="stat-copy"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong><small>${escapeHtml(scope)}</small></div>${sparkline}</div>`;
+  }
+
+  function renderUsageHistory(stats, usage, series) {
+    if (!series)
+      return `<section class="card"><div class="card-head"><div><h3>${escapeHtml(ui("stats_history"))}</h3><p class="hint">${escapeHtml(ui("stats_history_error"))}</p></div><button class="button small" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></div></section>`;
+    const { points, monthly, peakDay } = series;
     const maximum = Math.max(1, ...points.map((point) => point.inputTokens + point.outputTokens));
     const peakIndex = points.findIndex((point) => point.inputTokens + point.outputTokens === maximum);
     const selectedIndex = Math.max(0, peakIndex);
     const number = (value) => new Intl.NumberFormat().format(value);
-    const usage = statsModelUsage(stats, state.statsHistoryModel);
     const totalTokens = usage.inputTokens + usage.outputTokens;
-    return `<div class="usage-history-panel">
-      <div class="analytics-grid"><div class="chart-panel">
-      <div class="heading"><h3>${escapeHtml(ui("stats_history"))}</h3><p class="hint">${escapeHtml(ui(state.statsHistoryModel === null ? (monthly ? "stats_history_monthly" : "stats_history_daily") : monthly ? "stats_history_selected_monthly" : "stats_history_selected_daily"))}</p>
+    return `<div class="split">
+      <section class="card" data-usage-history>
+      <div class="card-head"><div><h3>${escapeHtml(ui("stats_history"))}</h3><p class="hint">${escapeHtml(ui(state.statsHistoryModel === null ? (monthly ? "stats_history_monthly" : "stats_history_daily") : monthly ? "stats_history_selected_monthly" : "stats_history_selected_daily"))} (UTC)</p></div>
       <div class="chart-legend"><span><i class="legend-dot" aria-hidden="true"></i>${escapeHtml(ui("stats_input"))}</span><span><i class="legend-dot output" aria-hidden="true"></i>${escapeHtml(ui("stats_output"))}</span></div>
       </div>
       ${
@@ -1729,7 +1791,7 @@
           ? `<p class="hint">${escapeHtml(ui("stats_empty"))}</p>`
           : `
       <div class="usage-chart">
-        <div class="chart-axis" aria-hidden="true"><span>${formatStatNumber(maximum)}</span><span>${formatStatNumber(maximum / 2)}</span><span>0</span></div>
+        <div class="chart-axis" aria-hidden="true"><span>${formatStatNumber(maximum)}</span><span>${formatStatNumber(Math.round(maximum / 2))}</span><span>0</span></div>
         <div class="chart-plot" role="group" aria-label="${escapeHtml(ui("stats_history"))}">
           ${points
             .map((point, index) => {
@@ -1742,9 +1804,11 @@
         </div>
       </div>
       <div class="chart-months" aria-hidden="true"><span>${escapeHtml(historyDate(stats.history.from))}</span><span>${escapeHtml(historyDate(stats.history.through))}</span></div>
-      <div class="chart-readout history-readout" role="status" aria-live="polite">${historyPointValues(points[selectedIndex])}</div>`
+      <div class="chart-readout" role="status" aria-live="polite">${historyPointValues(points[selectedIndex])}</div>`
       }
-      </div><aside class="usage-split"><h3>${escapeHtml(ui("stats_model_share"))}</h3><div class="stack">
+      </section><div class="col"><aside class="card">
+      <div class="card-head"><div><h3>${escapeHtml(ui("stats_model_share"))}</h3><p class="hint">${escapeHtml(state.statsHistoryModel ?? ui("stats_server_total"))}</p></div></div>
+      <div class="stack">
         ${
           usage.models.length
             ? usage.models
@@ -1757,12 +1821,15 @@
                 .join("")
             : `<p class="hint">${escapeHtml(ui("stats_empty"))}</p>`
         }
-      </div>${peakDay && peakIndex >= 0 ? `<div class="subsection"><h3>${escapeHtml(ui("stats_history_peak"))}</h3><strong>${escapeHtml(historyDate(peakDay.date))}</strong><p class="hint">${number(peakDay.inputTokens + peakDay.outputTokens)} ${escapeHtml(ui("stats_history_tokens"))}</p></div>` : ""}</aside></div>
-      <details class="history-values"><summary>${escapeHtml(ui("stats_history_values"))}</summary>
-        <div class="table-wrap"><table><caption>${escapeHtml(ui("stats_history_values"))}</caption><thead><tr><th scope="col">${escapeHtml(ui("stats_history_period"))}</th><th scope="col">${escapeHtml(ui("stats_input"))}</th><th scope="col">${escapeHtml(ui("stats_output"))}</th><th scope="col">${escapeHtml(ui("stats_total_tokens"))}</th></tr></thead><tbody>${points.map((point) => `<tr><th scope="row">${escapeHtml(historyPointLabel(point))}</th><td data-label="${escapeHtml(ui("stats_input"))}">${number(point.inputTokens)}</td><td data-label="${escapeHtml(ui("stats_output"))}">${number(point.outputTokens)}</td><td data-label="${escapeHtml(ui("stats_total_tokens"))}">${number(point.inputTokens + point.outputTokens)}</td></tr>`).join("")}</tbody></table></div>
-      </details>
-      <p class="hint">${escapeHtml(ui("stats_history_hint"))}</p>
-    </div>`;
+      </div></aside>
+      ${peakDay && peakIndex >= 0 ? `<aside class="card"><div class="card-head"><div><h3>${escapeHtml(ui("stats_history_peak"))}</h3><p class="hint">${escapeHtml(historyDate(peakDay.date))}</p></div><strong>${number(peakDay.inputTokens + peakDay.outputTokens)} ${escapeHtml(ui("stats_history_tokens"))}</strong></div></aside>` : ""}
+      </div></div>
+      <section class="card"><details><summary>${escapeHtml(ui("stats_history_values"))}</summary>
+        <div class="stack">
+        <div class="table-wrap"><table><caption>${escapeHtml(ui("stats_history_values"))}</caption><thead><tr><th scope="col">${escapeHtml(ui("stats_history_period"))}</th>${["stats_input", "stats_output", "stats_total_tokens"].map((key) => `<th class="num" scope="col">${escapeHtml(ui(key))}</th>`).join("")}</tr></thead><tbody>${points.map((point) => `<tr><th scope="row">${escapeHtml(historyPointLabel(point))}</th><td class="num">${number(point.inputTokens)}</td><td class="num">${number(point.outputTokens)}</td><td class="num">${number(point.inputTokens + point.outputTokens)}</td></tr>`).join("")}</tbody></table></div>
+        <p class="hint">${escapeHtml(ui("stats_history_hint"))}</p>
+        </div>
+      </details></section>`;
   }
 
   function selectHistoryPoint(target) {
@@ -1773,9 +1840,9 @@
         ? history
         : { ...history, days: history.models.filter((entry) => entry.model === state.statsHistoryModel) };
     const point = buildUsageHistory(filtered).points[Number(target.dataset.historyIndex)];
-    const panel = target.closest(".usage-history-panel");
+    const panel = target.closest("[data-usage-history]");
     if (!point || !panel) return;
-    panel.querySelector(".history-readout").innerHTML = historyPointValues(point);
+    panel.querySelector(".chart-readout").innerHTML = historyPointValues(point);
     panel.querySelectorAll("[data-history-index]").forEach((bar) => {
       bar.setAttribute("aria-pressed", String(bar === target));
     });
@@ -1792,82 +1859,111 @@
     ];
     const models = [...new Set((state.serverStats?.history?.models || []).map((entry) => entry.model))].sort();
     if (!models.includes(state.statsHistoryModel)) state.statsHistoryModel = null;
-    const timeframeControls = `<div class="analytics-toolbar">
-      <label class="field"><span class="field-label">${escapeHtml(ui("stats_model"))}</span><select data-history-model ${state.serverStats?.history?.models ? "" : "disabled"}><option value="">${escapeHtml(ui("stats_server_total"))}</option>${models.map((model) => `<option value="${escapeHtml(`model:${model}`)}" ${state.statsHistoryModel === model ? "selected" : ""}>${escapeHtml(model || "(unknown)")}</option>`).join("")}</select></label>
-      <label class="field"><span class="field-label">${escapeHtml(ui("stats_timeframe"))}</span><select data-history-timeframe>
+    const timeframeControls = `<div class="toolbar">
+      <label class="field"><span class="field-label sr-only">${escapeHtml(ui("stats_timeframe"))}</span><select data-history-timeframe>
       ${timeframeOptions
         .map(
           ([value, label]) =>
             `<option value="${value}" ${state.statsTimeframe === value ? "selected" : ""}>${escapeHtml(label)}</option>`,
         )
         .join("")}</select></label>
+      <div class="actions">
+        <label class="field"><span class="field-label sr-only">${escapeHtml(ui("stats_history_model_filter"))}</span><select data-history-model ${state.serverStats?.history?.models ? "" : "disabled"}><option value="">${escapeHtml(ui("stats_server_total"))}</option>${models.map((model) => `<option value="${escapeHtml(`model:${model}`)}" ${state.statsHistoryModel === model ? "selected" : ""}>${escapeHtml(model || "(unknown)")}</option>`).join("")}</select></label>
+        ${refreshButton("stats", ui("stats_refresh"))}
+      </div>
     </div>
-    <form class="entry-form usage-range-editor" id="stats-range-form" ${state.statsRangeEditing ? "" : "hidden"}>
+    <form class="card" id="stats-range-form" ${state.statsRangeEditing ? "" : "hidden"}>
+      <div class="card-head"><div><h3>${escapeHtml(ui("stats_edit_range"))}</h3><p class="hint">${escapeHtml(ui("stats_range_hint"))}</p></div></div>
       <div class="grid"><label class="field">${fieldLabel(ui("stats_from"))}<input type="date" name="from" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.from || ""}"></label><label class="field">${fieldLabel(ui("stats_through"))}<input type="date" name="through" required max="${new Date().toISOString().slice(0, 10)}" value="${state.statsRange?.through || ""}"></label></div>
-      <p class="hint">${escapeHtml(ui("stats_range_hint"))}</p><div class="actions entry-actions"><button class="button" type="button" data-stats-range-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("stats_apply_range"))}</button></div>
+      <div class="actions"><button class="button small" type="button" data-stats-range-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit">${escapeHtml(ui("stats_apply_range"))}</button></div>
     </form>
-    ${state.statsTimeframe === "custom" && state.statsRange ? `<div class="row usage-range-summary"><p class="hint">${state.statsRange.from} / ${state.statsRange.through} (UTC)</p><button class="button" type="button" data-stats-range-edit>${escapeHtml(ui("stats_edit_range"))}</button></div>` : ""}`;
+    ${state.statsTimeframe === "custom" && state.statsRange && !state.statsRangeEditing ? `<div class="toolbar"><p class="hint">${escapeHtml(historyPointLabel({ date: state.statsRange.from, through: state.statsRange.through }))} (UTC)</p><button class="button small" type="button" data-stats-range-edit>${escapeHtml(ui("stats_edit_range"))}</button></div>` : ""}`;
 
-    const statsHeader = `<header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("stats_server_total"))}</p><h2>${escapeHtml(ui("stats_title"))}</h2><p>${escapeHtml(ui("stats_scope_hint"))}</p></div></header>${timeframeControls}`;
-    let content = `<section class="panel stack">${statsHeader}${loadingBar(ui("stats_loading"))}</section>`;
+    let content = loadingBar(ui("stats_loading"));
     if (state.serverStatsError) {
-      content = `<section class="panel stack">${statsHeader}<strong>${escapeHtml(ui("stats_error"))}</strong><span>${escapeHtml(state.serverStatsError)}</span><button class="button" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></section>`;
+      content = `<section class="card"><div class="card-head"><div><h3>${escapeHtml(ui("stats_error"))}</h3><p class="hint">${escapeHtml(state.serverStatsError)}</p></div><button class="button small" type="button" data-stats-retry>${escapeHtml(ui("stats_retry"))}</button></div></section>`;
     } else if (state.serverStats) {
-      const { totals } = state.serverStats;
-      const usage = statsModelUsage(state.serverStats, state.statsHistoryModel);
+      const stats = state.serverStats;
+      const { totals } = stats;
+      const usage = statsModelUsage(stats, state.statsHistoryModel);
       const selectedLabel = state.statsHistoryModel ?? ui("stats_server_total");
-      content = `<section class="panel stack">${statsHeader}
+      const history =
+        stats.history && state.statsHistoryModel !== null
+          ? { ...stats.history, days: stats.history.models.filter((entry) => entry.model === state.statsHistoryModel) }
+          : stats.history;
+      const series = history ? buildUsageHistory(history) : null;
+      const points = series?.points || [];
+      content = `
         ${state.serverStatsLoading ? loadingBar(ui("stats_loading")) : ""}
-        ${state.serverStats.history?.models === null ? `<p class="hint">${escapeHtml(ui("stats_history_filter_error"))}</p>` : ""}
-        <div class="stat-grid">
-          <div class="stat-tile"><div class="stat-copy"><small>${escapeHtml(ui("stats_input"))}</small><strong>${formatStatNumber(usage.inputTokens)}</strong><small>${escapeHtml(selectedLabel)}</small></div></div>
-          <div class="stat-tile"><div class="stat-copy"><small>${escapeHtml(ui("stats_output"))}</small><strong>${formatStatNumber(usage.outputTokens)}</strong><small>${escapeHtml(selectedLabel)}</small></div></div>
-          <div class="stat-tile"><div class="stat-copy"><small>${escapeHtml(ui("stats_total_tokens"))}</small><strong>${formatStatNumber(usage.inputTokens + usage.outputTokens)}</strong><small>${escapeHtml(selectedLabel)}</small></div></div>
-          <div class="stat-tile"><div class="stat-copy"><small>${escapeHtml(ui("stats_cost"))}</small><strong>${usage.cost === null ? "-" : formatUsd(usage.cost)}</strong><small>${escapeHtml(usage.cost === null ? ui("stats_cost_unavailable") : selectedLabel)}</small></div></div>
+        ${stats.history?.models === null ? `<p class="notice">${escapeHtml(ui("stats_history_filter_error"))}</p>` : ""}
+        <div class="stat-grid framed">
+          ${renderStatsTile(
+            ui("stats_input"),
+            formatStatNumber(usage.inputTokens),
+            selectedLabel,
+            points.map((point) => point.inputTokens),
+          )}
+          ${renderStatsTile(
+            ui("stats_output"),
+            formatStatNumber(usage.outputTokens),
+            selectedLabel,
+            points.map((point) => point.outputTokens),
+          )}
+          ${renderStatsTile(
+            ui("stats_total_tokens"),
+            formatStatNumber(usage.inputTokens + usage.outputTokens),
+            selectedLabel,
+            points.map((point) => point.inputTokens + point.outputTokens),
+          )}
+          ${renderStatsTile(ui("stats_cost"), usage.cost === null ? "-" : formatUsd(usage.cost), usage.cost === null ? ui("stats_cost_unavailable") : selectedLabel)}
         </div>
-        ${renderUsageHistory(state.serverStats)}
-        </section>
-        ${renderModelUsage(state.serverStats, state.statsHistoryModel)}
-        <section class="panel"><div class="panel-header"><div class="heading"><h3>${escapeHtml(ui("stats_server_activity"))}</h3><p>${escapeHtml(ui("stats_server_activity_hint"))}</p></div></div>
-        <dl class="server-activity-list">
-          <div><dt>${escapeHtml(ui("stats_generations"))}</dt><dd>${formatStatNumber(totals.textGenerations)}</dd><small>${escapeHtml(ui("stats_generations_hint"))}</small></div>
-          <div><dt>${escapeHtml(ui("stats_replies"))}</dt><dd>${formatStatNumber(totals.messages)}</dd><small>${escapeHtml(ui("stats_replies_hint"))}</small></div>
-          <div><dt>${escapeHtml(ui("stats_commands"))}</dt><dd>${formatStatNumber(totals.commands)}</dd></div>
-          <div><dt>${escapeHtml(ui("stats_images"))}</dt><dd>${formatStatNumber(totals.imageGenerations)}</dd></div>
-          <div><dt>${escapeHtml(ui("stats_videos"))}</dt><dd>${formatStatNumber(totals.videoGenerations)}</dd></div>
-        </dl></section>
-        <div class="grid activity-grid">
-          ${renderStatsRanking(ui("stats_personas"), ui("stats_top_five"), state.serverStats.personas, (entry) => `${formatStatNumber(entry.count)} ${ui("stats_reply_unit")}`)}
-          ${renderStatsRanking(ui("stats_tools"), ui("stats_top_five"), state.serverStats.tools, (entry) => `${formatStatNumber(entry.count)} ${ui("stats_use_unit")}`)}
-          ${renderStatsRanking(ui("stats_commands"), ui("stats_top_five"), state.serverStats.topCommands, (entry) => `${formatStatNumber(entry.count)} ${ui("stats_use_unit")}`)}
-        </div>`;
+        ${renderUsageHistory(stats, usage, series)}
+        <div class="split">
+          ${renderStatsRanking(ui("stats_personas"), stats.personas, ui("stats_reply_unit"), state.overview.personas)}
+          <section class="card"><div class="card-head"><div><h3>${escapeHtml(ui("stats_server_activity"))}</h3><p class="hint">${escapeHtml(ui("stats_server_activity_hint"))}</p></div></div>
+          <div class="rows">
+          ${[
+            ["stats_generations", totals.textGenerations, "stats_generations_hint"],
+            ["stats_replies", totals.messages, "stats_replies_hint"],
+            ["stats_commands", totals.commands],
+            ["stats_images", totals.imageGenerations],
+            ["stats_videos", totals.videoGenerations],
+          ]
+            .map(
+              ([label, value, hint]) =>
+                `<div class="item"><div><p><strong>${escapeHtml(ui(label))}</strong></p>${hint ? `<div class="item-meta"><span>${escapeHtml(ui(hint))}</span></div>` : ""}</div><b>${formatStatNumber(value)}</b></div>`,
+            )
+            .join("")}
+          </div></section>
+        </div>
+        <div class="split">
+          ${renderStatsRanking(ui("stats_tools"), stats.tools, ui("stats_use_unit"))}
+          ${renderStatsRanking(ui("stats_commands"), stats.topCommands, ui("stats_use_unit"))}
+        </div>
+        ${renderModelUsage(stats, state.statsHistoryModel)}`;
     }
 
-    const mostActivePersona = state.serverStats?.personas[0];
-    const activeIdentity = state.overview.personas.find(
-      (persona) => persona.lineageId === mostActivePersona?.lineageId,
-    );
-    return `<section class="server-stats-section stack" aria-busy="${state.serverStatsLoading}">
-      <div class="grid overview-stat-grid">
-        <div class="stat-tile"><div class="stat-copy"><div><p class="eyebrow">${escapeHtml(ui("overview_personas"))}</p><strong>${formatStatNumber(state.overview.personas.length)}</strong></div></div></div>
-        <div class="stat-tile"><div class="stat-copy"><div><p class="eyebrow">${escapeHtml(ui("stats_most_active_persona"))}</p><strong>${mostActivePersona ? escapeHtml(mostActivePersona.name) : "-"}</strong><small>${mostActivePersona ? `${formatStatNumber(mostActivePersona.count)} ${escapeHtml(ui("stats_reply_unit"))}` : state.serverStatsLoading ? loadingBar(ui("stats_loading")) : escapeHtml(ui("stats_empty"))}</small></div>${activeIdentity ? personaAvatar(activeIdentity, "avatar") : ""}</div></div>
-      </div>
+    return `<section class="stage" data-server-stats aria-labelledby="overview-stats-title" aria-busy="${state.serverStatsLoading}">
+      <h2 class="sr-only" id="overview-stats-title">${escapeHtml(ui("stats_title"))}</h2>
+      ${timeframeControls}
       ${content}
     </section>`;
   }
 
   function updateServerStatsSection() {
     if (state.view !== "overview") return;
-    const current = document.querySelector(".server-stats-section");
+    const current = document.querySelector("[data-server-stats]");
     if (!current) return;
     const focusedFilter = current.contains(document.activeElement)
-      ? document.activeElement.closest(".analytics-toolbar .field")?.querySelector("select") || document.activeElement
+      ? document.activeElement.closest(".toolbar .field")?.querySelector("select") || document.activeElement
       : null;
     const focusSelector = focusedFilter?.matches("[data-history-model]")
       ? "[data-history-model]"
       : focusedFilter?.matches("[data-history-timeframe]")
         ? "[data-history-timeframe]"
-        : null;
+        : focusedFilter?.matches("[data-stats-refresh]")
+          ? "[data-stats-refresh]"
+          : null;
     const template = document.createElement("template");
     template.innerHTML = renderServerStats();
     const next = template.content.firstElementChild;
@@ -1897,6 +1993,8 @@
       const response = await api(`/guilds/${guildId}/stats?${query}`);
       if (state.guildId !== guildId || state.statsTimeframe !== timeframe || state.statsRange !== range) return;
       state.serverStats = response.stats;
+      const art = state.view === "overview" && document.querySelector("[data-overview-art]");
+      if (art) art.innerHTML = renderOverviewArt();
     } catch (error) {
       if (state.guildId !== guildId || state.statsTimeframe !== timeframe || state.statsRange !== range) return;
       state.serverStatsError = error.message;
@@ -7839,6 +7937,16 @@
     if (event.target.closest("[data-stats-range-cancel], [data-stats-range-edit]")) {
       state.statsRangeEditing = !!event.target.closest("[data-stats-range-edit]");
       updateServerStatsSection();
+      if (state.statsRangeEditing) {
+        document.querySelector('#stats-range-form input[name="from"]')?.focus();
+      } else {
+        const timeframe = document.querySelector("[data-history-timeframe]");
+        (
+          document.querySelector("[data-stats-range-edit]") ||
+          timeframe?.closest(".field")?.querySelector(".select-trigger") ||
+          timeframe
+        )?.focus({ preventScroll: true });
+      }
       return;
     }
     if (
@@ -8150,7 +8258,8 @@
       selectHistoryPoint(historyPoint);
       return;
     }
-    if (event.target.closest("[data-stats-retry]")) {
+    if (event.target.closest("[data-stats-retry], [data-stats-refresh]")) {
+      if (state.serverStatsLoading) return;
       state.serverStatsError = "";
       loadServerStats();
       return;
@@ -8593,11 +8702,14 @@
         document.querySelector('#stats-range-form input[name="from"]')?.focus();
         return;
       }
+      const wasEditing = state.statsRangeEditing;
       state.statsRangeEditing = false;
       if (event.target.value !== state.statsTimeframe) {
         state.statsTimeframe = event.target.value;
         state.serverStatsError = "";
         loadServerStats();
+      } else if (wasEditing) {
+        updateServerStatsSection();
       }
       return;
     }
