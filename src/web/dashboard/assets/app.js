@@ -113,13 +113,12 @@
   const settingsGroups = [
     {
       id: "conversation",
-      label: "Conversation",
+      labelKey: "conversation",
+      icon: "message-circle",
       panels: [
         {
-          eyebrow: "Conversation",
-          title: "Context",
-          description: "Server instructions, persistent notes, recent messages, and local time available to Tomori.",
-          wide: true,
+          titleKey: "settings_context",
+          descriptionKey: "settings_context_hint",
           sources: [
             {
               section: "chat",
@@ -129,12 +128,12 @@
           ],
         },
         {
-          eyebrow: "Conversation",
-          title: "Triggers & cooldowns",
-          description: "When Tomori responds, how personas match, and how frequently another response is allowed.",
+          titleKey: "settings_triggers",
+          descriptionKey: "settings_triggers_hint",
           sources: [
             {
               section: "triggers",
+              fields: ["always_reply_enabled", "deliberate_trigger_mode", "cooldown_type", "cooldown_length"],
             },
             {
               section: "chat",
@@ -143,8 +142,12 @@
           ],
         },
         {
-          eyebrow: "Conversation",
-          title: "Output",
+          titleKey: "settings_tool_intent",
+          descriptionKey: "settings_tool_intent_hint",
+          sources: [{ section: "triggers", fields: ["deliberate_tool_mode", "deliberate_tool_context_turns"] }],
+        },
+        {
+          titleKey: "settings_output",
           descriptionKey: "output_hint",
           sources: [
             {
@@ -157,14 +160,20 @@
                 "humanizer_punctuation_split_enabled",
                 "send_message_limit",
                 "response_prefill",
-                "response_reviewer_prompt",
-                "response_review_items",
               ],
             },
             {
               section: "capabilities",
-              fields: ["response_drafting_enabled", "emoji_usage_enabled", "sticker_usage_enabled"],
+              fields: ["emoji_usage_enabled", "sticker_usage_enabled"],
             },
+          ],
+        },
+        {
+          titleKey: "settings_draft_review",
+          descriptionKey: "settings_draft_review_hint",
+          sources: [
+            { section: "capabilities", fields: ["response_drafting_enabled"] },
+            { section: "chat", fields: ["response_reviewer_prompt", "response_review_items"] },
           ],
         },
         { section: "nsfw" },
@@ -172,7 +181,8 @@
     },
     {
       id: "models",
-      label: "Models & sampling",
+      labelKey: "settings_models_group",
+      icon: "sliders-horizontal",
       panels: [
         {
           descriptionKey: "models_hint",
@@ -187,11 +197,13 @@
     {
       id: "channels",
       labelKey: "channels",
+      icon: "radio",
       panels: [{ section: "autochat", fields: ["autoch_threshold", "autoch_threshold_max"] }, { section: "welcome" }],
     },
     {
       id: "memory",
       labelKey: "memory",
+      icon: "brain",
       panels: [
         {
           titleKey: "learning",
@@ -231,6 +243,7 @@
     {
       id: "media",
       labelKey: "tools",
+      icon: "plug",
       panels: [
         {
           section: "capabilities",
@@ -259,6 +272,7 @@
     {
       id: "diagnostics",
       labelKey: "diagnostics",
+      icon: "settings-2",
       panels: [
         { section: "notices" },
         {
@@ -616,6 +630,15 @@
     if (form.dataset.fx === "track") window.TomoriFX.saved(form);
     else setEditActions(form, false);
     form.querySelector(".form-error")?.remove();
+  }
+
+  function syncTrackedDraft(form) {
+    if (form.dataset.fx !== "track") return;
+    const pending = formSnapshot(form);
+    restoreSnapshot(form, formBaselines.get(form));
+    window.TomoriFX.saved(form);
+    restoreSnapshot(form, pending);
+    enhanceDashboard(form);
   }
 
   function showFormError(form, error, partial = false) {
@@ -1078,7 +1101,7 @@
   }
 
   function usesCollectionFrame() {
-    return state.view === "personas" || state.view === "overview" || state.view === "lorebooks";
+    return ["personas", "overview", "lorebooks", "settings"].includes(state.view);
   }
 
   function renderView() {
@@ -1260,14 +1283,14 @@
     if (state.overview.canManage && state.overview.settings) {
       for (const group of settingsGroups) {
         const route = { view: "settings", settingsGroup: group.id };
-        const path = `Server settings / ${group.labelKey ? ui(group.labelKey) : group.label}`;
+        const path = `${ui("nav_server_settings")} / ${ui(group.labelKey)}`;
         for (const panel of group.panels) addMarkup(renderSettingsPanel(panel), route, path);
         if (group.id === "conversation") addMarkup(renderDraftingPanel(), route, path);
         if (group.id === "models") addMarkup(renderLogitBiasPanel(), route, path);
         if (group.id === "memory") addMarkup(renderStmCategories(), route, path);
-        if (group.id === "media") page("settings", ui("tool_phrases"), { ...route, path, tag: "h2" });
+        if (group.id === "media") page("settings", ui("tool_phrases"), { ...route, path, tag: "h3" });
         if (group.id === "channels" && !state.overview.guild?.isDirectMessage)
-          page("settings", ui("random_schedules"), { ...route, path, tag: "h2" });
+          page("settings", ui("random_schedules"), { ...route, path, tag: "h3" });
       }
       for (const [sectionId, key] of channelSettingsFields) {
         const field = state.overview.settings.catalog
@@ -4323,9 +4346,7 @@
           workspace.scrollTop = scrollTop;
           workspace
             .querySelector(
-              namingForm
-                ? "[data-persona-naming] [data-persona-naming-reset]"
-                : "#stm-categories-form button[type=submit]:not([value=reset])",
+              namingForm ? "[data-persona-naming] [data-persona-naming-reset]" : "[data-stm-categories-reset]",
             )
             ?.focus({ preventScroll: true });
         }
@@ -4338,18 +4359,16 @@
 
   function renderStmCategories() {
     const { values, copy } = state.overview.settings.stmCategories;
-    return `<form class="panel stack settings-panel is-wide" id="stm-categories-form">
-      <div class="panel-header"><div class="heading"><h2>${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.description)}</p></div></div>
-      <p class="hint">${escapeHtml(copy.hint)}</p>
-      <div class="stack">${Array.from({ length: 5 }, (_, index) => {
+    return `<form class="card" data-fx="track" id="stm-categories-form">
+      ${personaCardHead(copy.title, copy.description)}
+      <div class="stack"><p class="hint">${escapeHtml(copy.hint)}</p>${Array.from({ length: 5 }, (_, index) => {
         const category = values[index];
         return `<fieldset class="stack" data-stm-slot><legend class="sr-only">${escapeHtml(copy.label)} ${index + 1}</legend>
           <label class="field">${fieldLabel(`${copy.label} ${index + 1}`)}<input name="label${index}" maxlength="997" value="${escapeHtml(category?.label ?? "")}"></label>
           <label class="field">${fieldLabel(copy.categoryDescription)}<textarea name="description${index}" rows="2" maxlength="997" data-auto-grow>${escapeHtml(category?.description ?? "")}</textarea></label>
         </fieldset>`;
-      }).join("")}</div>
-      <p class="hint">${escapeHtml(copy.warning)}</p>
-      <div class="actions form-actions"><button class="button " type="submit" name="action" value="reset" formnovalidate>${escapeHtml(copy.reset)}</button><button class="button primary" type="submit">${escapeHtml(copy.save)}</button></div>
+      }).join("")}<p class="hint">${escapeHtml(copy.warning)}</p></div>
+      ${cardSaveActions(copy.save, `<button class="button small" type="button" data-action-leading data-stm-categories-reset>${escapeHtml(copy.reset)}</button>`)}
     </form>`;
   }
 
@@ -5137,23 +5156,27 @@
           : `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(id)}" checked></label>`,
       )
       .join("");
-    const collection = state.view === "personas" && !single;
+    const collection = state.view === "settings" || (state.view === "personas" && !single);
     if (collection) {
       const rows = [...groups.values()]
         .map(
           (group) =>
             `<button class="channel-group" type="button" data-channel-group aria-expanded="true">${navigationIcon("chevron-down")}${escapeHtml(group.name)}<span class="n">${escapeHtml(channelSelectionCount(group.channels.filter((channel) => selected.has(String(channel.id))).length, group.channels.length))}</span></button>
-        ${group.channels.map((channel) => `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span><input type="checkbox" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}></label>`).join("")}`,
+        ${group.channels.map((channel) => `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}${single && required ? " required" : ""}></label>`).join("")}`,
         )
         .join("");
       const search = escapeHtml(ui("channel_search"));
-      const controls = `<div class="row"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
+      const controls = single
+        ? required
+          ? ""
+          : `<label class="channel"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(ui("channel_none"))}</strong></span><input type="radio" name="${escapeHtml(name)}" value=""${!values[0] ? " checked" : ""}></label>`
+        : `<div class="row"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
       const count = channelSelectionCount(
         channels.filter((channel) => selected.has(String(channel.id))).length,
         channels.length,
       );
       return `<div data-channel-selector>
-        <header class="card-head"><h3>${escapeHtml(ui(name === "personaChannels" ? "persona_channels" : "memory_channels"))}<small data-persona-channel-total>${escapeHtml(count)}</small></h3><label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label></header>
+        <header class="card-head">${state.view === "personas" ? `<h3>${escapeHtml(ui(name === "personaChannels" ? "persona_channels" : "memory_channels"))}<small data-persona-channel-total>${escapeHtml(count)}</small></h3>` : `<small data-persona-channel-total>${escapeHtml(count)}</small>`}<label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label></header>
         <div class="stack">${controls}${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div>
       </div>`;
     }
@@ -5201,15 +5224,15 @@
   function renderSettingField(field, value) {
     if (field.type === "toggle") {
       return `<label class="toggle span-all"><span class="field-label"><strong>${escapeHtml(field.label)}</strong>${field.hint ? `<small>${escapeHtml(field.hint)}</small>` : ""}</span>
-        <input name="${escapeHtml(field.key)}" type="checkbox"${value ? " checked" : ""}></label>`;
+        <input name="${escapeHtml(field.key)}" type="checkbox" role="switch"${value ? " checked" : ""}></label>`;
     }
     if (field.type === "textarea") {
       if (field.key === "system_prompt")
-        return `<div class="stack span-all"><label class="field">${fieldLabel(field.label, field.hint)}<textarea name="system_prompt" rows="5">${escapeHtml(value ?? "")}</textarea></label><div class="actions"><button class="button" type="button" data-system-prompt-presets aria-haspopup="dialog">${escapeHtml(ui("system_prompt_presets"))}</button></div></div>`;
+        return `<div class="stack span-all"><label class="field">${fieldLabel(field.label, field.hint)}<textarea name="system_prompt" rows="5">${escapeHtml(value ?? "")}</textarea></label><div class="row"><button class="button small" type="button" data-system-prompt-presets aria-haspopup="dialog">${escapeHtml(ui("system_prompt_presets"))}</button></div></div>`;
       return `<label class="field span-all">${fieldLabel(field.label, field.hint)}<textarea name="${escapeHtml(field.key)}" rows="5">${escapeHtml(value ?? "")}</textarea></label>`;
     }
     if (field.type === "channels") {
-      return `<fieldset class="field span-all choice-field"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}${renderChannelSelector(field.key, Array.isArray(value) ? value : [])}</fieldset>`;
+      return `<fieldset class="stack span-all"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}${renderChannelSelector(field.key, Array.isArray(value) ? value : [])}</fieldset>`;
     }
     if (field.type === "multiselect") {
       const notices = field.key === "tool_notice_hidden_keys";
@@ -5221,13 +5244,13 @@
             : `<label class="choice"><input type="checkbox" name="${escapeHtml(field.key)}" value="${escapeHtml(option.value)}"${selected.has(String(option.value)) ? " checked" : ""}><span><strong>${escapeHtml(option.label)}</strong>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`,
         )
         .join("");
-      return `<fieldset class="field span-all choice-field" data-setting-field="${escapeHtml(field.key)}"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}<div class="${notices ? "stack" : "grid"}">${options}</div></fieldset>`;
+      return `<fieldset class="stack span-all" data-setting-field="${escapeHtml(field.key)}"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}<div class="${notices ? "stack" : "grid"}">${options}</div></fieldset>`;
     }
     if (field.type === "select" || field.type === "persona") {
       if (["welcome_channel_disc_id", "thought_log_channel_disc_id"].includes(field.key)) {
-        return `<fieldset class="field span-all choice-field"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}${renderChannelSelector(field.key, [value], true, state.overview.channels, { preserveMissing: true })}</fieldset>`;
+        return `<fieldset class="stack span-all"><legend>${escapeHtml(field.label)}</legend>${field.hint ? `<p class="hint">${escapeHtml(field.hint)}</p>` : ""}${renderChannelSelector(field.key, [value], true, state.overview.channels, { preserveMissing: true })}</fieldset>`;
       }
-      return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${escapeHtml(field.key)}"${["welcome_channel_disc_id", "thought_log_channel_disc_id"].includes(field.key) ? " data-searchable" : ""}>${selectOptions(field, value)}</select></label>`;
+      return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${escapeHtml(field.key)}">${selectOptions(field, value)}</select></label>`;
     }
     if (field.type === "number") {
       const legacyZero = field.key === "cooldown_length" && value === 0;
@@ -5237,7 +5260,7 @@
     return `<label class="field span-all">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : (value ?? ""))}"></label>`;
   }
 
-  function renderSettingsPanel(panel) {
+  function renderSettingsPanel(panel, collection = true) {
     const settings = state.overview.settings;
     const sectionById = new Map(settings.catalog.map((section) => [section.id, section]));
     const sources = (panel.sources || [{ section: panel.section, fields: panel.fields }]).flatMap((source) => {
@@ -5253,23 +5276,28 @@
     });
     if (!sources.length) return "";
     const primarySection = sectionById.get(panel.section) || sources[0].section;
-    const title = panel.titleKey ? ui(panel.titleKey) : panel.title || primarySection.title;
-    const description = panel.descriptionKey
-      ? ui(panel.descriptionKey)
-      : panel.description || primarySection.description;
+    const title = panel.titleKey ? ui(panel.titleKey) : primarySection.title;
+    const description = panel.descriptionKey ? ui(panel.descriptionKey) : primarySection.description;
     const panelKey = sources
       .map(({ section, fields }) => `${section.id}:${fields.map((field) => field.key).join("+")}`)
       .join("/");
-    return `<form class="panel stack settings-panel${panel.wide ? " is-wide" : ""}" data-settings-key="${escapeHtml(panelKey)}" data-settings-sections="${sources.map((source) => source.section.id).join(",")}" data-settings-panel-title="${escapeHtml(title)}">
-        <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(panel.eyebrow || primarySection.eyebrow)}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div></div>
-        <div class="grid">
-          ${sources
-            .flatMap(({ section, fields }) =>
-              fields.map((field) => renderSettingField(field, settings.values[section.id]?.[field.key])),
-            )
-            .join("")}
-        </div>
+    const attributes = `data-settings-key="${escapeHtml(panelKey)}" data-settings-sections="${sources.map((source) => source.section.id).join(",")}" data-settings-panel-title="${escapeHtml(title)}"`;
+    const fields = sources
+      .flatMap(({ section, fields }) =>
+        fields.map((field) => renderSettingField(field, settings.values[section.id]?.[field.key])),
+      )
+      .join("");
+    if (!collection) {
+      return `<form class="panel stack settings-panel" ${attributes}>
+        <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(primarySection.eyebrow)}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div></div>
+        <div class="grid">${fields}</div>
         <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
+      </form>`;
+    }
+    return `<form class="card" data-fx="track" ${attributes}>
+        ${personaCardHead(title, description)}
+        <div class="stack">${fields}</div>
+        ${cardSaveActions(ui("save"))}
       </form>`;
   }
 
@@ -5771,10 +5799,11 @@
     if (button) {
       const selector = button.closest("[data-channel-selector]");
       selector.querySelectorAll("[data-channel-search]:not([hidden]) input").forEach((input) => {
-        if (state.view === "personas" && input.closest("[hidden]")) return;
+        if (input.closest(".channels") && input.closest("[hidden]")) return;
         input.checked = button.dataset.channelSelect === "all";
       });
       selector.dispatchEvent(new Event("change", { bubbles: true }));
+      selector.closest("form[data-fx='track']")?.dispatchEvent(new Event("input"));
       updateChannelCounts(selector);
     }
   });
@@ -5819,40 +5848,61 @@
 
   function renderSettings(workspace) {
     if (!state.overview.settings) {
-      workspace.innerHTML = `<div class="empty"><strong>Manage Server permission required.</strong></div>`;
+      workspace.innerHTML = `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("settings_manage_required"))}</strong></div></section>`;
       return;
     }
+    if (!workspace.querySelector("[data-server-settings-content]")) {
+      const title = escapeHtml(ui("nav_server_settings"));
+      const actions = escapeHtml(ui("settings_actions"));
+      workspace.innerHTML = `
+        <section class="banner compact" aria-labelledby="server-settings-title">
+          <div class="banner-info"><div class="stack" data-settings-summary>
+            <p class="crumb">${escapeHtml(ui("nav_server_administration"))}<span class="kind">${escapeHtml(ui("settings_managers_only"))}</span></p>
+            <h1 id="server-settings-title" data-fx="split">${title}</h1>
+            <p class="banner-text">${escapeHtml(ui("settings_banner_hint").replace("{server}", () => state.overview.guild.name))}</p>
+          </div></div>
+          <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("sliders-horizontal")}</span></div>
+        </section>
+        <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${title}">
+          ${settingsGroups.map((group) => `<button type="button" id="server-settings-${group.id}" role="tab" aria-controls="server-settings-stage" data-settings-group="${group.id}">${navigationIcon(group.icon)}${escapeHtml(ui(group.labelKey))}</button>`).join("")}
+        </nav>
+        <section id="server-settings-stage" class="stage" role="tabpanel">
+          <div class="toolbar"><div class="actions">
+            <button class="button icon" type="button" popovertarget="server-settings-actions" aria-label="${actions}">${navigationIcon("ellipsis")}</button>
+            <div class="action-menu" id="server-settings-actions" popover aria-label="${actions}">
+              <button class="button" type="button" data-overview-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_all"))}</button>
+            </div>
+          </div></div>
+          <div class="card-columns" data-server-settings-content></div>
+        </section>`;
+    }
     const activeGroup = settingsGroups.find((group) => group.id === state.settingsGroup) || settingsGroups[0];
-    const settingsContent = `<div class="columns">
-      ${activeGroup.panels.map(renderSettingsPanel).join("")}
-      ${activeGroup.id === "conversation" ? '<div id="response-drafting-workspace" class="panel"></div>' : ""}
+    workspace.querySelectorAll("[data-settings-group]").forEach((button) => {
+      const selected = button.dataset.settingsGroup === activeGroup.id;
+      if (button.getAttribute("aria-selected") !== String(selected))
+        button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    workspace
+      .querySelector("#server-settings-stage")
+      .setAttribute("aria-labelledby", `server-settings-${activeGroup.id}`);
+    const content = workspace.querySelector("[data-server-settings-content]");
+    content.innerHTML = `
+      ${activeGroup.panels.map((panel) => renderSettingsPanel(panel)).join("")}
+      ${activeGroup.id === "conversation" ? '<div id="response-drafting-workspace" class="card"></div>' : ""}
       ${activeGroup.id === "models" ? renderLogitBiasPanel() : ""}
       ${activeGroup.id === "memory" ? renderStmCategories() : ""}
-      ${activeGroup.id === "media" ? '<section class="panel stack" id="tool-phrase-panel"></section>' : ""}
-      ${activeGroup.id === "channels" && !state.overview.guild.isDirectMessage ? '<section class="panel stack" id="random-schedule-panel"></section>' : ""}
-    </div>`;
-    workspace.innerHTML = `
-      ${pageHeader(
-        "Administration",
-        "Server settings",
-        ui("settings_hint"),
-        refreshButton("overview", ui("refresh_all")),
-      )}
-      <nav class="tabs" aria-label="Server settings groups">
-        ${settingsGroups
-          .map(
-            (group) =>
-              `<button class="settings-tab${group.id === activeGroup.id ? " is-active" : ""}" type="button" aria-current="${group.id === activeGroup.id ? "page" : "false"}" data-settings-group="${group.id}">${escapeHtml(group.labelKey ? ui(group.labelKey) : group.label)}</button>`,
-          )
-          .join("")}
-      </nav>
-      ${settingsContent}`;
-    resizeAutoGrowTextareas(workspace);
-    const draftingHost = workspace.querySelector("#response-drafting-workspace");
+      ${activeGroup.id === "media" ? '<section class="card" id="tool-phrase-panel"></section>' : ""}
+      ${activeGroup.id === "channels" && !state.overview.guild.isDirectMessage ? '<section class="card" id="random-schedule-panel"></section>' : ""}`;
+    initDraftForms(content);
+    enhanceDashboard(content);
+    window.TomoriFX.stagger(content);
+    resizeAutoGrowTextareas(content);
+    const draftingHost = content.querySelector("#response-drafting-workspace");
     if (draftingHost) void loadDraftingPanel(draftingHost);
-    const toolHost = workspace.querySelector("#tool-phrase-panel");
+    const toolHost = content.querySelector("#tool-phrase-panel");
     if (toolHost) void loadToolPhrasePanel(toolHost);
-    const scheduleHost = workspace.querySelector("#random-schedule-panel");
+    const scheduleHost = content.querySelector("#random-schedule-panel");
     if (scheduleHost) void loadRandomSchedulePanel(scheduleHost);
   }
 
@@ -5898,7 +5948,7 @@
 
   async function loadToolPhrasePanel(host) {
     const path = `/guilds/${state.guildId}/settings/tool-triggers`;
-    const header = dashboardPanelHeading("tool_phrases", "tool_phrases_hint");
+    const header = personaCardHead(ui("tool_phrases"), ui("tool_phrases_hint"));
     host.innerHTML = header + loadingBar(ui("tool_phrases"));
     try {
       let { targets } = await api(path);
@@ -5906,10 +5956,10 @@
       let selected = (targets.find(({ entries }) => entries.length) ?? targets[0]).target;
       const render = () => {
         const { entries } = targets.find(({ target }) => target === selected);
-        host.innerHTML = `${header}<form class="stack"><label class="field">${fieldLabel(ui("tool_phrase_target"))}<select name="target">${targets.map(({ target, label }) => `<option value="${escapeHtml(target)}"${target === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
+        host.innerHTML = `${header}<div class="stack"><form class="stack"><label class="field">${fieldLabel(ui("tool_phrase_target"))}<select name="target">${targets.map(({ target, label }) => `<option value="${escapeHtml(target)}"${target === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
           <label class="field">${fieldLabel(ui("tool_phrase_literal"))}<input name="phrase" maxlength="40" required></label>
-          <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("tool_phrase_add"))}</button></div></form>
-          ${entries.length ? `<ul class="stack">${entries.map(({ kind, value }, index) => `<li class="entry-read"><div><strong dir="auto">${escapeHtml(value)}</strong>${kind === "regex" ? `<small class="hint">${escapeHtml(ui("tool_phrase_regex"))}</small>` : ""}</div><div class="entry-actions"><button class="button icon danger" type="button" data-phrase-remove="${index}" aria-label="${escapeHtml(ui("tool_phrase_remove"))}" data-tooltip="${escapeHtml(ui("tool_phrase_remove"))}">${navigationIcon("trash-2")}</button></div></li>`).join("")}</ul>` : `<p class="hint">${escapeHtml(ui("tool_phrase_empty"))}</p>`}`;
+          <div class="actions" data-form-actions><button class="button small primary" type="submit" data-fx="spark">${escapeHtml(ui("tool_phrase_add"))}</button></div></form>
+          ${entries.length ? `<div class="rows">${entries.map(({ kind, value }, index) => `<div class="item"><div><strong dir="auto">${escapeHtml(value)}</strong>${kind === "regex" ? `<div class="item-meta">${escapeHtml(ui("tool_phrase_regex"))}</div>` : ""}</div><div class="item-actions"><button class="button small icon danger" type="button" data-phrase-remove="${index}" aria-label="${escapeHtml(ui("tool_phrase_remove"))}" data-tooltip="${escapeHtml(ui("tool_phrase_remove"))}">${navigationIcon("trash-2")}</button></div></div>`).join("")}</div>` : `<p class="hint">${escapeHtml(ui("tool_phrase_empty"))}</p>`}</div>`;
         const form = host.querySelector("form");
         form.elements.target.onchange = () => {
           const phrase = form.elements.phrase.value;
@@ -5951,7 +6001,7 @@
   async function loadRandomSchedulePanel(host) {
     const guildId = state.guildId;
     const path = `/guilds/${guildId}/settings/random-triggers`;
-    const header = (actions = "") => dashboardPanelHeading("random_schedules", "random_schedules_hint", actions);
+    const header = (actions = "") => personaCardHead(ui("random_schedules"), ui("random_schedules_hint"), actions);
     host.innerHTML = header() + loadingBar(ui("random_schedules"));
     try {
       const { channels, triggers } = await api(path);
@@ -5966,11 +6016,11 @@
       host.innerHTML =
         header(
           candidates.length
-            ? `<button class="button" type="button" data-random-schedule-add aria-haspopup="dialog">${escapeHtml(ui("random_schedule_add"))}</button>`
+            ? `<button class="button small" type="button" data-random-schedule-add aria-haspopup="dialog">${escapeHtml(ui("random_schedule_add"))}</button>`
             : "",
         ) +
         (triggers.length
-          ? `<div class="table-wrap"><table><thead><tr><th scope="col">${escapeHtml(ui("random_schedule_channel"))}</th><th scope="col">${escapeHtml(ui("random_schedule_persona"))}</th><th scope="col">${escapeHtml(ui("random_schedule_next"))}</th><th scope="col"><span class="sr-only">${escapeHtml(ui("connection_actions"))}</span></th></tr></thead><tbody>${triggers.map((entry, index) => `<tr><td>#${escapeHtml(channelName(entry.channel_disc_id))}</td><td>${escapeHtml(personaName(entry.persona_id))}</td><td>${escapeHtml(new Date(entry.next_trigger_at).toLocaleString())}</td><td><div class="entry-actions"><button class="button" type="button" data-schedule-edit="${index}" aria-haspopup="dialog">${escapeHtml(ui("random_schedule_edit"))}</button><button class="button icon danger" type="button" data-schedule-remove="${index}" aria-label="${escapeHtml(ui("random_schedule_remove"))}" data-tooltip="${escapeHtml(ui("random_schedule_remove"))}">${navigationIcon("trash-2")}</button></div></td></tr>`).join("")}</tbody></table></div>`
+          ? `<div class="rows">${triggers.map((entry, index) => `<div class="item"><div><strong>#${escapeHtml(channelName(entry.channel_disc_id))}</strong><div class="item-meta"><span>${escapeHtml(personaName(entry.persona_id))}</span><span>${escapeHtml(ui("random_schedule_next"))} <time datetime="${escapeHtml(entry.next_trigger_at)}">${escapeHtml(new Date(entry.next_trigger_at).toLocaleString())}</time></span></div></div><div class="item-actions"><button class="button small" type="button" data-schedule-edit="${index}" aria-haspopup="dialog">${escapeHtml(ui("random_schedule_edit"))}</button><button class="button small icon danger" type="button" data-schedule-remove="${index}" aria-label="${escapeHtml(ui("random_schedule_remove"))}" data-tooltip="${escapeHtml(ui("random_schedule_remove"))}">${navigationIcon("trash-2")}</button></div></div>`).join("")}</div>`
           : `<p class="hint">${escapeHtml(ui("random_schedule_empty"))}</p>`);
       const openEditor = (button, entry) =>
         openRandomScheduleEditor(button, host, path, candidates, personas, entry, channelName, personaName);
@@ -6055,9 +6105,8 @@
   function renderLogitBiasPanel() {
     const bias = state.overview.settings.logitBias;
     if (!bias) return "";
-    return `<section class="panel stack" id="logit-bias-panel">
-      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("logit_bias"))}</h2><p>${escapeHtml(ui("logit_bias_hint"))}</p></div>
-      <div class="actions"><button class="button" type="button" data-logit-open="import" aria-haspopup="dialog">${escapeHtml(ui("logit_import"))}</button><button class="button primary" type="button" data-logit-open="add" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("logit_add"))}</button></div></header>
+    return `<section class="card" id="logit-bias-panel">
+      ${personaCardHead(ui("logit_bias"), ui("logit_bias_hint"), `<div class="actions"><button class="button small" type="button" data-logit-open="import" aria-haspopup="dialog">${escapeHtml(ui("logit_import"))}</button><button class="button small primary" type="button" data-logit-open="add" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("logit_add"))}</button></div>`)}
       <div data-logit-list>${renderLogitBiasList(bias.entries)}</div>
     </section>`;
   }
@@ -6068,8 +6117,8 @@
       .map(
         (entry) =>
           `<tr><td>${escapeHtml(entry.text)}${entry.kind === "token_id" ? ` <small class="hint">${escapeHtml(ui("logit_token_id"))}</small>` : ""}</td>
-        <td>${entry.value > 0 ? "+" : ""}${escapeHtml(entry.value)}</td><td><div class="actions"><button class="button icon danger" type="button"
-        data-logit-remove="${escapeHtml(entry.id)}" aria-label="${escapeHtml(`${ui("logit_remove")}: ${entry.text}`)}" data-tooltip="${escapeHtml(ui("logit_remove"))}">${navigationIcon("trash-2")}</button></div></td></tr>`,
+        <td class="num">${entry.value > 0 ? "+" : ""}${escapeHtml(entry.value)}</td><td class="num"><button class="button small icon danger" type="button"
+        data-logit-remove="${escapeHtml(entry.id)}" aria-label="${escapeHtml(`${ui("logit_remove")}: ${entry.text}`)}" data-tooltip="${escapeHtml(ui("logit_remove"))}">${navigationIcon("trash-2")}</button></td></tr>`,
       )
       .join("")}</tbody></table></div>`;
   }
@@ -6175,8 +6224,9 @@
     const unavailable = (value) =>
       `<option value="${escapeHtml(value)}" selected>${escapeHtml(ui("drafting_unavailable"))}</option>`;
     const defaultLabel = data ? `${ui("drafting_default")} (${data.defaultModel})` : ui("drafting_default");
-    return `<form class="stack" data-drafting-selections data-settings-key="response-drafting">
-      <header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("conversation"))}</p><h2>${escapeHtml(ui("drafting_title"))}</h2><p>${escapeHtml(ui("drafting_hint"))}</p></div></header>
+    return `<form data-fx="track" data-drafting-selections data-settings-key="response-drafting">
+      ${personaCardHead(ui("drafting_title"), ui("drafting_hint"))}
+      <div class="stack">
       <label class="field">${fieldLabel(ui("drafting_reviewer"), data && !data.defaultModelAvailable ? ui("drafting_default_unavailable") : "")}
         <select name="reviewer" data-searchable><option value="">${escapeHtml(defaultLabel)}</option>
         ${data?.reviewer?.provider === null ? unavailable(reviewer) : ""}${reviewerGroups}</select>
@@ -6185,7 +6235,8 @@
         <select name="checker" data-searchable><option value="">${escapeHtml(ui("drafting_checker_none"))}</option>
         ${checker && !data.checkers.some(({ reference }) => JSON.stringify(reference) === checker) ? unavailable(checker) : ""}${checkerOptions}</select>
       </label>
-      <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
+      </div>
+      ${cardSaveActions(ui("save"))}
     </form>`;
   }
 
@@ -6197,9 +6248,10 @@
       host.innerHTML = renderDraftingPanel(data);
       initDraftForms(host);
       enhanceDashboard(host);
+      focusSearchDestination();
     } catch {
       if (!host.isConnected) return;
-      host.innerHTML = `<div class="row"><p role="alert">${escapeHtml(ui("drafting_load_failed"))}</p>${refreshButton("drafting", ui("drafting_title"))}</div>`;
+      host.innerHTML = `${personaCardHead(ui("drafting_title"), "", `<div class="actions">${refreshButton("drafting", ui("drafting_title"))}</div>`)}<p class="notice error" role="alert">${escapeHtml(ui("drafting_load_failed"))}</p>`;
     }
   }
 
@@ -6645,7 +6697,10 @@
         }
       }
       if (!failures.length) completeFormSave(form);
-      else captureDraft(form);
+      else {
+        syncTrackedDraft(form);
+        captureDraft(form);
+      }
     });
     if (failures.length) showFormError(form, new Error(failures.join(" ")), saved > 0);
     else toast(ui(savedKey));
@@ -6831,7 +6886,7 @@
         <div class="actions"><button class="button secondary" type="button" data-provider-open aria-haspopup="dialog">${escapeHtml(ui("add_provider"))}</button><button class="button secondary" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button></div>
         </div>${renderConnectionDetail(data, scope, connection)}
       </section>
-      <section class="stack" aria-label="${escapeHtml(ui("model_routing"))}"${state.providerPanel[scope] === "models" ? "" : " hidden"}>${personal ? renderQuickCapabilities(data) + renderPersonalModels(data) : renderServerModels(data) + renderAdvancedServerModels(data) + renderSettingsPanel({ section: "byok" })}</section>
+      <section class="stack" aria-label="${escapeHtml(ui("model_routing"))}"${state.providerPanel[scope] === "models" ? "" : " hidden"}>${personal ? renderQuickCapabilities(data) + renderPersonalModels(data) : renderServerModels(data) + renderAdvancedServerModels(data) + renderSettingsPanel({ section: "byok" }, false)}</section>
       <section class="stack" aria-label="${escapeHtml(ui("connection_fallbacks"))}"${state.providerPanel[scope] === "fallbacks" ? "" : " hidden"}>${renderFallbacks(data, scope)}</section>
       <dialog id="provider-dialog"  aria-labelledby="provider-dialog-title">
         <form class="stack" id="provider-credential-form" data-provider-scope="${scope}">
@@ -7768,7 +7823,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
@@ -8247,6 +8302,11 @@
       await saveNamingOrCategories(namingReset.form, null, true);
       return;
     }
+    const categoriesReset = event.target.closest("[data-stm-categories-reset]");
+    if (categoriesReset) {
+      await saveNamingOrCategories(null, categoriesReset.form, true);
+      return;
+    }
     const removeChip = event.target.closest("[data-persona-chip-remove]");
     if (removeChip) {
       editPersonaChips(removeChip);
@@ -8557,9 +8617,10 @@
     }
     const settingsGroup = event.target.closest("[data-settings-group]");
     if (settingsGroup) {
+      if (state.settingsGroup === settingsGroup.dataset.settingsGroup) return;
       state.settingsGroup = settingsGroup.dataset.settingsGroup;
-      renderView();
-      focusNavigation(`[data-settings-group="${state.settingsGroup}"]`);
+      renderSettings(settingsGroup.closest("[data-dashboard-view]"));
+      settingsGroup.focus({ preventScroll: true });
       return;
     }
     const nav = event.target.closest("[data-nav]");
@@ -8630,7 +8691,7 @@
       );
       if (currentKeys.length && !(await confirmAction(ui("discard_title"), ui("refresh_detail")))) return;
       try {
-        await refreshOverview("Server settings refreshed", currentKeys);
+        await refreshOverview(ui("settings_refreshed"), currentKeys);
       } catch (error) {
         toast(error.message, "error");
       }
@@ -9301,7 +9362,7 @@
     const categoriesForm = event.target.closest("#stm-categories-form");
     if (namingForm || categoriesForm) {
       event.preventDefault();
-      await saveNamingOrCategories(namingForm, categoriesForm, event.submitter?.value === "reset");
+      await saveNamingOrCategories(namingForm, categoriesForm, false);
       return;
     }
 
@@ -9433,6 +9494,15 @@
       try {
         await withBusyForm(settingsForm, async () => {
           for (const section of sections) {
+            const savedFields = new Set(section.fields.map((field) => field.key));
+            const baseline = formBaselines.get(settingsForm);
+            const snapshot = formSnapshot(settingsForm);
+            const changed = snapshot.some(
+              (field, index) =>
+                savedFields.has(field.name) &&
+                (field.value !== baseline[index].value || field.checked !== baseline[index].checked),
+            );
+            if (settingsForm.dataset.fx === "track" && !changed) continue;
             const patch = collectSettingsPatch(settingsForm, section);
             if (!Object.keys(patch).length) continue;
             const result = await api(`/guilds/${state.guildId}/settings/${section.id}`, {
@@ -9441,21 +9511,21 @@
             });
             state.overview.settings.values[section.id] = result.values;
             if (section.id === "byok") state.providerData.personal = null;
-            const savedFields = new Set(section.fields.map((field) => field.key));
-            const values = formSnapshot(settingsForm);
             formBaselines.set(
               settingsForm,
-              formBaselines
-                .get(settingsForm)
-                .map((value, index) => (savedFields.has(value.name) ? values[index] : value)),
+              baseline.map((value, index) => (savedFields.has(value.name) ? snapshot[index] : value)),
             );
             captureDraft(settingsForm);
             savedSections += 1;
           }
           completeFormSave(settingsForm);
         });
-        toast(`${settingsForm.dataset.settingsPanelTitle || "Settings"} saved`);
+        toast(ui("settings_card_saved").replace("{name}", () => settingsForm.dataset.settingsPanelTitle));
       } catch (error) {
+        if (savedSections > 0) {
+          syncTrackedDraft(settingsForm);
+          captureDraft(settingsForm);
+        }
         showFormError(settingsForm, error, savedSections > 0);
       }
       return;
@@ -9535,6 +9605,7 @@
       const guildId = new URLSearchParams(window.location.search).get("guild");
       const guild = session.guilds.find((item) => item.id === guildId) || session.guilds[0];
       if (window.location.hash === "#lorebooks") state.view = "lorebooks";
+      if (window.location.hash === "#settings") state.view = "settings";
       await selectGuild(guild.id);
       if (window.location.hash === "#channel-scoped-memory") openChannelMemorySettings();
     } catch {

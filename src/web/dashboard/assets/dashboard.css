@@ -171,8 +171,17 @@ body[data-theme="dark"] .boot-logo {
 
 [data-persona-summary],
 [data-lorebook-summary],
+[data-settings-summary],
 [data-overview-summary] {
   gap: var(--space-3);
+}
+
+[data-settings-summary] .crumb {
+  flex-wrap: wrap;
+}
+
+:where([data-dashboard-view="settings"]) .toolbar > .actions {
+  flex: 1;
 }
 
 :is([data-persona-art], [data-overview-art]) > .sparkle {

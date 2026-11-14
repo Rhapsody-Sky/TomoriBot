@@ -160,10 +160,10 @@ describe("dashboard HTTP shell", () => {
     expect(source).toContain(`aria-busy="\${state.serverStatsLoading}"`);
     expect(source).toContain("fieldLabel(field.label, field.hint)");
     expect(source).toContain('class="choice"');
-    expect(source).toContain('label: "Models & sampling"');
-    expect(source).toContain('title: "Context"');
-    expect(source).toContain('title: "Triggers & cooldowns"');
-    expect(source).toContain('title: "Output"');
+    expect(source).toContain('labelKey: "settings_models_group"');
+    expect(source).toContain('titleKey: "settings_context"');
+    expect(source).toContain('titleKey: "settings_triggers"');
+    expect(source).toContain('titleKey: "settings_output"');
     expect(source).toContain('fields: ["match_limit", "cascade_limit"]');
     expect(source).toContain("data-settings-sections");
     expect(source).not.toContain("settings-category-heading");

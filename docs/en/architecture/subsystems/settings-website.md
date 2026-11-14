@@ -285,10 +285,11 @@ Other channel fields, including welcome and thought-log destinations and loreboo
 scopes, use the same categorized, searchable picker. Multi-selection provides select
 and deselect actions for the filtered channels without changing hidden selections.
 
-Server settings groups conversation, models and sampling, channels and automation,
-memory, tools and media, and notices and diagnostics. Memory contains learning
+The Server settings dock switches between conversation, models and sampling, channels
+and automation, memory, tools and media, and notices and diagnostics. Each card
+shows Save and Discard when its fields change. Memory contains learning
 permissions, channel-memory enablement, STM behavior and category definitions. Response
-review belongs to Conversation > Output; thought logs and prompt snapshots belong
+review belongs to Conversation > Draft review; thought logs and prompt snapshots belong
 to Notices & diagnostics.
 
 The mobile navigation drawer uses the same permitted destinations as the desktop

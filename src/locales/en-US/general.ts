@@ -1195,8 +1195,28 @@ export default {
       interface_diagnostics_hint: "Manage prompt snapshots, self-debugging and thought logs.",
       interface_models_hint:
         "Reasoning effort, temperature and model randomization. Choose the active models under Server providers.",
-      interface_output_hint: "Shape responses and configure draft review before they are sent.",
+      interface_output_hint: "Set how Tomori writes and sends responses.",
       interface_settings_hint: "Settings are grouped by purpose. Each panel saves independently.",
+      interface_settings_banner_hint:
+        "Manage how Tomori behaves on {server}. Members can override some settings with their personal preferences.",
+      interface_settings_managers_only: "Managers only",
+      interface_settings_manage_required: "Manage Server permission is required.",
+      interface_settings_models_group: "Models & sampling",
+      interface_settings_actions: "Settings actions",
+      interface_settings_refreshed: "Server settings refreshed",
+      interface_settings_card_saved: "Saved {name}",
+      interface_settings_context: "Context",
+      interface_settings_context_hint:
+        "Server instructions, persistent notes, recent messages, and local time available to Tomori.",
+      interface_settings_triggers: "Triggers & cooldowns",
+      interface_settings_triggers_hint:
+        "When Tomori responds, how personas match, and how frequently another response is allowed.",
+      interface_settings_tool_intent: "Tool triggers",
+      interface_settings_tool_intent_hint:
+        "Set when Tomori considers using a tool and how much conversation she checks.",
+      interface_settings_output: "Output",
+      interface_settings_draft_review: "Draft review",
+      interface_settings_draft_review_hint: "Choose when drafts are reviewed and what the reviewer sees.",
       interface_fallback: "Server provider fallback",
       interface_fallback_hint:
         "Allow a failed personal route to use the server's providers. This is separate from your personal model chain and applies across servers. Each server's BYOK policy still applies.",
