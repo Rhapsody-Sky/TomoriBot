@@ -175,8 +175,10 @@ Persona colors affect the persona banner and test chat.
 Persona attributes and sample dialogues open in place. Sprite tiles open an
 editor dialog with an image preview, independent Save and a hold button for
 deletion. A failed sprite write keeps the editor open with its input intact.
-Lorebooks use a book list, entry list and selected-entry editor. Content,
-matching rules and activation settings retain their individual save operations.
+Server lorebooks use a book list, entry list and selected-entry editor. In the
+Persona workspace, the entry list keeps its filter when the editor switches
+entries. Content, matching words, channel scope and activation rules save in
+their own cards. Selecting another entry asks whether to discard open drafts.
 
 Overview summarizes the persona count and the most active persona for the selected
 period. A searchable picker opens individual persona workspaces. Statistics

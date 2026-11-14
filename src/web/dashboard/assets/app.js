@@ -2856,7 +2856,9 @@
     const version = ++lorebookLoadVersion;
     const currentView = target.querySelector("[data-lorebook-browser]")?.dataset.view || "list";
     const bookId = lineageId === 0 ? state.lorebookBookId : null;
-    target.innerHTML = loadingBar(ui("lorebook_loading"));
+    const scroller =
+      lineageId !== 0 && target.querySelector("[data-lorebook-browser]") ? target.closest(".app-main") : null;
+    if (!scroller) target.innerHTML = loadingBar(ui("lorebook_loading"));
     try {
       const query = new URLSearchParams({ lineageId: String(lineageId) });
       if (bookId) query.set("bookId", String(bookId));
@@ -2872,11 +2874,17 @@
         if (state.lorebookBookId) return loadLorebooks(lineageId);
       }
       state.lorebookData = data;
+      const scrollTop = scroller?.scrollTop;
       target.innerHTML = renderLorebooks(lineageId, data);
       initDraftForms(target);
       window.TomoriControls?.enhance(target);
       window.TomoriFX?.enhance(target);
       const selected = lorebookSelections.get(lorebookSelectionKey(lineageId));
+      if (lineageId !== 0 && selected?.query) {
+        const search = target.querySelector("[data-lorebook-search-input]");
+        search.value = selected.query;
+        filterLorebookEntries(search);
+      }
       const selectedEntry = data.entries.find((entry) => entry.entry_id === selected?.entryId) || data.entries[0];
       if (selectedEntry) {
         openLorebookEditor(
@@ -2887,6 +2895,7 @@
         );
         target.querySelector("[data-lorebook-browser]").dataset.view = currentView;
       }
+      if (scroller) scroller.scrollTop = scrollTop;
       if (pendingSearchDestination?.lorebookSection) {
         target.querySelector("[data-lorebook-browser]").dataset.view = selectedEntry ? "detail" : "list";
         focusSearchDestination();
@@ -2901,7 +2910,7 @@
     }
   }
 
-  function lorebookChannels(ids, editable) {
+  function lorebookChannels(ids, editable, headingInCard = false) {
     const channels = state.overview.channels || [];
     const missing = ids.filter((id) => !channels.some((channel) => channel.id === id));
     if (!editable) {
@@ -2910,11 +2919,50 @@
     }
     const setting = `<a href="/settings?guild=${encodeURIComponent(state.guildId)}#channel-scoped-memory" data-lorebook-channel-settings>${escapeHtml(ui("lorebook_channel_settings_link"))}</a>`;
     const dependency = escapeHtml(ui("lorebook_channels_dependency")).replace("{setting}", () => setting);
-    return `<fieldset class="stack"><legend>${escapeHtml(ui("lorebook_channels"))}</legend><p class="hint">${escapeHtml(ui("lorebook_channels_hint"))} ${dependency}</p>${missing.length ? `<p class="hint">${escapeHtml(ui("lorebook_missing_channels"))}</p>` : ""}${renderChannelSelector("channelDiscIds", ids)}${missing.map((id) => `<input name="channelDiscIds" type="checkbox" value="${escapeHtml(id)}" data-missing-channel checked hidden>`).join("")}</fieldset>`;
+    return `<fieldset class="stack"><legend${headingInCard ? ' class="sr-only"' : ""}>${escapeHtml(ui("lorebook_channels"))}</legend><p class="hint">${escapeHtml(ui("lorebook_channels_hint"))} ${dependency}</p>${missing.length ? `<p class="hint">${escapeHtml(ui("lorebook_missing_channels"))}</p>` : ""}${renderChannelSelector("channelDiscIds", ids)}${missing.map((id) => `<input name="channelDiscIds" type="checkbox" value="${escapeHtml(id)}" data-missing-channel checked hidden>`).join("")}</fieldset>`;
   }
 
   function lorebookEntry(entry, collection) {
-    return `<button class="${collection ? "item pick" : "mail-item"}" type="button" data-lorebook-edit-entry="${entry.entry_id}" data-lorebook-editor-section="content" data-lorebook-search="${escapeHtml(`${entry.title} ${entry.content} ${entry.keys.join(" ")}`.toLowerCase())}" aria-current="false">${collection ? "<div>" : ""}<strong>${escapeHtml(entry.title)}</strong><small${collection ? ' class="excerpt"' : ""}>${escapeHtml(entry.content)}</small><small>${escapeHtml(ui(entry.enabled ? "lorebook_enabled" : "lorebook_disabled"))}</small>${collection ? "</div>" : ""}</button>`;
+    const search = escapeHtml(`${entry.title} ${entry.content} ${entry.keys.join(" ")}`.toLowerCase());
+    const title = escapeHtml(entry.title);
+    const content = escapeHtml(entry.content);
+    const status = escapeHtml(ui(entry.enabled ? "lorebook_enabled" : "lorebook_disabled"));
+    const keys = entry.constant
+      ? `<span class="chip tone">${escapeHtml(ui("lorebook_constant"))}</span>`
+      : entry.keys
+          .slice(0, 3)
+          .map((key) => `<span class="chip">${escapeHtml(key)}</span>`)
+          .join("");
+    return `<button class="${collection ? "item pick" : "mail-item"}" type="button" data-lorebook-edit-entry="${entry.entry_id}" data-lorebook-editor-section="content" data-lorebook-search="${search}" aria-current="false">${
+      collection
+        ? `<div><p><strong>${title}</strong></p><p class="excerpt">${content}</p><div class="item-meta">${keys}${entry.enabled ? "" : `<span class="chip off">${status}</span>`}</div></div>`
+        : `<strong>${title}</strong><small>${content}</small><small>${status}</small>`
+    }</button>`;
+  }
+
+  function filterLorebookEntries(search) {
+    const list = search.closest("[data-lorebook-browser]");
+    const query = search.value.trim().toLowerCase();
+    const entries = [...list.querySelectorAll("[data-lorebook-search]")];
+    for (const entry of entries) entry.hidden = !entry.dataset.lorebookSearch.includes(query);
+    const shown = entries.filter((entry) => !entry.hidden).length;
+    list.querySelector("[data-lorebook-no-results]").hidden = !query || shown > 0;
+    list.querySelector("[data-lorebook-empty]").hidden = Boolean(query) || entries.length > 0;
+    list.querySelector("[data-lorebook-results]").textContent = ui("lorebook_entry_count").replace(
+      "{count}",
+      String(shown),
+    );
+  }
+
+  async function confirmLorebookEntryChange(editor) {
+    const changed = [...editor.querySelectorAll("form[data-draft-key]")].filter((form) =>
+      drafts.has(form.dataset.draftKey),
+    );
+    if (!changed.length) return true;
+    if (!(await confirmAction(ui("discard_title"), ui("discard_detail"), ui("discard"))) || !editor.isConnected)
+      return false;
+    for (const form of changed) drafts.delete(form.dataset.draftKey);
+    return true;
   }
 
   function lorebookUsage(entry) {
@@ -2950,42 +2998,96 @@
       ? cardSaveActions(ui("lorebook_save"))
       : `<div class="actions form-actions entry-actions"><button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`;
     const deleteButton = `<button class="button danger hold-button" type="button" data-hold data-lorebook-delete-entry="${entryId}" data-confirm-title="${escapeHtml(ui("lorebook_delete_title").replace("{name}", () => entry.title))}" data-confirm-description="${escapeHtml(ui("lorebook_delete_entry_confirm"))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button>`;
-    lorebookSelections.set(lorebookSelectionKey(lineageId), { entryId, section });
+    const selectionKey = lorebookSelectionKey(lineageId);
+    const selection = lorebookSelections.get(selectionKey);
+    lorebookSelections.set(selectionKey, { ...selection, entryId, section });
+    const cardHead = (key) => `<header class="card-head"><h3>${escapeHtml(ui(key))}</h3></header>`;
+    const contentFields = `<label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" value="${escapeHtml(entry.title)}" required></label><label class="field">${fieldLabel(ui("lorebook_content"))}<textarea name="content" maxlength="4000" rows="${collection ? 6 : 9}" required>${escapeHtml(entry.content)}</textarea></label>`;
+    const enabled = `<label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_enabled"))}</span><input name="enabled" type="checkbox" role="switch"${entry.enabled ? " checked" : ""}></label>`;
     let body;
     if (!canManage) {
       body = `<label class="field">${fieldLabel(ui("lorebook_content"))}<textarea rows="9" readonly>${escapeHtml(entry.content)}</textarea></label><p class="hint">${escapeHtml(lorebookUsage(entry))}</p>${lineageId === 0 ? "" : lorebookChannels(entry.channel_disc_ids, false)}`;
-    } else if (section === "content") {
-      body = `<form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="content" data-entry-id="${entryId}" data-settings-key="${prefix}/content"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" value="${escapeHtml(entry.title)}" required></label><label class="field">${fieldLabel(ui("lorebook_content"))}<textarea name="content" maxlength="4000" rows="9" required>${escapeHtml(entry.content)}</textarea></label><label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_enabled"))}</span><input name="enabled" type="checkbox" role="switch"${entry.enabled ? " checked" : ""}></label>${collection ? `<div class="actions">${deleteButton}</div>${actions}` : `<div class="actions form-actions entry-actions">${deleteButton}<button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`}</form>`;
-    } else if (section === "matching") {
-      body = `<p class="hint">${escapeHtml(ui("lorebook_matching_hint"))}</p>
-        <form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="constant" data-entry-id="${entryId}" data-settings-key="${prefix}/constant"><label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_constant"))}<small>${escapeHtml(ui(entry.keys.length ? "lorebook_constant_hint" : "lorebook_constant_no_keys"))}</small></span><input name="constant" type="checkbox" role="switch"${entry.constant ? " checked" : ""}${entry.keys.length ? "" : " disabled"}></label>${entry.keys.length ? actions : ""}</form>
-        <form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="keys" data-entry-id="${entryId}" data-settings-key="${prefix}/keys" data-original-keys="${escapeHtml(JSON.stringify(entry.keys))}"><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_keys_hint"))}<textarea name="keys" rows="4">${escapeHtml(entry.keys.join("\n"))}</textarea></label><p class="hint">${escapeHtml(ui("lorebook_regex_hint"))}</p>${actions}</form>
-        ${lineageId === 0 ? "" : `<form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="entry-channels" data-entry-id="${entryId}" data-settings-key="${prefix}/channels" data-original-channels="${escapeHtml(JSON.stringify(entry.channel_disc_ids))}">${lorebookChannels(entry.channel_disc_ids, true)}${entry.legacy_channel_tags?.length ? `<p class="hint">${escapeHtml(ui("lorebook_pending_channels"))}: ${escapeHtml(entry.legacy_channel_tags.join(", "))}</p>` : ""}${actions}</form>`}`;
     } else {
-      body = `<p class="hint">${escapeHtml(ui("lorebook_rules_hint"))}</p>${entry.constant ? `<p class="notice info">${escapeHtml(ui("lorebook_rules_always"))}</p>` : ""}
-        <form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="activation" data-entry-id="${entryId}" data-settings-key="${prefix}/activation" data-original-keys="${escapeHtml(JSON.stringify(entry.secondary_keys))}">
+      const form = (kind, key, contents, attributes = "", save = actions) =>
+        `<form ${collection ? 'class="card" data-fx="track"' : 'class="entry-form"'} data-lorebook-form="${kind}" data-entry-id="${entryId}" data-settings-key="${prefix}/${key}"${attributes}>${contents}${save}</form>`;
+      const entryHead = `<header class="card-head"><h3 id="lorebook-editor-title" tabindex="-1">${escapeHtml(entry.title)}</h3><div class="actions">${deleteButton}</div></header>`;
+      const content = form(
+        "content",
+        "content",
+        collection ? `${entryHead}<div class="stack">${contentFields}${enabled}</div>` : `${contentFields}${enabled}`,
+        collection ? ' aria-labelledby="lorebook-editor-title"' : "",
+        collection
+          ? actions
+          : `<div class="actions form-actions entry-actions">${deleteButton}<button class="button primary" type="submit">${escapeHtml(ui("lorebook_save"))}</button></div>`,
+      );
+      const matching = `<p class="hint">${escapeHtml(ui("lorebook_matching_hint"))}</p>`;
+      const constant = `<label class="toggle"><span class="field-label">${escapeHtml(ui("lorebook_constant"))}<small>${escapeHtml(ui(entry.keys.length ? "lorebook_constant_hint" : "lorebook_constant_no_keys"))}</small></span><input name="constant" type="checkbox" role="switch"${entry.constant ? " checked" : ""}${entry.keys.length ? "" : " disabled"}></label>`;
+      const keys = `<label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_keys_hint"))}<textarea name="keys" rows="4">${escapeHtml(entry.keys.join("\n"))}</textarea></label><p class="hint">${escapeHtml(ui("lorebook_regex_hint"))}</p>`;
+      const rules = `<p class="hint">${escapeHtml(ui("lorebook_rules_hint"))}</p>${entry.constant ? `<p class="notice info">${escapeHtml(ui("lorebook_rules_always"))}</p>` : ""}`;
+      const activation = `
           <label class="field">${fieldLabel(ui("lorebook_secondary"), ui("lorebook_secondary_hint"))}<textarea name="secondaryKeys" rows="3">${escapeHtml(entry.secondary_keys.join("\n"))}</textarea></label>
           <label class="field">${fieldLabel(ui("lorebook_logic"), ui("lorebook_logic_hint"))}<select name="selectiveLogic">${["lorebook_logic_any", "lorebook_logic_not_all", "lorebook_logic_not_any", "lorebook_logic_all"].map((key, index) => `<option value="${index}"${entry.selective_logic === index ? " selected" : ""}>${escapeHtml(ui(key))}</option>`).join("")}</select></label>
-          <div class="grid"><label class="field">${fieldLabel(ui("lorebook_scan"), ui("lorebook_scan_hint"))}<input type="number" name="scanDepth" min="1" max="100" value="${entry.scan_depth}" data-scrub required></label><label class="field">${fieldLabel(ui("lorebook_chance"), ui("lorebook_chance_hint"))}<input type="number" name="triggerChance" min="0" max="100" value="${entry.trigger_chance}" data-scrub required></label></div>
+          ${collection ? "" : '<div class="grid">'}<label class="field">${fieldLabel(ui("lorebook_scan"), ui("lorebook_scan_hint"))}<input type="number" name="scanDepth" min="1" max="100" value="${entry.scan_depth}" data-scrub required></label><label class="field">${fieldLabel(ui("lorebook_chance"), ui("lorebook_chance_hint"))}<input type="number" name="triggerChance" min="0" max="100" value="${entry.trigger_chance}" data-scrub required></label>${collection ? "" : "</div>"}
           <label class="field">${fieldLabel(ui("lorebook_order"), ui("lorebook_order_hint"))}<input type="number" name="insertionOrder" min="-2147483648" max="2147483647" value="${entry.insertion_order}" data-scrub required></label>
-          <p class="hint">${escapeHtml(ui("lorebook_placement"))}: ${escapeHtml(ui(entry.placement === 0 ? "lorebook_before" : "lorebook_after"))}. ${escapeHtml(ui("lorebook_placement_hint"))}</p>${actions}
-        </form>`;
+          <p class="hint">${escapeHtml(ui("lorebook_placement"))}: ${escapeHtml(ui(entry.placement === 0 ? "lorebook_before" : "lorebook_after"))}. ${escapeHtml(ui("lorebook_placement_hint"))}</p>`;
+      if (collection || section === "matching") {
+        const constantForm = form(
+          "constant",
+          "constant",
+          collection ? `${cardHead("lorebook_when_used")}<div class="stack">${matching}${constant}</div>` : constant,
+          "",
+          entry.keys.length ? actions : "",
+        );
+        const keysForm = form(
+          "keys",
+          "keys",
+          collection ? `${cardHead("lorebook_keys")}<div class="stack">${keys}</div>` : keys,
+          ` data-original-keys="${escapeHtml(JSON.stringify(entry.keys))}"`,
+        );
+        body = collection
+          ? `${content}${constantForm}${keysForm}${form("entry-channels", "channels", `${cardHead("lorebook_channels")}<div class="stack">${lorebookChannels(entry.channel_disc_ids, true, true)}${entry.legacy_channel_tags?.length ? `<p class="hint">${escapeHtml(ui("lorebook_pending_channels"))}: ${escapeHtml(entry.legacy_channel_tags.join(", "))}</p>` : ""}</div>`, ` data-original-channels="${escapeHtml(JSON.stringify(entry.channel_disc_ids))}"`)}`
+          : `${matching}${constantForm}${keysForm}`;
+      } else if (section === "content") body = content;
+      if (collection || section === "rules") {
+        const rulesForm = form(
+          "activation",
+          "activation",
+          collection
+            ? `${cardHead("lorebook_additional_rules")}<div class="stack">${rules}${activation}</div>`
+            : activation,
+          ` data-original-keys="${escapeHtml(JSON.stringify(entry.secondary_keys))}"`,
+        );
+        body = collection ? `${body}${rulesForm}` : `${rules}${rulesForm}`;
+      }
     }
-    const tabs = canManage
-      ? `<nav class="${collection ? "segmented" : "tabs"}"${collection ? ' data-fx="indicator"' : ""} role="tablist" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${["content", "matching", "rules"].map((key) => `<button type="button" role="tab" data-lorebook-edit-entry="${entryId}" data-lorebook-editor-section="${key}" aria-selected="${key === section}" tabindex="${key === section ? 0 : -1}">${escapeHtml(ui({ content: "lorebook_content", matching: "lorebook_when_used", rules: "lorebook_additional_rules" }[key]))}</button>`).join("")}</nav>`
-      : "";
+    const tabs =
+      canManage && !collection
+        ? `<nav class="tabs" role="tablist" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${["content", "matching", "rules"].map((key) => `<button type="button" role="tab" data-lorebook-edit-entry="${entryId}" data-lorebook-editor-section="${key}" aria-selected="${key === section}" tabindex="${key === section ? 0 : -1}">${escapeHtml(ui({ content: "lorebook_content", matching: "lorebook_when_used", rules: "lorebook_additional_rules" }[key]))}</button>`).join("")}</nav>`
+        : "";
     const host = document.querySelector("#lorebook-editor-host");
     if (!host) return;
-    const content = `<button class="button ${collection ? "small" : "mail-back"}" type="button" data-lorebook-back>${navigationIcon("arrow-left")}${escapeHtml(ui("lorebook_back_entries"))}</button><header class="${collection ? "toolbar" : "panel-header"}"><div${collection ? "" : ' class="heading"'}><h3>${escapeHtml(entry.title)}</h3></div></header>${tabs}<div class="stack">${collection && !canManage ? `<section class="card">${body}</section>` : body}</div>${canManage && section !== "content" ? `<div class="actions entry-actions">${deleteButton}</div>` : ""}`;
-    if (collection) window.TomoriFX.swap(host, content);
-    else host.innerHTML = content;
+    if (collection) {
+      window.TomoriFX.swap(
+        host,
+        canManage
+          ? body
+          : `<section class="card"><header class="card-head"><h3 id="lorebook-editor-title" tabindex="-1">${escapeHtml(entry.title)}</h3></header><div class="stack">${body}</div></section>`,
+      );
+    } else {
+      host.innerHTML = `<button class="button mail-back" type="button" data-lorebook-back>${navigationIcon("arrow-left")}${escapeHtml(ui("lorebook_back_entries"))}</button><header class="panel-header"><div class="heading"><h3>${escapeHtml(entry.title)}</h3></div></header>${tabs}<div class="stack">${body}</div>${canManage && section !== "content" ? `<div class="actions entry-actions">${deleteButton}</div>` : ""}`;
+    }
     initDraftForms(host);
     window.TomoriControls?.enhance(host);
     window.TomoriFX?.enhance(host);
     document.querySelectorAll("[data-lorebook-search]").forEach((item) => {
       item.setAttribute("aria-current", String(Number(item.dataset.lorebookEditEntry) === entryId));
     });
-    if (navigate) {
+    if (navigate && collection) {
+      const list = host.previousElementSibling;
+      if (host.getBoundingClientRect().top > list.getBoundingClientRect().bottom) {
+        host.querySelector("#lorebook-editor-title").focus();
+      }
+    } else if (navigate) {
       host.closest("[data-lorebook-browser]").dataset.view = "detail";
       host.querySelector("[data-lorebook-back]")?.focus({ preventScroll: true });
     }
@@ -3003,7 +3105,7 @@
     if (id === "lorebook-create-dialog" || id === "lorebook-import-new-dialog")
       return '[popovertarget="lorebook-collection-actions"]';
     if (id === "lorebook-import-dialog" || id === "lorebook-settings-dialog")
-      return '[popovertarget="lorebook-book-actions"]';
+      return `[data-lorebook-open="${id}"], [popovertarget="lorebook-book-actions"]`;
     return `[data-lorebook-open="${id}"]`;
   }
 
@@ -3027,12 +3129,18 @@
       : state.overview.personas.find((item) => item.lineageId === lineageId)?.nickname;
     const scopeKey = `lorebook/${lineageId}/${book?.lorebook_id || 0}`;
     const available = !serverwide || Boolean(book);
+    const add = canManage
+      ? `<button class="button primary" type="button" data-lorebook-open="lorebook-entry-dialog" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("lorebook_new_entry"))}</button>`
+      : "";
+    const count = escapeHtml(ui("lorebook_entry_count").replace("{count}", String(data.entries.length)));
+    const searchLabel = escapeHtml(ui("lorebook_search"));
     const collectionActions = canManage
       ? `<button class="button" type="button" popovertarget="lorebook-collection-actions" aria-expanded="false">${navigationIcon("ellipsis")}${escapeHtml(ui("lorebook_collection_actions"))}</button><div id="lorebook-collection-actions" class="action-menu" popover aria-label="${escapeHtml(ui("lorebook_collection_actions"))}"><button class="button" type="button" data-lorebook-open="lorebook-create-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_new_book"))}</button><button class="button" type="button" data-lorebook-open="lorebook-import-new-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_import_new"))}</button></div>`
       : "";
-    const bookActions = available
-      ? `<div class="entry-actions"><button class="button" type="button" popovertarget="lorebook-book-actions" aria-expanded="false">${navigationIcon("ellipsis")}${escapeHtml(ui("lorebook_book_actions"))}</button><div id="lorebook-book-actions" class="action-menu" popover aria-label="${escapeHtml(ui("lorebook_book_actions"))}"><button class="button" type="button" data-lorebook-open="lorebook-import-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_transfer"))}</button>${book && canManage ? `<button class="button" type="button" data-lorebook-rename data-action-menu-preserve-focus>${escapeHtml(ui("lorebook_edit_book"))}</button><button class="button" type="button" data-lorebook-open="lorebook-settings-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_settings"))}</button><hr><button class="button danger" type="button" data-lorebook-delete-book>${escapeHtml(ui("lorebook_delete_book"))}</button>` : ""}</div></div>`
-      : "";
+    const bookActions =
+      serverwide && available
+        ? `<div class="entry-actions"><button class="button" type="button" popovertarget="lorebook-book-actions" aria-expanded="false">${navigationIcon("ellipsis")}${escapeHtml(ui("lorebook_book_actions"))}</button><div id="lorebook-book-actions" class="action-menu" popover aria-label="${escapeHtml(ui("lorebook_book_actions"))}"><button class="button" type="button" data-lorebook-open="lorebook-import-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_transfer"))}</button>${book && canManage ? `<button class="button" type="button" data-lorebook-rename data-action-menu-preserve-focus>${escapeHtml(ui("lorebook_edit_book"))}</button><button class="button" type="button" data-lorebook-open="lorebook-settings-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_settings"))}</button><hr><button class="button danger" type="button" data-lorebook-delete-book>${escapeHtml(ui("lorebook_delete_book"))}</button>` : ""}</div></div>`
+        : "";
     const transfer = available
       ? lorebookDialog(
           "lorebook-import-dialog",
@@ -3049,19 +3157,19 @@
       <section class="${serverwide ? "mail-list" : "card"}" aria-label="${escapeHtml(name || ui("lorebooks"))}">
         ${
           available
-            ? `<div class="${serverwide ? "mail-book-header" : "card-head"}" data-lorebook-book-summary><div class="heading"><h3>${escapeHtml(name)}</h3><small role="status" data-lorebook-results>${escapeHtml(ui("lorebook_entry_count").replace("{count}", String(data.entries.length)))}</small></div>${bookActions}</div>
+            ? `${serverwide ? `<div class="mail-book-header" data-lorebook-book-summary><div class="heading"><h3>${escapeHtml(name)}</h3><small role="status" data-lorebook-results>${count}</small></div>${bookActions}</div>` : `<header class="card-head"><h3>${escapeHtml(ui("lorebook_persona"))}<small role="status" data-lorebook-results>${count}</small></h3><div class="actions"><button class="button small" type="button" data-lorebook-open="lorebook-import-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_transfer"))}</button>${add}</div></header><div class="stack">`}
           ${book && canManage ? `<form class="entry-form" data-lorebook-form="book-rename" data-settings-key="${scopeKey}/rename" novalidate hidden><label class="field">${fieldLabel(ui("lorebook_book_name"))}<input name="name" maxlength="128" value="${escapeHtml(book.name)}" required aria-describedby="lorebook-name-error"><span class="error" id="lorebook-name-error" hidden></span></label><div class="actions form-actions entry-actions"><button class="button" type="button" data-lorebook-rename-cancel>${escapeHtml(ui("lorebook_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("lorebook_save_name"))}</button></div></form>` : ""}
           ${book && !book.enabled ? `<p class="notice warning">${escapeHtml(ui("lorebook_collection_paused"))}</p>` : ""}
-          <label class="field inline"><span class="field-label">${escapeHtml(ui("lorebook_search"))}</span><input type="search" data-lorebook-search-input></label>
+          ${serverwide ? `<label class="field inline"><span class="field-label">${searchLabel}</span><input type="search" data-lorebook-search-input></label>` : `<label class="field"><span class="field-label sr-only">${searchLabel}</span><input type="search" placeholder="${searchLabel}" data-lorebook-search-input></label>`}
         ${state.lorebookImportReceipt?.key === scopeKey ? `<div class="notice success stack" role="status"><strong>${escapeHtml(ui("lorebook_import_receipt"))}</strong><span>${escapeHtml(state.lorebookImportReceipt.text)}</span></div>` : ""}
-        <div class="${serverwide ? "mail-items" : "rows"}">${data.entries.map((entry) => lorebookEntry(entry, !serverwide)).join("")}</div>
-        <div class="empty" data-lorebook-empty${data.entries.length ? " hidden" : ""}><strong>${escapeHtml(ui("lorebook_empty"))}</strong><p class="muted">${escapeHtml(ui("lorebook_empty_hint"))}</p></div>
-        <div class="empty" data-lorebook-no-results hidden><strong>${escapeHtml(ui("lorebook_no_results"))}</strong><p class="muted">${escapeHtml(ui("lorebook_search_hint"))}</p></div>
-        ${canManage ? `<footer class="actions entry-actions"><button class="button primary" type="button" data-lorebook-open="lorebook-entry-dialog" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("lorebook_new_entry"))}</button></footer>` : ""}`
+        <div class="${serverwide ? "mail-items" : "rows"}"${serverwide ? "" : ' data-fx="stagger"'}>${data.entries.map((entry) => lorebookEntry(entry, !serverwide)).join("")}</div>
+        <div class="${serverwide ? "empty" : "empty-note"}" data-lorebook-empty${data.entries.length ? " hidden" : ""}><strong>${escapeHtml(ui("lorebook_empty"))}</strong>${serverwide || canManage ? `<p class="${serverwide ? "muted" : "hint"}">${escapeHtml(ui("lorebook_empty_hint"))}</p>` : ""}</div>
+        <div class="${serverwide ? "empty" : "empty-note"}" data-lorebook-no-results hidden><strong>${escapeHtml(ui("lorebook_no_results"))}</strong><p class="${serverwide ? "muted" : "hint"}">${escapeHtml(ui("lorebook_search_hint"))}</p></div>
+        ${serverwide ? (add ? `<footer class="actions entry-actions">${add}</footer>` : "") : "</div>"}`
             : `<div class="empty">${navigationIcon("book-open")}<h3>${escapeHtml(ui("lorebook_no_books"))}</h3><p class="muted">${escapeHtml(ui("lorebook_no_books_hint"))}</p></div>`
         }
       </section>
-      <article class="${serverwide ? "mail-detail" : "col"}" id="lorebook-editor-host" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${serverwide ? `<p class="hint">${escapeHtml(ui("lorebook_select_entry"))}</p>` : `<section class="card"><p class="empty-note">${escapeHtml(ui("lorebook_select_entry"))}</p></section>`}</article>
+      <article class="${serverwide ? "mail-detail" : "col"}" id="lorebook-editor-host" aria-label="${escapeHtml(ui("lorebook_entry_settings"))}">${serverwide ? `<p class="hint">${escapeHtml(ui("lorebook_select_entry"))}</p>` : `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("lorebook_select_entry"))}</strong></div></section>`}</article>
     </div>
     ${canManage && serverwide ? lorebookDialog("lorebook-create-dialog", ui("lorebook_new_book"), `<p class="hint">${escapeHtml(ui("lorebook_create_hint"))}</p><form class="stack" data-lorebook-form="book-create" data-settings-key="lorebook/books/new"><label class="field">${fieldLabel(ui("lorebook_book_name"))}<input name="name" maxlength="128" required autofocus></label>${lorebookDialogActions("lorebook-create-dialog", ui("lorebook_new_book"))}</form>`) + lorebookDialog("lorebook-import-new-dialog", ui("lorebook_import_new"), `<form class="stack" data-lorebook-import-form data-lorebook-import-new><label class="field">${fieldLabel(ui("lorebook_book_name"))}<input name="name" maxlength="128" required autofocus></label><label class="field">${fieldLabel(ui("lorebook_import"))}<input name="file" type="file" accept=".json,application/json" required></label>${lorebookDialogActions("lorebook-import-new-dialog", ui("lorebook_import"))}</form>`) : ""}
     ${
@@ -3076,7 +3184,7 @@
           )
         : ""
     }
-    ${canManage && available ? lorebookDialog("lorebook-entry-dialog", ui("lorebook_new_entry"), `<div class="row">${navigationIcon("book-open")}<dl class="meta-stack"><dt>${escapeHtml(ui(serverwide ? "lorebook_selected" : "lorebook_persona"))}</dt><dd dir="auto">${escapeHtml(name)}</dd></dl></div><p class="hint">${escapeHtml(ui("lorebook_new_entry_hint"))}</p><form class="stack" data-lorebook-form="create" data-settings-key="${scopeKey}/new" data-original-channels="[]"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" required autofocus></label><label class="field">${fieldLabel(ui("lorebook_content"), ui("lorebook_content_hint"))}<textarea name="content" maxlength="4000" rows="6" required></textarea></label><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_new_keys_hint"))}<textarea name="keys" rows="3"></textarea></label>${lineageId === 0 ? "" : lorebookChannels([], true)}${lorebookDialogActions("lorebook-entry-dialog", ui("lorebook_new_entry"))}</form>`) : ""}
+    ${canManage && available ? lorebookDialog("lorebook-entry-dialog", ui("lorebook_new_entry"), `<div class="row">${navigationIcon("book-open")}<dl class="meta-stack"><dt>${escapeHtml(ui(serverwide ? "lorebook_selected" : "lorebook_persona"))}</dt><dd dir="auto">${escapeHtml(name)}</dd></dl></div><p class="hint">${escapeHtml(ui("lorebook_new_entry_hint"))}</p><form class="stack" data-lorebook-form="create" data-settings-key="${scopeKey}/new" data-original-channels="[]"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" required autofocus></label><label class="field">${fieldLabel(ui("lorebook_content"), ui("lorebook_content_hint"))}<textarea name="content" maxlength="4000" rows="${serverwide ? 6 : 4}" required></textarea></label><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_new_keys_hint"))}<textarea name="keys" rows="${serverwide ? 3 : 2}"></textarea></label>${serverwide ? "" : `<details><summary>${escapeHtml(ui("lorebook_channels"))}</summary>${lorebookChannels([], true)}</details>`}${lorebookDialogActions("lorebook-entry-dialog", ui("lorebook_new_entry"))}</form>`) : ""}
     ${transfer}</div>`;
   }
 
@@ -3212,6 +3320,10 @@
     )
       return;
     if (kind === "book-create" && result?.bookId) state.lorebookBookId = result.bookId;
+    if (lineageId !== 0 && kind === "create" && result?.entryId) {
+      const key = lorebookSelectionKey(lineageId);
+      lorebookSelections.set(key, { ...lorebookSelections.get(key), entryId: result.entryId, section: "content" });
+    }
     const dialog = form.closest("dialog");
     dialog?.close();
     completeFormSave(form);
@@ -7401,18 +7513,11 @@
       error.textContent = "";
     }
     if (event.target.matches("[data-lorebook-search-input]")) {
-      const query = event.target.value.trim().toLowerCase();
-      document.querySelectorAll("[data-lorebook-search]").forEach((entry) => {
-        entry.hidden = !entry.dataset.lorebookSearch.includes(query);
-      });
-      const entries = [...document.querySelectorAll("[data-lorebook-search]")];
-      const shown = entries.filter((entry) => !entry.hidden).length;
-      document.querySelector("[data-lorebook-no-results]").hidden = !query || shown > 0;
-      document.querySelector("[data-lorebook-empty]").hidden = Boolean(query) || entries.length > 0;
-      document.querySelector("[data-lorebook-results]").textContent = ui("lorebook_entry_count").replace(
-        "{count}",
-        String(shown),
-      );
+      filterLorebookEntries(event.target);
+      if (state.view === "personas") {
+        const key = lorebookSelectionKey(activeLorebookLineage());
+        lorebookSelections.set(key, { ...lorebookSelections.get(key), query: event.target.value });
+      }
     }
     const textarea = event.target.closest?.("textarea[data-auto-grow]");
     if (textarea) resizeAutoGrowTextarea(textarea);
@@ -7524,6 +7629,11 @@
     if (event.target.closest("[data-lorebook-channel-settings]")) {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
+      if (
+        state.view === "personas" &&
+        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
+      )
+        return;
       openChannelMemorySettings();
       return;
     }
@@ -7565,11 +7675,14 @@
     }
     const entryEditor = event.target.closest("[data-lorebook-edit-entry]");
     if (entryEditor) {
-      const pending = document.querySelector("#lorebook-editor-host [data-changed]");
       const entryId = Number(entryEditor.dataset.lorebookEditEntry);
-      if (pending && state.view === "personas" && Number(pending.dataset.entryId) !== entryId) {
-        if (!(await confirmAction(ui("discard_title"), ui("leave_detail")))) return;
-        drafts.delete(pending.dataset.draftKey);
+      if (state.view === "personas") {
+        const host = document.querySelector("#lorebook-editor-host");
+        if (entryEditor.getAttribute("aria-current") === "true") {
+          host.querySelector("#lorebook-editor-title")?.focus();
+          return;
+        }
+        if (!(await confirmLorebookEntryChange(host))) return;
       }
       const sectionChange = entryEditor.matches('[role="tab"]');
       openLorebookEditor(entryId, entryEditor.dataset.lorebookEditorSection, !sectionChange);
@@ -8008,10 +8121,18 @@
     }
     const personaSelect = event.target.closest("[data-persona-select]");
     if (personaSelect) {
+      const nextPersona = Number(personaSelect.dataset.personaSelect);
+      if (
+        state.personaId !== nextPersona &&
+        state.view === "personas" &&
+        state.personaPanel === "lorebook" &&
+        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
+      )
+        return;
       state.view = "personas";
       personaSelect.closest("dialog")?.close();
-      if (state.personaId === Number(personaSelect.dataset.personaSelect)) return;
-      state.personaId = Number(personaSelect.dataset.personaSelect);
+      if (state.personaId === nextPersona) return;
+      state.personaId = nextPersona;
       state.memoryData = null;
       const fromQuickBar = Boolean(personaSelect.closest(".quick"));
       renderView();
@@ -8023,6 +8144,11 @@
       const tab = personaPanel.dataset.personaPanel;
       const panel = tab === "knowledge" ? state.personaKnowledgePanel : tab;
       if (panel === state.personaPanel) return;
+      if (
+        state.personaPanel === "lorebook" &&
+        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
+      )
+        return;
       state.personaPanel = panel;
       state.memoryData = null;
       renderView();
@@ -8048,6 +8174,12 @@
         document.querySelector("#navigation-sheet[open]")?.close();
         return;
       }
+      if (
+        state.view === "personas" &&
+        state.personaPanel === "lorebook" &&
+        !(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))
+      )
+        return;
       state.view = nav.dataset.nav;
       state.memoryData = null;
       renderView();

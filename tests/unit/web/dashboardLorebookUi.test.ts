@@ -244,7 +244,7 @@ describe("dashboard lorebook UI", () => {
       state.lorebookBookId = bookId;
       const html = render(lineageId, data);
       expect(html.includes('id="lorebook-collection-actions"')).toBe(lineageId === 0);
-      expect(html).toContain('id="lorebook-book-actions"');
+      expect(html.includes('id="lorebook-book-actions"')).toBe(lineageId === 0);
       for (const id of ["lorebook-entry-dialog", "lorebook-import-dialog"]) {
         const dialog = html.split(`<dialog id="${id}">`)[1]?.split("</dialog>")[0];
         expect(dialog).toContain(
@@ -257,6 +257,30 @@ describe("dashboard lorebook UI", () => {
         }
       }
     }
+  });
+
+  it("keeps every entry draft on cancel and clears them all on confirmed discard", async () => {
+    const source = await dashboardFunction("confirmLorebookEntryChange");
+    const keys = ["lorebook/77/0/11/keys", "lorebook/77/0/11/channels", "lorebook/77/0/12/content"];
+    const drafts = new Map(keys.map((key) => [key, []]));
+    let accepted = false;
+    const confirm = runInNewContext(`(${source})`, {
+      drafts,
+      ui: (key: string) => key,
+      confirmAction: async (_title: string, message: string) => {
+        expect(message).toBe("discard_detail");
+        return accepted;
+      },
+    }) as (editor: unknown) => Promise<boolean>;
+    const editor = {
+      isConnected: true,
+      querySelectorAll: () => keys.slice(0, 2).map((draftKey) => ({ dataset: { draftKey } })),
+    };
+    expect(await confirm(editor)).toBe(false);
+    expect([...drafts.keys()]).toEqual(keys);
+    accepted = true;
+    expect(await confirm(editor)).toBe(true);
+    expect([...drafts.keys()]).toEqual([keys[2]]);
   });
 
   it("renders a read-only workspace without mutation controls", async () => {
