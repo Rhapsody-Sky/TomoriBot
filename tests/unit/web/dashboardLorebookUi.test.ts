@@ -101,13 +101,27 @@ describe("dashboard lorebook UI", () => {
   it("offers one editor action per entry", async () => {
     const source = await dashboardFunction("lorebookEntry");
     const render = runInNewContext(`(${source})`, {
-      state: { overview: { canManage: true } },
-      ui: (key: string) => key,
+      state: { overview: { canManage: true, channels: [{ id: "1", name: "creative" }] } },
+      ui: (key: string) => localizedCopy("en-US", `general.dashboard.interface_${key}`),
       escapeHtml: (value: string) => value,
       lorebookUsage: () => "",
-    }) as (entry: unknown) => string;
-    const html = render({ entry_id: 11, title: "Harbor", content: "A harbor.", keys: [], enabled: true });
+      navigationIcon: () => "",
+    }) as (entry: unknown, collection: boolean) => string;
+    const html = render(
+      {
+        entry_id: 11,
+        title: "Harbor",
+        content: "A harbor.",
+        keys: ["harbor"],
+        secondary_keys: ["tide"],
+        channel_disc_ids: ["1"],
+        enabled: true,
+      },
+      true,
+    );
     expect(html.match(/data-lorebook-edit-entry=/g)).toHaveLength(1);
+    expect(html).toContain('<article class="item"');
+    expect(html).toMatch(/data-lorebook-search="[^"]*tide[^"]*creative/);
   });
 
   it("confirms the selected lorebook and its destructive consequence before deleting", async () => {
@@ -412,6 +426,54 @@ describe("dashboard lorebook UI", () => {
     }
   });
 
+  it("retries the persona trigger card without losing an Always on selection", async () => {
+    const source = await dashboardFunction("saveLorebookForm");
+    const keys = await dashboardFunction("lorebookKeys");
+    const writes: { route: string; body: unknown }[] = [];
+    let rejectFlags = true;
+    let completed = false;
+    const save = runInNewContext(`${keys}; (${source})`, {
+      state: { guildId: "42" },
+      activeLorebookLineage: () => 77,
+      lorebookScope: () => ({ lineageId: 77 }),
+      document: { querySelector: () => null },
+      lorebookCurrent: () => true,
+      withBusyForm: (_form: unknown, action: () => Promise<void>) => action(),
+      api: async (path: string, options: { body: string }) => {
+        const route = path.split("/").at(-1) || "";
+        writes.push({ route, body: JSON.parse(options.body) });
+        if (route === "flags" && rejectFlags) throw new Error("failed");
+      },
+      completeFormSave: () => {
+        completed = true;
+      },
+      toast: () => {},
+      ui: (key: string) => key,
+      loadLorebooks: async () => {},
+    }) as (form: unknown) => Promise<void>;
+    const form = {
+      isConnected: true,
+      closest: () => null,
+      dataset: { lorebookForm: "triggers", entryId: "9", originalKeys: '["old"]' },
+      elements: { keys: { value: "harbor\n/sea,glass/i" }, constant: { checked: true, disabled: false } },
+    };
+    await expect(save(form)).rejects.toThrow("lorebook_triggers_partial_save");
+    expect(completed).toBe(false);
+    rejectFlags = false;
+    await save(form);
+    const requests = [
+      { route: "keys", body: { lineageId: 77, keys: ["harbor", "/sea,glass/i"] } },
+      { route: "flags", body: { lineageId: 77, flags: { constant: true } } },
+    ];
+    expect(writes).toEqual([...requests, ...requests]);
+    expect(completed).toBe(true);
+    writes.length = 0;
+    form.elements.keys.value = "old";
+    form.elements.constant.checked = false;
+    await save(form);
+    expect(writes).toEqual([{ route: "flags", body: { lineageId: 77, flags: { constant: false } } }]);
+  });
+
   it("keeps the content draft on a partial save and retries both endpoints", async () => {
     const source = await dashboardFunction("saveLorebookForm");
     const writes: { path: string; payload: unknown }[] = [];
@@ -680,9 +742,15 @@ describe("dashboard lorebook UI", () => {
   it("separates entry content, matching words and additional rules into focused editor sections", async () => {
     const source = await dashboardFunction("openLorebookEditor");
     const mailbox = { dataset: { view: "list" } };
-    const host = { innerHTML: "", querySelector: () => ({ focus: () => {} }), closest: () => mailbox };
+    const host = {
+      hidden: true,
+      innerHTML: "",
+      querySelector: () => ({ focus: () => {} }),
+      closest: (selector: string) => (selector === "#lorebook-workspace" ? { querySelector: () => mailbox } : mailbox),
+    };
     let enhanced = 0;
     const selections = new Map();
+    let lineageId = 0;
     const open = runInNewContext(`(${source})`, {
       state: {
         overview: { canManage: true },
@@ -701,14 +769,23 @@ describe("dashboard lorebook UI", () => {
               trigger_chance: 100,
               insertion_order: 100,
               placement: 0,
+              channel_disc_ids: ["1"],
             },
           ],
         },
       },
-      activeLorebookLineage: () => 0,
+      activeLorebookLineage: () => lineageId,
       lorebookSelections: selections,
       lorebookSelectionKey: () => "42/0/3",
-      window: { TomoriControls: { enhance: () => enhanced++ } },
+      window: {
+        TomoriControls: { enhance: () => enhanced++ },
+        TomoriFX: {
+          enhance: () => {},
+          swap: (_element: unknown, html: string) => {
+            host.innerHTML = html;
+          },
+        },
+      },
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,
       fieldLabel: (value: string) => value,
@@ -716,6 +793,8 @@ describe("dashboard lorebook UI", () => {
       navigationIcon: () => "",
       lorebookDialog: (_id: string, _title: string, body: string) => body,
       lorebookDialogActions: () => "",
+      lorebookChannels: () => '<input name="channelDiscIds">',
+      cardSaveActions: () => "",
       initDraftForms: () => {},
     }) as (id: number, section: string) => void;
     open(11, "content");
@@ -739,5 +818,17 @@ describe("dashboard lorebook UI", () => {
     expect(host.innerHTML).not.toContain('name="content"');
     expect(selections.get("42/0/3")).toEqual({ entryId: 11, section: "rules" });
     expect(enhanced).toBe(3);
+    lineageId = 77;
+    open(11, "content");
+    expect(host.hidden).toBe(false);
+    expect(host.innerHTML).not.toContain('role="tablist"');
+    const order = ["content", "triggers", "activation", "entry-channels"].map((name) =>
+      host.innerHTML.indexOf(`data-lorebook-form="${name}"`),
+    );
+    expect(order[0]).toBeGreaterThan(-1);
+    expect(order.every((position, index) => index === 0 || position > order[index - 1])).toBe(true);
+    expect(host.innerHTML).toMatch(
+      /<div class="split"><div class="col">[\s\S]*?<\/form><\/div><form[^>]+data-lorebook-form="entry-channels"/,
+    );
   });
 });

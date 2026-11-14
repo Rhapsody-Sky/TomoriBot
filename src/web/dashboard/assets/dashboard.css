@@ -226,6 +226,15 @@ body[data-theme="dark"] .boot-logo {
   object-fit: contain;
 }
 
+[data-lorebook-browser][data-layout="list"] :is(.item strong, .item p, .item .chip, .browser-link strong) {
+  overflow-wrap: anywhere;
+}
+
+[data-lorebook-browser][data-layout="list"] .item .chip {
+  max-inline-size: 100%;
+  white-space: normal;
+}
+
 .persona-avatar-fallback,
 .avatar-fallback,
 .user-avatar-fallback,

@@ -178,9 +178,10 @@ editor dialog. Click the image preview or drop a file on it to stage a new image
 until Save. A hold button deletes the sprite. A failed write keeps the editor
 open with its input intact.
 Server lorebooks use a book list, entry list and selected-entry editor. In the
-Persona workspace, the entry list keeps its filter when the editor switches
-entries. Content, matching words, channel scope and activation rules save in
-their own cards. Selecting another entry asks whether to discard open drafts.
+Persona workspace, each row previews the entry's content, activation and channel
+scope. The full-width editor saves content, triggers, advanced rules and channel
+scope in separate cards. Returning to the list restores the filter and asks
+about unsaved edits.
 
 Overview summarizes the persona count and the most active persona for the selected
 period. A searchable picker opens individual persona workspaces. Statistics
