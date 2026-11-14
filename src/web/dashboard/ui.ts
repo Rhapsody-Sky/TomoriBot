@@ -9,7 +9,7 @@ export function renderDashboardHtml(content?: string): string {
     <title>TomoriBot Control Room</title>
     <link rel="icon" href="/settings/assets/tomori_companion_logo.svg">
     <link rel="stylesheet" href="/settings/assets/ui-kit.css?v=3">
-    <link rel="stylesheet" href="/settings/assets/dashboard.css?v=6">
+    <link rel="stylesheet" href="/settings/assets/dashboard.css?v=7">
     <link rel="stylesheet" href="/settings/assets/controls.css?v=3">
     <link rel="stylesheet" href="/settings/assets/collection.css">
   </head>

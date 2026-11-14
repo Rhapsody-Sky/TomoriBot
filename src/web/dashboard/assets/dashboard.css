@@ -595,16 +595,29 @@ body[data-theme="dark"] .boot-logo {
 .model-share-cell {
   min-width: 140px;
 }
-.channel-workspace .channel-default-collapsed {
-  border-bottom: 0;
+@container content (min-width: 861px) {
+  [data-channel-settings].split {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
+  }
 }
 
-.channel-workspace {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(0, 2fr);
-  gap: var(--space-4);
+[data-channel-settings] .card-head:has([data-channel-prompt]) {
+  margin-bottom: 0;
+}
+
+[data-channel-stage] [data-channel-selector] > .card-head {
   align-items: start;
 }
+
+[data-channel-load]:not([hidden]) {
+  margin-block-start: var(--space-4);
+}
+
+[data-channel-persona-options] {
+  max-block-size: 45dvh;
+  overflow-y: auto;
+}
+
 .channel-choices {
   max-height: 560px;
   overflow-y: auto;
@@ -672,23 +685,11 @@ body[data-theme="dark"] .boot-logo {
   max-block-size: min(30dvh, 320px);
 }
 
-.channel-setting-row.field {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 250px;
-  gap: 20px;
-  align-items: center;
-  padding-block: 16px;
-  border-bottom: 1px solid var(--line);
-}
 .channel-choice[hidden],
 .channel-category[hidden] {
   display: none;
 }
 @media (max-width: 900px) {
-  .channel-workspace,
-  .channel-setting-row.field {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .channel-choices {
     max-height: 320px;
   }

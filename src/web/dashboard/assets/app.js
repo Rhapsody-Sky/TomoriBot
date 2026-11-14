@@ -560,6 +560,7 @@
         return;
       }
       form.querySelectorAll(editSubmit).forEach((save) => {
+        if (save.previousElementSibling?.hasAttribute("data-discard-draft")) return;
         const discard = document.createElement("button");
         discard.type = "button";
         discard.className = "button";
@@ -624,12 +625,12 @@
     setEditActions(form, changed);
   }
 
-  function completeFormSave(form) {
+  function completeFormSave(form, source = form) {
     drafts.delete(form.dataset.draftKey);
     formBaselines.set(form, formSnapshot(form));
     if (form.dataset.fx === "track") window.TomoriFX.saved(form);
     else setEditActions(form, false);
-    form.querySelector(".form-error")?.remove();
+    source.querySelector(".form-error")?.remove();
   }
 
   function syncTrackedDraft(form) {
@@ -1101,7 +1102,7 @@
   }
 
   function usesCollectionFrame() {
-    return ["personas", "overview", "lorebooks", "settings"].includes(state.view);
+    return ["personas", "overview", "lorebooks", "settings", "channel-settings"].includes(state.view);
   }
 
   function renderView() {
@@ -1522,7 +1523,8 @@
     let target;
     if (entry.personaHome) target = root.querySelector(".banner");
     else if (entry.view === "channel-settings" && entry.channelTab !== "allowlist")
-      target = root.querySelector("[data-channel-settings] .panel");
+      target = root.querySelector("[data-channel-settings] [data-channel-picker]");
+    else if (entry.view === "channel-settings") target = root.querySelector("[data-channel-allowlist]");
     else if (entry.name)
       target = [...root.querySelectorAll("[name]")]
         .find((input) => input.name === entry.name && input.getClientRects().length)
@@ -3681,8 +3683,8 @@
     }
   }
 
-  function cardSaveActions(label, leading = "") {
-    return `<div class="actions">${leading}<button class="button small" type="button" data-edit-action data-discard-draft hidden>${escapeHtml(ui("discard"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(label)}</button></div>`;
+  function cardSaveActions(label, leading = "", validate = true) {
+    return `<div class="actions">${leading}<button class="button small" type="button" data-edit-action data-discard-draft hidden>${escapeHtml(ui("discard"))}</button><button class="button small primary" type="submit"${validate ? "" : " formnovalidate"} data-edit-action data-fx="spark" hidden>${escapeHtml(label)}</button></div>`;
   }
 
   function personaCardHead(title, hint = "", actions = "") {
@@ -4789,32 +4791,38 @@
     const allowed = personas.filter((persona) =>
       ids.every((id) => personaChannelSelection(data, persona.personaId).has(id)),
     );
-    host.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("channel_personas"))}</h2><p>${escapeHtml(ui("channel_personas_hint"))}</p></div></header><label class="toggle"><span>${escapeHtml(ui("all_personas_allowed"))}</span><input type="checkbox" ${allowed.length === personas.length ? "checked" : ""}></label><div class="row">${allowed
-      .slice(0, 5)
-      .map((persona) => `<span title="${escapeHtml(persona.nickname)}">${personaAvatar(persona, "avatar")}</span>`)
-      .join(
-        "",
-      )}<span>${allowed.length} / ${personas.length}</span></div><footer class="actions form-actions"><button type="button" class="button">${escapeHtml(ui("persona_permissions_edit"))}</button></footer>`;
+    host.innerHTML = `${personaCardHead(
+      ui("channel_personas"),
+      ui("channel_personas_hint"),
+      `<div class="actions"><button type="button" class="button small" aria-haspopup="dialog">${escapeHtml(ui("persona_permissions_edit"))}</button></div>`,
+    )}<div class="stack">
+      <label class="toggle"><span class="field-label">${escapeHtml(ui("all_personas_allowed"))}</span><input type="checkbox" role="switch"${allowed.length === personas.length ? " checked" : ""}></label>
+      <div class="row">${allowed
+        .slice(0, 5)
+        .map((persona) => `<span title="${escapeHtml(persona.nickname)}">${personaSticker(persona, "flat")}</span>`)
+        .join("")}<small>${escapeHtml(channelSelectionCount(allowed.length, personas.length))}</small></div>
+    </div>`;
     const open = (all = false) => {
       const dialog = document.createElement("dialog");
-      dialog.className = "dialog wide";
-      dialog.setAttribute("aria-label", ui("persona_permissions_edit"));
-      dialog.innerHTML = `<form class="stack"><header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("persona_permissions_edit"))}</h2><p>${escapeHtml(ui("channel_personas_hint"))}</p></div></header><label class="field">${fieldLabel(ui("persona_permissions_search"))}<input type="search"></label><div class="channel-choices">${personas
-        .map((persona) => {
-          const channels = personaChannelSelection(data, persona.personaId);
-          const count = ids.filter((id) => channels.has(id)).length;
-          return `<label class="channel-choice" data-permission-name="${escapeHtml(persona.nickname.toLowerCase())}"><input type="checkbox" value="${persona.personaId}" ${all || count === ids.length ? "checked" : ""} data-mixed="${!all && count > 0 && count < ids.length}">${personaAvatar(persona, "avatar")}<span>${escapeHtml(persona.nickname)}${!all && count > 0 && count < ids.length ? `<small>${escapeHtml(ui("persona_permissions_mixed"))}</small>` : ""}</span></label>`;
-        })
-        .join(
-          "",
-        )}</div><p role="alert" hidden></p><footer class="actions form-actions"><button class="button" type="button">${escapeHtml(ui("persona_permissions_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("channel_apply"))}</button></footer></form>`;
+      dialog.className = "wide";
+      dialog.setAttribute("aria-labelledby", "channel-personas-title");
+      dialog.innerHTML = `<form class="stack">
+        <header class="panel-header"><div class="heading"><h2 id="channel-personas-title">${escapeHtml(ui("persona_permissions_edit"))}</h2><p>${escapeHtml(ui("channel_personas_hint"))}</p></div></header>
+        <label class="field">${fieldLabel(ui("persona_permissions_search"))}<input type="search" autofocus></label>
+        <div class="row" data-persona-permissions-bulk><button type="button" class="button small" data-personas-select="all">${escapeHtml(ui("channel_select_all"))}</button><button type="button" class="button small" data-personas-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>
+        <fieldset class="grid" data-channel-persona-options><legend class="sr-only">${escapeHtml(ui("channel_personas"))}</legend>${personas
+          .map((persona) => {
+            const channels = personaChannelSelection(data, persona.personaId);
+            const count = ids.filter((id) => channels.has(id)).length;
+            const mixed = !all && count > 0 && count < ids.length;
+            return `<label class="choice" data-permission-name="${escapeHtml(persona.nickname.toLowerCase())}"><input type="checkbox" value="${persona.personaId}"${all || count === ids.length ? " checked" : ""} data-mixed="${mixed}">${personaSticker(persona, "flat")}<span class="field-label">${escapeHtml(persona.nickname)}${mixed ? `<small>${escapeHtml(ui("persona_permissions_mixed"))}</small>` : ""}</span></label>`;
+          })
+          .join("")}</fieldset>
+        <p class="notice error" role="alert" hidden>${escapeHtml(ui("persona_channel_required"))}</p>
+        <footer class="actions form-actions"><button class="button small" type="button">${escapeHtml(ui("persona_permissions_cancel"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></footer>
+      </form>`;
       document.body.append(dialog);
       const form = dialog.querySelector("form");
-      form.querySelector('[role="alert"]').className = "notice error";
-      const bulk = document.createElement("div");
-      bulk.className = "actions";
-      bulk.innerHTML = `<button type="button" class="button" data-personas-select="all">${escapeHtml(ui("channel_select_all"))}</button><button type="button" class="button" data-personas-select="none">${escapeHtml(ui("channel_deselect_all"))}</button>`;
-      form.querySelector(".channel-choices").before(bulk);
       const boxes = [...form.querySelectorAll('[type="checkbox"]')];
       const original = new Map(
         personas.map((persona) => {
@@ -4842,7 +4850,6 @@
         form.querySelector('[type="submit"]').disabled = invalid || !changes.length;
         setEditActions(form, changes.length > 0);
         form.querySelector('[role="alert"]').hidden = !invalid;
-        form.querySelector('[role="alert"]').textContent = ui("persona_channel_required");
       };
       form.addEventListener("change", validate);
       form.querySelector('[type="search"]').addEventListener("input", (event) => {
@@ -4850,7 +4857,7 @@
           row.hidden = !row.dataset.permissionName.includes(event.target.value.trim().toLowerCase());
         });
       });
-      bulk.addEventListener("click", (event) => {
+      form.querySelector("[data-persona-permissions-bulk]").addEventListener("click", (event) => {
         const button = event.target.closest("[data-personas-select]");
         if (!button) return;
         boxes
@@ -5127,7 +5134,7 @@
     values = [],
     single = false,
     channels = state.overview.channels,
-    { preserveMissing = false, required = false } = {},
+    { preserveMissing = false, required = false, title = "", hint = "" } = {},
   ) {
     const selected = new Set(values.filter((value) => value != null && value !== "").map(String));
     const allowed = state.overview.allowedChannelIds || [];
@@ -5156,7 +5163,7 @@
           : `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(id)}" checked></label>`,
       )
       .join("");
-    const collection = state.view === "settings" || (state.view === "personas" && !single);
+    const collection = ["settings", "channel-settings"].includes(state.view) || (state.view === "personas" && !single);
     if (collection) {
       const rows = [...groups.values()]
         .map(
@@ -5175,9 +5182,15 @@
         channels.filter((channel) => selected.has(String(channel.id))).length,
         channels.length,
       );
+      const heading =
+        title ||
+        (state.view === "personas" ? ui(name === "personaChannels" ? "persona_channels" : "memory_channels") : "");
+      const total = `<small data-persona-channel-total>${escapeHtml(count)}</small>`;
+      const filter = `<label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label>`;
+      const bulkUnderSearch = state.view === "channel-settings" && !single;
       return `<div data-channel-selector>
-        <header class="card-head">${state.view === "personas" ? `<h3>${escapeHtml(ui(name === "personaChannels" ? "persona_channels" : "memory_channels"))}<small data-persona-channel-total>${escapeHtml(count)}</small></h3>` : `<small data-persona-channel-total>${escapeHtml(count)}</small>`}<label class="field"><span class="field-label sr-only">${search}</span><input type="search" placeholder="${search}" data-channel-filter></label></header>
-        <div class="stack">${controls}${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div>
+        <header class="card-head">${heading ? `<div><h3>${escapeHtml(heading)}${total}</h3>${hint ? `<p class="hint">${escapeHtml(hint)}</p>` : ""}</div>` : total}${bulkUnderSearch ? `<div class="stack">${filter}${controls}</div>` : filter}</header>
+        <div class="stack">${bulkUnderSearch ? "" : controls}${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div>
       </div>`;
     }
     const rows =
@@ -5378,22 +5391,23 @@
     };
     return `${fields
       .map(
-        (key) => `<section class="subsection stack" data-channel-override="${key}">
+        (key) => `<div class="stack" data-channel-override="${key}">
       <label class="field">${fieldLabel(ui(`channel_${key}`), ui(`channel_${key}_hint`))}<select name="channel_${key}" data-channel-mode="${key}">
       <option value="keep">${escapeHtml(ui("channel_keep"))}</option><option value="set">${escapeHtml(ui(key === "allowlisted" || key === "persona" ? "channel_add_allowlist" : "channel_set"))}</option><option value="clear">${escapeHtml(ui(key === "allowlisted" || key === "persona" ? "channel_remove_allowlist" : "channel_reset"))}</option></select></label>
-      ${key !== "persona" ? `<label class="toggle" data-channel-single-reset="${key}" hidden><span>${escapeHtml(ui("channel_reset"))}</span><input name="channel_reset_${key}" type="checkbox"></label>` : ""}
-      ${key === "cooldown" ? `<p class="hint" data-channel-cooldown-note hidden>${escapeHtml(ui("channel_cooldown_requires_allowlist"))} <button class="button" type="button" data-channel-tab="allowlist">${escapeHtml(ui("channel_allowlisted"))}</button></p>` : ""}
-      <p class="hint" data-channel-current="${key}"></p><div class="stack" data-channel-inputs="${key}" hidden>${controls[key]}</div>${key === "autochatPersona" ? '<div class="row" data-channel-persona-preview hidden></div>' : ""}</section>`,
+      ${key !== "persona" ? `<label class="toggle" data-channel-single-reset="${key}" hidden><span class="field-label">${escapeHtml(ui("channel_reset"))}</span><input name="channel_reset_${key}" type="checkbox" role="switch"></label>` : ""}
+      ${key === "cooldown" ? `<div class="notice" data-channel-cooldown-note hidden><div class="stack"><p>${escapeHtml(ui("channel_cooldown_requires_allowlist"))}</p><div class="row"><button class="button small" type="button" data-channel-tab="allowlist">${escapeHtml(ui("channel_allowlisted"))}</button></div></div></div>` : ""}
+      <p class="hint" data-channel-current="${key}"></p><div class="stack" data-channel-inputs="${key}" hidden>${controls[key]}</div>${key === "autochatPersona" ? '<div class="row" data-channel-persona-preview hidden></div>' : ""}</div>`,
       )
       .join("")}`;
   }
 
-  async function loadChannelOverrides(form, ids) {
+  async function loadChannelOverrides(form, ids, update) {
     const key = ids.join(",");
     if (channelWorkspaces.get(form)?.key === key) return;
     const request = { key, data: null };
     channelWorkspaces.set(form, request);
     const status = form.querySelector("[data-channel-load]");
+    status.hidden = false;
     status.innerHTML = loadingBar(ui("channel_loading"));
     try {
       const query = new URLSearchParams();
@@ -5454,6 +5468,7 @@
           form.elements.channel_cooldown_seconds.value = value?.seconds ?? 5;
         }
       }
+      status.hidden = true;
       status.textContent = "";
       if (ids.length === 1) {
         request.basic = {};
@@ -5466,12 +5481,10 @@
           reset.checked = rows[0][field] == null;
           form.elements[`channel_${field}`].value = "keep";
         }
-        request.pendingBaseline = true;
       }
-      form.dispatchEvent(new Event("change", { bubbles: true }));
-      if (request.pendingBaseline) {
+      update();
+      if (ids.length === 1) {
         request.singleBaseline = singleChannelSnapshot(form);
-        request.pendingBaseline = false;
         formBaselines.set(form, formSnapshot(form));
       } else {
         const modes = new Set([
@@ -5495,10 +5508,8 @@
       enhanceDashboard(form);
     } catch (error) {
       if (channelWorkspaces.get(form) !== request || !form.isConnected) return;
-      status.textContent = ui("channel_load_failed");
+      status.innerHTML = `<p class="notice error" role="alert">${escapeHtml(ui("channel_load_failed"))} ${escapeHtml(error.message)}</p>`;
       channelWorkspaces.delete(form);
-      form.querySelector('[type="submit"]').disabled = true;
-      showFormError(form, error);
     }
   }
 
@@ -5558,83 +5569,110 @@
   let channelRenderRequest = 0;
   async function renderChannelSettings(workspace) {
     if (!state.overview.settings) return renderSettings(workspace);
+    if (!workspace.querySelector("[data-channel-stage]")) {
+      const title = escapeHtml(ui("channel_settings"));
+      workspace.innerHTML = `
+        <section class="banner compact" aria-labelledby="channel-settings-title">
+          <div class="banner-info"><div class="stack">
+            <p class="crumb">${escapeHtml(ui("nav_server_administration"))}<span class="kind">${escapeHtml(ui("settings_managers_only"))}</span></p>
+            <h1 id="channel-settings-title" data-fx="split">${title}</h1>
+            <p class="banner-text">${escapeHtml(ui("channel_settings_hint"))}</p>
+          </div></div>
+          <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("radio")}</span></div>
+        </section>
+        <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${title}">
+          <button type="button" id="channel-tab-settings" role="tab" aria-controls="channel-settings-stage" data-channel-tab="settings">${navigationIcon("sliders-horizontal")}${title}</button>
+          <button type="button" id="channel-tab-allowlist" role="tab" aria-controls="channel-settings-stage" data-channel-tab="allowlist">${navigationIcon("check")}${escapeHtml(ui("channel_allowlisted"))}</button>
+        </nav>
+        <section id="channel-settings-stage" class="stage" role="tabpanel" data-channel-stage></section>`;
+    }
+    const stage = workspace.querySelector("[data-channel-stage]");
+    workspace.querySelectorAll(".dock [data-channel-tab]").forEach((button) => {
+      const selected = button.dataset.channelTab === channelTab;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    stage.setAttribute("aria-labelledby", `channel-tab-${channelTab}`);
     const channels = state.overview.channels;
     const guildId = state.guildId;
     const renderRequest = ++channelRenderRequest;
-    workspace.innerHTML = loadingBar(ui("channel_loading"));
+    const current = () =>
+      stage.isConnected &&
+      state.guildId === guildId &&
+      state.view === "channel-settings" &&
+      channelRenderRequest === renderRequest;
+    stage.innerHTML = loadingBar(ui("channel_loading"));
     let data;
     try {
       data = await api(`/guilds/${guildId}/channel-settings`);
     } catch (error) {
-      if (workspace.isConnected && state.guildId === guildId && channelRenderRequest === renderRequest)
-        workspace.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+      if (current()) stage.innerHTML = `<div class="notice error" role="alert">${escapeHtml(error.message)}</div>`;
       return;
     }
-    if (
-      !workspace.isConnected ||
-      state.guildId !== guildId ||
-      state.view !== "channel-settings" ||
-      channelRenderRequest !== renderRequest
-    )
-      return;
+    if (!current()) return;
     const allowed = data.allowlistedChannelIds;
-    const visibleChannels = allowed.length ? channels.filter((channel) => allowed.includes(channel.id)) : channels;
-    const tabs = `<nav class="tabs" aria-label="${escapeHtml(ui("channel_settings"))}"><button type="button" class="settings-tab${channelTab === "settings" ? " is-active" : ""}" data-channel-tab="settings">${escapeHtml(ui("channel_settings"))}</button><button type="button" class="settings-tab${channelTab === "allowlist" ? " is-active" : ""}" data-channel-tab="allowlist">${escapeHtml(ui("channel_allowlisted"))}</button></nav>`;
     if (channelTab === "allowlist") {
       const effectiveAllowed = allowed.length ? allowed : channels.map((channel) => channel.id);
-      workspace.innerHTML = `${pageHeader("Administration", ui("channel_settings"), ui("channel_settings_hint"))}${tabs}<form class="panel stack" data-channel-allowlist data-settings-key="channel-allowlist"><header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("channel_allowlisted"))}</h2><p>${escapeHtml(ui("channel_allowlisted_hint"))}</p></div></header>${renderChannelSelector("allowedChannels", allowed)}<footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("channel_apply"))}</button></footer></form>`;
-      workspace.querySelector("[data-channel-allowlist]")._allowed = allowed;
-      const allowlistForm = workspace.querySelector("[data-channel-allowlist]");
-      allowlistForm.querySelectorAll('[name="allowedChannels"]').forEach((input) => {
-        input.checked = effectiveAllowed.includes(input.value);
-      });
-      const notice = document.createElement("p");
-      notice.className = "notice error";
-      notice.setAttribute("role", "alert");
-      notice.textContent = ui("channel_required");
-      allowlistForm.querySelector("footer").before(notice);
+      stage.innerHTML = `<form class="card" data-fx="track" data-channel-allowlist data-settings-key="channel-allowlist">
+        <div class="stack">
+          ${renderChannelSelector("allowedChannels", effectiveAllowed, false, channels, {
+            title: ui("channel_allowlisted"),
+            hint: ui("channel_allowlisted_hint"),
+          })}
+          <p class="notice error" data-channel-required role="alert" hidden>${escapeHtml(ui("channel_required"))}</p>
+        </div>
+        ${cardSaveActions(ui("save"))}
+      </form>`;
+      const form = stage.querySelector("[data-channel-allowlist]");
+      form._allowed = allowed;
+      const notice = form.querySelector("[data-channel-required]");
       const validate = () => {
-        const empty = !allowlistForm.querySelector('[name="allowedChannels"]:checked');
+        const empty = !form.querySelector('[name="allowedChannels"]:checked');
         notice.hidden = !empty;
-        allowlistForm.querySelector('[type="submit"]').disabled = empty;
+        form.querySelector('[type="submit"]').disabled = empty;
       };
-      allowlistForm.addEventListener("change", validate);
+      form.addEventListener("change", validate);
+      form.addEventListener("dashboard:restore", validate);
       validate();
-      initDraftForms(workspace);
-      enhanceDashboard(workspace);
+      initDraftForms(stage);
+      enhanceDashboard(stage);
+      focusSearchDestination();
       return;
     }
-    workspace.innerHTML = `${pageHeader("Administration", ui("channel_settings"), ui("channel_settings_hint"))}
-      ${tabs}
-      <form class="channel-workspace" data-channel-settings data-settings-key="channel-settings">
-        <section class="panel stack"><header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("channel_uncategorized"))}</h2></div></header>
-          ${renderChannelSelector("selectedChannels", [], false, visibleChannels)}
+    const visibleChannels = allowed.length ? channels.filter((channel) => allowed.includes(channel.id)) : channels;
+    stage.innerHTML = `<form class="split" data-channel-settings data-settings-key="channel-settings">
+        <section class="card" data-channel-picker>
+          ${renderChannelSelector("selectedChannels", [], false, visibleChannels, { title: ui("channel_uncategorized") })}
         </section>
-        <div class="stack"><section class="panel stack"><header class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("channel_selected"))}</p><h2 data-channel-count>0</h2><p>${escapeHtml(ui("channel_batch_hint"))}</p></div></header>
-          <p class="hint" data-channel-prompt>${escapeHtml(ui("channel_select_hint"))}</p>
-          <div data-channel-load></div></section><div class="stack" data-channel-fields hidden>${[
+        <div class="col">
+          <section class="card">
+            <header class="card-head"><div><h3 data-channel-count>${escapeHtml(ui("channel_selected"))}</h3><p class="hint" data-channel-prompt>${escapeHtml(ui("channel_select_hint"))}</p></div></header>
+            <div data-channel-load hidden></div>
+          </section>
+          <div class="stack" data-channel-fields hidden>${[
             ["channel_conversation", ["rp_channel_ids"], ["textModel", "prompt", "cooldown"]],
             ["channel_memory_context", ["private_channel_ids", "crosschannel_blocklist_ids"], ["contextNote"]],
             ["channel_autochat", ["autoch_disc_ids"], ["autochatPersona"]],
           ]
             .map(
               ([title, settings, extras]) =>
-                `<section class="panel stack" data-channel-panel><header class="panel-header"><div class="heading"><h2>${escapeHtml(ui(title))}</h2></div></header>${channelSettingsFields
-                  .filter(([, key]) => settings.includes(key))
-                  .map(([sectionId, key]) => {
-                    const field = state.overview.settings.catalog
-                      .find((section) => section.id === sectionId)
-                      .fields.find((field) => field.key === key);
-                    return `<label class="field channel-setting-row">${fieldLabel(field.label, field.hint)}<select name="${key}"><option value="keep">${escapeHtml(ui("channel_disabled"))}</option><option value="on">${escapeHtml(ui("channel_enable"))}</option><option value="off">${escapeHtml(ui("channel_disable"))}</option></select></label>`;
-                  })
-                  .join(
-                    "",
-                  )}${renderChannelOverrides(extras)}<footer class="actions form-actions"><button class="button primary" type="submit" formnovalidate disabled>${escapeHtml(ui("channel_apply"))}</button></footer></section>`,
+                `<section class="card" data-channel-panel>${personaCardHead(ui(title))}
+                  <div class="stack">${channelSettingsFields
+                    .filter(([, key]) => settings.includes(key))
+                    .map(([sectionId, key]) => {
+                      const field = state.overview.settings.catalog
+                        .find((section) => section.id === sectionId)
+                        .fields.find((field) => field.key === key);
+                      return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${key}"><option value="keep">${escapeHtml(ui("channel_disabled"))}</option><option value="on">${escapeHtml(ui("channel_enable"))}</option><option value="off">${escapeHtml(ui("channel_disable"))}</option></select></label>`;
+                    })
+                    .join("")}${renderChannelOverrides(extras)}</div>
+                  ${cardSaveActions(ui("save"), "", false)}
+                </section>`,
             )
-            .join("")}<section class="panel stack" data-channel-personas></section></div>
+            .join("")}<section class="card" data-channel-personas></section></div>
         </div>
       </form>`;
-    const form = workspace.querySelector("[data-channel-settings]");
+    const form = stage.querySelector("[data-channel-settings]");
     const update = () => {
       const selected = [...form.querySelectorAll('[name="selectedChannels"]:checked')].map((input) => input.value);
       const selectionKey = selected.join(",");
@@ -5644,15 +5682,30 @@
         form._channelDraftRestored = true;
       }
       form._selectionKey = selectionKey;
-      form.querySelector("[data-channel-count]").textContent =
+      const label = form.querySelector("[data-channel-count]");
+      label.textContent =
         selected.length === 1
           ? `# ${channels.find((channel) => channel.id === selected[0]).name}`
-          : String(selected.length);
-      form.querySelector("[data-channel-fields]").hidden = !selected.length;
-      form.querySelector("[data-channel-count]").nextElementSibling.textContent = ui(
-        selected.length === 1 ? "channel_single_hint" : "channel_batch_hint",
+          : ui("channel_selected");
+      if (selected.length > 1) {
+        const count = document.createElement("small");
+        count.textContent = String(selected.length);
+        label.append(count);
+      }
+      const channelWorkspace = channelWorkspaces.get(form);
+      const loaded = channelWorkspace?.key === selectionKey && !!channelWorkspace.data;
+      form.querySelector("[data-channel-fields]").hidden = !loaded;
+      if (!selected.length) {
+        channelWorkspaces.delete(form);
+        form.querySelector("[data-channel-load]").hidden = true;
+      }
+      form.querySelector("[data-channel-prompt]").textContent = ui(
+        selected.length === 1
+          ? "channel_single_hint"
+          : selected.length > 1
+            ? "channel_batch_hint"
+            : "channel_select_hint",
       );
-      form.querySelector("[data-channel-prompt]").hidden = !!selected.length;
       for (const [sectionId, key] of channelSettingsFields) {
         const existing = new Set(state.overview.settings.values[sectionId][key] || []);
         const count = selected.filter((id) => existing.has(id)).length;
@@ -5676,7 +5729,6 @@
         inputs.hidden = single
           ? reset.querySelector("input").checked
           : mode !== "set" && !(key === "persona" && mode === "clear");
-        if (reset) reset.classList.toggle("channel-default-collapsed", single && inputs.hidden);
         if (key === "autochatPersona") {
           const preview = form.querySelector("[data-channel-persona-preview]");
           const personas = state.overview.personas;
@@ -5686,7 +5738,7 @@
             : personas.find((entry) => entry.personaId === Number(form.elements.channel_autochat_id.value));
           preview.hidden = !persona;
           preview.innerHTML = persona
-            ? `${personaAvatar(persona, "avatar")}<strong>${escapeHtml(persona.nickname)}</strong>`
+            ? `${personaSticker(persona, "flat")}<strong>${escapeHtml(persona.nickname)}</strong>`
             : "";
         }
         inputs.querySelectorAll("input[name], select[name], textarea[name]").forEach((input) => {
@@ -5706,12 +5758,9 @@
       }
       form.querySelectorAll('[type="submit"]').forEach((button) => {
         button.disabled =
-          !selected.length ||
-          !channelHasChanges(form, button.closest("[data-channel-panel]")) ||
-          channelWorkspaces.get(form)?.key !== selected.join(",") ||
-          !channelWorkspaces.get(form)?.data;
+          !selected.length || !channelHasChanges(form, button.closest("[data-channel-panel]")) || !loaded;
       });
-      if (selected.length) loadChannelOverrides(form, selected);
+      if (selected.length) void loadChannelOverrides(form, selected, update);
     };
     form.addEventListener(
       "change",
@@ -5723,12 +5772,14 @@
           form.querySelectorAll('[name="selectedChannels"]').forEach((input) => {
             input.checked = previous.has(input.value);
           });
+          updateChannelCounts(form.querySelector("[data-channel-selector]"));
           if (!(await confirmAction(ui("discard_title"), ui("discard_detail")))) return;
           const chosen = new Set(next);
           form.querySelectorAll('[name="selectedChannels"]').forEach((input) => {
             input.checked = chosen.has(input.value);
           });
           drafts.delete(form.dataset.draftKey);
+          updateChannelCounts(form.querySelector("[data-channel-selector]"));
           update();
           captureDraft(form);
           return;
@@ -5740,9 +5791,10 @@
     form.addEventListener("input", (event) => {
       if (event.target.name !== "selectedChannels") update();
     });
-    initDraftForms(form.parentElement);
+    initDraftForms(stage);
     update();
-    enhanceDashboard(workspace);
+    enhanceDashboard(stage);
+    focusSearchDestination();
   }
 
   document.addEventListener("input", (event) => {
@@ -5780,8 +5832,15 @@
   document.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-channel-tab]");
     if (tab) {
+      if (savingForms) {
+        toast(ui("saving"));
+        return;
+      }
+      if (channelTab === tab.dataset.channelTab) return;
       channelTab = tab.dataset.channelTab;
-      renderChannelSettings(tab.closest("[data-dashboard-view]"));
+      const workspace = tab.closest("[data-dashboard-view]");
+      void renderChannelSettings(workspace);
+      workspace.querySelector(`#channel-tab-${channelTab}`)?.focus({ preventScroll: true });
       return;
     }
     const category = event.target.closest("[data-channel-group]");
@@ -7019,7 +7078,8 @@
       state.overview = await api(`/guilds/${guildId}/overview`);
       if (
         (state.view === "personal-spotlights" && state.overview.guild.isDirectMessage) ||
-        (state.view === "moderation" && (!state.overview.canManage || state.overview.guild.isDirectMessage))
+        (["moderation", "channel-settings"].includes(state.view) &&
+          (!state.overview.canManage || state.overview.guild.isDirectMessage))
       )
         state.view = "overview";
       renderShell();
@@ -7823,7 +7883,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
@@ -9382,6 +9442,7 @@
       const removed = [...previous].filter((id) => visible.has(id) && !selected.has(id));
       if (!added.length && !removed.length) return;
       if (!(await confirmAction(ui("channel_restrictions"), ui("channel_restrictions_confirm")))) return;
+      const guildId = state.guildId;
       let saved = false;
       try {
         await withBusyForm(allowlistForm, async () => {
@@ -9390,7 +9451,7 @@
             [removed, false],
           ]) {
             if (channelIds.length) {
-              await api(`/guilds/${state.guildId}/channel-settings`, {
+              await api(`/guilds/${guildId}/channel-settings`, {
                 method: "PATCH",
                 body: JSON.stringify({ channelIds, patch: { allowlisted } }),
               });
@@ -9398,9 +9459,9 @@
             }
           }
           completeFormSave(allowlistForm);
+          state.overview = await api(`/guilds/${guildId}/overview`);
         });
-        state.overview = await api(`/guilds/${state.guildId}/overview`);
-        renderChannelSettings(allowlistForm.closest("[data-dashboard-view]"));
+        if (allowlistForm.isConnected) void renderChannelSettings(allowlistForm.closest("[data-dashboard-view]"));
         toast(ui("channel_saved"));
       } catch (error) {
         showFormError(allowlistForm, error, saved);
@@ -9470,7 +9531,7 @@
             });
             saved = true;
           }
-          completeFormSave(channelForm);
+          completeFormSave(channelForm, panel);
         });
         channelWorkspaces.delete(channelForm);
         channelForm._pendingPanels = pendingPanels;
@@ -9478,7 +9539,7 @@
         toast(ui("channel_saved"));
       } catch (error) {
         captureDraft(channelForm);
-        showFormError(channelForm, error, saved);
+        showFormError(panel, error, saved);
       }
       return;
     }
@@ -9606,6 +9667,7 @@
       const guild = session.guilds.find((item) => item.id === guildId) || session.guilds[0];
       if (window.location.hash === "#lorebooks") state.view = "lorebooks";
       if (window.location.hash === "#settings") state.view = "settings";
+      if (window.location.hash === "#channel-settings") state.view = "channel-settings";
       await selectGuild(guild.id);
       if (window.location.hash === "#channel-scoped-memory") openChannelMemorySettings();
     } catch {

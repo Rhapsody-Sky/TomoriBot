@@ -260,11 +260,11 @@ when their content exceeds the smaller manual-entry limits used by Discord.
 These limits are defined in code and are not server settings. Writes still use
 the persona repository and invalidate the server's persona cache after success.
 
-Channel settings groups channel-scoped controls around a categorized channel picker.
+Channel settings uses the Collection channel picker on both dock tabs.
 The Allowlist tab manages which channels Tomori can use. A nonempty allowlist limits
 the settings picker to those channels; an empty stored allowlist allows all channels
 and is displayed with every channel selected. The dashboard rejects an empty selection.
-Channel settings save per panel; saving one panel preserves unsaved edits in the others.
+Each settings card saves independently. Saving a card preserves drafts in the other cards.
 Selecting one channel shows its editable values directly. Multiple selections use
 explicit batch changes; omitted settings retain each channel's value. The panels
 include autochat enablement and persona,
