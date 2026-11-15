@@ -22,6 +22,8 @@ describe("dashboard personal models", () => {
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,
       fieldLabel: (label: string) => `<span>${label}</span>`,
+      personaCardHead: (title: string) => `<h3>${title}</h3>`,
+      cardSaveActions: () => '<button type="submit" hidden></button>',
       state: { overview: { profile: { copy: {} } } },
     }) as (data: unknown, scope: string) => string;
     const option = { id: 7, provider: "custom:1", label: "Sample primary" };
@@ -134,13 +136,20 @@ describe("dashboard personal models", () => {
 
   it("keeps server fallback saves scoped to the server chain", async () => {
     const calls: string[] = [];
+    let saved = false;
     const save = runInNewContext(`(${await dashboardFunction("saveFallbacks")})`, {
       state: { guildId: "42", providerData: { server: {} } },
       api: async (path: string) => calls.push(path),
       withBusyForm: async (_form: unknown, action: () => Promise<void>) => action(),
       ui: (key: string) => key,
       toast: () => {},
-      refreshProviders: async (scope: string) => expect(scope).toBe("server"),
+      completeFormSave: () => {
+        saved = true;
+      },
+      refreshProviders: async (scope: string) => {
+        expect(scope).toBe("server");
+        expect(saved).toBe(true);
+      },
     }) as (form: unknown) => Promise<void>;
     await save({
       classList: { contains: () => false },
@@ -190,6 +199,7 @@ describe("dashboard personal models", () => {
     const source = await dashboardFunction("savePersonalParameters");
     let body = "";
     let refreshed = "";
+    const completedScopes: string[] = [];
     const fields = [
       "temperature",
       "top_p",
@@ -208,6 +218,9 @@ describe("dashboard personal models", () => {
       withBusyForm: async (_form: unknown, action: () => Promise<void>) => action(),
       toast: () => {},
       ui: (key: string) => key,
+      completeFormSave: (form: { dataset: { providerScope: string } }) => {
+        completedScopes.push(form.dataset.providerScope);
+      },
       refreshProviders: async (scope: string) => {
         refreshed = scope;
       },
@@ -225,6 +238,7 @@ describe("dashboard personal models", () => {
     await save({ dataset: { personalParameters: "openrouter", providerScope: "server" }, elements });
     expect(JSON.parse(body).patch.thinking_level).toBe("high");
     expect(refreshed).toBe("server");
+    expect(completedScopes).toEqual(["server"]);
   });
 
   it("retries only unsaved model changes after a partial failure", async () => {

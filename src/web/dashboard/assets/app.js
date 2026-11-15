@@ -409,7 +409,7 @@
   };
 
   const draftForms =
-    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], #stm-categories-form";
+    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], #stm-categories-form, form[data-provider-scope=server][data-fx=track]";
   const localEditForms =
     "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], [data-spotlight-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], [data-personal-model], [data-personal-parameters], #fallback-form, #memory-compose-form, #memory-edit-form";
   const editForms = `${draftForms}, ${localEditForms}`;
@@ -534,6 +534,8 @@
     });
     const humanizerFields = form.querySelector("[data-persona-humanizer-fields]");
     if (humanizerFields) humanizerFields.hidden = form.elements.humanizerMode.value === "inherit";
+    if (form.id === "fallback-form") updateFallbackSlots(form);
+    if (form.id === "openrouter-form") updateOpenRouterHint(form);
     resizeAutoGrowTextareas(form);
     form.dispatchEvent(new Event("dashboard:restore"));
     if (form.dataset.fx === "track") form.dispatchEvent(new Event("input"));
@@ -809,7 +811,7 @@
             ${
               state.overview?.canManage
                 ? `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_administration"))}</h2><div class="sidebar-group-links">
-                   ${navButton("server-providers", "Server providers", true)}
+                   ${navButton("server-providers", ui("nav_server_providers"), true)}
                    ${state.overview.guild.isDirectMessage ? "" : navButton("channel-settings", ui("channel_settings"), true)}
                    ${state.overview.guild.isDirectMessage ? "" : navButton("moderation", ui("moderation"), true)}
                    ${navButton("settings", "Server settings", true)}</div></section>`
@@ -1102,7 +1104,9 @@
   }
 
   function usesCollectionFrame() {
-    return ["personas", "overview", "lorebooks", "settings", "channel-settings"].includes(state.view);
+    return ["personas", "overview", "lorebooks", "settings", "channel-settings", "server-providers"].includes(
+      state.view,
+    );
   }
 
   function renderView() {
@@ -1163,7 +1167,7 @@
         loadLorebooks(0);
         break;
       case "personal-providers":
-        renderProviders(workspace, "personal");
+        renderPersonalProviders(workspace);
         break;
       case "personas":
         renderPersonaWorkspace(workspace);
@@ -1172,7 +1176,7 @@
         renderPersonalSpotlights(workspace);
         break;
       case "server-providers":
-        renderProviders(workspace, "server");
+        renderServerProviders(workspace);
         break;
       case "settings":
         renderSettings(workspace);
@@ -1374,7 +1378,7 @@
     }
     for (const scope of state.overview.canManage ? ["personal", "server"] : ["personal"]) {
       const view = `${scope === "personal" ? "personal" : "server"}-providers`;
-      const path = scope === "personal" ? "My providers" : "Server providers";
+      const path = scope === "personal" ? "My providers" : ui("nav_server_providers");
       const data = state.providerData[scope];
       const hasModels = scope !== "personal" || !data || providerConnections(data).length > 0;
       for (const [panel, key] of [
@@ -1414,10 +1418,8 @@
           { view, scope, providerPanel: "models" },
           `${path} / ${ui("primary_models")}`,
         );
-      const workspace = { innerHTML: "" };
-      renderProviders(workspace, scope);
       const template = document.createElement("template");
-      template.innerHTML = workspace.innerHTML;
+      template.innerHTML = renderProviderDialogs(data, scope);
       for (const dialog of template.content.querySelectorAll("dialog"))
         addMarkup(
           dialog.outerHTML,
@@ -3176,7 +3178,7 @@
     );
   }
 
-  async function confirmLorebookEntryChange(editor) {
+  async function confirmDraftDiscard(editor) {
     if (!editor) return true;
     const changed = [...editor.querySelectorAll("form[data-draft-key]")].filter((form) =>
       drafts.has(form.dataset.draftKey),
@@ -3190,13 +3192,15 @@
 
   async function confirmDashboardSectionChange() {
     if (state.view === "personas") return confirmPersonaSectionChange(document.querySelector("[data-persona-content]"));
-    if (state.view === "lorebooks") return confirmLorebookEntryChange(document.querySelector("#lorebook-workspace"));
+    if (state.view === "lorebooks") return confirmDraftDiscard(document.querySelector("#lorebook-workspace"));
+    if (state.view === "server-providers")
+      return confirmDraftDiscard(document.querySelector("#server-providers-stage"));
     return true;
   }
 
   async function confirmPersonaSectionChange(content) {
     if (!content) return true;
-    if (state.personaPanel === "lorebook") return confirmLorebookEntryChange(content);
+    if (state.personaPanel === "lorebook") return confirmDraftDiscard(content);
     const entryForms = [...content.querySelectorAll("[data-persona-entry-form]")];
     const composer = content.querySelector("#memory-compose-form:not([hidden])");
     if (
@@ -5302,7 +5306,7 @@
     return `<label class="field span-all">${fieldLabel(field.label, field.hint)}<input name="${escapeHtml(field.key)}" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : (value ?? ""))}"></label>`;
   }
 
-  function renderSettingsPanel(panel, collection = true) {
+  function renderSettingsPanel(panel) {
     const settings = state.overview.settings;
     const sectionById = new Map(settings.catalog.map((section) => [section.id, section]));
     const sources = (panel.sources || [{ section: panel.section, fields: panel.fields }]).flatMap((source) => {
@@ -5329,13 +5333,6 @@
         fields.map((field) => renderSettingField(field, settings.values[section.id]?.[field.key])),
       )
       .join("");
-    if (!collection) {
-      return `<form class="panel stack settings-panel" ${attributes}>
-        <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(primarySection.eyebrow)}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div></div>
-        <div class="grid">${fields}</div>
-        <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
-      </form>`;
-    }
     return `<form class="card" data-fx="track" ${attributes}>
         ${personaCardHead(title, description)}
         <div class="stack">${fields}</div>
@@ -6363,39 +6360,60 @@
   }
 
   function renderEndpointRows(data, scope) {
-    if (!data.endpoints?.length) {
-      return `<p class="hint">No custom endpoints.</p>`;
-    }
-    return data.endpoints
-      .map(
-        (endpoint) => `<article class="subsection">
-          <div class="row">
-            <div class="heading"><p class="eyebrow">${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}</p><h3>${escapeHtml(endpoint.modelName || endpoint.displayName)}</h3><small>${escapeHtml(endpoint.endpointUrl)}</small></div>
-            ${endpoint.id && endpoint.capability !== "transcription" && (endpoint.capability === "text" || endpoint.capability === "speech" || endpoint.modelRefId) ? `<button class="button" type="button" data-endpoint-model-edit="${endpoint.id}" data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_model_edit"))}</button>` : ""}
-          </div>
-          <div class="row">
-            ${endpoint.requiresAuth ? "<span>Auth</span>" : ""}
-            ${endpoint.hasTools ? "<span>Tools</span>" : ""}
-            ${endpoint.seesImages ? "<span>Vision</span>" : ""}
-            ${endpoint.supportsStructOutput ? "<span>Structured output</span>" : ""}
-          </div>
-        </article>`,
-      )
+    if (!data.endpoints?.length) return '<p class="hint">No custom endpoints.</p>';
+    const collection = scope === "server";
+    const rows = data.endpoints
+      .map((endpoint) => {
+        const label = escapeHtml(endpoint.modelName || endpoint.displayName);
+        const route = `${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}`;
+        const url = escapeHtml(endpoint.endpointUrl);
+        const editable =
+          endpoint.id &&
+          endpoint.capability !== "transcription" &&
+          (endpoint.capability === "text" || endpoint.capability === "speech" || endpoint.modelRefId);
+        const edit = editable
+          ? `<button class="button${collection ? " small" : ""}" type="button" data-endpoint-model-edit="${endpoint.id}" data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_model_edit"))}</button>`
+          : "";
+        const features = [
+          endpoint.requiresAuth && "Auth",
+          endpoint.hasTools && "Tools",
+          endpoint.seesImages && "Vision",
+          endpoint.supportsStructOutput && "Structured output",
+        ].filter(Boolean);
+        if (collection)
+          return `<article class="item">
+        <div class="stack">
+          <div><strong>${label}</strong><div class="item-meta"><span>${route}</span></div><small>${url}</small></div>
+          ${features.length ? `<div class="chips">${features.map((feature) => `<span class="chip">${feature}</span>`).join("")}</div>` : ""}
+        </div>
+        ${edit ? `<div class="item-actions">${edit}</div>` : ""}
+      </article>`;
+        return `<article class="subsection">
+        <div class="row"><div class="heading"><p class="eyebrow">${route}</p><h3>${label}</h3><small>${url}</small></div>${edit}</div>
+        <div class="row">${features.map((feature) => `<span>${feature}</span>`).join("")}</div>
+      </article>`;
+      })
       .join("");
+    return collection ? `<div class="rows">${rows}</div>` : rows;
   }
 
   function renderOpenRouterRows(data, scope) {
     if (!data.openRouterModels?.length) {
       return `<p class="hint">${escapeHtml(ui("connection_no_models"))}</p>`;
     }
-    return data.openRouterModels
-      .map(
-        (model) => `<article class="panel-header">
-          <div class="heading"><span class="eyebrow">${escapeHtml(model.capability)}</span><h3>${escapeHtml(model.codename)}</h3></div>
-          ${model.capability === "transcription" ? "" : `<div class="actions"><button class="button danger" type="button" data-openrouter-delete="${escapeHtml(model.codename)}" data-openrouter-capability="${escapeHtml(model.capability)}" data-provider-scope="${scope}" data-tooltip="${escapeHtml(ui("connection_remove_registration_hint"))}">${escapeHtml(ui("connection_remove_registration"))}</button></div>`}
-        </article>`,
-      )
+    const collection = scope === "server";
+    const rows = data.openRouterModels
+      .map((model) => {
+        const remove =
+          model.capability === "transcription"
+            ? ""
+            : `<button class="button${collection ? " small" : ""} danger" type="button" data-openrouter-delete="${escapeHtml(model.codename)}" data-openrouter-capability="${escapeHtml(model.capability)}" data-provider-scope="${scope}" data-tooltip="${escapeHtml(ui("connection_remove_registration_hint"))}">${escapeHtml(ui("connection_remove_registration"))}</button>`;
+        if (collection)
+          return `<article class="item"><div><strong>${escapeHtml(model.codename)}</strong><div class="item-meta"><span>${escapeHtml(model.capability)}</span></div></div>${remove ? `<div class="item-actions">${remove}</div>` : ""}</article>`;
+        return `<article class="panel-header"><div class="heading"><span class="eyebrow">${escapeHtml(model.capability)}</span><h3>${escapeHtml(model.codename)}</h3></div>${remove ? `<div class="actions">${remove}</div>` : ""}</article>`;
+      })
       .join("");
+    return collection ? `<div class="rows">${rows}</div>` : rows;
   }
 
   function renderServerModels(data) {
@@ -6441,9 +6459,9 @@
       : transcription?.selected
         ? JSON.stringify(transcription.selected)
         : "";
-    return `<form class="panel stack provider-panel server-model-panel" id="server-models-form">
-      <div class="panel-header"><div class="heading"><p class="eyebrow">Server defaults</p><h2>Primary models</h2><p>Global model choices used unless a persona, channel, or personal provider overrides them.</p></div></div>
-      <div class="grid">
+    return `<form class="card" id="server-models-form" data-provider-scope="server" data-settings-key="server-models" data-fx="track">
+      ${personaCardHead(ui("primary_models"), ui("server_primary_models_hint"))}
+      <div class="stack">
         ${fields
           .map(
             ([kind, label, description, allowNone]) =>
@@ -6452,7 +6470,7 @@
           .join("")}
         ${transcription ? `<label class="field">${fieldLabel(ui("model_transcription"), ui("transcription_server_hint"))}<select name="transcription" data-original-model="${escapeHtml(originalTranscription)}"><option value="">${escapeHtml(ui("transcription_disabled"))}</option>${unavailable ? `<option value="unavailable" selected disabled>${escapeHtml(ui("personal_model_unavailable"))}</option>` : ""}${transcriptionOptions}</select></label>` : ""}
       </div>
-      <div class="actions"><button class="button primary" type="submit">Save primary models</button></div>
+      ${cardSaveActions(ui("save"))}
     </form>`;
   }
 
@@ -6463,9 +6481,9 @@
       speech_design: "speech_design_model_hint",
       speech_clone: "speech_clone_model_hint",
     };
-    return `<form class="panel stack provider-panel server-model-panel" data-advanced-models>
-      <header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("advanced_models"))}</h2><p>${escapeHtml(ui("advanced_models_hint"))}</p></div></header>
-      <div class="grid">${data.advancedModels
+    return `<form class="card" data-advanced-models data-provider-scope="server" data-settings-key="server-advanced-models" data-fx="track">
+      ${personaCardHead(ui("advanced_models"), ui("advanced_models_hint"))}
+      <div class="stack">${data.advancedModels
         .map(
           ({ kind, options, selected }) => `<label class="field">
         ${fieldLabel(ui(`model_${kind}`), ui(hints[kind]))}
@@ -6476,7 +6494,7 @@
         </select></label>`,
         )
         .join("")}</div>
-      <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
+      ${cardSaveActions(ui("save"))}
     </form>`;
   }
 
@@ -6590,17 +6608,13 @@
   ];
 
   function renderPersonalParameters(data, scope = "personal") {
-    const parameters = data.parameters || [];
-    return `<section class="panel provider-panel">
-      <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connection_provider"))}</p><h2>${escapeHtml(ui(`${scope}_parameters`))}</h2><p>${escapeHtml(ui(`${scope}_parameters_hint`))}</p></div></div>
-      ${
-        parameters.length
-          ? parameters
-              .map(
-                (
-                  provider,
-                ) => `<form class="stack" data-personal-parameters="${escapeHtml(provider.provider)}" data-provider-scope="${scope}">
-        <h3>${escapeHtml(provider.displayName)}</h3>
+    const collection = scope === "server";
+    const forms = (data.parameters || [])
+      .map(
+        (
+          provider,
+        ) => `<form class="${collection ? "card" : "stack"}" data-personal-parameters="${escapeHtml(provider.provider)}" data-provider-scope="${scope}"${collection ? ` data-settings-key="server-parameters/${escapeHtml(provider.provider)}" data-fx="track"` : ""}>
+        ${collection ? personaCardHead(ui("server_parameters"), ui("server_parameters_hint")) : `<h3>${escapeHtml(provider.displayName)}</h3>`}
         <div class="grid">
           ${personalParameterFields.map(([key, min, max, step]) => `<label class="field">${fieldLabel(ui(`parameter_${key}`))}<input type="number" name="${key}" min="${min}" max="${max}" step="${step}" value="${formatStoredParameterValue(provider[key])}" placeholder="${escapeHtml(ui("parameter_unset"))}"></label>`).join("")}
           <label class="field">${fieldLabel(ui("parameter_thinking_level"))}<select name="thinking_level">
@@ -6608,12 +6622,14 @@
             ${["auto", "none", "minimal", "low", "medium", "high"].map((value) => `<option value="${value}"${provider.thinking_level === value ? " selected" : ""}>${escapeHtml(ui(`thinking_${value}`))}</option>`).join("")}
           </select></label>
         </div>
-        <div class="actions"><button class="button primary" type="submit">${escapeHtml(ui("personal_parameters_save"))}</button></div>
+        ${collection ? cardSaveActions(ui("save")) : `<div class="actions"><button class="button primary" type="submit">${escapeHtml(ui("personal_parameters_save"))}</button></div>`}
       </form>`,
-              )
-              .join("")
-          : `<p class="hint">${escapeHtml(ui("personal_parameters_empty"))}</p>`
-      }
+      )
+      .join("");
+    if (collection) return forms;
+    return `<section class="panel provider-panel">
+      <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connection_provider"))}</p><h2>${escapeHtml(ui("personal_parameters"))}</h2><p>${escapeHtml(ui("personal_parameters_hint"))}</p></div></div>
+      ${forms || `<p class="hint">${escapeHtml(ui("personal_parameters_empty"))}</p>`}
     </section>`;
   }
 
@@ -6632,6 +6648,7 @@
         body: JSON.stringify({ provider: form.dataset.personalParameters, patch }),
       });
     });
+    if (scope === "server") completeFormSave(form);
     toast(ui(`${scope}_parameters_saved`));
     await refreshProviders(scope);
   }
@@ -6647,8 +6664,8 @@
     const primaryLabel = primary?.label || ui(selected ? "personal_model_unavailable" : "personal_model_unassigned");
     const lastFilled = (data.fallbackRefs || []).reduce((last, ref, index) => (ref ? index : last), -1);
     const profile = state.overview.profile;
-    return `<section class="panel provider-panel"><form id="fallback-form" data-provider-scope="${scope}" data-original-fallbacks="${escapeHtml(JSON.stringify((data.fallbackRefs || []).filter(Boolean)))}">
-      <div class="panel-header"><div class="heading"><p class="eyebrow">Failover</p><h2>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks" : "server_fallbacks"))}</h2><p>${escapeHtml(ui(scope === "personal" ? "personal_fallbacks_hint" : "server_fallbacks_hint"))}</p></div></div>
+    return `${personal ? '<section class="panel provider-panel">' : ""}<form ${personal ? "" : 'class="card" data-settings-key="server-fallbacks" data-fx="track" '}id="fallback-form" data-provider-scope="${scope}" data-original-fallbacks="${escapeHtml(JSON.stringify((data.fallbackRefs || []).filter(Boolean)))}">
+      ${personal ? `<div class="panel-header"><div class="heading"><p class="eyebrow">Failover</p><h2>${escapeHtml(ui("personal_fallbacks"))}</h2><p>${escapeHtml(ui("personal_fallbacks_hint"))}</p></div></div>` : personaCardHead(ui("server_fallbacks"), ui("server_fallbacks_hint"))}
       <ol class="chain">
         <li>${fieldLabel(ui("fallback_primary"))}<strong>${escapeHtml(primaryLabel)}</strong>${personal && selected && !data.models.text.enabled ? `<small>${escapeHtml(ui("personal_model_disabled"))}</small>` : ""}</li>
         ${[0, 1, 2, 3, 4]
@@ -6677,8 +6694,16 @@
       </div>`
           : ""
       }
-      <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
-    </form></section>`;
+      ${personal ? `<div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>` : cardSaveActions(ui("save"))}
+    </form>${personal ? "</section>" : ""}`;
+  }
+
+  function updateFallbackSlots(form) {
+    const slots = [...form.querySelectorAll("[data-fallback-slot]")];
+    const lastFilled = slots.reduce((last, slot, index) => (slot.querySelector("select").value ? index : last), -1);
+    slots.forEach((slot, index) => {
+      slot.hidden = index > lastFilled + 1;
+    });
   }
 
   async function saveFallbacks(form) {
@@ -6756,6 +6781,7 @@
       captureDraft(form);
       throw Object.assign(new Error([...saved, ...failed].join(" ")), { partial: saved.length > 0 });
     }
+    if (scope === "server") completeFormSave(form);
     toast(saved.length === 1 ? saved[0] : ui("fallback_saved"));
     await refreshProviders(scope);
   }
@@ -6879,12 +6905,19 @@
         return `<tr><th scope="row">${escapeHtml(ui(`model_${key}`))}</th><td>${models.map((model) => escapeHtml(model.label)).join(", ")}</td></tr>`;
       })
       .join("");
-    return `<div class="subsection stack"><h3>${escapeHtml(ui("connection_available_models"))}</h3>${groups ? `<div class="table-wrap"><table><tbody>${groups}</tbody></table></div>` : `<p>${escapeHtml(ui("connection_no_available_models"))}</p>`}</div>`;
+    const label = escapeHtml(ui("connection_available_models"));
+    const models = groups
+      ? `<div class="table-wrap"><table aria-label="${label}"><tbody>${groups}</tbody></table></div>`
+      : `<p class="hint">${escapeHtml(ui("connection_no_available_models"))}</p>`;
+    return scope === "server" ? models : `<div class="subsection stack"><h3>${label}</h3>${models}</div>`;
   }
 
   function renderConnectionDetail(data, scope, connection) {
+    const collection = scope === "server";
     if (!connection)
-      return `<div class="hint"><strong>${escapeHtml(ui("connection_empty"))}</strong><p>${escapeHtml(ui("connection_select"))}</p></div>`;
+      return collection
+        ? ""
+        : `<div class="hint"><strong>${escapeHtml(ui("connection_empty"))}</strong><p>${escapeHtml(ui("connection_select"))}</p></div>`;
     const provider = connection.provider;
     const endpoint = connection.endpoint;
     const providerName = provider?.provider || endpoint?.provider;
@@ -6893,71 +6926,96 @@
     const canReplace = provider && !endpoint && !provider.provider.startsWith("custom:");
     const activeTextProvider =
       scope === "server" && canReplace && provider.provider.toLowerCase() === data.activeTextProvider;
+    const buttonClass = collection ? "button small" : "button";
     const remove = endpoint
-      ? `<button class="button danger" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>`
+      ? `<button class="${buttonClass} danger" type="button" data-endpoint-delete="${endpoint.id}" data-provider-scope="${scope}">Remove connection</button>`
       : canReplace && scope === "personal"
-        ? `<button class="button danger" type="button" data-provider-delete="${escapeHtml(provider.provider)}">Remove</button>`
+        ? `<button class="${buttonClass} danger" type="button" data-provider-delete="${escapeHtml(provider.provider)}">Remove</button>`
         : canReplace && (brave || (data.activeTextProvider && !activeTextProvider))
-          ? `<button class="button danger" type="button" data-server-provider-delete="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(connection.name)}" aria-haspopup="dialog">${escapeHtml(ui("connection_remove_server_provider"))}</button>`
+          ? `<button class="${buttonClass} danger" type="button" data-server-provider-delete="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(connection.name)}" aria-haspopup="dialog">${escapeHtml(ui("connection_remove_server_provider"))}</button>`
           : "";
     const menuId = `connection-actions-${scope}`;
     const edit = endpoint?.connectionId
-      ? `<button class="button" type="button" data-endpoint-edit="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_edit"))}</button>`
+      ? `<button class="${buttonClass}" type="button" data-endpoint-edit="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_edit"))}</button>`
       : "";
     const rotation =
       scope === "server" && provider?.supportsRotation
-        ? `<button class="button" type="button" data-provider-rotation="${escapeHtml(provider.provider)}" aria-haspopup="dialog">${escapeHtml(ui("rotation_title"))}</button>`
+        ? `<button class="${buttonClass}" type="button" data-provider-rotation="${escapeHtml(provider.provider)}" aria-haspopup="dialog">${escapeHtml(ui("rotation_title"))}</button>`
         : "";
-    const actions =
-      canReplace || edit || remove
-        ? `<button class="button icon" type="button" popovertarget="${menuId}" aria-label="${escapeHtml(ui("connection_actions"))}" data-tooltip="${escapeHtml(ui("connection_actions"))}">${navigationIcon("ellipsis")}</button><div id="${menuId}" class="action-menu" popover aria-label="${escapeHtml(ui("connection_actions"))}">${edit}${canReplace ? `<button class="button" type="button" data-provider-open="${escapeHtml(provider.provider)}">${escapeHtml(ui("connection_replace_key"))}</button>` : ""}${rotation}${remove}</div>`
-        : "";
-    return `<div class="${parameters.length || providerName?.toLowerCase() === "openrouter" ? "grid" : "stack"}">
-      <section class="panel provider-panel"><header class="panel-header"><div class="heading"><h2>${escapeHtml(connection.name)}</h2>${provider ? `<small>${provider.hasApiKey ? "Encrypted key stored" : "No key stored"}</small>` : ""}${activeTextProvider ? `<small>${escapeHtml(ui("connection_active_text"))}</small>` : ""}</div><div class="actions">${actions}</div></header>${endpoint ? renderEndpointRows({ endpoints: connection.endpoints }, scope) : ""}${brave ? `<p>${escapeHtml(ui("brave_search_key_hint"))}</p>` : renderConnectionModels(data, scope, providerName)}${providerName?.toLowerCase() === "openrouter" ? `<div class="subsection stack"><h3>${escapeHtml(ui("connection_registered_models"))}</h3>${renderOpenRouterRows(data, scope)}</div>` : ""}</section>
+    const replace = canReplace
+      ? `<button class="${buttonClass}" type="button" data-provider-open="${escapeHtml(provider.provider)}">${escapeHtml(ui("connection_replace_key"))}</button>`
+      : "";
+    const actionItems = [edit, replace, rotation, remove].filter(Boolean);
+    const actions = actionItems.length
+      ? `<button class="button icon" type="button" popovertarget="${menuId}" aria-label="${escapeHtml(ui("connection_actions"))}">${navigationIcon("ellipsis")}</button><div id="${menuId}" class="action-menu" popover aria-label="${escapeHtml(ui("connection_actions"))}">${edit}${replace}${rotation}${collection && remove && actionItems.length > 1 ? "<hr>" : ""}${remove}</div>`
+      : "";
+    const openRouter = providerName?.toLowerCase() === "openrouter";
+    const credentialStatus = provider ? (provider.hasApiKey ? "Encrypted key stored" : "No key stored") : "";
+    const endpoints = endpoint ? renderEndpointRows({ endpoints: connection.endpoints }, scope) : "";
+    const models = brave
+      ? `<p class="hint">${escapeHtml(ui("brave_search_key_hint"))}</p>`
+      : renderConnectionModels(data, scope, providerName);
+    if (collection) {
+      const controls = actionItems.length > 2 ? actions : actionItems.join("");
+      return `<section class="card">
+        ${personaCardHead(connection.name, "", controls ? `<div class="actions">${controls}</div>` : "")}
+        <div class="stack">
+          ${credentialStatus || activeTextProvider ? `<div class="chips">${credentialStatus ? `<span class="chip">${escapeHtml(credentialStatus)}</span>` : ""}${activeTextProvider ? `<span class="chip tone">${escapeHtml(ui("connection_active_text"))}</span>` : ""}</div>` : ""}
+          ${endpoints}${models}
+        </div>
+      </section>
+      ${openRouter ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterRows(data, scope)}</section>${renderOpenRouterRegistration(scope)}` : ""}
+      ${parameters.length ? renderPersonalParameters({ parameters }, scope) : ""}`;
+    }
+    return `<div class="${parameters.length || openRouter ? "grid" : "stack"}">
+      <section class="panel provider-panel"><header class="panel-header"><div class="heading"><h2>${escapeHtml(connection.name)}</h2>${credentialStatus ? `<small>${escapeHtml(credentialStatus)}</small>` : ""}${activeTextProvider ? `<small>${escapeHtml(ui("connection_active_text"))}</small>` : ""}</div><div class="actions">${actions}</div></header>${endpoints}${models}${openRouter ? `<div class="subsection stack"><h3>${escapeHtml(ui("connection_registered_models"))}</h3>${renderOpenRouterRows(data, scope)}</div>` : ""}</section>
       <div class="stack">
-      ${
-        providerName?.toLowerCase() === "openrouter"
-          ? `<section class="panel provider-panel">
-        <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connection_provider"))}</p><h2>${escapeHtml(ui("connection_models"))}</h2><p>${escapeHtml(ui("connection_models_hint"))}</p></div></div>
-        <form id="openrouter-form" data-provider-scope="${scope}">
-          <div class="grid"><label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option><option value="transcription">${escapeHtml(ui("model_transcription"))}</option></select></label>
-            <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label></div>
-          <p class="hint" data-openrouter-transcription-hint hidden>${escapeHtml(ui("openrouter_transcription_hint"))}</p>
-          <div class="actions"><button class="button primary" type="submit">${escapeHtml(ui("connection_register_model"))}</button></div>
-        </form>
-      </section>`
-          : ""
-      }
+      ${openRouter ? renderOpenRouterRegistration(scope) : ""}
       ${parameters.length ? renderPersonalParameters({ parameters }, scope) : ""}
       </div>
     </div>`;
   }
 
-  function renderProviders(workspace, scope) {
+  function renderOpenRouterRegistration(scope) {
+    const collection = scope === "server";
+    return `${collection ? "" : '<section class="panel provider-panel">'}
+      <form id="openrouter-form" data-provider-scope="${scope}"${collection ? ' class="card" data-settings-key="server-openrouter-registration" data-fx="track"' : ""}>
+        ${collection ? personaCardHead(ui("connection_register_model"), ui("connection_models_hint")) : `<div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connection_provider"))}</p><h2>${escapeHtml(ui("connection_models"))}</h2><p>${escapeHtml(ui("connection_models_hint"))}</p></div></div>`}
+          <div class="grid"><label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option><option value="transcription">${escapeHtml(ui("model_transcription"))}</option></select></label>
+            <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label></div>
+          <p class="hint" data-openrouter-transcription-hint hidden>${escapeHtml(ui("openrouter_transcription_hint"))}</p>
+        ${collection ? cardSaveActions(ui("connection_register_model")) : `<div class="actions"><button class="button primary" type="submit">${escapeHtml(ui("connection_register_model"))}</button></div>`}
+      </form>${collection ? "" : "</section>"}`;
+  }
+
+  function updateOpenRouterHint(form) {
+    form.querySelector("[data-openrouter-transcription-hint]").hidden =
+      form.elements.capability.value !== "transcription";
+  }
+
+  function renderPersonalProviders(workspace) {
+    const scope = "personal";
     const data = state.providerData[scope];
-    const personal = scope === "personal";
     if (!data) {
-      workspace.innerHTML = `${pageHeader(personal ? "Personal" : "Administration", personal ? "My providers" : "Server providers", "")}${loadingBar(ui("providers_loading"))}`;
+      workspace.innerHTML = `${pageHeader("Personal", "My providers", "")}${loadingBar(ui("providers_loading"))}`;
       loadProviderWorkspace(scope);
       return;
     }
     const { connections, connection } = selectProviderConnection(data, scope);
 
-    const hasPersonalModels = !personal || connections.length > 0;
+    const hasPersonalModels = connections.length > 0;
     if (!hasPersonalModels) state.providerPanel[scope] = "connections";
 
     workspace.innerHTML = `
       ${pageHeader(
-        personal ? "Personal" : "Administration",
-        personal ? "My providers" : "Server providers",
-        personal
-          ? data.byokRequired
-            ? "This server requires personal provider credentials."
-            : "Your encrypted credentials and active personal capabilities."
-          : "Server-owned credentials, endpoints, registrations, and failover.",
+        "Personal",
+        "My providers",
+        data.byokRequired
+          ? "This server requires personal provider credentials."
+          : "Your encrypted credentials and active personal capabilities.",
         refreshButton("provider", ui("refresh_providers"), scope),
       )}
-      <nav class="tabs provider-primary-tabs tabs-parent${state.providerPanel[scope] === "connections" ? " tabs-joined" : ""}" aria-label="${escapeHtml(personal ? "My providers" : "Server providers")}">${[
+      <nav class="tabs provider-primary-tabs tabs-parent${state.providerPanel[scope] === "connections" ? " tabs-joined" : ""}" aria-label="My providers">${[
         ["connections", "connections"],
         ["models", "primary_models"],
         ["fallbacks", "connection_fallbacks"],
@@ -6974,9 +7032,13 @@
         <div class="actions"><button class="button secondary" type="button" data-provider-open aria-haspopup="dialog">${escapeHtml(ui("add_provider"))}</button><button class="button secondary" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button></div>
         </div>${renderConnectionDetail(data, scope, connection)}
       </section>
-      <section class="stack" aria-label="${escapeHtml(ui("model_routing"))}"${state.providerPanel[scope] === "models" ? "" : " hidden"}>${personal ? renderQuickCapabilities(data) + renderPersonalModels(data) : renderServerModels(data) + renderAdvancedServerModels(data) + renderSettingsPanel({ section: "byok" }, false)}</section>
+      <section class="stack" aria-label="${escapeHtml(ui("model_routing"))}"${state.providerPanel[scope] === "models" ? "" : " hidden"}>${renderQuickCapabilities(data) + renderPersonalModels(data)}</section>
       <section class="stack" aria-label="${escapeHtml(ui("connection_fallbacks"))}"${state.providerPanel[scope] === "fallbacks" ? "" : " hidden"}>${renderFallbacks(data, scope)}</section>
-      <dialog id="provider-dialog"  aria-labelledby="provider-dialog-title">
+      ${renderProviderDialogs(data, scope)}`;
+  }
+
+  function renderProviderDialogs(data, scope) {
+    return `<dialog id="provider-dialog" aria-labelledby="provider-dialog-title">
         <form class="stack" id="provider-credential-form" data-provider-scope="${scope}">
           <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connections"))}</p><h2 id="provider-dialog-title">${escapeHtml(ui("add_provider"))}</h2></div></div>
           <label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}</select></label><label class="field">${fieldLabel("API key", ui("provider_key_hint"))}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label>
@@ -7023,6 +7085,75 @@
       </dialog>`;
   }
 
+  const serverProviderPanels = [
+    ["connections", "connections", "plug"],
+    ["models", "primary_models", "layout-grid"],
+    ["fallbacks", "connection_fallbacks", "arrow-up-down"],
+  ];
+
+  function renderServerProviders(workspace) {
+    if (!state.overview.canManage) {
+      workspace.innerHTML = `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("settings_manage_required"))}</strong></div></section>`;
+      return;
+    }
+    if (!workspace.querySelector("#server-providers-stage")) {
+      const title = escapeHtml(ui("nav_server_providers"));
+      workspace.innerHTML = `
+        <section class="banner compact" aria-labelledby="server-providers-title">
+          <div class="banner-info"><div class="stack">
+            <p class="crumb">${escapeHtml(ui("nav_server_administration"))}<span class="kind">${escapeHtml(ui("settings_managers_only"))}</span></p>
+            <h1 id="server-providers-title" data-fx="split">${title}</h1>
+            <p class="banner-text">${escapeHtml(ui("server_providers_hint"))}</p>
+          </div></div>
+          <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("plug")}</span></div>
+          <div class="banner-menu">${refreshButton("provider", ui("refresh_providers"), "server")}</div>
+        </section>
+        <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${title}">
+          ${serverProviderPanels.map(([id, label, icon]) => `<button type="button" id="server-providers-${id}" role="tab" aria-controls="server-providers-stage" data-provider-panel="${id}" data-provider-scope="server">${navigationIcon(icon)}${escapeHtml(ui(label))}</button>`).join("")}
+        </nav>
+        <section id="server-providers-stage" class="stage" role="tabpanel"></section>
+        <div data-server-provider-dialogs></div>`;
+    }
+    const panel = state.providerPanel.server;
+    for (const button of workspace.querySelectorAll(".dock [data-provider-panel]")) {
+      const active = button.dataset.providerPanel === panel;
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    const stage = workspace.querySelector("#server-providers-stage");
+    stage.setAttribute("aria-labelledby", `server-providers-${panel}`);
+    const data = state.providerData.server;
+    if (!data) {
+      if (!stage.hasAttribute("aria-busy")) {
+        stage.setAttribute("aria-busy", "true");
+        stage.innerHTML = loadingBar(ui("providers_loading"));
+        void loadProviderWorkspace("server");
+      }
+      return;
+    }
+    stage.removeAttribute("aria-busy");
+    workspace.querySelector("[data-server-provider-dialogs]").innerHTML = renderProviderDialogs(data, "server");
+    if (panel === "models") {
+      stage.innerHTML = `<div class="card-columns">${renderServerModels(data)}${renderAdvancedServerModels(data)}${renderSettingsPanel({ section: "byok" })}</div>`;
+    } else if (panel === "fallbacks") {
+      stage.innerHTML = renderFallbacks(data, "server");
+    } else {
+      const { connections, connection } = selectProviderConnection(data, "server");
+      const add = `<button class="button small primary" type="button" data-provider-open aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("add_provider"))}</button>`;
+      const register = `<button class="button small" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button>`;
+      stage.innerHTML = connections.length
+        ? `<div class="toolbar"><div class="actions">${register}${add}</div></div>
+          <div class="split" data-server-provider-connections>
+            <section class="card">
+              ${personaCardHead(ui("connections"))}
+              <div class="rows">${connections.map((entry) => `<button class="item pick" type="button" data-connection-select="${escapeHtml(entry.key)}" data-provider-scope="server" aria-current="${entry.key === connection?.key}"><strong>${escapeHtml(entry.name)}</strong></button>`).join("")}</div>
+            </section>
+            <div class="col" data-server-provider-detail>${renderConnectionDetail(data, "server", connection)}</div>
+          </div>`
+        : `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("connection_empty"))}</strong><div class="row">${register}${add}</div></div></section>`;
+    }
+  }
+
   const providerLoadVersion = { personal: 0, server: 0 };
 
   async function loadProviderWorkspace(scope, notify = false) {
@@ -7042,8 +7173,13 @@
       toast(error.message, "error");
       const workspace = document.querySelector("[data-dashboard-view]");
       const expectedView = scope === "personal" ? "personal-providers" : "server-providers";
-      if (workspace && state.view === expectedView)
-        workspace.innerHTML = `<div class="empty"><strong>${escapeHtml(error.message)}</strong></div>`;
+      if (workspace && state.view === expectedView) {
+        if (scope === "server") {
+          const stage = workspace.querySelector("#server-providers-stage");
+          stage.removeAttribute("aria-busy");
+          stage.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+        } else workspace.innerHTML = `<div class="empty"><strong>${escapeHtml(error.message)}</strong></div>`;
+      }
       return false;
     }
   }
@@ -7107,6 +7243,7 @@
       state.overview = await api(`/guilds/${guildId}/overview`);
       if (
         (state.view === "personal-spotlights" && state.overview.guild.isDirectMessage) ||
+        (state.view === "server-providers" && !state.overview.canManage) ||
         (["moderation", "channel-settings"].includes(state.view) &&
           (!state.overview.canManage || state.overview.guild.isDirectMessage))
       )
@@ -7205,8 +7342,8 @@
       await refreshProviders("server");
       if (stillHere()) {
         focusNavigation(
-          document.querySelector('[data-connection-select][aria-selected="true"]')
-            ? '[data-connection-select][aria-selected="true"]'
+          document.querySelector('[data-connection-select][aria-current="true"]')
+            ? '[data-connection-select][aria-current="true"]'
             : "[data-provider-open]",
         );
       }
@@ -7587,7 +7724,10 @@
     const fields = form.querySelector("[data-connection-fields]");
     const save = form.querySelector('[type="submit"]');
     const focusMenu = () => {
-      if (guildId === state.guildId) focusNavigation(`[popovertarget="connection-actions-${scope}"]`);
+      if (guildId === state.guildId)
+        focusNavigation(
+          `[popovertarget="connection-actions-${scope}"], [data-endpoint-edit="${connectionId}"][data-provider-scope="${scope}"]`,
+        );
     };
     form.querySelector("[data-connection-cancel]").onclick = () => dialog.close();
     dialog.addEventListener("cancel", (event) => {
@@ -7912,7 +8052,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], .deck-card[aria-pressed]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];
@@ -8165,7 +8305,7 @@
     if (event.target.closest("[data-lorebook-channel-settings]")) {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
-      if (!(await confirmLorebookEntryChange(document.querySelector("#lorebook-workspace")))) return;
+      if (!(await confirmDraftDiscard(document.querySelector("#lorebook-workspace")))) return;
       openChannelMemorySettings();
       return;
     }
@@ -8175,7 +8315,7 @@
       const target = document.querySelector("#lorebook-workspace");
       const browser = target.querySelector("[data-lorebook-browser]");
       const editor = target.querySelector("#lorebook-editor-host");
-      if (!(await confirmLorebookEntryChange(editor)) || !editor.isConnected) return;
+      if (!(await confirmDraftDiscard(editor)) || !editor.isConnected) return;
       const selection = lorebookSelections.get(lorebookSelectionKey(activeLorebookLineage()));
       editor.hidden = true;
       editor.replaceChildren();
@@ -8503,14 +8643,36 @@
     }
     const connectionTab = event.target.closest("button[data-connection-select]");
     if (connectionTab) {
-      state.providerConnection[connectionTab.dataset.providerScope] = connectionTab.dataset.connectionSelect;
+      const { providerScope, connectionSelect } = connectionTab.dataset;
+      if (providerScope === "server") {
+        if (savingForms || connectionSelect === state.providerConnection.server) return;
+        const detail = document.querySelector("[data-server-provider-detail]");
+        if (!(await confirmDraftDiscard(detail)) || !connectionTab.isConnected) return;
+        const data = state.providerData.server;
+        if (!data) return;
+        state.providerConnection.server = connectionSelect;
+        const { connection } = selectProviderConnection(data, "server");
+        for (const button of connectionTab.parentElement.children)
+          button.setAttribute("aria-current", String(button === connectionTab));
+        window.TomoriFX.swap(detail, renderConnectionDetail(data, "server", connection));
+        initDraftForms(detail);
+        enhanceDashboard(detail);
+        connectionTab.focus({ preventScroll: true });
+        return;
+      }
+      state.providerConnection[providerScope] = connectionSelect;
       renderView();
       focusNavigation(`button[data-connection-select="${CSS.escape(connectionTab.dataset.connectionSelect)}"]`);
       return;
     }
     const providerPanel = event.target.closest("[data-provider-panel]");
     if (providerPanel) {
-      state.providerPanel[providerPanel.dataset.providerScope] = providerPanel.dataset.providerPanel;
+      const { providerScope, providerPanel: panel } = providerPanel.dataset;
+      if (providerScope === "server") {
+        if (panel === state.providerPanel.server || !(await confirmDashboardSectionChange())) return;
+        if (!providerPanel.isConnected) return;
+      }
+      state.providerPanel[providerScope] = panel;
       renderView();
       focusNavigation(`[data-provider-panel="${providerPanel.dataset.providerPanel}"]`);
       return;
@@ -8812,8 +8974,7 @@
       event.target.form.querySelector("[data-persona-humanizer-fields]").hidden = event.target.value === "inherit";
     }
     if (event.target.matches('#openrouter-form select[name="capability"]')) {
-      event.target.form.querySelector("[data-openrouter-transcription-hint]").hidden =
-        event.target.value !== "transcription";
+      updateOpenRouterHint(event.target.form);
     }
     if (event.target.id === "character-reference-file") {
       const file = event.target.files?.[0];
@@ -8822,11 +8983,7 @@
       return;
     }
     if (event.target.matches('#fallback-form select[name^="fallback-"]')) {
-      const slots = [...event.target.form.querySelectorAll("[data-fallback-slot]")];
-      const lastFilled = slots.reduce((last, slot, index) => (slot.querySelector("select").value ? index : last), -1);
-      slots.forEach((slot, index) => {
-        slot.hidden = index > lastFilled + 1;
-      });
+      updateFallbackSlots(event.target.form);
     }
     if (event.target.matches("[data-design-remember]")) {
       setRememberDesign(event.target.checked);
@@ -9249,7 +9406,8 @@
           });
         });
         form.reset();
-        form.querySelector("[data-openrouter-transcription-hint]").hidden = true;
+        updateOpenRouterHint(form);
+        if (scope === "server") completeFormSave(form);
         const message =
           result?.model?.capability === "transcription"
             ? ui("openrouter_transcription_saved")
@@ -9321,6 +9479,7 @@
             }),
           });
         });
+        completeFormSave(form);
         toast("Primary models saved");
         await refreshProviders("server");
       } catch (error) {
@@ -9697,6 +9856,7 @@
       if (window.location.hash === "#lorebooks") state.view = "lorebooks";
       if (window.location.hash === "#settings") state.view = "settings";
       if (window.location.hash === "#channel-settings") state.view = "channel-settings";
+      if (window.location.hash === "#server-providers") state.view = "server-providers";
       await selectGuild(guild.id);
       if (window.location.hash === "#channel-scoped-memory") openChannelMemorySettings();
     } catch {

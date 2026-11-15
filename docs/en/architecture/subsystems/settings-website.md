@@ -398,7 +398,9 @@ The integration is isolated under `src/web`:
   named connection while preserving its models. A blank token keeps the stored
   credential. Removing a connection removes its models; switch away from an
   active text connection before removing it.
-- `Server providers` uses the Discord removal operation for saved providers. The
+- `Server providers` lists connections beside their model registrations and
+  provider parameters. Primary models and the fallback chain have their own
+  sections. Removing a saved provider uses the Discord operation. The
   active text provider is protected. Removing another provider also removes its
   saved credential, rotation keys, and server-specific model registrations.
 - Sprite routes require server management permission, including image previews

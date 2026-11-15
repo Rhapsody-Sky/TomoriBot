@@ -596,9 +596,19 @@ body[data-theme="dark"] .boot-logo {
   min-width: 140px;
 }
 @container content (min-width: 861px) {
-  [data-channel-settings].split {
+  :is([data-channel-settings], [data-server-provider-connections]).split {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
   }
+}
+
+[data-server-provider-connections] .item,
+[data-server-provider-detail] {
+  overflow-wrap: anywhere;
+}
+
+#fallback-form[data-provider-scope="server"] .chain > li:nth-last-child(1 of :not([hidden])) {
+  padding-block-end: 0;
+  border-color: transparent;
 }
 
 [data-channel-settings] .card-head:has([data-channel-prompt]) {

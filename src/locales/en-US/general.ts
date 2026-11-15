@@ -126,6 +126,11 @@ export default {
       interface_nav_global: "Global",
       interface_nav_server_settings: "Server Settings",
       interface_nav_server_administration: "Server Administration",
+      interface_nav_server_providers: "Server providers",
+      interface_server_providers_hint:
+        "Manage provider credentials, custom endpoints, model assignments, and fallbacks.",
+      interface_server_primary_models_hint:
+        "These models are the server defaults. Personas, channels, and personal providers can override them.",
       interface_channel_settings_hint: "Choose channels, then set how Tomori behaves and handles context in them.",
       interface_channel_search: "Search channels or categories",
       interface_channel_select_all: "Select all shown",
