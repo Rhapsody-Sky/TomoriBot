@@ -97,6 +97,9 @@ Personal Spotlight narrows which personas you can trigger in a specific channel,
 assigns a fallback auto-trigger persona for your messages there. It is scoped to you and one
 channel: it does not affect anyone else in the server.
 
-Configure it in `/personal config` > `Advanced` > `Personal Spotlight`, or open `Personal spotlights`
-for the selected server in the dashboard. Spotlight respects server persona permissions and
-restricts persona handoffs to the personas you selected. A timed spotlight expires automatically.
+Configure it in `/personal config` > `Advanced` > `Personal Spotlight`, or choose a channel in
+the dashboard's `Personal spotlights` page. To remove a saved spotlight after losing access to
+its channel, select it under `Unavailable channels`.
+
+Spotlight respects server persona permissions and restricts persona handoffs to the personas you
+selected. A timed spotlight expires automatically.

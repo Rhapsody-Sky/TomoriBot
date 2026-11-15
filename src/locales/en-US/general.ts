@@ -1105,7 +1105,9 @@ export default {
         "Personas will follow their usual server and channel rules for your messages here.",
       interface_spotlight_channel: "Text channel",
       interface_spotlight_channel_unavailable: "Channel unavailable",
-      interface_spotlight_unavailable_hint: "You can remove this spotlight, but you no longer have access to edit it.",
+      interface_spotlight_unavailable_channels: "Unavailable channels",
+      interface_spotlight_unavailable_hint:
+        "Editing requires access to the channel. You can still remove the spotlight here.",
       interface_spotlight_no_channels: "There are no available text channels without a spotlight.",
       interface_spotlight_personas: "Allowed personas",
       interface_spotlight_choose_personas: "Choose personas",

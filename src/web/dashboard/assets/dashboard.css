@@ -643,24 +643,20 @@ body[data-theme="dark"] .boot-logo {
   padding: 0 var(--pad) var(--pad);
 }
 
-[data-spotlight-picker] .item > :first-child {
-  overflow-wrap: anywhere;
-}
-
 [data-channel-persona-preview] .sticker {
   width: var(--space-8);
 }
 
-[data-channel-personas] .quick > [role="img"] {
+:is([data-channel-personas], [data-spotlight-details]) .quick > [role="img"] {
   inline-size: calc(2 * var(--space-6));
 }
 
-[data-channel-personas] .quick > [role="img"]:nth-child(even) .sticker {
+:is([data-channel-personas], [data-spotlight-details]) .quick > [role="img"]:nth-child(even) .sticker {
   --tilt: 3deg;
 }
 
 @media (max-width: 800px) {
-  [data-channel-personas] .quick > [role="img"]:nth-child(n + 4) {
+  :is([data-channel-personas], [data-spotlight-details]) .quick > [role="img"]:nth-child(n + 4) {
     display: none;
   }
 }

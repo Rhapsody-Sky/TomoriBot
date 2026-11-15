@@ -16,6 +16,66 @@ async function dashboardFunction(name: string): Promise<string> {
 }
 
 describe("dashboard connections", () => {
+  it("restores the save label without turning an expired spark into button text", async () => {
+    const source = await dashboardFunction("withBusyForm");
+    const label = { textContent: "save" };
+    const control = {
+      disabled: false,
+      childNodes: [label],
+      get textContent() {
+        return this.childNodes.map((node) => node.textContent).join("");
+      },
+      set textContent(text: string) {
+        this.childNodes = [{ textContent: text }];
+      },
+      replaceChildren(fragment: { childNodes: (typeof label)[] }) {
+        this.childNodes = fragment.childNodes;
+      },
+    };
+    const savedContent = {
+      childNodes: [] as (typeof label)[],
+      append(...nodes: (typeof label)[]) {
+        this.childNodes = nodes;
+        control.childNodes = [];
+      },
+    };
+    const withBusyForm = runInNewContext(`${source}; withBusyForm`, {
+      document: { activeElement: null, createDocumentFragment: () => savedContent },
+      state: { overview: {} },
+      savingForms: 0,
+      ui: String,
+    }) as (form: object, action: () => Promise<void>) => Promise<void>;
+    const classes = new Set<string>();
+    const form = {
+      querySelectorAll: () => [control],
+      querySelector: () => control,
+      contains: () => false,
+      classList: {
+        contains: (name: string) => classes.has(name),
+        add: (name: string) => classes.add(name),
+        remove: (name: string) => classes.delete(name),
+      },
+      setAttribute: () => {},
+      removeAttribute: () => {},
+    };
+    const failure = new Error();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const burst = { textContent: "✦✧" };
+      control.childNodes.push(burst);
+      await expect(
+        withBusyForm(form, async () => {
+          expect(control.textContent).toBe("saving");
+          expect(control.disabled).toBe(true);
+          savedContent.childNodes = savedContent.childNodes.filter((node) => node !== burst);
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(control.childNodes[0]).toBe(label);
+      expect(control.textContent).toBe("save");
+      expect(control.disabled).toBe(false);
+    }
+  });
+
   it("indexes every persona and keeps management settings restricted to admins", async () => {
     const source = await dashboardFunction("buildSettingsSearchIndex");
     const overview = {

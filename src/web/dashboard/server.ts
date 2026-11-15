@@ -1502,6 +1502,7 @@ export function createDashboardApp(client: Client) {
           "spotlight_remove_hint",
           "spotlight_channel",
           "spotlight_channel_unavailable",
+          "spotlight_unavailable_channels",
           "spotlight_unavailable_hint",
           "spotlight_no_channels",
           "spotlight_personas",
