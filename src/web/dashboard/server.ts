@@ -1492,6 +1492,7 @@ export function createDashboardApp(client: Client) {
           "spotlights_hint",
           "spotlights_empty",
           "spotlight_active",
+          "spotlight_refresh",
           "spotlight_add",
           "spotlight_edit",
           "spotlight_remove",

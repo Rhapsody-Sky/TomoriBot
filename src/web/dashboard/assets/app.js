@@ -1112,6 +1112,7 @@
       "channel-settings",
       "server-providers",
       "moderation",
+      "personal-spotlights",
     ].includes(state.view);
   }
 
@@ -2248,20 +2249,31 @@
   }
 
   function renderPersonalSpotlights(workspace) {
-    workspace.innerHTML = `${pageHeader(state.overview.guild.name, ui("spotlights"), ui("spotlights_hint"))}<section class="panel stack" id="personal-spotlights"></section>`;
+    workspace.innerHTML = `<section class="banner compact" aria-labelledby="spotlights-title">
+      <div class="banner-info"><div class="stack">
+        <p class="crumb">${escapeHtml(ui("nav_server_settings"))}</p>
+        <h1 id="spotlights-title" data-fx="split">${escapeHtml(ui("spotlights"))}</h1>
+        <p class="banner-text">${escapeHtml(ui("spotlights_hint"))}</p>
+      </div></div>
+      <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("radio")}</span></div>
+    </section>
+    <section class="stage"><section class="card" id="personal-spotlights"></section></section>`;
     void loadPersonalSpotlights(workspace.querySelector("#personal-spotlights"));
   }
 
   async function loadPersonalSpotlights(host) {
     const path = `/guilds/${state.guildId}/personal-spotlights`;
+    host.setAttribute("aria-busy", "true");
     host.innerHTML = loadingBar(ui("spotlights"));
     try {
       const data = await api(path);
       if (host.isConnected) renderPersonalSpotlightList(host, path, data);
     } catch (error) {
       if (!host.isConnected) return;
-      host.innerHTML = `<div class="row"><p role="alert">${escapeHtml(error.message)}</p>${refreshButton("spotlight", ui("refresh_all"))}</div>`;
+      host.innerHTML = `<div class="stack"><p class="notice error" role="alert">${escapeHtml(error.message)}</p><div class="row"><button class="button small" type="button" data-spotlight-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("spotlight_refresh"))}</button></div></div>`;
       host.querySelector("[data-spotlight-refresh]").onclick = () => loadPersonalSpotlights(host);
+    } finally {
+      host.removeAttribute("aria-busy");
     }
   }
 
@@ -2274,26 +2286,36 @@
       (channel) =>
         (!restricted || allowed.includes(channel.id)) && !data.spotlights.some((row) => row.channelId === channel.id),
     );
-    host.innerHTML = `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui("spotlight_active"))}</h2></div><div class="actions">
-      ${refreshButton("spotlight", ui("spotlights"))}
-      <button class="button primary" type="button" data-spotlight-add aria-haspopup="dialog"${newChannels.length ? "" : " disabled"}>${navigationIcon("plus")}${escapeHtml(ui("spotlight_add"))}</button>
-    </div></header>
+    const add = `<button class="button small primary" type="button" data-spotlight-add aria-haspopup="dialog"${newChannels.length ? "" : " disabled"}>${navigationIcon("plus")}${escapeHtml(ui("spotlight_add"))}</button>`;
+    const actions = `<div class="actions"><button class="button small icon" type="button" data-spotlight-refresh aria-label="${escapeHtml(ui("spotlight_refresh"))}">${navigationIcon("refresh-cw")}</button>${data.spotlights.length ? add : ""}</div>`;
+    host.innerHTML = `${personaCardHead(ui("spotlight_active"), "", actions)}<div class="stack">
       ${
         data.spotlights.length
-          ? data.spotlights
+          ? `<div class="rows">${data.spotlights
               .map((row) => {
                 const channel = channels.get(row.channelId);
                 const names = row.personaIds.map((id) => personas.get(id)).filter(Boolean);
                 const auto = personas.get(row.autoTriggerPersonaId);
-                return `<article class="subsection stack"><div class="row">
-          <div class="heading"><h3>${escapeHtml(channel ? `#${channel.name}` : ui("spotlight_channel_unavailable"))}</h3><small>${escapeHtml(row.expiresAt ? formatDate(row.expiresAt) : ui("spotlight_permanent"))}</small></div>
-          <div class="actions">${channel ? `<button class="button" type="button" data-spotlight-edit="${escapeHtml(row.channelId)}" aria-haspopup="dialog">${escapeHtml(ui("spotlight_edit"))}</button>` : ""}<button class="button danger" type="button" data-spotlight-remove="${escapeHtml(row.channelId)}">${escapeHtml(ui("spotlight_remove"))}</button></div>
-        </div>${names.length ? `<p>${escapeHtml(names.join(", "))}</p>` : ""}${auto ? `<p><strong>${escapeHtml(ui("spotlight_auto"))}:</strong> ${escapeHtml(auto)}</p>` : ""}</article>`;
+                const id = escapeHtml(row.channelId);
+                const expires = row.expiresAt
+                  ? `<time datetime="${escapeHtml(row.expiresAt)}">${escapeHtml(formatDate(row.expiresAt))}</time>`
+                  : escapeHtml(ui("spotlight_permanent"));
+                return `<article class="item" aria-labelledby="spotlight-channel-${id}">
+                  <div>
+                    <p><strong id="spotlight-channel-${id}" dir="auto">${escapeHtml(channel ? `#${channel.name}` : ui("spotlight_channel_unavailable"))}</strong></p>
+                    <div class="item-meta">${names.length ? `<span dir="auto">${escapeHtml(names.join(", "))}</span>` : ""}<span class="chip">${expires}</span></div>
+                    ${auto ? `<div class="item-meta"><span>${escapeHtml(ui("spotlight_auto"))}: <bdi>${escapeHtml(auto)}</bdi></span></div>` : ""}
+                  </div>
+                  <div class="item-actions">
+                    ${channel ? `<button class="button small icon" type="button" data-spotlight-edit="${id}" aria-haspopup="dialog" aria-label="${escapeHtml(ui("spotlight_edit"))}" aria-describedby="spotlight-channel-${id}">${navigationIcon("pencil")}</button>` : ""}
+                    <button class="button small icon danger" type="button" data-spotlight-remove="${id}" aria-haspopup="dialog" aria-label="${escapeHtml(ui("spotlight_remove"))}" aria-describedby="spotlight-channel-${id}">${navigationIcon("trash-2")}</button>
+                  </div>
+                </article>`;
               })
-              .join("")
-          : `<p class="hint">${escapeHtml(ui("spotlights_empty"))}</p>`
+              .join("")}</div>`
+          : `<div class="empty-note"><strong>${escapeHtml(ui("spotlights_empty"))}</strong>${add}</div>`
       }
-      ${!newChannels.length ? `<p class="hint">${escapeHtml(ui("spotlight_no_channels"))}</p>` : ""}`;
+      ${!newChannels.length ? `<p class="hint">${escapeHtml(ui("spotlight_no_channels"))}</p>` : ""}</div>`;
     host.querySelector("[data-spotlight-refresh]").onclick = () => loadPersonalSpotlights(host);
     const edit = (row) => {
       openPersonalSpotlightEditor(path, row, row ? [channels.get(row.channelId)] : newChannels, (saved) => {
@@ -2330,35 +2352,50 @@
   function openPersonalSpotlightEditor(path, row, channels, onSave) {
     const personas = state.overview.personas;
     const title = ui(row ? "spotlight_edit" : "spotlight_add");
+    const personaSearch = escapeHtml(ui("spotlight_search_personas"));
     const dialog = document.createElement("dialog");
-    dialog.className = "dialog wide";
+    dialog.id = "spotlight-editor";
+    dialog.className = "collection";
     dialog.setAttribute("aria-labelledby", "spotlight-editor-title");
-    dialog.innerHTML = `<form class="stack" data-spotlight-form>
-      <header class="panel-header"><div class="heading"><h2 id="spotlight-editor-title">${escapeHtml(title)}</h2></div></header>
-      ${row ? `<p><strong>${escapeHtml(ui("spotlight_channel"))}:</strong> #${escapeHtml(channels[0].name)}</p>` : renderChannelSelector("channelId", [], true, channels)}
-      <fieldset class="stack"><legend>${escapeHtml(ui("spotlight_personas"))}</legend>
-        <label class="field">${fieldLabel(ui("spotlight_search_personas"))}<input type="search" data-spotlight-persona-search></label>
-        <div class="channel-choices">${personas
-          .map(
-            (persona) =>
-              `<label class="channel-choice" data-spotlight-persona-name="${escapeHtml(persona.nickname.toLowerCase())}"><input type="checkbox" name="personaIds" value="${persona.personaId}"${row?.personaIds.includes(persona.personaId) ? " checked" : ""}>${personaAvatar(persona, "avatar")}<span>${escapeHtml(persona.nickname)}</span></label>`,
-          )
-          .join("")}</div>
-      </fieldset>
-      <div class="grid">
-        <label class="field">${fieldLabel(ui("spotlight_auto"), ui("spotlight_auto_hint"))}<select name="autoTriggerPersonaId" data-searchable></select></label>
-        <label class="field">${fieldLabel(ui("spotlight_hours"), ui(row ? "spotlight_keep_expiry" : "spotlight_hours_hint"))}<input type="number" name="durationHours" min="0" max="999999" step="1" value="${row ? "" : "0"}"${row ? "" : " required"}></label>
-      </div>
-      <footer class="actions form-actions"><button class="button" type="button" data-spotlight-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></footer>
+    dialog.innerHTML = `<form data-spotlight-form>
+      <header class="collection-head"><div class="collection-title">
+        <h2 id="spotlight-editor-title">${escapeHtml(title)}</h2>
+        <button class="button icon" type="button" data-spotlight-cancel aria-label="${escapeHtml(ui("control_close_dialog"))}">${navigationIcon("x")}</button>
+      </div></header>
+      <div class="collection-body"><div class="split">
+        <div class="col">
+          ${row ? `<p><strong>${escapeHtml(ui("spotlight_channel"))}:</strong> <bdi>#${escapeHtml(channels[0].name)}</bdi></p>` : renderChannelSelector("channelId", [], true, channels, { required: true, title: ui("spotlight_channel") })}
+          <label class="field">${fieldLabel(ui("spotlight_auto"), ui("spotlight_auto_hint"))}<select name="autoTriggerPersonaId" data-searchable></select></label>
+          <label class="field">${fieldLabel(ui("spotlight_hours"), ui(row ? "spotlight_keep_expiry" : "spotlight_hours_hint"))}<input type="number" name="durationHours" min="0" max="999999" step="1" value="${row ? "" : "0"}"${row ? "" : " required"}></label>
+        </div>
+        <section aria-labelledby="spotlight-personas-title">
+          <header class="card-head">
+            <div><h3 id="spotlight-personas-title">${escapeHtml(ui("spotlight_personas"))}</h3></div>
+            <label class="field"><span class="field-label sr-only">${personaSearch}</span><input type="search" data-persona-picker-search placeholder="${personaSearch}" autofocus></label>
+          </header>
+          <div class="deck">${personas
+            .map(
+              (persona) =>
+                `<button class="deck-card" type="button" value="${persona.personaId}" aria-pressed="${Boolean(row?.personaIds.includes(persona.personaId))}" data-persona-search="${personaPickerSearchText(persona)}">${personaPickerTileContent(persona)}</button>`,
+            )
+            .join("")}</div>
+          <div class="empty-note" data-persona-picker-empty${personas.length ? " hidden" : ""}><strong>${escapeHtml(ui("persona_picker_no_results"))}</strong></div>
+          <input type="hidden" name="personaIds">
+        </section>
+      </div></div>
+      <footer><div class="actions"><button class="button" type="button" data-spotlight-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></div></footer>
     </form>`;
     document.body.append(dialog);
     const form = dialog.querySelector("form");
+    const selection = form.elements.personaIds;
     const selectedIds = () =>
-      [...form.querySelectorAll('[name="personaIds"]:checked')].map((input) => Number(input.value));
-    const channelId = () => row?.channelId || form.elements.channelId.value;
+      [...form.querySelectorAll('.deck-card[aria-pressed="true"]')].map((button) => Number(button.value));
+    const channelId = () => row?.channelId || form.querySelector('[name="channelId"]:checked')?.value;
     const auto = form.elements.autoTriggerPersonaId;
+    const submit = form.querySelector('[type="submit"]');
     const update = (current = auto.value) => {
       const selected = new Set(selectedIds());
+      selection.value = [...selected].join(",");
       auto.replaceChildren(new Option(ui("spotlight_auto_none"), ""));
       personas
         .filter((persona) => selected.has(persona.personaId))
@@ -2366,18 +2403,19 @@
           auto.add(new Option(persona.nickname, persona.personaId));
         });
       auto.value = selected.has(Number(current)) ? current : "";
-      form.querySelector('[type="submit"]').disabled = !selected.size || !channelId();
+      submit.disabled = !selected.size || !channelId();
     };
     form.addEventListener("change", (event) => {
-      if (["personaIds", "channelId"].includes(event.target.name)) update();
+      if (event.target.name === "channelId") submit.disabled = !selection.value || !channelId();
     });
-    form.querySelector("[data-spotlight-persona-search]").oninput = (event) => {
-      const query = event.target.value.trim().toLowerCase();
-      form.querySelectorAll("[data-spotlight-persona-name]").forEach((label) => {
-        label.hidden = !label.dataset.spotlightPersonaName.includes(query);
-      });
-    };
-    form.querySelector("[data-spotlight-cancel]").onclick = () => dialog.close();
+    form.addEventListener("click", (event) => {
+      if (event.target.closest("[data-spotlight-cancel]")) return dialog.close();
+      const card = event.target.closest(".deck-card");
+      if (!card || card.disabled) return;
+      card.setAttribute("aria-pressed", String(card.getAttribute("aria-pressed") !== "true"));
+      update();
+      selection.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (form.classList.contains("is-saving") || !channelId() || !selectedIds().length) return;
@@ -5259,7 +5297,9 @@
           : `<label hidden><input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(id)}" checked></label>`,
       )
       .join("");
-    const collection = ["settings", "channel-settings"].includes(state.view) || (state.view === "personas" && !single);
+    const collection =
+      ["settings", "channel-settings", "personal-spotlights"].includes(state.view) ||
+      (state.view === "personas" && !single);
     if (collection) {
       const rows = [...groups.values()]
         .map(
@@ -8196,7 +8236,7 @@
       openSettingsSearch();
       return;
     }
-    const picker = event.target.closest?.("#persona-picker-dialog, #channel-personas-dialog");
+    const picker = event.target.closest?.("#persona-picker-dialog, #channel-personas-dialog, #spotlight-editor");
     if (picker && event.key === "/" && event.target.type !== "search") {
       event.preventDefault();
       picker.querySelector("[data-persona-picker-search]").focus();
@@ -9994,6 +10034,7 @@
       if (window.location.hash === "#channel-settings") state.view = "channel-settings";
       if (window.location.hash === "#server-providers") state.view = "server-providers";
       if (window.location.hash === "#moderation") state.view = "moderation";
+      if (window.location.hash === "#personal-spotlights") state.view = "personal-spotlights";
       await selectGuild(guild.id);
       if (window.location.hash === "#channel-scoped-memory") openChannelMemorySettings();
     } catch {
