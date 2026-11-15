@@ -2509,7 +2509,7 @@
       `<button class="button primary" type="button" data-moderation-add aria-haspopup="dialog"${disabled ? " disabled" : ""}>${navigationIcon("plus")}${escapeHtml(ui(key))}</button>`;
     const removeButton = (action, index, description, compactAction) => {
       const label = escapeHtml(ui(action));
-      return `<div class="item-actions"><button class="button small danger" type="button" data-moderation-remove="${index}" aria-describedby="${description}" aria-haspopup="dialog"${compactAction ? ` aria-label="${label}"` : ""}>${compactAction ? escapeHtml(ui(compactAction)) : label}</button></div>`;
+      return `<button class="button small danger" type="button" data-moderation-remove="${index}" aria-describedby="${description}" aria-haspopup="dialog"${compactAction ? ` aria-label="${label}"` : ""}>${compactAction ? `<span data-restriction-wide>${label}</span><span data-restriction-compact>${escapeHtml(ui(compactAction))}</span>` : label}</button>`;
     };
     const removals = [];
     let availableRoles;
@@ -2535,14 +2535,14 @@
         availableRoles = data.roles.filter(({ id }) => !allowed.has(id));
         entries = data.allowedRoleIds.map((id) => ({ id, name: names.get(id) }));
       }
-      const listRows = entries.map((entry, index) => {
+      const tableRows = entries.map((entry, index) => {
         const id = roles ? entry.id : entry.userId;
         const name = entry.name || id;
         const searchText = [name, id, entry.personaName].join(" ").toLowerCase();
         const rowId = `moderation-entry-${index}`;
         const detail = entry.name ? id : roles ? ui("moderation_role_unavailable") : "";
         let description = rowId;
-        let restriction = "";
+        let restrictionCells = "";
         if (roles) {
           removals.push({
             title: ui("moderation_remove_role").replace("{name}", () => name),
@@ -2561,7 +2561,10 @@
           });
           const type = ui(entry.type === "mute" ? "moderation_persona_mute" : "moderation_persona_block");
           const date = formatDate(entry.expiresAt);
-          restriction = `<div class="item-meta"><span id="${personaId}" dir="auto">${escapeHtml(entry.personaName)}</span><span class="chip">${escapeHtml(type)}</span><time datetime="${escapeHtml(entry.expiresAt)}">${escapeHtml(ui("moderation_expires").replace("{date}", () => date))}</time></div>`;
+          const expiresAt = escapeHtml(entry.expiresAt);
+          restrictionCells = `<td><span id="${personaId}" dir="auto">${escapeHtml(entry.personaName)}</span><small class="hint" data-restriction-compact>${escapeHtml(type)}<br><time datetime="${expiresAt}">${escapeHtml(ui("moderation_expires").replace("{date}", () => date))}</time></small></td>
+          <td data-restriction-wide>${escapeHtml(type)}</td>
+          <td data-restriction-wide><time datetime="${expiresAt}">${escapeHtml(date)}</time></td>`;
         } else {
           removals.push({
             title: ui("moderation_remove_user").replace("{name}", () => name),
@@ -2569,10 +2572,10 @@
             body: { action: "unblockUser", userId: id },
           });
         }
-        return `<article class="item" role="listitem" data-moderation-search="${escapeHtml(searchText)}"${restrictions ? ` data-restriction-type="${escapeHtml(entry.type)}"` : ""}>
-          <div><strong id="${rowId}" dir="auto">${escapeHtml(name)}</strong>${detail ? `<div class="item-meta">${escapeHtml(detail)}</div>` : ""}${restriction}</div>
-          ${removeButton(action, index, description, restrictions ? "moderation_lift_compact" : undefined)}
-        </article>`;
+        return `<tr data-moderation-search="${escapeHtml(searchText)}"${restrictions ? ` data-restriction-type="${escapeHtml(entry.type)}"` : ""}>
+          <th scope="row" id="${rowId}"><strong dir="auto">${escapeHtml(name)}</strong>${detail ? `<small class="hint">${escapeHtml(detail)}</small>` : ""}</th>
+          ${restrictionCells}<td>${removeButton(action, index, description, restrictions ? "moderation_lift_compact" : undefined)}</td>
+        </tr>`;
       });
       const add = roles
         ? addButton("moderation_add_role", !availableRoles.length)
@@ -2582,7 +2585,7 @@
       if (add) actions.insertAdjacentHTML("beforeend", add);
       host.innerHTML = `<section class="card" data-moderation-list="${moderationTab}">${personaCardHead(ui(heading), ui(`${heading}_hint`))}
         ${
-          listRows.length
+          tableRows.length
             ? `<div class="stack"><div class="grid">
           <label class="field">${fieldLabel(ui(searchLabel))}<input type="search" data-moderation-query value="${escapeHtml(filters.query)}"></label>
           ${
@@ -2602,16 +2605,28 @@
               : ""
           }
         </div>
-        <div class="rows" role="list" aria-label="${escapeHtml(ui(heading))}">${listRows.join("")}</div>
+        <div class="table-wrap"><table aria-label="${escapeHtml(ui(heading))}">
+          <thead><tr>
+            <th scope="col">${escapeHtml(ui(roles ? "moderation_role_column" : "moderation_member_column"))}</th>
+            ${
+              restrictions
+                ? `<th scope="col">${escapeHtml(ui("moderation_persona_column"))}</th>
+            <th scope="col" data-restriction-wide>${escapeHtml(ui("moderation_restriction_type"))}</th>
+            <th scope="col" data-restriction-wide>${escapeHtml(ui("moderation_expires_column"))}</th>`
+                : ""
+            }
+            <th scope="col"><span class="sr-only">${escapeHtml(ui(action))}</span></th>
+          </tr></thead><tbody>${tableRows.join("")}</tbody>
+        </table></div>
         <p class="hint" role="status" data-moderation-filter-status></p></div>`
             : `<div class="empty-note"><strong>${escapeHtml(ui(`${heading}_empty`))}</strong></div>`
         }
         </section>`;
-      if (listRows.length) {
+      if (tableRows.length) {
         const query = host.querySelector("[data-moderation-query]");
         const type = host.querySelector("[data-restriction-filter]");
         const rows = [...host.querySelectorAll("[data-moderation-search]")];
-        const list = host.querySelector(".rows");
+        const table = host.querySelector(".table-wrap");
         const status = host.querySelector("[data-moderation-filter-status]");
         const filterRows = () => {
           filters.query = query.value;
@@ -2624,7 +2639,7 @@
               !terms.every((term) => entry.dataset.moderationSearch.includes(term));
             if (!entry.hidden) visible++;
           }
-          list.hidden = visible === 0;
+          table.hidden = visible === 0;
           status.textContent = visible
             ? ui("moderation_filter_count")
                 .replace("{visible}", String(visible))

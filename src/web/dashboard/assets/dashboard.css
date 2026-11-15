@@ -327,8 +327,39 @@ body[data-theme="dark"] .boot-logo {
   padding-block: 0;
 }
 
-[data-moderation-list] .item > :first-child {
+[data-moderation-list] :is(th, td) {
   overflow-wrap: anywhere;
+}
+
+[data-moderation-list] :is(th, td):last-child {
+  text-align: end;
+}
+
+[data-moderation-list] th[scope="row"] strong {
+  color: var(--ink);
+}
+
+[data-moderation-list] small {
+  display: block;
+  font-weight: normal;
+}
+
+[data-moderation-list] [data-restriction-compact] {
+  display: none;
+}
+
+@container content (max-width: 560px) {
+  [data-moderation-list] :is(th, td) {
+    padding-inline: var(--space-2);
+  }
+
+  [data-moderation-list] [data-restriction-wide] {
+    display: none;
+  }
+
+  [data-moderation-list] [data-restriction-compact] {
+    display: block;
+  }
 }
 
 .provider-panel > .subsection {
