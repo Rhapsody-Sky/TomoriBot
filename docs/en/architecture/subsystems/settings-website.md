@@ -399,6 +399,7 @@ The integration is isolated under `src/web`:
   credential. Removing a connection removes its models; switch away from an
   active text connection before removing it.
 - The Connections submenu in `Server providers` selects the connection to manage.
+  Choose `Other provider` in `Add provider` to register a custom endpoint.
   Its model registrations and provider parameters appear below. Primary models
   and the fallback chain have their own sections. Removing a saved provider uses the Discord operation. The
   active text provider is protected. Removing another provider also removes its

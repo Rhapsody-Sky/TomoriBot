@@ -1228,7 +1228,21 @@
         const hint = element.querySelector("small")?.textContent || "";
         const name = element.querySelector("[name]")?.getAttribute("name");
         const dialog = element.closest("dialog")?.id;
-        const entry = { ...route, dialog, title, hint, name, tag: element.tagName.toLowerCase(), path };
+        const providerRegistration = element.closest("[data-provider-endpoint-fields]")
+          ? "endpoint"
+          : element.closest("[data-provider-key-fields]")
+            ? "key"
+            : undefined;
+        const entry = {
+          ...route,
+          dialog,
+          title,
+          hint,
+          name,
+          tag: element.tagName.toLowerCase(),
+          path,
+          providerRegistration,
+        };
         if (
           !entries.some(
             (existing) =>
@@ -1521,6 +1535,13 @@
     }
     const root = entry.dialog ? document.getElementById(entry.dialog) : document.querySelector("[data-dashboard-view]");
     if (!root) return;
+    if (entry.dialog === "provider-dialog" && entry.view === "server-providers") {
+      const form = root.querySelector("form");
+      const provider = form.elements.provider;
+      if (entry.providerRegistration === "endpoint") provider.value = "other";
+      if (entry.providerRegistration === "key" && provider.value === "other") provider.selectedIndex = 0;
+      updateServerProviderRegistration(form);
+    }
     if (entry.dialog && !root.open) root.showModal();
     let target;
     if (entry.personaHome) target = root.querySelector(".banner");
@@ -7038,19 +7059,9 @@
       ${renderProviderDialogs(data, scope)}`;
   }
 
-  function renderProviderDialogs(data, scope) {
-    return `<dialog id="provider-dialog" aria-labelledby="provider-dialog-title">
-        <form class="stack" id="provider-credential-form" data-provider-scope="${scope}">
-          <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connections"))}</p><h2 id="provider-dialog-title">${escapeHtml(ui("add_provider"))}</h2></div></div>
-          <label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}</select></label><label class="field">${fieldLabel("API key", ui("provider_key_hint"))}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label>
-          <div class="actions"><button class="button" type="button" data-dialog-close="provider-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">Store encrypted key</button></div>
-        </form>
-      </dialog>
-      <dialog id="endpoint-dialog" class="wide" aria-labelledby="endpoint-dialog-title">
-        <form class="stack" id="endpoint-form" data-provider-scope="${scope}">
-          <div class="panel-header"><div class="heading"><p class="eyebrow">Custom</p><h2 id="endpoint-dialog-title">${escapeHtml(ui("endpoint_register_new"))}</h2></div></div>
-          <div class="grid">
-            <label class="field">${fieldLabel("Internal label", "Stable letters, numbers, underscores, or dashes used to identify this endpoint.")}<input name="label" pattern="[A-Za-z0-9_-]+" maxlength="48" required></label>
+  function renderProviderEndpointFields() {
+    return `<div class="grid">
+            <label class="field">${fieldLabel("Internal label", "Stable letters, numbers, underscores, or dashes used to identify this endpoint.")}<input name="label" pattern="[A-Za-z0-9_\\-]+" maxlength="48" required></label>
             <label class="field span-all">${fieldLabel("Endpoint URL", "Base URL Tomori connects to. It is tested before registration.")}<input name="endpointUrl" type="url" required></label>
             <label class="field">${fieldLabel("Capability", "Type of generation or processing this connection provides.")}<select name="capability">
               <option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="speech">Speech</option><option value="transcription">Transcription</option>
@@ -7080,10 +7091,51 @@
               )
               .join("")}
             </div>
-          </fieldset>
-          <div class="actions"><button class="button" type="button" data-dialog-close="endpoint-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">Test and register</button></div>
+          </fieldset>`;
+  }
+
+  function renderProviderDialogs(data, scope) {
+    const server = scope === "server";
+    const keyField = `<label class="field">${fieldLabel("API key", ui("provider_key_hint"))}<input name="apiKey" type="password" autocomplete="new-password" minlength="10" required></label>`;
+    return `<dialog id="provider-dialog" aria-labelledby="provider-dialog-title">
+        <form class="stack" id="provider-credential-form" data-provider-scope="${scope}">
+          <div class="panel-header"><div class="heading"><p class="eyebrow">${escapeHtml(ui("connections"))}</p><h2 id="provider-dialog-title">${escapeHtml(ui("add_provider"))}</h2></div></div>
+          <label class="field">${fieldLabel("Provider", "Service this credential belongs to and the capabilities it may unlock.")}<select name="provider">${providerChoiceOptions(data)}${server ? `<option value="other">${escapeHtml(ui("provider_other"))}</option>` : ""}</select></label>
+          ${
+            server
+              ? `<fieldset data-provider-key-fields>${keyField}</fieldset>
+          <fieldset class="stack" data-provider-endpoint-fields hidden disabled>
+            <legend>${escapeHtml(ui("endpoint_register_new"))}</legend>
+            ${renderProviderEndpointFields()}
+          </fieldset>`
+              : keyField
+          }
+          <div class="actions" data-form-actions><button class="button" type="button" data-dialog-close="provider-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("provider_store_key"))}</button></div>
         </form>
-      </dialog>`;
+      </dialog>
+      ${
+        server
+          ? ""
+          : `<dialog id="endpoint-dialog" class="wide" aria-labelledby="endpoint-dialog-title">
+        <form class="stack" id="endpoint-form" data-provider-scope="${scope}">
+          <div class="panel-header"><div class="heading"><p class="eyebrow">Custom</p><h2 id="endpoint-dialog-title">${escapeHtml(ui("endpoint_register_new"))}</h2></div></div>
+          ${renderProviderEndpointFields()}
+          <div class="actions" data-form-actions><button class="button" type="button" data-dialog-close="endpoint-dialog">${escapeHtml(ui("endpoint_cancel"))}</button><button class="button primary" type="submit">${escapeHtml(ui("endpoint_test_register"))}</button></div>
+        </form>
+      </dialog>`
+      }`;
+  }
+
+  function updateServerProviderRegistration(form) {
+    const endpoint = form.elements.provider.value === "other";
+    const keyFields = form.querySelector("[data-provider-key-fields]");
+    const endpointFields = form.querySelector("[data-provider-endpoint-fields]");
+    keyFields.hidden = keyFields.disabled = endpoint;
+    endpointFields.hidden = endpointFields.disabled = !endpoint;
+    form.closest("dialog").classList.toggle("wide", endpoint);
+    form.querySelector('[type="submit"]').textContent = ui(endpoint ? "endpoint_test_register" : "provider_store_key");
+    form.querySelector(".form-error")?.remove();
+    window.TomoriControls?.enhance(form);
   }
 
   const serverProviderPanels = [
@@ -7199,12 +7251,11 @@
     } else {
       const { connections, connection } = selectProviderConnection(data, "server");
       const add = `<button class="button small primary" type="button" data-provider-open aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("add_provider"))}</button>`;
-      const register = `<button class="button small" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button>`;
       const { markup, activeTab } = renderServerProviderPicker(connections, connection?.key);
       stage.innerHTML = connections.length
-        ? `<div class="toolbar" data-server-provider-toolbar>${markup}<div class="actions">${register}${add}</div></div>
+        ? `<div class="toolbar" data-server-provider-toolbar>${markup}<div class="actions">${add}</div></div>
           <div id="server-connection-detail"${activeTab ? ` role="tabpanel" aria-labelledby="${activeTab}"` : ""}>${renderConnectionDetail(data, "server", connection)}</div>`
-        : `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("connection_empty"))}</strong><div class="row">${register}${add}</div></div></section>`;
+        : `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("connection_empty"))}</strong><div class="row">${add}</div></div></section>`;
     }
   }
 
@@ -8724,6 +8775,7 @@
       const form = document.querySelector("#provider-credential-form");
       form.reset();
       if (providerOpen.dataset.providerOpen) form.elements.provider.value = providerOpen.dataset.providerOpen;
+      if (form.dataset.providerScope === "server") updateServerProviderRegistration(form);
       document.querySelector("#provider-dialog")?.showModal();
       return;
     }
@@ -8994,6 +9046,10 @@
   document.addEventListener("holdcomplete", handleDashboardAction);
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches('#provider-credential-form[data-provider-scope="server"] select[name="provider"]')) {
+      updateServerProviderRegistration(event.target.form);
+      return;
+    }
     if (event.target.matches("[data-server-provider-select]")) {
       const select = event.target;
       if (!(await switchServerProviderConnection(select.value, select)) && select.isConnected) {
@@ -9379,63 +9435,44 @@
       return;
     }
 
-    if (event.target.id === "provider-credential-form") {
+    if (event.target.matches("#provider-credential-form, #endpoint-form")) {
       event.preventDefault();
       const form = event.target;
       const scope = form.dataset.providerScope;
-      const provider = form.elements.provider.value;
+      const provider = form.elements.provider?.value;
+      const endpoint = form.id === "endpoint-form" || (scope === "server" && provider === "other");
+      const payload = endpoint
+        ? {
+            label: form.elements.label.value,
+            endpointUrl: form.elements.endpointUrl.value,
+            capability: form.elements.capability.value,
+            apiStyle: form.elements.apiStyle.value,
+            modelName: form.elements.modelName.value || null,
+            authToken: form.elements.authToken.value || null,
+            numCtx: form.elements.numCtx.value ? Number(form.elements.numCtx.value) : null,
+            hasTools: form.elements.hasTools.checked,
+            seesImages: form.elements.seesImages.checked,
+            seesVideos: form.elements.seesVideos.checked,
+            supportsStructOutput: form.elements.supportsStructOutput.checked,
+            strictRoleAlternation: form.elements.strictRoleAlternation.checked,
+            supportsPrefixCompletion: form.elements.supportsPrefixCompletion.checked,
+          }
+        : { provider, apiKey: form.elements.apiKey.value };
       try {
-        await withBusyForm(form, async () => {
-          await api(`/guilds/${state.guildId}/providers/${scope}/credentials`, {
+        await withBusyForm(form, () =>
+          api(`/guilds/${state.guildId}/providers/${scope}/${endpoint ? "endpoints" : "credentials"}`, {
             method: "POST",
-            body: JSON.stringify({
-              provider: form.elements.provider.value,
-              apiKey: form.elements.apiKey.value,
-            }),
-          });
-        });
+            body: JSON.stringify(payload),
+          }),
+        );
         form.reset();
-        document.querySelector("#provider-dialog")?.close();
-        state.providerConnection[scope] = `provider:${provider}`;
-        toast("Provider key stored");
+        form.closest("dialog")?.close();
+        if (!endpoint) state.providerConnection[scope] = `provider:${provider}`;
+        toast(endpoint ? "Endpoint tested and registered" : "Provider key stored");
         await refreshProviders(scope);
       } catch (error) {
-        toast(error.message, "error");
-      }
-      return;
-    }
-
-    if (event.target.id === "endpoint-form") {
-      event.preventDefault();
-      const form = event.target;
-      const scope = form.dataset.providerScope;
-      try {
-        await withBusyForm(form, async () => {
-          await api(`/guilds/${state.guildId}/providers/${scope}/endpoints`, {
-            method: "POST",
-            body: JSON.stringify({
-              label: form.elements.label.value,
-              endpointUrl: form.elements.endpointUrl.value,
-              capability: form.elements.capability.value,
-              apiStyle: form.elements.apiStyle.value,
-              modelName: form.elements.modelName.value || null,
-              authToken: form.elements.authToken.value || null,
-              numCtx: form.elements.numCtx.value ? Number(form.elements.numCtx.value) : null,
-              hasTools: form.elements.hasTools.checked,
-              seesImages: form.elements.seesImages.checked,
-              seesVideos: form.elements.seesVideos.checked,
-              supportsStructOutput: form.elements.supportsStructOutput.checked,
-              strictRoleAlternation: form.elements.strictRoleAlternation.checked,
-              supportsPrefixCompletion: form.elements.supportsPrefixCompletion.checked,
-            }),
-          });
-        });
-        form.reset();
-        document.querySelector("#endpoint-dialog")?.close();
-        toast("Endpoint tested and registered");
-        await refreshProviders(scope);
-      } catch (error) {
-        showFormError(form, error);
+        if (endpoint) showFormError(form, error);
+        else toast(error.message, "error");
       }
       return;
     }

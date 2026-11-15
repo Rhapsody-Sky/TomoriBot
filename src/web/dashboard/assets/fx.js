@@ -205,10 +205,18 @@
 
     function measure() {
       const items = tabs();
+      const focused = document.activeElement;
       items.forEach((b) => (b.hidden = false));
       more.hidden = true;
       if (nav.scrollWidth <= nav.clientWidth + 1) {
+        const restoreTab = menu.contains(focused)
+          ? items[Number(focused.dataset.proxy)]
+          : focused === more
+            ? items.find((b) => b.getAttribute("aria-selected") === "true")
+            : null;
+        if (menu.matches(":popover-open")) menu.hidePopover();
         menu.replaceChildren();
+        restoreTab?.focus({ preventScroll: true });
         return;
       }
       more.hidden = false;
@@ -247,7 +255,12 @@
         tab.focus({ preventScroll: true });
       });
     });
-    new ResizeObserver(() => measure()).observe(nav);
+    const resize = new ResizeObserver(() => {
+      if (nav.isConnected) measure();
+      else resize.disconnect();
+    });
+    resize.observe(nav);
+    if (nav.parentElement) resize.observe(nav.parentElement);
     new MutationObserver(() => requestAnimationFrame(measure)).observe(nav, { subtree: true, attributeFilter: ["aria-selected"] });
     document.fonts?.ready.then(measure);
     measure();
