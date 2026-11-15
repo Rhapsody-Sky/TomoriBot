@@ -7209,7 +7209,6 @@
     }
     if (!workspace.querySelector("#server-providers-stage")) {
       const title = escapeHtml(ui("nav_server_providers"));
-      const actionsLabel = escapeHtml(ui("settings_actions"));
       workspace.innerHTML = `
         <section class="banner compact" aria-labelledby="server-providers-title">
           <div class="banner-info"><div class="stack">
@@ -7224,10 +7223,7 @@
         </nav>
         <section id="server-providers-stage" class="stage" role="tabpanel">
           <div class="toolbar" data-server-provider-toolbar><div class="actions">
-            <button class="button small icon" type="button" popovertarget="server-providers-actions" aria-label="${actionsLabel}">${navigationIcon("ellipsis")}</button>
-            <div class="action-menu" id="server-providers-actions" popover aria-label="${actionsLabel}">
-              <button class="button" type="button" data-provider-refresh="server">${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_providers"))}</button>
-            </div>
+            <button class="button small icon" type="button" data-provider-refresh="server" aria-label="${escapeHtml(ui("refresh_providers"))}">${navigationIcon("refresh-cw")}</button>
           </div></div>
           <div class="stack" data-server-provider-content></div>
         </section>
