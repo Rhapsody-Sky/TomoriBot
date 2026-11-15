@@ -620,10 +620,36 @@ body[data-theme="dark"] .boot-logo {
   align-items: start;
 }
 
-[data-spotlight-picker] .channel .item-meta {
-  column-gap: var(--space-4);
-  row-gap: var(--space-1);
-  overflow-wrap: anywhere;
+[data-spotlight-channel-meta] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+[data-spotlight-channel-meta] .sticker {
+  inline-size: var(--space-6);
+  font-size: var(--text-xs);
+}
+
+[data-spotlight-picker] .channel .name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-spotlight-short-date] {
+  display: none;
+}
+
+@container content (max-width: 480px) {
+  [data-spotlight-deadline] {
+    display: none;
+  }
+
+  [data-spotlight-short-date] {
+    display: inline;
+  }
 }
 
 [data-spotlight-details] .card-head h3 {

@@ -1071,7 +1071,7 @@
   };
 
   function navigationIcon(name) {
-    return `<svg class="glyph" aria-hidden="true" focusable="false"><use href="/settings/assets/navigation-icons.svg?v=3#${name}"></use></svg>`;
+    return `<svg class="glyph" aria-hidden="true" focusable="false"><use href="/settings/assets/navigation-icons.svg?v=4#${name}"></use></svg>`;
   }
 
   function refreshButton(action, label, scope = "") {
@@ -2326,7 +2326,6 @@
           required: true,
           title: ui("channel_uncategorized"),
           includeExcluded: true,
-          status: (id) => (channels.has(id) && spotlights.has(id) ? ui("spotlight_active_short") : ""),
           metadata: (id) => renderSpotlightChannelMetadata(spotlights.get(id), personas),
         },
       )}</section>`;
@@ -2356,8 +2355,8 @@
         if (!saved || !row) renderPicker();
         else {
           const choice = picker.querySelector(`input[name="spotlightChannel"][value="${CSS.escape(saved.channelId)}"]`);
-          const metadata = choice?.closest(".channel").querySelector(".item-meta");
-          if (metadata) metadata.innerHTML = renderSpotlightChannelMetadata(saved, personas);
+          const metadata = choice?.closest(".channel")?.querySelector("[data-spotlight-channel-meta]");
+          if (metadata) metadata.outerHTML = renderSpotlightChannelMetadata(saved, personas);
         }
         renderEditor();
         editor.querySelector("h3")?.focus({ preventScroll: true });
@@ -2387,13 +2386,19 @@
 
   function renderSpotlightChannelMetadata(spotlight, personas) {
     if (!spotlight) return "";
-    const expiry = renderSpotlightExpiry(spotlight.expiresAt);
-    const deadline = spotlight.expiresAt ? escapeHtml(ui("spotlight_expires")).replace("{date}", () => expiry) : expiry;
+    const expiresAt = spotlight.expiresAt;
+    const deadline = expiresAt
+      ? ui("spotlight_expires").replace("{date}", () => formatDate(expiresAt))
+      : ui("spotlight_permanent");
+    const shortDate = expiresAt
+      ? new Intl.DateTimeFormat(undefined, { day: "numeric", month: "numeric" }).format(new Date(expiresAt))
+      : "";
     const auto = personas.find(({ personaId }) => personaId === spotlight.autoTriggerPersonaId);
-    const trigger = auto
-      ? escapeHtml(ui("spotlight_auto_summary")).replace("{persona}", () => `<bdi>${escapeHtml(auto.nickname)}</bdi>`)
-      : escapeHtml(ui("spotlight_auto_none"));
-    return `<span>${deadline}</span><span>${trigger}</span>`;
+    const trigger = auto ? escapeHtml(ui("spotlight_auto_summary").replace("{persona}", () => auto.nickname)) : "";
+    return `<span data-spotlight-channel-meta>
+      <span class="chip" data-tooltip="${escapeHtml(deadline)}">${navigationIcon(expiresAt ? "clock" : "pin")}<span data-spotlight-deadline aria-hidden="true">${renderSpotlightExpiry(expiresAt)}</span>${shortDate ? `<span data-spotlight-short-date aria-hidden="true">${escapeHtml(shortDate)}</span>` : ""}<span class="sr-only">${escapeHtml(deadline)}</span></span>
+      ${auto ? `<span data-tooltip="${trigger}">${personaSticker(auto, "flat")}<span class="sr-only">${trigger}</span></span>` : ""}
+    </span>`;
   }
 
   function renderPersonalSpotlightSettings(editor, channel, row, personas, path, update) {
@@ -5389,15 +5394,7 @@
     values = [],
     single = false,
     channels = state.overview.channels,
-    {
-      preserveMissing = false,
-      required = false,
-      title = "",
-      hint = "",
-      includeExcluded = false,
-      status,
-      metadata,
-    } = {},
+    { preserveMissing = false, required = false, title = "", hint = "", includeExcluded = false, metadata } = {},
   ) {
     const selected = new Set(values.filter((value) => value != null && value !== "").map(String));
     const allowed = state.overview.allowedChannelIds || [];
@@ -5435,11 +5432,10 @@
           (group) =>
             `<button class="channel-group" type="button" data-channel-group aria-expanded="true">${navigationIcon("chevron-down")}${escapeHtml(group.name)}<span class="n">${escapeHtml(channelSelectionCount(group.channels.filter((channel) => selected.has(String(channel.id))).length, group.channels.length))}</span></button>
          ${group.channels
-           .map((channel) => {
-             const label = status?.(channel.id);
-             const details = metadata?.(channel.id);
-             return `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}${details ? `<span class="item-meta">${details}</span>` : ""}</span>${label ? `<span class="chip">${escapeHtml(label)}</span>` : ""}<input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}${single && required ? " required" : ""}></label>`;
-           })
+           .map(
+             (channel) =>
+               `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span>${metadata?.(channel.id) ?? ""}<input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}${single && required ? " required" : ""}></label>`,
+           )
            .join("")}`,
         )
         .join("");

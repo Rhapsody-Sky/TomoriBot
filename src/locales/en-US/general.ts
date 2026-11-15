@@ -1027,7 +1027,6 @@ export default {
         "Limit which personas can respond to you in a channel. Spotlights only affect your messages and still follow server permissions.",
       interface_spotlights_empty: "You have no active spotlights on this server.",
       interface_spotlight_active: "Active spotlights",
-      interface_spotlight_active_short: "Active",
       interface_spotlight_inactive: "No spotlight set",
       interface_spotlight_refresh: "Refresh spotlights",
       interface_spotlight_add: "Add spotlight",
