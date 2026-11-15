@@ -1210,7 +1210,6 @@ export default {
       interface_settings_managers_only: "Managers only",
       interface_settings_manage_required: "Manage Server permission is required.",
       interface_settings_models_group: "Models & sampling",
-      interface_settings_actions: "Settings actions",
       interface_settings_refreshed: "Server settings refreshed",
       interface_settings_card_saved: "Saved {name}",
       interface_settings_context: "Context",

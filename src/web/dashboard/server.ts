@@ -1725,7 +1725,6 @@ export function createDashboardApp(client: Client) {
           "settings_managers_only",
           "settings_manage_required",
           "settings_models_group",
-          "settings_actions",
           "settings_refreshed",
           "settings_card_saved",
           "settings_context",

@@ -5959,7 +5959,6 @@
     }
     if (!workspace.querySelector("[data-server-settings-content]")) {
       const title = escapeHtml(ui("nav_server_settings"));
-      const actions = escapeHtml(ui("settings_actions"));
       workspace.innerHTML = `
         <section class="banner compact" aria-labelledby="server-settings-title">
           <div class="banner-info"><div class="stack" data-settings-summary>
@@ -5974,10 +5973,7 @@
         </nav>
         <section id="server-settings-stage" class="stage" role="tabpanel">
           <div class="toolbar"><div class="actions">
-            <button class="button icon" type="button" popovertarget="server-settings-actions" aria-label="${actions}">${navigationIcon("ellipsis")}</button>
-            <div class="action-menu" id="server-settings-actions" popover aria-label="${actions}">
-              <button class="button" type="button" data-overview-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_all"))}</button>
-            </div>
+            <button class="button icon" type="button" data-overview-refresh aria-label="${escapeHtml(ui("refresh_all"))}">${navigationIcon("refresh-cw")}</button>
           </div></div>
           <div class="card-columns" data-server-settings-content></div>
         </section>`;
