@@ -594,7 +594,7 @@ body[data-theme="dark"] .boot-logo {
   min-width: 140px;
 }
 @container content (min-width: 861px) {
-  [data-channel-settings].split {
+  :is([data-channel-settings], [data-spotlight-workspace]).split {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
   }
 }
@@ -616,7 +616,7 @@ body[data-theme="dark"] .boot-logo {
   margin-bottom: 0;
 }
 
-[data-channel-stage] [data-channel-selector] > .card-head {
+:is([data-channel-stage], [data-spotlight-picker]) [data-channel-selector] > .card-head {
   align-items: start;
 }
 
@@ -624,30 +624,26 @@ body[data-theme="dark"] .boot-logo {
   margin-block-start: var(--space-4);
 }
 
-:is(#channel-personas-dialog, #spotlight-editor) > form {
+:is(#channel-personas-dialog, #spotlight-personas-dialog) > form {
   display: grid;
   grid-row: 1 / -1;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-inline-size: 0;
 }
 
-#channel-personas-dialog .collection-title {
+:is(#channel-personas-dialog, #spotlight-personas-dialog) .collection-title {
   flex-wrap: nowrap;
 }
 
-#channel-personas-dialog .collection-title h2 {
+:is(#channel-personas-dialog, #spotlight-personas-dialog) .collection-title h2 {
   white-space: normal;
 }
 
-:is(#channel-personas-dialog, #spotlight-editor) footer {
+:is(#channel-personas-dialog, #spotlight-personas-dialog) footer {
   padding: 0 var(--pad) var(--pad);
 }
 
-#spotlight-editor {
-  container: content / inline-size;
-}
-
-#personal-spotlights .item > :first-child {
+[data-spotlight-picker] .item > :first-child {
   overflow-wrap: anywhere;
 }
 
