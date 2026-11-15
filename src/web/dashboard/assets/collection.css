@@ -1639,7 +1639,7 @@ dialog.collection[open] {
   font-size: var(--text-xs);
 }
 
-.deck-card[aria-current="true"] {
+.deck-card:is([aria-current="true"], [aria-pressed="true"]) {
   background: color-mix(in oklch, var(--primary) 16%, transparent);
   box-shadow: inset 0 0 0 2px var(--primary);
 }

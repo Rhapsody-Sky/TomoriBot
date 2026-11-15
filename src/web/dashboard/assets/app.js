@@ -4391,9 +4391,17 @@
     return personas
       .map(
         (entry) =>
-          `<button class="deck-card" type="button" data-persona-search="${escapeHtml([entry.nickname, ...(entry.triggerWords || [])].join(" ").toLowerCase())}" data-persona-select="${entry.personaId}" aria-current="${entry.personaId === selectedId}">${personaSticker(entry)}<strong>${escapeHtml(entry.nickname)}</strong><small>${escapeHtml(ui(entry.isAlter ? "persona_alter_label" : "persona_main_label"))} / #${entry.lineageId}</small></button>`,
+          `<button class="deck-card" type="button" data-persona-search="${personaPickerSearchText(entry)}" data-persona-select="${entry.personaId}" aria-current="${entry.personaId === selectedId}">${personaPickerTileContent(entry)}</button>`,
       )
       .join("");
+  }
+
+  function personaPickerSearchText(persona) {
+    return escapeHtml([persona.nickname, ...(persona.triggerWords || [])].join(" ").toLowerCase());
+  }
+
+  function personaPickerTileContent(persona) {
+    return `${personaSticker(persona)}<strong>${escapeHtml(persona.nickname)}</strong><small>${escapeHtml(ui(persona.isAlter ? "persona_alter_label" : "persona_main_label"))} / #${persona.lineageId}</small>`;
   }
 
   function filterPersonaPicker(dialog) {
@@ -4788,9 +4796,13 @@
 
   function renderChannelPersonas(host, data, ids) {
     const personas = state.overview.personas;
-    const allowed = personas.filter((persona) =>
-      ids.every((id) => personaChannelSelection(data, persona.personaId).has(id)),
+    const original = new Map(
+      personas.map((persona) => {
+        const channels = personaChannelSelection(data, persona.personaId);
+        return [persona.personaId, ids.filter((id) => channels.has(id)).length];
+      }),
     );
+    const allowed = personas.filter((persona) => original.get(persona.personaId) === ids.length);
     const allAllowed = allowed.length === personas.length;
     const count =
       allAllowed && allowed.length
@@ -4816,46 +4828,57 @@
     </div>`;
     const open = (all = false) => {
       const dialog = document.createElement("dialog");
-      dialog.className = "wide";
+      dialog.id = "channel-personas-dialog";
+      dialog.className = "collection";
       dialog.setAttribute("aria-labelledby", "channel-personas-title");
-      dialog.innerHTML = `<form class="stack">
-        <header class="panel-header"><div class="heading"><h2 id="channel-personas-title">${escapeHtml(ui("persona_permissions_edit"))}</h2><p>${escapeHtml(ui("channel_personas_hint"))}</p></div></header>
-        <label class="field">${fieldLabel(ui("persona_permissions_search"))}<input type="search" autofocus></label>
-        <div class="row" data-persona-permissions-bulk><button type="button" class="button small" data-personas-select="all">${escapeHtml(ui("channel_select_all"))}</button><button type="button" class="button small" data-personas-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>
-        <fieldset class="grid" data-channel-persona-options><legend class="sr-only">${escapeHtml(ui("channel_personas"))}</legend>${personas
-          .map((persona) => {
-            const channels = personaChannelSelection(data, persona.personaId);
-            const count = ids.filter((id) => channels.has(id)).length;
-            const mixed = !all && count > 0 && count < ids.length;
-            return `<label class="choice" data-permission-name="${escapeHtml(persona.nickname.toLowerCase())}"><input type="checkbox" value="${persona.personaId}"${all || count === ids.length ? " checked" : ""} data-mixed="${mixed}">${personaSticker(persona, "flat")}<span class="field-label">${escapeHtml(persona.nickname)}${mixed ? `<small>${escapeHtml(ui("persona_permissions_mixed"))}</small>` : ""}</span></label>`;
-          })
-          .join("")}</fieldset>
-        <p class="notice error" role="alert" hidden>${escapeHtml(ui("persona_channel_required"))}</p>
-        <footer class="actions form-actions"><button class="button small" type="button">${escapeHtml(ui("persona_permissions_cancel"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></footer>
+      const search = escapeHtml(ui("persona_permissions_search"));
+      const cancel = escapeHtml(ui("persona_permissions_cancel"));
+      dialog.innerHTML = `<form>
+        <header class="collection-head">
+          <div class="collection-title">
+            <h2 id="channel-personas-title">${editLabel} <small>${personas.length}</small></h2>
+            <button class="button icon" type="button" data-channel-personas-close aria-label="${escapeHtml(ui("control_close_dialog"))}">${navigationIcon("x")}</button>
+          </div>
+          <div class="collection-tools">
+            <label class="field"><span class="field-label sr-only">${search}</span><input type="search" data-persona-picker-search placeholder="${search}" autofocus></label>
+            <div class="row"><button type="button" class="button small" data-personas-select="all">${escapeHtml(ui("channel_select_all"))}</button><button type="button" class="button small" data-personas-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>
+          </div>
+        </header>
+        <div class="collection-body">
+          <div class="deck" role="group" aria-label="${escapeHtml(ui("channel_personas"))}">${personas
+            .map((persona) => {
+              const count = original.get(persona.personaId);
+              const pressed = all || count === ids.length ? "true" : count ? "mixed" : "false";
+              return `<button class="deck-card" type="button" value="${persona.personaId}" aria-pressed="${pressed}" data-persona-search="${personaPickerSearchText(persona)}">${personaPickerTileContent(persona)}<small data-channel-personas-mixed${pressed === "mixed" ? "" : " hidden"}>${escapeHtml(ui("persona_permissions_mixed"))}</small></button>`;
+            })
+            .join("")}</div>
+          <div class="empty-note" data-persona-picker-empty${personas.length ? " hidden" : ""}><strong>${escapeHtml(ui("persona_picker_no_results"))}</strong></div>
+        </div>
+        <footer>
+          <p class="notice error" role="alert" hidden>${escapeHtml(ui("persona_channel_required"))}</p>
+          <div class="actions"><button class="button small" type="button" data-channel-personas-close>${cancel}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></div>
+        </footer>
       </form>`;
       document.body.append(dialog);
       const form = dialog.querySelector("form");
-      const boxes = [...form.querySelectorAll('[type="checkbox"]')];
-      const original = new Map(
-        personas.map((persona) => {
-          const channels = personaChannelSelection(data, persona.personaId);
-          return [persona.personaId, ids.filter((id) => channels.has(id)).length];
-        }),
-      );
-      boxes.forEach((box) => {
-        box.indeterminate = box.dataset.mixed === "true";
-      });
+      const cards = [...form.querySelectorAll(".deck-card")];
+      const setPermission = (card, allowed) => {
+        card.setAttribute("aria-pressed", String(allowed));
+        card.querySelector("[data-channel-personas-mixed]").hidden = true;
+      };
       const assignments = () =>
-        boxes
-          .filter((box) => !box.indeterminate && original.get(Number(box.value)) !== (box.checked ? ids.length : 0))
-          .map((box) => {
-            const channels = personaChannelSelection(data, Number(box.value));
-            ids.forEach((id) => {
-              if (box.checked) channels.add(id);
-              else channels.delete(id);
-            });
-            return { personaId: Number(box.value), channelIds: [...channels] };
-          });
+        cards.flatMap((card) => {
+          const pressed = card.getAttribute("aria-pressed");
+          const personaId = Number(card.value);
+          const allowed = pressed === "true";
+          if (pressed === "mixed" || original.get(personaId) === (allowed ? ids.length : 0)) return [];
+          const channels = personaChannelSelection(data, personaId);
+          for (const id of ids) {
+            if (allowed) channels.add(id);
+            else channels.delete(id);
+          }
+          return [{ personaId, channelIds: [...channels] }];
+        });
       const validate = () => {
         const changes = assignments();
         const invalid = changes.some((entry) => !entry.channelIds.length);
@@ -4863,24 +4886,18 @@
         setEditActions(form, changes.length > 0);
         form.querySelector('[role="alert"]').hidden = !invalid;
       };
-      form.addEventListener("change", validate);
-      form.querySelector('[type="search"]').addEventListener("input", (event) => {
-        form.querySelectorAll("[data-permission-name]").forEach((row) => {
-          row.hidden = !row.dataset.permissionName.includes(event.target.value.trim().toLowerCase());
-        });
-      });
-      form.querySelector("[data-persona-permissions-bulk]").addEventListener("click", (event) => {
-        const button = event.target.closest("[data-personas-select]");
-        if (!button) return;
-        boxes
-          .filter((box) => !box.closest("label").hidden)
-          .forEach((box) => {
-            box.checked = button.dataset.personasSelect === "all";
-            box.indeterminate = false;
-          });
+      form.addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        if (!button || button.disabled) return;
+        if (button.hasAttribute("data-channel-personas-close")) return dialog.close();
+        if (button.matches(".deck-card")) setPermission(button, button.getAttribute("aria-pressed") !== "true");
+        else if (button.dataset.personasSelect) {
+          for (const card of cards) {
+            if (!card.hidden) setPermission(card, button.dataset.personasSelect === "all");
+          }
+        } else return;
         validate();
       });
-      form.querySelector('footer [type="button"]').onclick = () => dialog.close();
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const changes = assignments();
@@ -7887,7 +7904,7 @@
       openSettingsSearch();
       return;
     }
-    const picker = event.target.closest?.("#persona-picker-dialog");
+    const picker = event.target.closest?.("#persona-picker-dialog, #channel-personas-dialog");
     if (picker && event.key === "/" && event.target.type !== "search") {
       event.preventDefault();
       picker.querySelector("[data-persona-picker-search]").focus();
@@ -7895,10 +7912,10 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-      const items = [...group.querySelectorAll(":scope > button:not([hidden]):not(.more-pill)")];
+      const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];
       const index = items.indexOf(current);
       const next =
         items[

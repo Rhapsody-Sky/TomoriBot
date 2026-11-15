@@ -613,12 +613,26 @@ body[data-theme="dark"] .boot-logo {
   margin-block-start: var(--space-4);
 }
 
-[data-channel-persona-options] {
-  max-block-size: 45dvh;
-  overflow-y: auto;
+#channel-personas-dialog > form {
+  display: grid;
+  grid-row: 1 / -1;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-inline-size: 0;
 }
 
-:is([data-channel-persona-options], [data-channel-persona-preview]) .sticker {
+#channel-personas-dialog .collection-title {
+  flex-wrap: nowrap;
+}
+
+#channel-personas-dialog .collection-title h2 {
+  white-space: normal;
+}
+
+#channel-personas-dialog footer {
+  padding: 0 var(--pad) var(--pad);
+}
+
+[data-channel-persona-preview] .sticker {
   width: var(--space-8);
 }
 
