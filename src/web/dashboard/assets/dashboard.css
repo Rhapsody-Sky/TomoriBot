@@ -335,6 +335,10 @@ body[data-theme="dark"] .boot-logo {
   text-align: end;
 }
 
+[data-moderation-list] tbody tr:hover {
+  background-color: color-mix(in oklch, var(--ink) 6%, transparent);
+}
+
 [data-moderation-list] th[scope="row"] strong {
   color: var(--ink);
 }

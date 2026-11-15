@@ -2445,7 +2445,7 @@
       </nav>
       <section id="moderation-stage" class="stage" role="tabpanel">
         <div class="toolbar"><div class="actions">
-          <button class="button icon" type="button" data-moderation-refresh aria-label="${escapeHtml(ui("moderation_refresh"))}">${navigationIcon("refresh-cw")}</button>
+          <button class="button small icon" type="button" data-moderation-refresh aria-label="${escapeHtml(ui("moderation_refresh"))}">${navigationIcon("refresh-cw")}</button>
         </div></div>
         <div data-moderation-content></div>
       </section>`;
@@ -2506,7 +2506,7 @@
     actions.querySelector("[data-moderation-add]")?.remove();
     const patch = (body) => api(path, { method: "PATCH", body: JSON.stringify(body) });
     const addButton = (key, disabled = false) =>
-      `<button class="button primary" type="button" data-moderation-add aria-haspopup="dialog"${disabled ? " disabled" : ""}>${navigationIcon("plus")}${escapeHtml(ui(key))}</button>`;
+      `<button class="button small primary" type="button" data-moderation-add aria-haspopup="dialog"${disabled ? " disabled" : ""}>${navigationIcon("plus")}${escapeHtml(ui(key))}</button>`;
     const removeButton = (action, index, description, compactAction) => {
       const label = escapeHtml(ui(action));
       return `<button class="button small danger" type="button" data-moderation-remove="${index}" aria-describedby="${description}" aria-haspopup="dialog"${compactAction ? ` aria-label="${label}"` : ""}>${compactAction ? `<span data-restriction-wide>${label}</span><span data-restriction-compact>${escapeHtml(ui(compactAction))}</span>` : label}</button>`;
