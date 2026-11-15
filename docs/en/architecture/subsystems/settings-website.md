@@ -169,6 +169,10 @@ The application updates the selected controls and replaces the stage content.
 Switching personas keeps the section selected and updates the banner and chat.
 Leaving a Persona section with unsaved edits asks whether to discard them.
 
+Moderation uses the Collection dock for the role allowlist, server blacklist,
+persona restrictions, and quotas. Refresh reloads the selected section and keeps
+its search filters. Each quota type saves independently.
+
 `Your design` keeps preferences in browser storage when the user chooses to
 remember them on that device. Stored settings apply before the dashboard paints.
 Persona colors affect the persona banner and test chat.

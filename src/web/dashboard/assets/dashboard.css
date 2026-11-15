@@ -327,45 +327,8 @@ body[data-theme="dark"] .boot-logo {
   padding-block: 0;
 }
 
-.moderation-table th,
-.moderation-table td {
+[data-moderation-list] .item > :first-child {
   overflow-wrap: anywhere;
-}
-
-.moderation-table th[scope="row"] strong {
-  color: var(--ink);
-}
-
-.moderation-table small {
-  display: block;
-  font-weight: normal;
-}
-
-.moderation-table .restriction-compact {
-  display: none;
-}
-
-.moderation-table .entry-actions {
-  justify-content: flex-end;
-}
-
-.moderation-table .entry-actions .button {
-  height: auto;
-  overflow-wrap: normal;
-}
-
-@media (max-width: 560px) {
-  .moderation-table :is(th, td) {
-    padding-inline: var(--space-2);
-  }
-
-  .moderation-table .restriction-wide {
-    display: none;
-  }
-
-  .moderation-table .restriction-compact {
-    display: block;
-  }
 }
 
 .provider-panel > .subsection {

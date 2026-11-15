@@ -1104,9 +1104,15 @@
   }
 
   function usesCollectionFrame() {
-    return ["personas", "overview", "lorebooks", "settings", "channel-settings", "server-providers"].includes(
-      state.view,
-    );
+    return [
+      "personas",
+      "overview",
+      "lorebooks",
+      "settings",
+      "channel-settings",
+      "server-providers",
+      "moderation",
+    ].includes(state.view);
   }
 
   function renderView() {
@@ -1270,11 +1276,11 @@
     page("lorebooks", ui("lorebooks"));
     if (state.overview.canManage) {
       if (!state.overview.guild.isDirectMessage) {
-        for (const [moderationTab, key] of Object.entries(moderationTabs)) {
+        for (const [moderationTab, [key]] of Object.entries(moderationTabs)) {
           page("moderation", ui(key), { moderationTab, path: ui("moderation") });
         }
         for (const type of ["text", "image", "video"]) {
-          page("moderation", ui(`moderation_${type}`), { moderationTab: "quotas", path: ui("moderation"), tag: "h2" });
+          page("moderation", ui(`moderation_${type}`), { moderationTab: "quotas", path: ui("moderation"), tag: "h3" });
         }
       }
       for (const [key, name] of [
@@ -2401,10 +2407,10 @@
   }
 
   const moderationTabs = {
-    roles: "moderation_roles",
-    blacklist: "moderation_server_blocks",
-    restrictions: "moderation_persona_blocks",
-    quotas: "moderation_quotas",
+    roles: ["moderation_roles", "users-round"],
+    blacklist: ["moderation_server_blocks", "x"],
+    restrictions: ["moderation_persona_blocks", "user-round"],
+    quotas: ["moderation_quotas", "sliders-horizontal"],
   };
   let moderationTab = "roles";
 
@@ -2412,66 +2418,98 @@
     return `<header class="panel-header"><div class="heading"><h2>${escapeHtml(ui(key))}</h2>${hint ? `<p>${escapeHtml(ui(hint))}</p>` : ""}</div>${actions ? `<div class="actions">${actions}</div>` : ""}</header>`;
   }
 
-  async function renderModeration(
-    workspace,
-    listFilters = { roles: { query: "" }, blacklist: { query: "" }, restrictions: { query: "", type: "" } },
-  ) {
-    const path = `/guilds/${state.guildId}/moderation`;
-    workspace.innerHTML = `${pageHeader(state.overview.guild.name, ui("moderation"), ui("moderation_hint"), refreshButton("moderation", ui("moderation_refresh")))}
-      <nav class="tabs" aria-label="${escapeHtml(ui("moderation"))}"></nav>
-      <div class="stack" data-moderation-content>${loadingBar(ui("moderation"))}</div>`;
-    const host = workspace.querySelector("[data-moderation-content]");
-    const tabs = workspace.querySelector("nav");
-    const refresh = workspace.querySelector("[data-moderation-refresh]");
-    refresh.onclick = () => {
-      if (!savingForms) void renderModeration(workspace, listFilters);
-    };
-    tabs.innerHTML = Object.entries(moderationTabs)
-      .map(
-        ([id, key]) =>
-          `<button class="settings-tab${id === moderationTab ? " is-active" : ""}" type="button" data-moderation-tab="${id}"${id === moderationTab ? ' aria-current="page"' : ""}>${escapeHtml(ui(key))}</button>`,
-      )
-      .join("");
-    const tabButtons = [...tabs.querySelectorAll("button")];
-    initNavigationMenus();
-    let data;
-    try {
-      data = await api(path);
-    } catch (error) {
-      if (host.isConnected)
-        host.innerHTML = `<div class="notice error" role="alert">${escapeHtml(error.message)}</div>`;
+  function renderModeration(workspace) {
+    if (!state.overview.canManage || state.overview.guild.isDirectMessage) {
+      workspace.innerHTML = `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("settings_manage_required"))}</strong></div></section>`;
       return;
     }
-    if (!host.isConnected) return;
+    const path = `/guilds/${state.guildId}/moderation`;
+    const title = escapeHtml(ui("moderation"));
+    const listFilters = { roles: { query: "" }, blacklist: { query: "" }, restrictions: { query: "", type: "" } };
+    workspace.innerHTML = `
+      <section class="banner compact" aria-labelledby="moderation-title">
+        <div class="banner-info"><div class="stack">
+          <p class="crumb">${escapeHtml(ui("nav_server_administration"))}<span class="kind">${escapeHtml(ui("settings_managers_only"))}</span></p>
+          <h1 id="moderation-title" data-fx="split">${title}</h1>
+          <p class="banner-text">${escapeHtml(ui("moderation_hint"))}</p>
+        </div></div>
+        <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("users-round")}</span></div>
+      </section>
+      <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${title}">
+        ${Object.entries(moderationTabs)
+          .map(
+            ([id, [key, icon]]) =>
+              `<button type="button" id="moderation-tab-${id}" role="tab" aria-controls="moderation-stage" data-moderation-tab="${id}">${navigationIcon(icon)}${escapeHtml(ui(key))}</button>`,
+          )
+          .join("")}
+      </nav>
+      <section id="moderation-stage" class="stage" role="tabpanel">
+        <div class="toolbar"><div class="actions">
+          <button class="button icon" type="button" data-moderation-refresh aria-label="${escapeHtml(ui("moderation_refresh"))}">${navigationIcon("refresh-cw")}</button>
+        </div></div>
+        <div data-moderation-content></div>
+      </section>`;
+    const stage = workspace.querySelector("#moderation-stage");
+    const host = stage.querySelector("[data-moderation-content]");
+    const tabButtons = [...workspace.querySelectorAll("[data-moderation-tab]")];
+    let data = null;
+    let loadVersion = 0;
+    const selectTab = () => {
+      for (const tab of tabButtons) {
+        const selected = tab.dataset.moderationTab === moderationTab;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+      }
+      stage.setAttribute("aria-labelledby", `moderation-tab-${moderationTab}`);
+    };
+    const load = async () => {
+      const version = ++loadVersion;
+      const current = () => host.isConnected && version === loadVersion;
+      data = null;
+      stage.querySelector("[data-moderation-add]")?.remove();
+      host.setAttribute("aria-busy", "true");
+      host.innerHTML = loadingBar(ui("moderation"));
+      try {
+        const result = await api(path);
+        if (current()) data = result;
+      } catch (error) {
+        if (current()) host.innerHTML = `<div class="notice error" role="alert">${escapeHtml(error.message)}</div>`;
+      } finally {
+        if (current()) host.removeAttribute("aria-busy");
+      }
+      if (data && current()) renderModerationPanel(stage, path, data, onSaved, listFilters);
+    };
     const onSaved = () => {
       if (!host.isConnected) return;
       toast(ui("moderation_saved"));
-      void renderModeration(workspace, listFilters);
+      void load();
+    };
+    stage.querySelector("[data-moderation-refresh]").onclick = () => {
+      if (!savingForms && !host.hasAttribute("aria-busy")) void load();
     };
     for (const button of tabButtons) {
       button.onclick = () => {
         if (moderationTab === button.dataset.moderationTab || savingForms) return;
         moderationTab = button.dataset.moderationTab;
-        for (const tab of tabButtons) {
-          tab.classList.toggle("is-active", tab === button);
-          if (tab === button) tab.setAttribute("aria-current", "page");
-          else tab.removeAttribute("aria-current");
-        }
-        renderModerationPanel(host, path, data, onSaved, listFilters);
-        window.TomoriControls?.enhanceTabs(workspace);
-        focusNavigation(`[data-moderation-tab="${moderationTab}"]`);
+        selectTab();
+        if (data) renderModerationPanel(stage, path, data, onSaved, listFilters);
+        button.focus({ preventScroll: true });
       };
     }
-    renderModerationPanel(host, path, data, onSaved, listFilters);
+    selectTab();
+    void load();
   }
 
-  function renderModerationPanel(host, path, data, onSaved, listFilters) {
+  function renderModerationPanel(stage, path, data, onSaved, listFilters) {
+    const host = stage.querySelector("[data-moderation-content]");
+    const actions = stage.querySelector(".toolbar > .actions");
+    actions.querySelector("[data-moderation-add]")?.remove();
     const patch = (body) => api(path, { method: "PATCH", body: JSON.stringify(body) });
     const addButton = (key, disabled = false) =>
       `<button class="button primary" type="button" data-moderation-add aria-haspopup="dialog"${disabled ? " disabled" : ""}>${navigationIcon("plus")}${escapeHtml(ui(key))}</button>`;
     const removeButton = (action, index, description, compactAction) => {
       const label = escapeHtml(ui(action));
-      return `<div class="entry-actions"><button class="button danger" type="button" data-moderation-remove="${index}" aria-describedby="${description}" aria-haspopup="dialog"${compactAction ? ` aria-label="${label}"` : ""}>${compactAction ? `<span class="restriction-wide">${label}</span><span class="restriction-compact">${escapeHtml(ui(compactAction))}</span>` : label}</button></div>`;
+      return `<div class="item-actions"><button class="button small danger" type="button" data-moderation-remove="${index}" aria-describedby="${description}" aria-haspopup="dialog"${compactAction ? ` aria-label="${label}"` : ""}>${compactAction ? escapeHtml(ui(compactAction)) : label}</button></div>`;
     };
     const removals = [];
     let availableRoles;
@@ -2479,7 +2517,7 @@
       const roles = moderationTab === "roles";
       const restrictions = moderationTab === "restrictions";
       const filters = listFilters[moderationTab];
-      const heading = moderationTabs[moderationTab];
+      const [heading] = moderationTabs[moderationTab];
       const action = roles
         ? "moderation_remove_action"
         : restrictions
@@ -2497,14 +2535,14 @@
         availableRoles = data.roles.filter(({ id }) => !allowed.has(id));
         entries = data.allowedRoleIds.map((id) => ({ id, name: names.get(id) }));
       }
-      const tableRows = entries.map((entry, index) => {
+      const listRows = entries.map((entry, index) => {
         const id = roles ? entry.id : entry.userId;
         const name = entry.name || id;
         const searchText = [name, id, entry.personaName].join(" ").toLowerCase();
         const rowId = `moderation-entry-${index}`;
         const detail = entry.name ? id : roles ? ui("moderation_role_unavailable") : "";
         let description = rowId;
-        let personaCells = "";
+        let restriction = "";
         if (roles) {
           removals.push({
             title: ui("moderation_remove_role").replace("{name}", () => name),
@@ -2523,9 +2561,7 @@
           });
           const type = ui(entry.type === "mute" ? "moderation_persona_mute" : "moderation_persona_block");
           const date = formatDate(entry.expiresAt);
-          personaCells = `<td id="${personaId}"><span dir="auto">${escapeHtml(entry.personaName)}</span><small class="hint restriction-compact">${escapeHtml(type)}<br>${escapeHtml(ui("moderation_expires").replace("{date}", () => date))}</small></td>
-          <td class="restriction-wide">${escapeHtml(type)}</td>
-          <td class="restriction-wide"><time datetime="${escapeHtml(entry.expiresAt)}">${escapeHtml(date)}</time></td>`;
+          restriction = `<div class="item-meta"><span id="${personaId}" dir="auto">${escapeHtml(entry.personaName)}</span><span class="chip">${escapeHtml(type)}</span><time datetime="${escapeHtml(entry.expiresAt)}">${escapeHtml(ui("moderation_expires").replace("{date}", () => date))}</time></div>`;
         } else {
           removals.push({
             title: ui("moderation_remove_user").replace("{name}", () => name),
@@ -2533,20 +2569,21 @@
             body: { action: "unblockUser", userId: id },
           });
         }
-        return `<tr data-moderation-search="${escapeHtml(searchText)}"${restrictions ? ` data-restriction-type="${escapeHtml(entry.type)}"` : ""}>
-          <th scope="row" id="${rowId}"><strong dir="auto">${escapeHtml(name)}</strong>${detail ? `<small class="hint">${escapeHtml(detail)}</small>` : ""}</th>
-          ${personaCells}<td>${removeButton(action, index, description, restrictions ? "moderation_lift_compact" : undefined)}</td>
-        </tr>`;
+        return `<article class="item" role="listitem" data-moderation-search="${escapeHtml(searchText)}"${restrictions ? ` data-restriction-type="${escapeHtml(entry.type)}"` : ""}>
+          <div><strong id="${rowId}" dir="auto">${escapeHtml(name)}</strong>${detail ? `<div class="item-meta">${escapeHtml(detail)}</div>` : ""}${restriction}</div>
+          ${removeButton(action, index, description, restrictions ? "moderation_lift_compact" : undefined)}
+        </article>`;
       });
       const add = roles
         ? addButton("moderation_add_role", !availableRoles.length)
         : restrictions
           ? ""
           : addButton("moderation_add_user");
-      host.innerHTML = `<section class="panel stack" data-moderation-list="${moderationTab}">${dashboardPanelHeading(heading, `${heading}_hint`, add)}
+      if (add) actions.insertAdjacentHTML("beforeend", add);
+      host.innerHTML = `<section class="card" data-moderation-list="${moderationTab}">${personaCardHead(ui(heading), ui(`${heading}_hint`))}
         ${
-          tableRows.length
-            ? `<div class="grid">
+          listRows.length
+            ? `<div class="stack"><div class="grid">
           <label class="field">${fieldLabel(ui(searchLabel))}<input type="search" data-moderation-query value="${escapeHtml(filters.query)}"></label>
           ${
             restrictions
@@ -2565,28 +2602,16 @@
               : ""
           }
         </div>
-        <div class="table-wrap"><table class="moderation-table" aria-label="${escapeHtml(ui(heading))}">
-          <thead><tr>
-            <th scope="col">${escapeHtml(ui(roles ? "moderation_role_column" : "moderation_member_column"))}</th>
-            ${
-              restrictions
-                ? `<th scope="col">${escapeHtml(ui("moderation_persona_column"))}</th>
-            <th scope="col" class="restriction-wide">${escapeHtml(ui("moderation_restriction_type"))}</th>
-            <th scope="col" class="restriction-wide">${escapeHtml(ui("moderation_expires_column"))}</th>`
-                : ""
-            }
-            <th scope="col"><span class="sr-only">${escapeHtml(ui(action))}</span></th>
-          </tr></thead><tbody>${tableRows.join("")}</tbody>
-        </table></div>
-        <p class="hint" role="status" data-moderation-filter-status></p>`
-            : `<p class="hint">${escapeHtml(ui(`${heading}_empty`))}</p>`
+        <div class="rows" role="list" aria-label="${escapeHtml(ui(heading))}">${listRows.join("")}</div>
+        <p class="hint" role="status" data-moderation-filter-status></p></div>`
+            : `<div class="empty-note"><strong>${escapeHtml(ui(`${heading}_empty`))}</strong></div>`
         }
         </section>`;
-      if (tableRows.length) {
+      if (listRows.length) {
         const query = host.querySelector("[data-moderation-query]");
         const type = host.querySelector("[data-restriction-filter]");
         const rows = [...host.querySelectorAll("[data-moderation-search]")];
-        const table = host.querySelector(".table-wrap");
+        const list = host.querySelector(".rows");
         const status = host.querySelector("[data-moderation-filter-status]");
         const filterRows = () => {
           filters.query = query.value;
@@ -2599,7 +2624,7 @@
               !terms.every((term) => entry.dataset.moderationSearch.includes(term));
             if (!entry.hidden) visible++;
           }
-          table.hidden = visible === 0;
+          list.hidden = visible === 0;
           status.textContent = visible
             ? ui("moderation_filter_count")
                 .replace("{visible}", String(visible))
@@ -2616,15 +2641,17 @@
         ["serverwideQuota", "serverwide_quota", "moderation_server_quota", 0, 99999],
         ["serverwideQuotaResetsIn", "serverwide_quota_resets_in", "moderation_reset_days", 1, 365],
       ];
-      host.innerHTML = ["text", "image", "video"]
+      host.innerHTML = `<div class="card-columns">${["text", "image", "video"]
         .map(
-          (type) => `<form class="panel stack" data-moderation-quota="${type}" data-settings-key="moderation/${type}">
-        ${dashboardPanelHeading(`moderation_${type}`)}
-        <div class="grid">${fields.map(([name, column, label, min, max]) => `<label class="field">${fieldLabel(ui(label), ui(`${label}_hint`))}<input type="number" name="${name}" min="${min}" max="${max}" step="1" value="${escapeHtml(data.quotas[type][column])}" required></label>`).join("")}</div>
-        <footer class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></footer>
+          (
+            type,
+          ) => `<form class="card" data-fx="track" data-moderation-quota="${type}" data-settings-key="moderation/${type}">
+        ${personaCardHead(ui(`moderation_${type}`))}
+        <div class="stack">${fields.map(([name, column, label, min, max]) => `<label class="field">${fieldLabel(ui(label), ui(`${label}_hint`))}<input type="number" name="${name}" min="${min}" max="${max}" step="1" value="${escapeHtml(data.quotas[type][column])}" required></label>`).join("")}</div>
+        ${cardSaveActions(ui("save"))}
       </form>`,
         )
-        .join("");
+        .join("")}</div>`;
       host.querySelectorAll("[data-moderation-quota]").forEach((form) => {
         form.onsubmit = async (event) => {
           event.preventDefault();
@@ -2649,7 +2676,7 @@
         };
       });
     }
-    const add = host.querySelector("[data-moderation-add]");
+    const add = actions.querySelector("[data-moderation-add]");
     if (add) add.onclick = () => openModerationPicker(path, patch, availableRoles, data.serverBlocks, onSaved);
     host.querySelectorAll("[data-moderation-remove]").forEach((button) => {
       button.onclick = async () => {
@@ -2673,14 +2700,14 @@
     const isRole = !!roles;
     const key = isRole ? "moderation_add_role" : "moderation_add_user";
     const dialog = document.createElement("dialog");
-    dialog.className = "dialog stack";
-    dialog.setAttribute("aria-label", ui(key));
-    dialog.innerHTML = `${dashboardPanelHeading(key, isRole ? "moderation_add_role_hint" : "moderation_server_blocks_hint")}
-      ${isRole ? "" : `<form class="stack" data-member-search><label class="field">${fieldLabel(ui("moderation_member_query"), ui("moderation_member_query_hint"))}<input type="search" name="query" minlength="2" maxlength="100" required autofocus></label><div class="actions form-actions"><button class="button" type="submit">${escapeHtml(ui("settings_search"))}</button></div></form>`}
+    dialog.className = "stack";
+    dialog.setAttribute("aria-labelledby", "moderation-picker-title");
+    dialog.innerHTML = `<header class="panel-header"><div class="heading"><h2 id="moderation-picker-title">${escapeHtml(ui(key))}</h2><p>${escapeHtml(ui(isRole ? "moderation_add_role_hint" : "moderation_server_blocks_hint"))}</p></div></header>
+      ${isRole ? "" : `<form class="stack" data-member-search><label class="field">${fieldLabel(ui("moderation_member_query"), ui("moderation_member_query_hint"))}<input type="search" name="query" minlength="2" maxlength="100" required autofocus></label><div class="actions"><button class="button" type="submit">${escapeHtml(ui("settings_search"))}</button></div></form>`}
       <form class="stack" data-moderation-picker>
         <label class="field"${isRole ? "" : " hidden"}>${fieldLabel(ui(isRole ? "moderation_role" : "moderation_member"))}<select name="target" required${isRole ? " data-searchable autofocus" : ""}></select></label>
         <p role="status" class="hint" hidden></p>
-        <footer class="actions form-actions"><button type="button" class="button" data-picker-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button type="submit" class="button primary"${isRole ? "" : " hidden disabled"}>${escapeHtml(ui(key))}</button></footer>
+        <footer class="actions"><button type="button" class="button" data-picker-cancel>${escapeHtml(ui("endpoint_cancel"))}</button><button type="submit" class="button primary"${isRole ? "" : " hidden disabled"}>${escapeHtml(ui(key))}</button></footer>
       </form>`;
     const form = dialog.querySelector("[data-moderation-picker]");
     const select = form.elements.target;
@@ -8162,7 +8189,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], .deck-card[aria-pressed]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];
@@ -9951,6 +9978,7 @@
       if (window.location.hash === "#settings") state.view = "settings";
       if (window.location.hash === "#channel-settings") state.view = "channel-settings";
       if (window.location.hash === "#server-providers") state.view = "server-providers";
+      if (window.location.hash === "#moderation") state.view = "moderation";
       await selectGuild(guild.id);
       if (window.location.hash === "#channel-scoped-memory") openChannelMemorySettings();
     } catch {
