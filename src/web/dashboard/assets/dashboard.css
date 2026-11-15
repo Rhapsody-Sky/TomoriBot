@@ -596,14 +596,17 @@ body[data-theme="dark"] .boot-logo {
   min-width: 140px;
 }
 @container content (min-width: 861px) {
-  :is([data-channel-settings], [data-server-provider-connections]).split {
+  [data-channel-settings].split {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
   }
 }
 
-[data-server-provider-connections] .item,
-[data-server-provider-detail] {
+#server-connection-detail {
   overflow-wrap: anywhere;
+}
+
+[data-server-provider-toolbar] > label {
+  min-inline-size: 0;
 }
 
 #fallback-form[data-provider-scope="server"] .chain > li:nth-last-child(1 of :not([hidden])) {

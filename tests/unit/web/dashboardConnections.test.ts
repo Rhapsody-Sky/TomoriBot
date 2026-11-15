@@ -325,6 +325,23 @@ describe("dashboard connections", () => {
     expect(state.providerData.personal).toBe(expected);
   });
 
+  it("keeps the active provider selected when the submenu needs a searchable select", async () => {
+    const source = await dashboardFunction("renderServerProviderPicker");
+    const render = runInNewContext(`(${source})`, { ui: String, escapeHtml: String });
+    const connections = Array.from({ length: 8 }, (_, index) => ({
+      key: `endpoint:custom:${index + 1}`,
+      name: `Local ${index + 1}`,
+    }));
+    const active = connections[2].key;
+    const segmented = render(connections.slice(0, 5), active);
+    expect(segmented.activeTab).toBe("server-connection-2");
+    expect(segmented.markup).toContain(`aria-selected="true" tabindex="0" data-connection-select="${active}"`);
+    const select = render(connections, active);
+    expect(select.markup).toContain("data-server-provider-select data-searchable");
+    expect(select.markup).toContain(`value="${active}" selected`);
+    for (const connection of connections) expect(select.markup).toContain(`value="${connection.key}"`);
+  });
+
   it("lists only the selected provider's available models", async () => {
     const source = await dashboardFunction("renderConnectionModels");
     const render = runInNewContext(`(${source})`, {

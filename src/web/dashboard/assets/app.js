@@ -6957,7 +6957,7 @@
       : renderConnectionModels(data, scope, providerName);
     if (collection) {
       const controls = actionItems.length > 2 ? actions : actionItems.join("");
-      return `<section class="card">
+      const cards = `<section class="card">
         ${personaCardHead(connection.name, "", controls ? `<div class="actions">${controls}</div>` : "")}
         <div class="stack">
           ${credentialStatus || activeTextProvider ? `<div class="chips">${credentialStatus ? `<span class="chip">${escapeHtml(credentialStatus)}</span>` : ""}${activeTextProvider ? `<span class="chip tone">${escapeHtml(ui("connection_active_text"))}</span>` : ""}</div>` : ""}
@@ -6966,6 +6966,7 @@
       </section>
       ${openRouter ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterRows(data, scope)}</section>${renderOpenRouterRegistration(scope)}` : ""}
       ${parameters.length ? renderPersonalParameters({ parameters }, scope) : ""}`;
+      return openRouter || parameters.length ? `<div class="card-columns">${cards}</div>` : cards;
     }
     return `<div class="${parameters.length || openRouter ? "grid" : "stack"}">
       <section class="panel provider-panel"><header class="panel-header"><div class="heading"><h2>${escapeHtml(connection.name)}</h2>${credentialStatus ? `<small>${escapeHtml(credentialStatus)}</small>` : ""}${activeTextProvider ? `<small>${escapeHtml(ui("connection_active_text"))}</small>` : ""}</div><div class="actions">${actions}</div></header>${endpoints}${models}${openRouter ? `<div class="subsection stack"><h3>${escapeHtml(ui("connection_registered_models"))}</h3>${renderOpenRouterRows(data, scope)}</div>` : ""}</section>
@@ -7091,6 +7092,64 @@
     ["fallbacks", "connection_fallbacks", "arrow-up-down"],
   ];
 
+  function renderServerProviderPicker(connections, selectedKey) {
+    if (connections.length < 2) return { markup: "", activeTab: "" };
+    const label = escapeHtml(ui("connection_provider"));
+    if (connections.length > 5 || connections.some(({ name }) => name.length > 24)) {
+      return {
+        markup: `<label class="field"><span class="field-label sr-only">${label}</span><select data-server-provider-select${connections.length >= 8 ? " data-searchable" : ""}>
+          ${connections.map(({ key, name }) => `<option value="${escapeHtml(key)}"${key === selectedKey ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")}
+        </select></label>`,
+        activeTab: "",
+      };
+    }
+    const activeTab = `server-connection-${connections.findIndex(({ key }) => key === selectedKey)}`;
+    return {
+      markup: `<nav class="segmented" data-fx="indicator" data-overflow role="tablist" aria-label="${label}">
+        ${connections
+          .map(({ key, name }, index) => {
+            const active = key === selectedKey;
+            return `<button type="button" id="server-connection-${index}" role="tab" aria-controls="server-connection-detail" aria-selected="${active}" tabindex="${active ? 0 : -1}" data-connection-select="${escapeHtml(key)}" data-provider-scope="server">${escapeHtml(name)}</button>`;
+          })
+          .join("")}
+      </nav>`,
+      activeTab,
+    };
+  }
+
+  async function switchServerProviderConnection(key, control) {
+    if (savingForms) {
+      toast(ui("saving"));
+      return false;
+    }
+    if (key === state.providerConnection.server) return true;
+    const detail = document.querySelector("#server-connection-detail");
+    const data = state.providerData.server;
+    if (!detail || !data) return false;
+    const connection = providerConnections(data).find((entry) => entry.key === key);
+    if (
+      !connection ||
+      !(await confirmDraftDiscard(detail)) ||
+      !control.isConnected ||
+      data !== state.providerData.server
+    )
+      return false;
+    state.providerConnection.server = connection.key;
+    if (control.matches('[role="tab"]')) {
+      for (const tab of control.parentElement.querySelectorAll("[data-connection-select]")) {
+        const active = tab === control;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+      }
+      detail.setAttribute("aria-labelledby", control.id);
+      control.focus({ preventScroll: true });
+    }
+    window.TomoriFX.swap(detail, renderConnectionDetail(data, "server", connection));
+    initDraftForms(detail);
+    enhanceDashboard(detail);
+    return true;
+  }
+
   function renderServerProviders(workspace) {
     if (!state.overview.canManage) {
       workspace.innerHTML = `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("settings_manage_required"))}</strong></div></section>`;
@@ -7141,15 +7200,10 @@
       const { connections, connection } = selectProviderConnection(data, "server");
       const add = `<button class="button small primary" type="button" data-provider-open aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("add_provider"))}</button>`;
       const register = `<button class="button small" type="button" data-endpoint-open aria-haspopup="dialog">${escapeHtml(ui("endpoint_register_new"))}</button>`;
+      const { markup, activeTab } = renderServerProviderPicker(connections, connection?.key);
       stage.innerHTML = connections.length
-        ? `<div class="toolbar"><div class="actions">${register}${add}</div></div>
-          <div class="split" data-server-provider-connections>
-            <section class="card">
-              ${personaCardHead(ui("connections"))}
-              <div class="rows">${connections.map((entry) => `<button class="item pick" type="button" data-connection-select="${escapeHtml(entry.key)}" data-provider-scope="server" aria-current="${entry.key === connection?.key}"><strong>${escapeHtml(entry.name)}</strong></button>`).join("")}</div>
-            </section>
-            <div class="col" data-server-provider-detail>${renderConnectionDetail(data, "server", connection)}</div>
-          </div>`
+        ? `<div class="toolbar" data-server-provider-toolbar>${markup}<div class="actions">${register}${add}</div></div>
+          <div id="server-connection-detail"${activeTab ? ` role="tabpanel" aria-labelledby="${activeTab}"` : ""}>${renderConnectionDetail(data, "server", connection)}</div>`
         : `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("connection_empty"))}</strong><div class="row">${register}${add}</div></div></section>`;
     }
   }
@@ -7341,11 +7395,9 @@
       if (guildId !== state.guildId) return;
       await refreshProviders("server");
       if (stillHere()) {
-        focusNavigation(
-          document.querySelector('[data-connection-select][aria-current="true"]')
-            ? '[data-connection-select][aria-current="true"]'
-            : "[data-provider-open]",
-        );
+        const picker =
+          '[data-connection-select][aria-selected="true"], [data-server-provider-select] + .select-trigger';
+        focusNavigation(document.querySelector(picker) ? picker : "[data-provider-open]");
       }
     } catch (error) {
       toast(error.message, "error");
@@ -8052,7 +8104,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], .deck-card[aria-pressed]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];
@@ -8645,19 +8697,9 @@
     if (connectionTab) {
       const { providerScope, connectionSelect } = connectionTab.dataset;
       if (providerScope === "server") {
-        if (savingForms || connectionSelect === state.providerConnection.server) return;
-        const detail = document.querySelector("[data-server-provider-detail]");
-        if (!(await confirmDraftDiscard(detail)) || !connectionTab.isConnected) return;
-        const data = state.providerData.server;
-        if (!data) return;
-        state.providerConnection.server = connectionSelect;
-        const { connection } = selectProviderConnection(data, "server");
-        for (const button of connectionTab.parentElement.children)
-          button.setAttribute("aria-current", String(button === connectionTab));
-        window.TomoriFX.swap(detail, renderConnectionDetail(data, "server", connection));
-        initDraftForms(detail);
-        enhanceDashboard(detail);
-        connectionTab.focus({ preventScroll: true });
+        if (!(await switchServerProviderConnection(connectionSelect, connectionTab))) {
+          connectionTab.parentElement?.querySelector('[aria-selected="true"]')?.focus({ preventScroll: true });
+        }
         return;
       }
       state.providerConnection[providerScope] = connectionSelect;
@@ -8952,6 +8994,14 @@
   document.addEventListener("holdcomplete", handleDashboardAction);
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-server-provider-select]")) {
+      const select = event.target;
+      if (!(await switchServerProviderConnection(select.value, select)) && select.isConnected) {
+        select.value = state.providerConnection.server;
+        select.dispatchEvent(new Event("input"));
+      }
+      return;
+    }
     if (event.target.matches("[data-persona-picker-sort]")) sortPersonaPicker(event.target.closest("dialog"));
     if (event.target.matches("[data-memory-channel-limit]"))
       event.target.form.querySelector("[data-memory-channel-picker]").hidden = !event.target.checked;
