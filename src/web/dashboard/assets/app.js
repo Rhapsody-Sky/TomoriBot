@@ -2327,6 +2327,7 @@
           title: ui("channel_uncategorized"),
           includeExcluded: true,
           status: (id) => (channels.has(id) && spotlights.has(id) ? ui("spotlight_active_short") : ""),
+          metadata: (id) => renderSpotlightChannelMetadata(spotlights.get(id), personas),
         },
       )}</section>`;
       if (query) {
@@ -2349,11 +2350,15 @@
       const row = spotlights.get(selected);
       const update = (saved) => {
         if (!host.isConnected) return;
-        const refreshPicker = !saved || !row;
         if (saved) spotlights.set(saved.channelId, saved);
         else spotlights.delete(selected);
         if (!canSelect(selected)) selected = firstChannel();
-        if (refreshPicker) renderPicker();
+        if (!saved || !row) renderPicker();
+        else {
+          const choice = picker.querySelector(`input[name="spotlightChannel"][value="${CSS.escape(saved.channelId)}"]`);
+          const metadata = choice?.closest(".channel").querySelector(".item-meta");
+          if (metadata) metadata.innerHTML = renderSpotlightChannelMetadata(saved, personas);
+        }
         renderEditor();
         editor.querySelector("h3")?.focus({ preventScroll: true });
       };
@@ -2374,6 +2379,23 @@
     renderEditor();
   }
 
+  function renderSpotlightExpiry(expiresAt) {
+    return expiresAt
+      ? `<time datetime="${escapeHtml(expiresAt)}">${escapeHtml(formatDate(expiresAt))}</time>`
+      : escapeHtml(ui("spotlight_permanent"));
+  }
+
+  function renderSpotlightChannelMetadata(spotlight, personas) {
+    if (!spotlight) return "";
+    const expiry = renderSpotlightExpiry(spotlight.expiresAt);
+    const deadline = spotlight.expiresAt ? escapeHtml(ui("spotlight_expires")).replace("{date}", () => expiry) : expiry;
+    const auto = personas.find(({ personaId }) => personaId === spotlight.autoTriggerPersonaId);
+    const trigger = auto
+      ? escapeHtml(ui("spotlight_auto_summary")).replace("{persona}", () => `<bdi>${escapeHtml(auto.nickname)}</bdi>`)
+      : escapeHtml(ui("spotlight_auto_none"));
+    return `<span>${deadline}</span><span>${trigger}</span>`;
+  }
+
   function renderPersonalSpotlightSettings(editor, channel, row, personas, path, update) {
     if (!channel && !row) {
       window.TomoriFX.swap(
@@ -2385,9 +2407,7 @@
     const remove = row
       ? `<button class="button small danger" type="button" data-spotlight-remove aria-haspopup="dialog">${escapeHtml(ui("spotlight_remove"))}</button>`
       : "";
-    const expires = row?.expiresAt
-      ? `<time datetime="${escapeHtml(row.expiresAt)}">${escapeHtml(formatDate(row.expiresAt))}</time>`
-      : escapeHtml(ui(row ? "spotlight_permanent" : "spotlight_inactive"));
+    const expires = row ? renderSpotlightExpiry(row.expiresAt) : escapeHtml(ui("spotlight_inactive"));
     const heading = `<header class="card-head"><div><h3 tabindex="-1" dir="auto">${escapeHtml(channel ? `#${channel.name}` : ui("spotlight_channel_unavailable"))}</h3></div><span class="chip">${expires}</span></header>`;
     if (channel) {
       const choose = escapeHtml(ui("spotlight_choose_personas"));
@@ -5369,7 +5389,15 @@
     values = [],
     single = false,
     channels = state.overview.channels,
-    { preserveMissing = false, required = false, title = "", hint = "", includeExcluded = false, status } = {},
+    {
+      preserveMissing = false,
+      required = false,
+      title = "",
+      hint = "",
+      includeExcluded = false,
+      status,
+      metadata,
+    } = {},
   ) {
     const selected = new Set(values.filter((value) => value != null && value !== "").map(String));
     const allowed = state.overview.allowedChannelIds || [];
@@ -5409,7 +5437,8 @@
          ${group.channels
            .map((channel) => {
              const label = status?.(channel.id);
-             return `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}</span>${label ? `<span class="chip">${escapeHtml(label)}</span>` : ""}<input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}${single && required ? " required" : ""}></label>`;
+             const details = metadata?.(channel.id);
+             return `<label class="channel" data-channel-search="${escapeHtml([channel.name, channel.topic, group.name].filter(Boolean).join(" ").toLowerCase())}"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(channel.name)}</strong>${channel.topic ? `<small>${escapeHtml(channel.topic)}</small>` : ""}${details ? `<span class="item-meta">${details}</span>` : ""}</span>${label ? `<span class="chip">${escapeHtml(label)}</span>` : ""}<input type="${single ? "radio" : "checkbox"}" name="${escapeHtml(name)}" value="${escapeHtml(channel.id)}"${selected.has(String(channel.id)) ? " checked" : ""}${single && required ? " required" : ""}></label>`;
            })
            .join("")}`,
         )

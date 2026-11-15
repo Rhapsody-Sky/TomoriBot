@@ -594,7 +594,7 @@ body[data-theme="dark"] .boot-logo {
   min-width: 140px;
 }
 @container content (min-width: 861px) {
-  :is([data-channel-settings], [data-spotlight-workspace]).split {
+  [data-channel-settings].split {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.618fr);
   }
 }
@@ -618,6 +618,16 @@ body[data-theme="dark"] .boot-logo {
 
 :is([data-channel-stage], [data-spotlight-picker]) [data-channel-selector] > .card-head {
   align-items: start;
+}
+
+[data-spotlight-picker] .channel .item-meta {
+  column-gap: var(--space-4);
+  row-gap: var(--space-1);
+  overflow-wrap: anywhere;
+}
+
+[data-spotlight-details] .card-head h3 {
+  overflow-wrap: anywhere;
 }
 
 [data-channel-load]:not([hidden]) {

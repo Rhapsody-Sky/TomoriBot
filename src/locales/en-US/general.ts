@@ -1113,6 +1113,7 @@ export default {
       interface_spotlight_choose_personas: "Choose personas",
       interface_spotlight_search_personas: "Search personas",
       interface_spotlight_auto: "Auto-trigger persona",
+      interface_spotlight_auto_summary: "Auto-trigger · {persona}",
       interface_spotlight_auto_hint:
         "When your message does not trigger a persona, this persona can respond without a trigger.",
       interface_spotlight_auto_none: "No auto-trigger",
@@ -1120,6 +1121,7 @@ export default {
       interface_spotlight_hours_hint: "Use 0 to keep the spotlight until you remove it.",
       interface_spotlight_keep_expiry: "Leave empty to keep the current duration, or use 0 to make it permanent.",
       interface_spotlight_permanent: "No expiry",
+      interface_spotlight_expires: "Expires {date}",
       interface_spotlight_saved: "Spotlight saved",
       interface_spotlight_removed: "Spotlight removed",
       spotlight_invalid:
