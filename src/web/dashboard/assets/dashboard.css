@@ -618,8 +618,22 @@ body[data-theme="dark"] .boot-logo {
   overflow-y: auto;
 }
 
-:is([data-channel-personas], [data-channel-persona-options], [data-channel-persona-preview]) .sticker {
+:is([data-channel-persona-options], [data-channel-persona-preview]) .sticker {
   width: var(--space-8);
+}
+
+[data-channel-personas] .quick > [role="img"] {
+  inline-size: calc(2 * var(--space-6));
+}
+
+[data-channel-personas] .quick > [role="img"]:nth-child(even) .sticker {
+  --tilt: 3deg;
+}
+
+@media (max-width: 800px) {
+  [data-channel-personas] .quick > [role="img"]:nth-child(n + 4) {
+    display: none;
+  }
 }
 
 .channel-choices {

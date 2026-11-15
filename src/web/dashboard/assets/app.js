@@ -4791,16 +4791,28 @@
     const allowed = personas.filter((persona) =>
       ids.every((id) => personaChannelSelection(data, persona.personaId).has(id)),
     );
-    host.innerHTML = `${personaCardHead(
-      ui("channel_personas"),
-      ui("channel_personas_hint"),
-      `<div class="actions"><button type="button" class="button small" aria-haspopup="dialog">${escapeHtml(ui("persona_permissions_edit"))}</button></div>`,
-    )}<div class="stack">
-      <label class="toggle"><span class="field-label">${escapeHtml(ui("all_personas_allowed"))}</span><input type="checkbox" role="switch"${allowed.length === personas.length ? " checked" : ""}></label>
-      <div class="row">${allowed
-        .slice(0, 5)
-        .map((persona) => `<span title="${escapeHtml(persona.nickname)}">${personaSticker(persona, "flat")}</span>`)
-        .join("")}<small>${escapeHtml(channelSelectionCount(allowed.length, personas.length))}</small></div>
+    const allAllowed = allowed.length === personas.length;
+    const count =
+      allAllowed && allowed.length
+        ? ui("persona_all").replace("{count}", String(allowed.length))
+        : channelSelectionCount(allowed.length, personas.length);
+    const editLabel = escapeHtml(ui("persona_permissions_edit"));
+    host.innerHTML = `${personaCardHead(ui("channel_personas"), ui("channel_personas_hint"))}<div class="stack">
+      <label class="toggle"><span class="field-label">${escapeHtml(ui("all_personas_allowed"))}</span><input type="checkbox" role="switch"${allAllowed ? " checked" : ""}></label>
+      <div class="quickbar">
+        ${
+          allowed.length
+            ? `<div class="quick">${allowed
+                .slice(0, 4)
+                .map((persona) => {
+                  const name = escapeHtml(persona.nickname);
+                  return `<span role="img" aria-label="${name}" data-tooltip="${name}">${personaSticker(persona)}</span>`;
+                })
+                .join("")}</div>`
+            : ""
+        }
+        <button class="button small" type="button" data-channel-personas-edit aria-haspopup="dialog" data-tooltip="${editLabel}">${navigationIcon("layout-grid")}<span>${escapeHtml(count)}</span><span class="sr-only"> ${editLabel}</span></button>
+      </div>
     </div>`;
     const open = (all = false) => {
       const dialog = document.createElement("dialog");
@@ -4888,10 +4900,10 @@
       enhanceDashboard(dialog);
       dialog.showModal();
     };
-    host.querySelector("button").onclick = () => open();
+    host.querySelector("[data-channel-personas-edit]").onclick = () => open();
     host.querySelector("input").onchange = (event) => {
       const all = event.target.checked;
-      event.target.checked = allowed.length === personas.length;
+      event.target.checked = allAllowed;
       open(all);
     };
   }
