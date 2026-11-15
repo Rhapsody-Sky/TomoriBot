@@ -7209,6 +7209,7 @@
     }
     if (!workspace.querySelector("#server-providers-stage")) {
       const title = escapeHtml(ui("nav_server_providers"));
+      const actionsLabel = escapeHtml(ui("settings_actions"));
       workspace.innerHTML = `
         <section class="banner compact" aria-labelledby="server-providers-title">
           <div class="banner-info"><div class="stack">
@@ -7217,12 +7218,19 @@
             <p class="banner-text">${escapeHtml(ui("server_providers_hint"))}</p>
           </div></div>
           <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("plug")}</span></div>
-          <div class="banner-menu">${refreshButton("provider", ui("refresh_providers"), "server")}</div>
         </section>
         <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${title}">
           ${serverProviderPanels.map(([id, label, icon]) => `<button type="button" id="server-providers-${id}" role="tab" aria-controls="server-providers-stage" data-provider-panel="${id}" data-provider-scope="server">${navigationIcon(icon)}${escapeHtml(ui(label))}</button>`).join("")}
         </nav>
-        <section id="server-providers-stage" class="stage" role="tabpanel"></section>
+        <section id="server-providers-stage" class="stage" role="tabpanel">
+          <div class="toolbar" data-server-provider-toolbar><div class="actions">
+            <button class="button small icon" type="button" popovertarget="server-providers-actions" aria-label="${actionsLabel}">${navigationIcon("ellipsis")}</button>
+            <div class="action-menu" id="server-providers-actions" popover aria-label="${actionsLabel}">
+              <button class="button" type="button" data-provider-refresh="server">${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_providers"))}</button>
+            </div>
+          </div></div>
+          <div class="stack" data-server-provider-content></div>
+        </section>
         <div data-server-provider-dialogs></div>`;
     }
     const panel = state.providerPanel.server;
@@ -7233,28 +7241,35 @@
     }
     const stage = workspace.querySelector("#server-providers-stage");
     stage.setAttribute("aria-labelledby", `server-providers-${panel}`);
+    const content = stage.querySelector("[data-server-provider-content]");
+    const actions = stage.querySelector("[data-server-provider-toolbar] > .actions");
+    actions.previousElementSibling?.remove();
+    actions.querySelector("[data-provider-open]")?.remove();
     const data = state.providerData.server;
     if (!data) {
-      if (!stage.hasAttribute("aria-busy")) {
-        stage.setAttribute("aria-busy", "true");
-        stage.innerHTML = loadingBar(ui("providers_loading"));
+      if (!content.hasAttribute("aria-busy")) {
+        content.setAttribute("aria-busy", "true");
+        content.innerHTML = loadingBar(ui("providers_loading"));
         void loadProviderWorkspace("server");
       }
       return;
     }
-    stage.removeAttribute("aria-busy");
+    content.removeAttribute("aria-busy");
     workspace.querySelector("[data-server-provider-dialogs]").innerHTML = renderProviderDialogs(data, "server");
     if (panel === "models") {
-      stage.innerHTML = `<div class="card-columns">${renderServerModels(data)}${renderAdvancedServerModels(data)}${renderSettingsPanel({ section: "byok" })}</div>`;
+      content.innerHTML = `<div class="card-columns">${renderServerModels(data)}${renderAdvancedServerModels(data)}${renderSettingsPanel({ section: "byok" })}</div>`;
     } else if (panel === "fallbacks") {
-      stage.innerHTML = renderFallbacks(data, "server");
+      content.innerHTML = renderFallbacks(data, "server");
     } else {
       const { connections, connection } = selectProviderConnection(data, "server");
       const add = `<button class="button small primary" type="button" data-provider-open aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("add_provider"))}</button>`;
       const { markup, activeTab } = renderServerProviderPicker(connections, connection?.key);
-      stage.innerHTML = connections.length
-        ? `<div class="toolbar" data-server-provider-toolbar>${markup}<div class="actions">${add}</div></div>
-          <div id="server-connection-detail"${activeTab ? ` role="tabpanel" aria-labelledby="${activeTab}"` : ""}>${renderConnectionDetail(data, "server", connection)}</div>`
+      if (connections.length) {
+        actions.insertAdjacentHTML("beforebegin", markup);
+        actions.insertAdjacentHTML("beforeend", add);
+      }
+      content.innerHTML = connections.length
+        ? `<div id="server-connection-detail"${activeTab ? ` role="tabpanel" aria-labelledby="${activeTab}"` : ""}>${renderConnectionDetail(data, "server", connection)}</div>`
         : `<section class="card"><div class="empty-note"><strong>${escapeHtml(ui("connection_empty"))}</strong><div class="row">${add}</div></div></section>`;
     }
   }
@@ -7280,9 +7295,9 @@
       const expectedView = scope === "personal" ? "personal-providers" : "server-providers";
       if (workspace && state.view === expectedView) {
         if (scope === "server") {
-          const stage = workspace.querySelector("#server-providers-stage");
-          stage.removeAttribute("aria-busy");
-          stage.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+          const content = workspace.querySelector("[data-server-provider-content]");
+          content.removeAttribute("aria-busy");
+          content.innerHTML = `<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
         } else workspace.innerHTML = `<div class="empty"><strong>${escapeHtml(error.message)}</strong></div>`;
       }
       return false;
