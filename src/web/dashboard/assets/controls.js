@@ -773,7 +773,8 @@
   let target = null;
   let showTimer = 0;
   let hideTimer = 0;
-  let pointerFocus = false;
+  let hoveredControl = null;
+  let keyboardNavigation = false;
 
   function tooltipControl(node) {
     return node instanceof Element
@@ -838,43 +839,35 @@
     }, 150);
   }
 
-  document.addEventListener("pointerover", (event) => {
+  document.addEventListener("pointermove", (event) => {
     if (event.pointerType === "touch") return;
     if (tip.contains(event.target)) {
       clearTimeout(hideTimer);
       return;
     }
     const button = tooltipControl(event.target);
-    if (!button || (event.relatedTarget instanceof Node && button.contains(event.relatedTarget))) return;
+    if (!button || button === hoveredControl) return;
+    hoveredControl = button;
     clearTimeout(showTimer);
     showTimer = setTimeout(() => showTooltip(button), 350);
   });
   document.addEventListener("pointerout", (event) => {
     const button = tooltipControl(event.target);
-    if (button && (!(event.relatedTarget instanceof Node) || !button.contains(event.relatedTarget)))
+    if (button && (!(event.relatedTarget instanceof Node) || !button.contains(event.relatedTarget))) {
+      if (hoveredControl === button) hoveredControl = null;
       leaveTooltip(button);
-    else if (tip.contains(event.target) && target) leaveTooltip(target);
+    } else if (tip.contains(event.target) && target) leaveTooltip(target);
   });
   document.addEventListener("focusin", (event) => {
     const button = tooltipControl(event.target);
-    if (button && !pointerFocus) showTooltip(button);
+    if (button && keyboardNavigation) showTooltip(button);
   });
   document.addEventListener("focusout", (event) => {
     const button = tooltipControl(event.target);
     if (button && (!(event.relatedTarget instanceof Node) || !button.contains(event.relatedTarget)))
       leaveTooltip(button);
   });
-  document.addEventListener(
-    "pointerdown",
-    () => {
-      pointerFocus = true;
-      hideTooltip();
-      setTimeout(() => {
-        pointerFocus = false;
-      }, 0);
-    },
-    true,
-  );
+  document.addEventListener("pointerdown", hideTooltip, true);
   document.addEventListener("click", hideTooltip);
   document.addEventListener("input", (event) => {
     if (event.target === target) hideTooltip();
@@ -882,6 +875,12 @@
   document.addEventListener(
     "keydown",
     (event) => {
+      keyboardNavigation =
+        event.key === "Tab" || event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End";
+      if (keyboardNavigation)
+        setTimeout(() => {
+          keyboardNavigation = false;
+        }, 0);
       if (event.key === "Escape" && target) {
         dismissed.add(target);
         hideTooltip();
