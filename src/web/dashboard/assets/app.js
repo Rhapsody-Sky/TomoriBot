@@ -6645,13 +6645,10 @@
       .join("");
   }
 
-  function renderEndpointRows(data, scope) {
-    if (!data.endpoints?.length) return '<p class="hint">No custom endpoints.</p>';
-    const rows = data.endpoints
+  function renderEndpointModels(endpoints, scope) {
+    const rows = endpoints
       .map((endpoint) => {
-        const label = escapeHtml(endpoint.modelName || endpoint.displayName);
-        const route = `${escapeHtml(endpoint.capability)} / ${escapeHtml(endpoint.apiStyle)}`;
-        const url = escapeHtml(endpoint.endpointUrl);
+        const name = endpoint.modelName || endpoint.displayName;
         const editable =
           endpoint.id &&
           endpoint.capability !== "transcription" &&
@@ -6660,24 +6657,35 @@
           ? `<button class="button small" type="button" data-endpoint-model-edit="${endpoint.id}" data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_model_edit"))}</button>`
           : "";
         const features = [
-          endpoint.requiresAuth && "Auth",
-          endpoint.hasTools && "Tools",
-          endpoint.seesImages && "Vision",
-          endpoint.supportsStructOutput && "Structured output",
+          endpoint.requiresAuth && "connection_model_auth",
+          endpoint.hasTools && "endpoint_tools",
+          endpoint.seesImages && "endpoint_images",
+          endpoint.seesVideos && "endpoint_videos",
+          endpoint.supportsStructOutput && "endpoint_structured",
         ].filter(Boolean);
-        return `<article class="item">
-        <div class="stack">
-          <div><strong>${label}</strong><div class="item-meta"><span>${route}</span></div><small>${url}</small></div>
-          ${features.length ? `<div class="chips">${features.map((feature) => `<span class="chip">${feature}</span>`).join("")}</div>` : ""}
-        </div>
-        ${edit ? `<div class="item-actions">${edit}</div>` : ""}
-      </article>`;
+        return `<tr>
+          <th scope="row">${escapeHtml(name)}</th>
+          <td>${escapeHtml(ui(`model_${endpoint.capability}`))}</td>
+          <td>${escapeHtml(endpoint.apiStyle)}</td>
+          <td class="num">${endpoint.numCtx ? new Intl.NumberFormat().format(endpoint.numCtx) : "&ndash;"}</td>
+          <td>${features.length ? `<div class="chips">${features.map((key) => `<span class="chip">${escapeHtml(ui(key))}</span>`).join("")}</div>` : "&ndash;"}</td>
+          <td data-provider-model-actions>${edit}</td>
+        </tr>`;
       })
       .join("");
-    return `<div class="rows">${rows}</div>`;
+    return `<div class="table-wrap"><table aria-label="${escapeHtml(ui("connection_registered_models"))}">
+      <thead><tr>
+        <th scope="col">${escapeHtml(ui("endpoint_model_name"))}</th>
+        <th scope="col">${escapeHtml(ui("connection_model_capability"))}</th>
+        <th scope="col">${escapeHtml(ui("connection_model_api_style"))}</th>
+        <th scope="col" class="num">${escapeHtml(ui("endpoint_model_context"))}</th>
+        <th scope="col">${escapeHtml(ui("connection_model_features"))}</th>
+        <th scope="col" data-provider-model-actions>${escapeHtml(ui("persona_actions"))}</th>
+      </tr></thead><tbody>${rows}</tbody>
+    </table></div>`;
   }
 
-  function renderOpenRouterRows(data, scope) {
+  function renderOpenRouterModels(data, scope) {
     if (!data.openRouterModels?.length) {
       return `<p class="hint">${escapeHtml(ui("connection_no_models"))}</p>`;
     }
@@ -6687,10 +6695,21 @@
           model.capability === "transcription"
             ? ""
             : `<button class="button small danger" type="button" data-openrouter-delete="${escapeHtml(model.codename)}" data-openrouter-capability="${escapeHtml(model.capability)}" data-provider-scope="${scope}" data-tooltip="${escapeHtml(ui("connection_remove_registration_hint"))}">${escapeHtml(ui("connection_remove_registration"))}</button>`;
-        return `<article class="item"><div><strong>${escapeHtml(model.codename)}</strong><div class="item-meta"><span>${escapeHtml(model.capability)}</span></div></div>${remove ? `<div class="item-actions">${remove}</div>` : ""}</article>`;
+        const description = model.description && model.description !== model.codename ? model.description : "";
+        return `<tr>
+          <th scope="row">${escapeHtml(model.codename)}${description ? `<br><small>${escapeHtml(description)}</small>` : ""}</th>
+          <td>${escapeHtml(ui(`model_${model.capability}`))}</td>
+          <td data-provider-model-actions>${remove}</td>
+        </tr>`;
       })
       .join("");
-    return `<div class="rows">${rows}</div>`;
+    return `<div class="table-wrap"><table aria-label="${escapeHtml(ui("connection_registered_models"))}">
+      <thead><tr>
+        <th scope="col">${escapeHtml(ui("endpoint_model_name"))}</th>
+        <th scope="col">${escapeHtml(ui("connection_model_capability"))}</th>
+        <th scope="col" data-provider-model-actions>${escapeHtml(ui("persona_actions"))}</th>
+      </tr></thead><tbody>${rows}</tbody>
+    </table></div>`;
   }
 
   function renderServerModels(data) {
@@ -7194,7 +7213,7 @@
       .join("");
     const label = escapeHtml(ui("connection_available_models"));
     return groups
-      ? `<div class="table-wrap"><table aria-label="${label}"><tbody>${groups}</tbody></table></div>`
+      ? `<div class="table-wrap"><table aria-label="${label}"><thead><tr><th scope="col">${escapeHtml(ui("connection_model_capability"))}</th><th scope="col">${escapeHtml(ui("connection_models"))}</th></tr></thead><tbody>${groups}</tbody></table></div>`
       : `<p class="hint">${escapeHtml(ui("connection_no_available_models"))}</p>`;
   }
 
@@ -7232,19 +7251,19 @@
       : "";
     const openRouter = providerName?.toLowerCase() === "openrouter";
     const credentialStatus = provider ? ui(provider.hasApiKey ? "connection_key_stored" : "connection_no_key") : "";
-    const endpoints = endpoint ? renderEndpointRows({ endpoints: connection.endpoints }, scope) : "";
+    const endpoints = endpoint ? renderEndpointModels(connection.endpoints, scope) : "";
     const models = brave
       ? `<p class="hint">${escapeHtml(ui("brave_search_key_hint"))}</p>`
       : renderConnectionModels(data, scope, providerName);
     const controls = actionItems.length > 2 ? actions : actionItems.join("");
     const cards = `<section class="card">
-      ${personaCardHead(connection.name, "", controls ? `<div class="actions">${controls}</div>` : "")}
+      ${personaCardHead(connection.name, endpoint?.endpointUrl, controls ? `<div class="actions">${controls}</div>` : "")}
       <div class="stack">
         ${credentialStatus || activeTextProvider ? `<div class="chips">${credentialStatus ? `<span class="chip">${escapeHtml(credentialStatus)}</span>` : ""}${activeTextProvider ? `<span class="chip tone">${escapeHtml(ui("connection_active_text"))}</span>` : ""}</div>` : ""}
         ${endpoints}${models}
       </div>
     </section>
-    ${openRouter ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterRows(data, scope)}</section>${renderOpenRouterRegistration(scope)}` : ""}
+    ${openRouter ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterModels(data, scope)}</section>${renderOpenRouterRegistration(scope)}` : ""}
     ${parameters.length ? renderPersonalParameters({ parameters }, scope) : ""}`;
     return openRouter || parameters.length ? `<div class="card-columns">${cards}</div>` : cards;
   }

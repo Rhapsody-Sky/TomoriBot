@@ -609,6 +609,18 @@ body[data-theme="dark"] .boot-logo {
   min-inline-size: 0;
 }
 
+[data-provider-content] .table-wrap {
+  overflow-wrap: normal;
+}
+
+[data-provider-content] tbody tr:is(:hover, :focus-within) {
+  background-color: color-mix(in oklch, var(--ink) 6%, transparent);
+}
+
+[data-provider-model-actions] {
+  text-align: end;
+}
+
 #fallback-form .chain > li:nth-last-child(1 of :not([hidden])) {
   padding-block-end: 0;
   border-color: transparent;
