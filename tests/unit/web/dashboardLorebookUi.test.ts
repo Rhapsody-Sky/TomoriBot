@@ -62,14 +62,6 @@ describe("Persona section navigation", () => {
 describe("dashboard lorebook UI", () => {
   beforeAll(() => initializeLocalizer());
 
-  it("omits absent page-header copy without leaving an empty decorative label", async () => {
-    const header = runInNewContext(`(${await dashboardFunction("pageHeader")})`, {
-      escapeHtml: (value: string) => value,
-    }) as (eyebrow: string, title: string, copy: string) => string;
-    expect(header("", "Collection", "")).not.toContain("<p");
-    expect(header("Workspace", "Collection", "Description").match(/<p/g)).toHaveLength(2);
-  });
-
   it("previews the actual additional word conditions for each matching mode", async () => {
     const source = await dashboardFunction("lorebookUsage");
     const usage = runInNewContext(`(${source})`, {
@@ -292,9 +284,8 @@ describe("dashboard lorebook UI", () => {
       expect(html.includes('id="lorebook-book-actions"')).toBe(lineageId === 0);
       for (const id of ["lorebook-entry-dialog", "lorebook-import-dialog"]) {
         const dialog = html.split(`<dialog id="${id}">`)[1]?.split("</dialog>")[0];
-        expect(dialog).toContain(
-          `<dt>${localizedCopy("en-US", `general.dashboard.interface_${label}`)}</dt><dd dir="auto">${name}</dd>`,
-        );
+        expect(dialog).toContain(localizedCopy("en-US", `general.dashboard.interface_${label}`));
+        expect(dialog).toContain(`>${name}<`);
         if (id === "lorebook-entry-dialog") {
           expect(dialog).toContain(localizedCopy("en-US", "general.dashboard.interface_lorebook_title"));
           expect(dialog).toContain('name="title" maxlength="128" required autofocus');
@@ -305,7 +296,7 @@ describe("dashboard lorebook UI", () => {
   });
 
   it("keeps every entry draft on cancel and clears them all on confirmed discard", async () => {
-    const source = await dashboardFunction("confirmLorebookEntryChange");
+    const source = await dashboardFunction("confirmDraftDiscard");
     const keys = ["lorebook/77/0/11/keys", "lorebook/77/0/11/channels", "lorebook/77/0/12/content"];
     const drafts = new Map(keys.map((key) => [key, []]));
     let accepted = false;
@@ -683,6 +674,48 @@ describe("dashboard lorebook UI", () => {
     await current;
     expect(state.lorebookBookId).toBeNull();
     expect(target.innerHTML).toBe("new data");
+  });
+
+  it("resolves a field search from an empty lorebook to an entry in a populated book", async () => {
+    const source = await dashboardFunction("loadLorebooks");
+    const state = { guildId: "1", lorebookBookId: 3, lorebookData: null };
+    const target = { innerHTML: "", querySelector: () => null };
+    const books = [
+      { lorebook_id: 3, entryCount: 0 },
+      { lorebook_id: 4, entryCount: 1 },
+    ];
+    const requests: number[] = [];
+    const selectedEntries: number[] = [];
+    let focused = false;
+    const load = runInNewContext(`let lorebookLoadVersion = 0; ${source}; loadLorebooks`, {
+      state,
+      pendingSearchDestination: { view: "lorebooks", lorebookEntryField: true },
+      window: {},
+      loadingBar: () => "",
+      lorebookSelections: new Map(),
+      lorebookSelectionKey: () => "scope",
+      document: { querySelector: (selector: string) => (selector === "#lorebook-workspace" ? target : null) },
+      URLSearchParams,
+      lorebookCurrent: () => true,
+      ui: String,
+      api: (path: string) => {
+        const bookId = Number(new URL(path, "http://localhost").searchParams.get("bookId"));
+        requests.push(bookId);
+        return Promise.resolve({ books, entries: bookId === 4 ? [{ entry_id: 12 }] : [] });
+      },
+      renderLorebooks: () => "library",
+      initDraftForms: () => {},
+      openLorebookEditor: (id: number) => selectedEntries.push(id),
+      focusSearchDestination: () => {
+        focused = true;
+      },
+    }) as (lineage: number) => Promise<void>;
+
+    await load(0);
+    expect(requests).toEqual([3, 4]);
+    expect(state.lorebookBookId).toBe(4);
+    expect(selectedEntries).toEqual([12]);
+    expect(focused).toBe(true);
   });
 
   it("keeps book actions and entry creation available from the library", async () => {

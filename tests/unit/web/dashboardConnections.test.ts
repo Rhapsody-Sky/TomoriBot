@@ -76,7 +76,7 @@ describe("dashboard connections", () => {
     }
   });
 
-  it("indexes every persona and keeps management settings restricted to admins", async () => {
+  it("indexes visible dashboard destinations for the workspace and account permissions", async () => {
     const source = await dashboardFunction("buildSettingsSearchIndex");
     const overview = {
       canManage: true,
@@ -87,12 +87,21 @@ describe("dashboard connections", () => {
         { personaId: 3, lineageId: 5, nickname: "Mirri" },
       ],
       personaNaming: { copy: { tab: "preferences" } },
+      settings: { catalog: [] },
+    };
+    const state = {
+      overview: overview as typeof overview | null,
+      providerData: {},
+      session: { user: { isGlobalAdmin: false } },
+      publicSite: { copy: { title: "site_title", pages: "site_pages", links: "site_links" } },
     };
     const build = runInNewContext(`${source}; buildSettingsSearchIndex`, {
-      state: { overview, providerData: {} },
+      state,
       ui: String,
       profileTabs: { profile: "user-round", privacy: "brain", conversation: "message-circle" },
       moderationTabs: {},
+      settingsGroups: [],
+      channelSettingsFields: [],
       personaKnowledgeTabs: () => [],
       settingSearchText: (element: { textContent: string }) => element.textContent,
       document: {
@@ -113,17 +122,27 @@ describe("dashboard connections", () => {
       renderPersonaNaming: () => "How this persona addresses you",
       renderPersonaSettings: () => "",
       renderPersonaAppearance: () => "",
+      renderChannelOverrides: () => "",
     }) as () => {
+      view: string;
       title?: string;
       profileTab?: string;
       personaId?: number;
       personaHome?: boolean;
       personaPanel?: string;
       name?: string;
+      siteTab?: string;
+      channelSelection?: boolean;
     }[];
     for (const canManage of [true, false]) {
       overview.canManage = canManage;
       const entries = build();
+      expect(entries.some((entry) => entry.view === "overview" && entry.title === "overview_title")).toBe(true);
+      expect(entries.some((entry) => entry.view === "settings" && entry.title === "nav_server_settings")).toBe(
+        canManage,
+      );
+      expect(entries.some((entry) => entry.view === "channel-settings" && entry.channelSelection)).toBe(canManage);
+      expect(entries.some((entry) => entry.view === "site-admin")).toBe(false);
       expect(entries.find((entry) => entry.title === "conversation options")?.profileTab).toBe("conversation");
       expect(entries.filter((entry) => entry.personaHome).map((entry) => entry.personaId)).toEqual([2, 3]);
       for (const personaId of [2, 3]) {
@@ -134,6 +153,41 @@ describe("dashboard connections", () => {
       }
       expect(entries.some((entry) => entry.personaId === 1)).toBe(false);
     }
+    overview.canManage = true;
+    overview.guild.isDirectMessage = true;
+    expect(build().some((entry) => entry.view === "channel-settings")).toBe(false);
+
+    state.session.user.isGlobalAdmin = true;
+    state.overview = null;
+    const entriesWithoutServer = build();
+    expect(entriesWithoutServer.every((entry) => entry.view === "site-admin")).toBe(true);
+    expect(entriesWithoutServer.some((entry) => entry.title === "site_title")).toBe(true);
+    expect(entriesWithoutServer.some((entry) => entry.siteTab === "links")).toBe(true);
+  });
+
+  it("keeps a channel field destination pending until the channel settings are visible", async () => {
+    const source = await dashboardFunction("channelSearchDestination");
+    const picker = {};
+    const field = {};
+    const fields = {};
+    let channelLoaded = false;
+    const form = {
+      querySelector: (selector: string) =>
+        selector === "[data-channel-picker]" ? picker : channelLoaded ? fields : null,
+    };
+    const root = { querySelector: () => form };
+    const entry = { name: "channel_autochat_id", channelPickerFocused: false };
+    const revealed: unknown[] = [];
+    const resolve = runInNewContext(`${source}; channelSearchDestination`, {
+      revealSearchDestination: (target: unknown) => revealed.push(target),
+      searchField: (scope: unknown, name: string) => (scope === fields && name === entry.name ? field : null),
+    }) as (root: unknown, entry: unknown) => unknown;
+
+    expect(resolve(root, entry)).toBeNull();
+    expect(resolve(root, entry)).toBeNull();
+    expect(revealed).toEqual([picker]);
+    channelLoaded = true;
+    expect(resolve(root, entry)).toBe(field);
   });
 
   it("filters channel choices while preserving stored selections outside the allowlist", async () => {
@@ -250,6 +304,9 @@ describe("dashboard connections", () => {
       { title: "triggerWords", path: "Personas / Mirri", hint: "" },
     ];
     expect(filter(personaEntries, "Juno triggerWords")).toEqual([personaEntries[1], personaEntries[0]]);
+    const serverSettings = { title: "Server Settings", path: "Server Settings", hint: "" };
+    const crossServerMemory = { title: "Cross-server short-term memory", path: "My settings", hint: "" };
+    expect(filter([crossServerMemory, serverSettings], "server settings")[0]).toBe(serverSettings);
   });
 
   it("puts sprite editing and deletion in the dialog and keeps the tile a single action", async () => {

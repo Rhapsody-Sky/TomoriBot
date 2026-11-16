@@ -852,10 +852,10 @@
         </header>
         <div class="shell"><div class="sidebar-rail"><aside class="sidebar" data-variant="detailed">
           <nav class="nav-stack sidebar-sections" id="dashboard-navigation" aria-label="Dashboard">
+            ${state.overview || (state.session?.user.isGlobalAdmin && state.publicSite) ? `<button class="button sidebar-search" type="button" data-settings-search-open aria-haspopup="dialog">${navigationIcon("search")}${escapeHtml(ui("settings_search"))}</button>` : ""}
             ${
               state.overview
                 ? `
-            <button class="button${collection ? " sidebar-search" : ""}" type="button" data-settings-search-open aria-haspopup="dialog">${collection ? navigationIcon("search") : ""}${escapeHtml(ui("settings_search"))}</button>
             <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_global"))}</h2><div class="sidebar-group-links">
             ${navButton("profile", ui("my_settings"))}
             ${navButton("personal-memory", ui("global_memory"))}
@@ -1198,6 +1198,7 @@
         enhanceDashboard,
         completeFormSave,
         showFormError,
+        initialTab: pendingSearchDestination?.view === "site-admin" ? pendingSearchDestination.siteTab : undefined,
         isCurrent: () => state.view === "site-admin",
         copy: state.publicSite.copy,
         afterSave: async () => {
@@ -1285,13 +1286,17 @@
       const template = document.createElement("template");
       template.innerHTML = html;
       for (const element of template.content.querySelectorAll(
-        "label.field, label.toggle, h2, h3, legend, [data-openrouter-model-add]",
+        "label.field, label.toggle, h2, h3, legend, [data-openrouter-model-add], [data-endpoint-model-add]",
       )) {
         if (element.closest(".entry-list, [data-persona-entries], .chat, .chat-dock")) continue;
         const title = settingSearchText(element);
         if (!title) continue;
         const hint = element.querySelector("small")?.textContent || "";
         const name = element.querySelector("[name]")?.getAttribute("name");
+        const namingMode =
+          element.closest("[data-persona-naming]") && element.querySelector("input[name]")
+            ? element.parentElement.querySelector("[data-naming-mode]")
+            : null;
         const dialog = element.closest("dialog")?.id;
         const providerRegistration = element.closest("[data-provider-endpoint-fields]")
           ? "endpoint"
@@ -1304,15 +1309,17 @@
           title,
           hint,
           name,
+          nameFallback: namingMode?.name,
+          channelOverride: element.closest("[data-channel-override]")?.dataset.channelOverride,
           tag: element.tagName.toLowerCase(),
-          path,
+          path: namingMode ? `${path} / ${settingSearchText(namingMode.closest(".field"))}` : path,
           providerRegistration,
         };
         if (
           !entries.some(
             (existing) =>
               existing.personaId === entry.personaId &&
-              existing.path === path &&
+              existing.path === entry.path &&
               existing.title === title &&
               existing.dialog === dialog,
           )
@@ -1321,6 +1328,13 @@
       }
     };
     const page = (view, title, extra = {}) => entries.push({ view, title, path: title, hint: "", ...extra });
+    if (state.session?.user.isGlobalAdmin && state.publicSite) {
+      const copy = state.publicSite.copy;
+      page("site-admin", copy.title, { hint: copy.hint });
+      for (const siteTab of ["pages", "links"]) page("site-admin", copy[siteTab], { siteTab, path: copy.title });
+    }
+    if (!state.overview) return entries;
+    page("overview", ui("overview_title"), { hint: ui("overview_hint") });
     page("profile", ui("my_settings"));
     for (const profileTab of Object.keys(profileTabs))
       addMarkup(renderProfilePanel(profileTab), { view: "profile", profileTab }, ui("my_settings"));
@@ -1334,6 +1348,7 @@
       page("personal-spotlights", ui("spotlights"), { hint: ui("spotlights_hint") });
     page("lorebooks", ui("lorebooks"));
     if (state.overview.canManage) {
+      page("settings", ui("nav_server_settings"), { settingsGroup: "conversation" });
       if (!state.overview.guild.isDirectMessage) {
         for (const [moderationTab, [key]] of Object.entries(moderationTabs)) {
           page("moderation", ui(key), { moderationTab, path: ui("moderation") });
@@ -1376,26 +1391,20 @@
         if (group.id === "channels" && !state.overview.guild?.isDirectMessage)
           page("settings", ui("random_schedules"), { ...route, path, tag: "h3" });
       }
-      for (const [sectionId, key] of channelSettingsFields) {
-        const field = state.overview.settings.catalog
-          .find((section) => section.id === sectionId)
-          ?.fields.find((field) => field.key === key);
-        if (field)
-          entries.push({
-            view: "channel-settings",
-            title: field.label,
-            hint: field.hint,
-            path: ui("channel_settings"),
-            channelTab: "settings",
-          });
+      if (!state.overview.guild.isDirectMessage) {
+        const path = ui("channel_settings");
+        const route = { view: "channel-settings", channelTab: "settings", channelSelection: true };
+        page("channel-settings", path, { channelTab: "settings" });
+        for (const [sectionId, key] of channelSettingsFields) {
+          const field = state.overview.settings.catalog
+            .find((section) => section.id === sectionId)
+            ?.fields.find((field) => field.key === key);
+          if (field) entries.push({ ...route, title: field.label, hint: field.hint, path, name: key });
+        }
+        addMarkup(renderChannelOverrides(), route, path);
+        page("channel-settings", ui("channel_allowlisted"), { channelTab: "allowlist", path });
+        page("channel-settings", ui("channel_personas"), { ...route, channelPersonas: true, path });
       }
-      addMarkup(
-        renderChannelOverrides(),
-        { view: "channel-settings", channelTab: "settings", channelSelection: true },
-        ui("channel_settings"),
-      );
-      page("channel-settings", ui("channel_allowlisted"), { channelTab: "allowlist" });
-      page("channel-settings", ui("channel_personas"), { channelTab: "settings" });
     }
     for (const persona of state.overview.personas.filter((entry) => entry.lineageId !== 0)) {
       const route = { view: "personas", personaId: persona.personaId };
@@ -1538,7 +1547,7 @@
     list.innerHTML = matches
       .slice(0, 60)
       .map((entry) => {
-        const persona = state.overview.personas.find((persona) => persona.personaId === entry.personaId);
+        const persona = state.overview?.personas.find((persona) => persona.personaId === entry.personaId);
         return `<button type="button" class="settings-search-result" data-settings-search-result="${settingsSearchEntries.indexOf(entry)}">${persona ? personaAvatar(persona, "avatar") : ""}<span class="settings-search-copy"><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.path)}</small>${entry.hint ? `<span>${escapeHtml(entry.hint)}</span>` : ""}</span></button>`;
       })
       .join("");
@@ -1550,7 +1559,9 @@
   async function openSettingsSearch() {
     clearSearchSpotlight();
     if (document.getElementById("navigation-sheet")?.open) initNavigationMenus();
-    if (!state.overview || document.querySelector("dialog[open]")) return;
+    if (!state.overview && !(state.session?.user.isGlobalAdmin && state.publicSite)) return;
+    if (document.querySelector("dialog[open]")) return;
+    pendingSearchDestination = null;
     const guildId = state.guildId;
     const dialog = document.createElement("dialog");
     dialog.className = "dialog wide settings-search";
@@ -1577,6 +1588,7 @@
     settingsSearchEntries = buildSettingsSearchIndex();
     updateSettingsSearch(dialog);
     dialog.querySelector("input").focus();
+    if (!state.overview) return;
     for (const scope of state.overview.canManage ? ["personal", "server"] : ["personal"]) {
       if (state.providerData[scope]) continue;
       try {
@@ -1594,7 +1606,11 @@
   function focusSearchDestination() {
     const entry = pendingSearchDestination;
     if (!entry) return;
-    if (state.view !== entry.view) {
+    if (
+      state.view !== entry.view ||
+      state.guildId !== entry.guildId ||
+      (entry.channelTab && channelTab !== entry.channelTab)
+    ) {
       pendingSearchDestination = null;
       return;
     }
@@ -1610,28 +1626,60 @@
     if (entry.dialog && !root.open) root.showModal();
     let target;
     if (entry.personaHome) target = root.querySelector(".banner");
-    else if (entry.view === "channel-settings" && entry.channelTab !== "allowlist")
-      target = root.querySelector("[data-channel-settings] [data-channel-picker]");
-    else if (entry.view === "channel-settings") target = root.querySelector("[data-channel-allowlist]");
-    else if (entry.name)
-      target = [...root.querySelectorAll("[name]")]
-        .find((input) => input.name === entry.name && input.getClientRects().length)
-        ?.closest(".field, .toggle, fieldset");
-    if (!target && entry.tag)
-      target = [...root.querySelectorAll(entry.tag)].find(
-        (element) => settingSearchText(element) === entry.title && element.getClientRects().length,
-      );
-    if (!target && !entry.tag && !entry.name)
-      target = root.querySelector(entry.personaPanel ? "[data-persona-content]" : "h1");
+    else if (entry.channelTab === "allowlist") target = root.querySelector("[data-channel-allowlist]");
+    else if (entry.channelSelection) target = channelSearchDestination(root, entry);
+    else if (entry.siteTab) target = root.querySelector(`#site-tab-${entry.siteTab}`);
+    else if (entry.lorebookEntryField) {
+      const editor = root.querySelector("#lorebook-editor-host:not([hidden])");
+      if (editor) target = searchField(editor, entry.name);
+    } else if (entry.name || entry.tag) {
+      target = searchField(root, entry.name) || searchField(root, entry.nameFallback);
+      if (!target && entry.tag)
+        target = [...root.querySelectorAll(entry.tag)].find(
+          (element) => settingSearchText(element) === entry.title && element.getClientRects().length,
+        );
+    } else target = root.querySelector(entry.personaPanel ? "[data-persona-content]" : "h1");
     if (!target) return;
     if (target.matches("h2, h3, legend")) target = target.closest("fieldset, .panel, .card") || target;
     pendingSearchDestination = null;
+    revealSearchDestination(target);
+  }
+
+  function searchField(root, name) {
+    if (!name) return null;
+    return [...root.querySelectorAll(`[name="${CSS.escape(name)}"]`)]
+      .filter((control) => !control.hidden && control.getClientRects().length)
+      .map((control) => control.closest(".field, .toggle, fieldset"))
+      .find((field) => field?.getClientRects().length);
+  }
+
+  function channelSearchDestination(root, entry) {
+    const form = root.querySelector("[data-channel-settings]");
+    if (!form) return null;
+    const fields = form.querySelector("[data-channel-fields]:not([hidden])");
+    if (!fields) {
+      if (!entry.channelPickerFocused) {
+        entry.channelPickerFocused = true;
+        revealSearchDestination(form.querySelector("[data-channel-picker]"));
+      }
+      return null;
+    }
+    if (entry.channelPersonas) return fields.querySelector("[data-channel-personas]");
+    const field = searchField(fields, entry.name);
+    if (field || !entry.channelOverride) return field;
+    const override = fields.querySelector(`[data-channel-override="${CSS.escape(entry.channelOverride)}"]`);
+    return override?.querySelector("[data-channel-inputs]:not([hidden]) .field") || override;
+  }
+
+  function revealSearchDestination(target) {
     target.scrollIntoView({ block: "center", behavior: "instant" });
     const control =
-      target.querySelector(
-        'input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), button',
-      ) || target;
-    if (control === target && !target.matches("button")) target.tabIndex = -1;
+      [
+        ...target.querySelectorAll(
+          'input:not([type="hidden"]):not(:disabled), select:not(.control-native-select):not(:disabled), textarea:not(:disabled), button:not(:disabled)',
+        ),
+      ].find((element) => element.getClientRects().length) || target;
+    if (control === target && !target.matches("button, a[href]")) target.tabIndex = -1;
     control.focus({ preventScroll: true });
     showSearchSpotlight(target);
   }
@@ -1651,12 +1699,20 @@
       const rect = target.getBoundingClientRect();
       const left = Math.max(4, rect.left - 12);
       const top = Math.max(4, rect.top - 12);
+      const width = Math.min(innerWidth - 4, rect.right + 12) - left;
+      const height = Math.min(innerHeight - 4, rect.bottom + 12) - top;
+      const shown = spotlight.matches(":popover-open");
+      if (width <= 0 || height <= 0) {
+        if (shown) spotlight.hidePopover();
+        return;
+      }
       Object.assign(spotlight.style, {
         left: `${left}px`,
         top: `${top}px`,
-        width: `${Math.max(0, Math.min(innerWidth - 4, rect.right + 12) - left)}px`,
-        height: `${Math.max(0, Math.min(innerHeight - 4, rect.bottom + 12) - top)}px`,
+        width: `${width}px`,
+        height: `${height}px`,
       });
+      if (!shown) spotlight.showPopover();
     };
     const resize = new ResizeObserver(position);
     const dismiss = () => clearSearchSpotlight();
@@ -1670,8 +1726,18 @@
       clearSearchSpotlight = () => {};
     };
     position();
-    spotlight.showPopover();
     resize.observe(target);
+    requestAnimationFrame(async () => {
+      if (!spotlight.isConnected) return;
+      const scope = target.closest("dialog, main");
+      const animations = [...(scope?.querySelectorAll("[data-resizing]") || [])].flatMap((card) =>
+        card.getAnimations(),
+      );
+      await Promise.allSettled(animations.map((animation) => animation.finished));
+      if (!spotlight.isConnected || !target.isConnected) return;
+      target.scrollIntoView({ block: "center", behavior: "instant" });
+      position();
+    });
     document.addEventListener("scroll", position, true);
     window.addEventListener("resize", position);
     document.addEventListener("pointerdown", dismiss, true);
@@ -3406,6 +3472,18 @@
         state.lorebookBookId = data.books[0]?.lorebook_id ?? null;
         if (state.lorebookBookId) return loadLorebooks(lineageId);
       }
+      const deepLink =
+        lineageId === 0 && pendingSearchDestination?.view === "lorebooks" && pendingSearchDestination.lorebookEntryField
+          ? pendingSearchDestination
+          : null;
+      if (deepLink && data.entries.length === 0 && !deepLink.lorebookFallback) {
+        const bookWithEntries = data.books.find((book) => book.lorebook_id !== bookId && book.entryCount > 0);
+        if (bookWithEntries) {
+          deepLink.lorebookFallback = true;
+          state.lorebookBookId = bookWithEntries.lorebook_id;
+          return loadLorebooks(lineageId);
+        }
+      }
       state.lorebookData = data;
       const scrollTop = scroller?.scrollTop;
       const restoreEditor = browser?.dataset.view === "detail";
@@ -3419,7 +3497,6 @@
         search.value = selected.query;
         filterLorebookEntries(search);
       }
-      const deepLink = lineageId === 0 && pendingSearchDestination?.lorebookEntryField;
       const selectedEntry = data.entries.find((entry) => entry.entry_id === selected?.entryId);
       if (deepLink && (selectedEntry || data.entries[0])) {
         openLorebookEditor((selectedEntry || data.entries[0]).entry_id, false);
@@ -3436,7 +3513,16 @@
             <span class="chip">${escapeHtml(ui(entries === 1 ? "lorebook_collection_entry_count_one" : "lorebook_collection_entry_count").replace("{count}", count.format(entries)))}</span>`;
           totals.hidden = false;
         }
-        if (deepLink) focusSearchDestination();
+        if (deepLink && data.entries.length) focusSearchDestination();
+        else if (deepLink) {
+          pendingSearchDestination = null;
+          const add = [
+            ...target.querySelectorAll(
+              '[data-lorebook-open="lorebook-entry-dialog"], [data-lorebook-open="lorebook-create-dialog"]',
+            ),
+          ].find((button) => button.getClientRects().length);
+          revealSearchDestination(add || target.querySelector("[data-lorebook-browser]"));
+        }
       }
     } catch (error) {
       if (version !== lorebookLoadVersion || !lorebookCurrent(lineageId, target, guildId)) return;
@@ -8708,10 +8794,12 @@
       );
       if (unsaved && !(await confirmAction(ui("discard_title"), ui("leave_detail")))) return;
       if (!(await confirmDashboardSectionChange())) return;
-      pendingSearchDestination = entry;
-      setTimeout(() => {
-        if (pendingSearchDestination === entry) pendingSearchDestination = null;
-      }, 10000);
+      const destination = { ...entry, guildId: state.guildId };
+      pendingSearchDestination = destination;
+      if (!entry.channelSelection)
+        setTimeout(() => {
+          if (pendingSearchDestination === destination) pendingSearchDestination = null;
+        }, 10000);
       state.view = entry.view;
       if (entry.profileTab) profileTab = entry.profileTab;
       if (entry.settingsGroup) state.settingsGroup = entry.settingsGroup;

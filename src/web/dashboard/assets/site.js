@@ -50,6 +50,7 @@
     }
     if (!isCurrent()) return;
 
+    if (context.initialTab) activeTab = context.initialTab;
     const pages = entries.filter((entry) => entry.kind === "page");
     if (!pages.some((entry) => entry.id === activePage)) activePage = pages[0].id;
 
