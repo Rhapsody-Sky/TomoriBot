@@ -695,37 +695,21 @@
     return response;
   }
 
-  function renderEntryScreen(screen, title, description, action) {
-    const login = screen === "login";
+  function renderEntryStatus(screen, title, description, action) {
     const failure = screen === "failed";
-    const logo = '<img src="/settings/assets/tomori_companion_logo.svg" alt="" data-entry-logo>';
-    const greetingLabel = escapeHtml(ui("entry_another_greeting") || "Another greeting from Tomori");
     app.innerHTML = `<main class="app-main" data-dashboard-entry="${screen}">
       <div class="stack" data-entry-layout>
-        <section class="banner${login ? " tinted" : " compact"}"${login ? ' data-tint="tomori"' : ""} aria-labelledby="entry-title">
+        <section class="banner compact" aria-labelledby="entry-title">
           <div class="banner-info"><div class="stack">
-            <p class="crumb">${login ? logo : ""}TomoriBot Control</p>
-            <h1 id="entry-title"${login ? ' data-fx="split" aria-live="polite" aria-atomic="true"' : ""}>${escapeHtml(title)}</h1>
+            <p class="crumb">TomoriBot Control</p>
+            <h1 id="entry-title">${escapeHtml(title)}</h1>
             <p class="${failure ? "notice error" : "banner-text"}"${failure ? ' role="alert"' : ""}>${escapeHtml(description)}</p>
             <div class="row">${action}</div>
           </div></div>
           <div class="banner-art" aria-hidden="true">
-            ${
-              login
-                ? `<div class="art-stage"><img class="art-full" src="/settings/assets/persona-art-tomori.png" alt="" data-fx="tilt"></div>
-              <span class="sparkle">✦</span><span class="sparkle s2">✦</span>`
-                : `<span class="sticker emblem">${logo}</span>`
-            }
+            <span class="sticker emblem"><img src="/settings/assets/tomori_companion_logo.svg" alt=""></span>
           </div>
-          ${
-            login
-              ? `<div class="banner-menu">
-            <button class="button icon" type="button" data-entry-greeting data-fx="spark" aria-label="${greetingLabel}">${navigationIcon("message-circle")}</button>
-          </div>`
-              : ""
-          }
         </section>
-        ${login ? renderPublicLinks() : ""}
       </div>
     </main>`;
     window.TomoriControls?.enhance(app);
@@ -733,12 +717,28 @@
   }
 
   function renderLoggedOut() {
-    renderEntryScreen(
-      "login",
-      loginMessage,
+    const greetingLabel = escapeHtml(ui("entry_another_greeting") || "Another greeting from Tomori");
+    const signIn = escapeHtml(ui("entry_sign_in") || "Continue with Discord");
+    const signInHint = escapeHtml(
       ui("entry_sign_in_hint") || "Sign in with Discord to manage your own Tomori data and the servers you administer.",
-      `<a class="button primary" href="/settings/login">${escapeHtml(ui("entry_sign_in") || "Continue with Discord")}</a>`,
     );
+    app.innerHTML = `<main class="app-main" data-dashboard-entry="login">
+      <div class="stack" data-entry-layout>
+        <img src="/settings/assets/tomori_companion_logo.svg" alt="" data-entry-logo>
+        <header class="stack">
+          <p class="crumb">TomoriBot Control</p>
+          <h1 id="entry-title" data-fx="split" aria-live="polite" aria-atomic="true">${escapeHtml(loginMessage)}</h1>
+          <p class="muted" data-entry-description>${signInHint}</p>
+        </header>
+        <div class="row">
+          <button class="button icon" type="button" data-entry-greeting data-fx="spark" aria-label="${greetingLabel}">${navigationIcon("message-circle")}</button>
+          <a class="button primary" href="/settings/login">${signIn}</a>
+        </div>
+        ${renderPublicLinks()}
+      </div>
+    </main>`;
+    window.TomoriControls?.enhance(app);
+    window.TomoriFX?.enhance(app);
     app.querySelector("[data-entry-greeting]").addEventListener("click", () => {
       const greetings = loginMessages.filter((message) => message !== loginMessage);
       loginMessage = greetings[Math.floor(Math.random() * greetings.length)];
@@ -761,7 +761,7 @@
   }
 
   function renderNoGuilds() {
-    renderEntryScreen(
+    renderEntryStatus(
       "no-servers",
       ui("entry_no_shared_servers") || "No shared servers",
       ui("entry_no_shared_servers_hint") || "TomoriBot is not in one of your servers yet.",
@@ -7642,7 +7642,7 @@
         state.view = "overview";
       renderShell();
     } catch (error) {
-      renderEntryScreen(
+      renderEntryStatus(
         "failed",
         ui("entry_load_failed") || "This server could not be loaded.",
         error.message,
