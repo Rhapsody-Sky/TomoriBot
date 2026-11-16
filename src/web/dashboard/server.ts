@@ -94,6 +94,33 @@ function escapeHtml(value: string): string {
   escapeToBuffer(value, buffer);
   return buffer.join("");
 }
+
+function renderDashboardError(title: string, detail = ""): string {
+  const back = localizer("en-US", "general.dashboard.site_back");
+  return renderDashboardHtml(`<main class="app-main" data-dashboard-entry="failed">
+    <div class="stack" data-entry-layout>
+      <section class="banner compact" aria-labelledby="entry-title">
+        <div class="banner-info"><div class="stack">
+          <p class="crumb">TomoriBot Control</p>
+          <h1 id="entry-title">${escapeHtml(title)}</h1>
+          ${detail ? `<p class="notice error">${escapeHtml(detail)}</p>` : ""}
+          <div class="row"><a class="button" href="${BASE_PATH}">${escapeHtml(back)}</a></div>
+        </div></div>
+        <div class="banner-art" aria-hidden="true">
+          <span class="sticker emblem"><img src="${BASE_PATH}/assets/tomori_companion_logo.svg" alt=""></span>
+        </div>
+      </section>
+    </div>
+  </main>`);
+}
+
+function renderOAuthError(key: "unconfigured" | "invalid_state" | "failed"): string {
+  return renderDashboardError(
+    localizer("en-US", "general.dashboard.site_oauth_title"),
+    localizer("en-US", `general.dashboard.site_oauth_${key}`),
+  );
+}
+
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 const DASHBOARD_STATS_TIMEFRAMES = new Set<DashboardStatsTimeframe>([
   "today",
@@ -588,7 +615,7 @@ export function createDashboardApp(client: Client) {
     const entries = await site.list();
     const copy = siteCopy();
     const page = entries.find((entry) => entry.kind === "page" && entry.id === context.req.param("pageId"));
-    if (!page) return context.text(copy.missing, 404);
+    if (!page) return context.html(renderDashboardError(copy.missing), 404);
     const links = entries
       .filter((entry) => entry.kind === "page" || entry.showOnLogin)
       .map((entry) => {
@@ -675,7 +702,7 @@ export function createDashboardApp(client: Client) {
 
   app.get(`${BASE_PATH}/login`, (context) => {
     if (!config.clientId || !config.clientSecret) {
-      return context.text("Discord OAuth is not configured for the TomoriBot dashboard.", 503);
+      return context.html(renderOAuthError("unconfigured"), 503);
     }
     const state = randomToken();
     setSignedCookie(context, config, OAUTH_STATE_COOKIE, state, OAUTH_STATE_TTL_SECONDS);
@@ -695,7 +722,7 @@ export function createDashboardApp(client: Client) {
     const expectedState = readSignedCookie(context, config, OAUTH_STATE_COOKIE);
     clearDashboardCookie(context, config, OAUTH_STATE_COOKIE);
     if (!code || !state || !expectedState || state !== expectedState) {
-      return context.text("Invalid OAuth state.", 400);
+      return context.html(renderOAuthError("invalid_state"), 400);
     }
 
     try {
@@ -706,7 +733,7 @@ export function createDashboardApp(client: Client) {
       return context.redirect(BASE_PATH);
     } catch (error) {
       await log.error("Dashboard OAuth callback failed", error);
-      return context.text("Discord login failed.", 502);
+      return context.html(renderOAuthError("failed"), 502);
     }
   });
 

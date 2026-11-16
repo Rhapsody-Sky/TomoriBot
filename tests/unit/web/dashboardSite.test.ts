@@ -6,6 +6,7 @@ import { initializeLocalizer } from "@/utils/text/localizer";
 import { DashboardSessionStore, OAUTH_STATE_COOKIE, SESSION_COOKIE } from "@/web/dashboard/auth";
 import { createDashboardApp } from "@/web/dashboard/server";
 import { cleanSiteHtml, DashboardSiteService } from "@/web/dashboard/siteService";
+import { localizedCopy } from "../../helpers/localeCases";
 
 const client = { application: { id: "123456789012345678" }, guilds: { cache: new Map() } } as unknown as Client;
 
@@ -95,7 +96,14 @@ describe("dashboard public pages", () => {
         })
       ).status,
     ).toBe(200);
-    expect((await app.request("/settings/pages/cookies")).status).toBe(404);
+    const hidden = await app.request("/settings/pages/cookies");
+    expect(hidden.status).toBe(404);
+    expect(hidden.headers.get("cache-control")).toBe("no-store");
+    expect(hidden.headers.get("content-type")).toContain("text/html");
+    const hiddenHtml = await hidden.text();
+    expect(hiddenHtml).toContain(localizedCopy("en-US", "general.dashboard.site_missing"));
+    expect(hiddenHtml).toContain('href="/settings"');
+    expect(hiddenHtml).not.toContain("/settings/assets/app.js");
     const updated = await (await app.request("/settings/api/site")).json();
     expect(updated.entries.some((entry: DashboardSiteEntry) => entry.id === "cookies")).toBe(false);
   });

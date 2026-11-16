@@ -495,11 +495,14 @@
   }
 
   function formSnapshot(form) {
-    return Array.from(form.querySelectorAll("input[name], select[name], textarea[name]"), (input) => ({
-      name: input.name,
-      value: input.value,
-      checked: input.type === "checkbox" || input.type === "radio" ? input.checked : undefined,
-    }));
+    return Array.from(
+      form.querySelectorAll("input[name]:not([data-track-change]), select[name], textarea[name]"),
+      (input) => ({
+        name: input.name,
+        value: input.value,
+        checked: input.type === "checkbox" || input.type === "radio" ? input.checked : undefined,
+      }),
+    );
   }
 
   function restoreSnapshot(form, values) {
@@ -562,6 +565,7 @@
         return;
       }
       form.querySelectorAll(editSubmit).forEach((save) => {
+        if (save.hasAttribute("data-edit-action")) return;
         if (save.previousElementSibling?.hasAttribute("data-discard-draft")) return;
         const discard = document.createElement("button");
         discard.type = "button";
@@ -583,17 +587,21 @@
   function setEditActions(form, changed) {
     form.querySelectorAll(editSubmit).forEach((button) => {
       button.dataset.editAction = "";
-      const visible =
-        changed &&
-        (!form.matches("[data-channel-settings]") || channelHasChanges(form, button.closest("[data-channel-panel]")));
       const discard = button.previousElementSibling;
       const hasDiscard = discard?.hasAttribute("data-discard-draft");
-      if (button.hidden !== visible && (!hasDiscard || discard.hidden !== visible)) return;
+      if (button.hidden !== changed && (!hasDiscard || discard.hidden !== changed)) return;
       window.TomoriFX.reflowActions(button.parentElement, () => {
-        button.hidden = !visible;
-        if (hasDiscard) discard.hidden = !visible;
+        button.hidden = !changed;
+        if (hasDiscard) discard.hidden = !changed;
       });
     });
+  }
+
+  function setTrackedChange(input, changed) {
+    const value = changed ? "1" : "";
+    if (input.value === value) return;
+    input.value = value;
+    input.parentElement.dispatchEvent(new Event("input"));
   }
 
   function initLocalEditForm(form) {
@@ -610,6 +618,10 @@
           )
         : snapshot,
     );
+    if (original && form.dataset.fx === "track") {
+      window.TomoriFX.enhance(form);
+      syncTrackedDraft(form);
+    }
     captureDraft(form);
   }
 
@@ -623,16 +635,17 @@
       if (changed) drafts.set(form.dataset.draftKey, values);
       else drafts.delete(form.dataset.draftKey);
     }
-    if (form.dataset.fx === "track") return;
-    setEditActions(form, changed);
+    if (form.matches("[data-channel-settings]")) updateChannelActions(form, changed);
+    else if (form.dataset.fx !== "track") setEditActions(form, changed);
   }
 
   function completeFormSave(form, source = form) {
     drafts.delete(form.dataset.draftKey);
     formBaselines.set(form, formSnapshot(form));
     if (form.dataset.fx === "track") window.TomoriFX.saved(form);
+    else if (form.matches("[data-channel-settings]")) updateChannelActions(form, false);
     else setEditActions(form, false);
-    source.querySelector(".form-error")?.remove();
+    source.querySelector("[data-form-error]")?.remove();
   }
 
   function syncTrackedDraft(form) {
@@ -645,14 +658,20 @@
   }
 
   function showFormError(form, error, partial = false) {
-    form.querySelector(".form-error")?.remove();
+    form.querySelector("[data-form-error]")?.remove();
     const message = document.createElement("div");
-    message.className = "form-error";
-    if (form.closest(".card, .collection")) message.classList.add("notice", "error");
+    message.className = "notice error";
+    message.dataset.formError = "";
     message.setAttribute("role", "alert");
     message.textContent =
       !partial && error.status === 403 ? error.message : `${error.message} ${ui(partial ? "partial" : "retry")}`;
-    form.querySelector(".form-actions, .actions:has([data-edit-action]), [data-form-actions]")?.before(message);
+    const actions = form.querySelector(".form-actions, .actions:has([data-edit-action]), [data-form-actions]");
+    if (actions) actions.before(message);
+    else form.append(message);
+  }
+
+  function errorNotice(message) {
+    return `<p class="notice error" role="alert">${escapeHtml(message)}</p>`;
   }
 
   window.addEventListener("beforeunload", (event) => {
@@ -917,7 +936,7 @@
         </form>
       </dialog>
       <dialog id="memory-dialog" aria-labelledby="memory-dialog-title">
-        <form class="stack" method="dialog" id="memory-edit-form">
+        <form class="stack" method="dialog" id="memory-edit-form" data-fx="track">
           <header class="panel-header"><div class="heading"><h2 id="memory-dialog-title">${escapeHtml(ui("memory_edit_title"))}</h2></div></header>
           <div class="stack">
             <label class="field">${fieldLabel(ui("memory"))}<textarea name="content" rows="4" required></textarea></label>
@@ -2989,7 +3008,7 @@
       search.onsubmit = async (event) => {
         event.preventDefault();
         clearSelection();
-        search.querySelector(".form-error")?.remove();
+        search.querySelector("[data-form-error]")?.remove();
         try {
           const query = search.elements.query.value.trim();
           const result = await withBusyForm(search, () => api(`${path}/members?q=${encodeURIComponent(query)}`));
@@ -3077,7 +3096,7 @@
             ${
               serverWritesDisabled || personalCreationDisabled
                 ? `<div class="notice info stack"><strong>${escapeHtml(ui(personalCreationDisabled ? "memory_creation_disabled" : "memory_teaching_disabled"))}</strong><span>${escapeHtml(ui("memory_existing_access"))}</span></div>`
-                : `<form id="memory-compose-form" class="compose" hidden>
+                : `<form id="memory-compose-form" class="compose" data-fx="track" hidden>
                     <div class="stack">
                       <label class="field">${fieldLabel(ui("memory_add"), ui("memory_compose_hint"))}<textarea name="content" rows="3" required></textarea></label>
                       ${personal ? "" : '<div class="subsection" data-memory-channel-scope hidden></div>'}
@@ -3123,6 +3142,7 @@
       form.elements.content.focus();
     } else {
       form.reset();
+      completeFormSave(form);
       form.querySelector("[data-memory-channel-picker]")?.setAttribute("hidden", "");
       trigger.focus({ preventScroll: true });
     }
@@ -3714,12 +3734,13 @@
       serverwide && book && canManage
         ? `<button class="button small icon" type="button" popovertarget="lorebook-book-actions" aria-label="${escapeHtml(ui("lorebook_book_actions"))}" aria-expanded="false">${navigationIcon("ellipsis")}</button><div id="lorebook-book-actions" class="action-menu" popover aria-label="${escapeHtml(ui("lorebook_book_actions"))}"><button class="button" type="button" data-lorebook-open="lorebook-import-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_transfer"))}</button><button class="button" type="button" data-lorebook-rename data-action-menu-preserve-focus>${escapeHtml(ui("lorebook_edit_book"))}</button><button class="button" type="button" data-lorebook-open="lorebook-settings-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_settings"))}</button><hr><button class="button danger" type="button" data-lorebook-delete-book>${escapeHtml(ui("lorebook_delete_book"))}</button></div>`
         : `<button class="button small" type="button" data-lorebook-open="lorebook-import-dialog" aria-haspopup="dialog">${escapeHtml(ui("lorebook_transfer"))}</button>`;
+    const lorebookContext = `<div class="row">${navigationIcon("book-open")}<div><p class="hint">${escapeHtml(ui(serverwide ? "lorebook_selected" : "lorebook_persona"))}</p><p><strong dir="auto">${escapeHtml(name)}</strong></p></div></div>`;
     const transfer = available
       ? lorebookDialog(
           "lorebook-import-dialog",
           ui("lorebook_transfer"),
           `
-      <div class="row">${navigationIcon("book-open")}<dl class="meta-stack"><dt>${escapeHtml(ui(serverwide ? "lorebook_selected" : "lorebook_persona"))}</dt><dd dir="auto">${escapeHtml(name)}</dd></dl></div>
+      ${lorebookContext}
       <section class="subsection stack"><h3>${escapeHtml(ui("lorebook_export_heading"))}</h3><p class="hint">${escapeHtml(ui("lorebook_export_hint"))}</p><button class="button secondary" type="button" data-lorebook-export>${escapeHtml(ui("lorebook_export"))}</button></section>
       ${canManage ? `<form class="subsection stack" data-lorebook-import-form><h3>${escapeHtml(ui("lorebook_import_heading"))}</h3><p class="hint">${escapeHtml(ui("lorebook_transfer_hint"))}</p><label class="field">${fieldLabel(ui("lorebook_import"))}<input name="file" type="file" accept=".json,application/json" required></label><label class="field">${fieldLabel(ui("lorebook_import_mode"), ui("lorebook_import_mode_hint"))}<select name="mode"><option value="append">${escapeHtml(ui("lorebook_append"))}</option><option value="replace">${escapeHtml(ui("lorebook_replace"))}</option></select></label>${lorebookDialogActions("lorebook-import-dialog", ui("lorebook_import"))}</form>` : ""}
     `,
@@ -3758,7 +3779,7 @@
           )
         : ""
     }
-    ${canManage && available ? lorebookDialog("lorebook-entry-dialog", ui("lorebook_new_entry"), `<div class="row">${navigationIcon("book-open")}<dl class="meta-stack"><dt>${escapeHtml(ui(serverwide ? "lorebook_selected" : "lorebook_persona"))}</dt><dd dir="auto">${escapeHtml(name)}</dd></dl></div><p class="hint">${escapeHtml(ui("lorebook_new_entry_hint"))}</p><form class="stack" data-lorebook-form="create" data-settings-key="${scopeKey}/new" data-original-channels="[]"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" required autofocus></label><label class="field">${fieldLabel(ui("lorebook_content"), ui("lorebook_content_hint"))}<textarea name="content" maxlength="4000" rows="${serverwide ? 6 : 4}" required></textarea></label><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_new_keys_hint"))}<textarea name="keys" rows="${serverwide ? 3 : 2}"></textarea></label>${serverwide ? "" : `<details><summary>${escapeHtml(ui("lorebook_channels"))}</summary>${lorebookChannels([], true)}</details>`}${lorebookDialogActions("lorebook-entry-dialog", ui("lorebook_new_entry"))}</form>`) : ""}
+    ${canManage && available ? lorebookDialog("lorebook-entry-dialog", ui("lorebook_new_entry"), `${lorebookContext}<p class="hint">${escapeHtml(ui("lorebook_new_entry_hint"))}</p><form class="stack" data-lorebook-form="create" data-settings-key="${scopeKey}/new" data-original-channels="[]"><label class="field">${fieldLabel(ui("lorebook_title"), ui("lorebook_title_hint"))}<input name="title" maxlength="128" required autofocus></label><label class="field">${fieldLabel(ui("lorebook_content"), ui("lorebook_content_hint"))}<textarea name="content" maxlength="4000" rows="${serverwide ? 6 : 4}" required></textarea></label><label class="field">${fieldLabel(ui("lorebook_keys"), ui("lorebook_new_keys_hint"))}<textarea name="keys" rows="${serverwide ? 3 : 2}"></textarea></label>${serverwide ? "" : `<details><summary>${escapeHtml(ui("lorebook_channels"))}</summary>${lorebookChannels([], true)}</details>`}${lorebookDialogActions("lorebook-entry-dialog", ui("lorebook_new_entry"))}</form>`) : ""}
     ${transfer}</div>`;
   }
 
@@ -4430,7 +4451,7 @@
     const read = attributes
       ? `<div><p>${escapeHtml(saved.text)}</p>${saved.isPublic ? `<div class="item-meta"><span class="chip">${navigationIcon("users-round")}<span>${escapeHtml(ui("persona_attribute_public"))}</span></span></div>` : ""}</div>`
       : `<div class="talk"><div class="bubble-row me"><p class="speech" dir="auto">${escapeHtml(saved.input)}</p></div><div class="bubble-row">${personaSticker(persona, "flat")}<p class="speech" dir="auto">${escapeHtml(saved.output)}</p></div></div>`;
-    return `${draft ? `<form class="stack" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}"><div class="${attributes ? "stack" : "edit-pair"}">${fields}</div><div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit" data-fx="spark">${escapeHtml(ui("persona_save"))}</button></div></form>` : `${read}<div class="item-actions"><button class="button small icon" type="button" data-entry-edit aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div>`}`;
+    return `${draft ? `<form class="stack" data-fx="track" data-persona-entry-form data-edit-baseline="${escapeHtml(JSON.stringify(saved))}"><div class="${attributes ? "stack" : "edit-pair"}">${fields}</div><div class="actions"><button class="button small" type="button" data-entry-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("persona_save"))}</button></div></form>` : `${read}<div class="item-actions"><button class="button small icon" type="button" data-entry-edit aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button><button class="button small icon danger" type="button" data-entry-delete aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button></div>`}`;
   }
 
   function personaTint(persona) {
@@ -5155,7 +5176,8 @@
       dialog.setAttribute("aria-labelledby", "channel-personas-title");
       const search = escapeHtml(ui("persona_permissions_search"));
       const cancel = escapeHtml(ui("persona_permissions_cancel"));
-      dialog.innerHTML = `<form>
+      dialog.innerHTML = `<form data-fx="track">
+        <input type="hidden" name="hasChanges" data-track-change>
         <header class="collection-head">
           <div class="collection-title">
             <h2 id="channel-personas-title">${editLabel} <small>${personas.length}</small></h2>
@@ -5205,7 +5227,7 @@
         const changes = assignments();
         const invalid = changes.some((entry) => !entry.channelIds.length);
         form.querySelector('[type="submit"]').disabled = invalid || !changes.length;
-        setEditActions(form, changes.length > 0);
+        setTrackedChange(form.elements.hasChanges, changes.length > 0);
         form.querySelector('[role="alert"]').hidden = !invalid;
       };
       form.addEventListener("click", (event) => {
@@ -5476,7 +5498,7 @@
     } catch (error) {
       if (!current()) return;
       document.querySelector("#sprite-workspace").innerHTML =
-        `<div class="empty"><strong>${escapeHtml(ui("sprite_load_failed"))}</strong><span>${escapeHtml(error.message)}</span><button class="button secondary" type="button" data-sprite-retry>${escapeHtml(ui("sprite_retry"))}</button></div>`;
+        `<div class="notice error stack" role="alert"><strong>${escapeHtml(ui("sprite_load_failed"))}</strong><span>${escapeHtml(error.message)}</span><div class="row"><button class="button secondary" type="button" data-sprite-retry>${escapeHtml(ui("sprite_retry"))}</button></div></div>`;
     }
   }
 
@@ -5693,6 +5715,16 @@
         return mode !== "keep" && (!workspace.basic || workspace.basic[key] !== (mode === "on"));
       }) || Object.keys(collectChannelOverrides(form)).some((key) => panel.querySelector(`[name="channel_${key}"]`))
     );
+  }
+
+  function updateChannelActions(form, changed = true) {
+    const workspace = channelWorkspaces.get(form);
+    const loaded = workspace?.key === form._selectionKey && !!workspace?.data;
+    for (const panel of form.querySelectorAll("[data-channel-panel]")) {
+      const panelChanged = changed && loaded && channelHasChanges(form, panel);
+      panel.querySelector('button[type="submit"]').disabled = !panelChanged;
+      setTrackedChange(panel.querySelector("[data-track-change]"), panelChanged);
+    }
   }
 
   function singleChannelSnapshot(form) {
@@ -6017,7 +6049,7 @@
                       return `<label class="field">${fieldLabel(field.label, field.hint)}<select name="${key}"><option value="keep">${escapeHtml(ui("channel_disabled"))}</option><option value="on">${escapeHtml(ui("channel_enable"))}</option><option value="off">${escapeHtml(ui("channel_disable"))}</option></select></label>`;
                     })
                     .join("")}${renderChannelOverrides(extras)}</div>
-                  ${cardSaveActions(ui("save"), "", false)}
+                  <div data-fx="track"><input type="hidden" name="hasChanges" data-track-change>${cardSaveActions(ui("save"), "", false)}</div>
                 </section>`,
             )
             .join("")}<section class="card" data-channel-personas></section></div>
@@ -6107,10 +6139,7 @@
             });
         }
       }
-      form.querySelectorAll('[type="submit"]').forEach((button) => {
-        button.disabled =
-          !selected.length || !channelHasChanges(form, button.closest("[data-channel-panel]")) || !loaded;
-      });
+      updateChannelActions(form);
       if (selected.length) void loadChannelOverrides(form, selected, update);
     };
     form.addEventListener(
@@ -7393,7 +7422,7 @@
     endpointFields.hidden = endpointFields.disabled = !endpoint;
     form.closest("dialog").classList.toggle("wide", endpoint);
     form.querySelector('[type="submit"]').textContent = ui(endpoint ? "endpoint_test_register" : "provider_store_key");
-    form.querySelector(".form-error")?.remove();
+    form.querySelector("[data-form-error]")?.remove();
     window.TomoriControls?.enhance(form);
   }
 
@@ -7939,7 +7968,7 @@
         form.elements.file.disabled = isPreset;
         form.elements.identityMode.disabled = isPreset;
         resetReview();
-        form.querySelector(".form-error")?.remove();
+        form.querySelector("[data-form-error]")?.remove();
       };
       form.addEventListener("change", sync);
       sync();
@@ -7948,7 +7977,7 @@
       form.onsubmit = async (event) => {
         event.preventDefault();
         if (!dialog.open || state.guildId !== guildId || form.classList.contains("is-saving")) return;
-        form.querySelector(".form-error")?.remove();
+        form.querySelector("[data-form-error]")?.remove();
         const body = new FormData(form);
         try {
           if (!reviewed) {
@@ -8026,7 +8055,7 @@
             await update({ action: "clear" }, "rotation_cleared");
         };
     } catch (error) {
-      if (dialog.open) fields.textContent = error.message;
+      if (dialog.open) fields.innerHTML = errorNotice(error.message);
     }
   }
 
@@ -8167,7 +8196,7 @@
         }
       };
     } catch (error) {
-      if (dialog.open) fields.textContent = error.message;
+      if (dialog.open) fields.innerHTML = errorNotice(error.message);
     }
   }
 
@@ -8807,7 +8836,7 @@
       if (cancel) {
         restoreSnapshot(form, formBaselines.get(form));
         captureDraft(form);
-        form.querySelector(".form-error")?.remove();
+        form.querySelector("[data-form-error]")?.remove();
         form.querySelector(".error").hidden = true;
         form.elements.name.removeAttribute("aria-invalid");
       }
@@ -9021,7 +9050,7 @@
         if (form.matches("[data-channel-settings]")) form.dispatchEvent(new Event("change", { bubbles: true }));
         captureDraft(form);
         enhanceDashboard(form);
-        panel.querySelector(".form-error")?.remove();
+        panel.querySelector("[data-form-error]")?.remove();
         panel
           .querySelector('input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])')
           ?.focus({ preventScroll: true });
@@ -9759,6 +9788,7 @@
           }
         });
         personaEntryDrafts.delete(key);
+        completeFormSave(entryForm);
         await refreshPersonas(personaId, ui("persona_saved"));
       } catch (error) {
         toast(error.message, "error");
@@ -10014,6 +10044,7 @@
             }),
           }),
         );
+        completeFormSave(form);
         document.querySelector("#memory-dialog").close();
         toast(ui("memory_updated"));
         await loadMemories();

@@ -16,7 +16,7 @@ import { createDashboardApp } from "@/web/dashboard/server";
 import { TomoriDashboardCore } from "@/web/dashboard/core";
 import { DashboardLorebookService } from "@/web/dashboard/lorebookService";
 import { DashboardServiceError } from "@/web/dashboard/errors";
-import { DashboardSessionStore, SESSION_COOKIE } from "@/web/dashboard/auth";
+import { DashboardSessionStore, OAUTH_STATE_COOKIE, SESSION_COOKIE } from "@/web/dashboard/auth";
 import { initializeLocalizer } from "@/utils/text/localizer";
 import { createServerConfig, createUserRow } from "../../helpers/fixtures";
 import { localizedCopy } from "../../helpers/localeCases";
@@ -96,6 +96,44 @@ describe("dashboard HTTP shell", () => {
     expect(html).toContain("/settings/assets/app.js");
     expect(html).toContain('data-dashboard-entry="loading" aria-busy="true"');
     expect(html).toContain('role="progressbar" aria-labelledby="entry-title"');
+  });
+
+  it("renders Discord sign-in failures without starting a dashboard session", async () => {
+    await initializeLocalizer();
+    const { app, config } = createDashboardApp(fakeClient);
+    config.clientId = "";
+    const unavailable = await app.request("/settings/login");
+    const invalid = await app.request("/settings/oauth/callback");
+
+    config.clientId = "123456789012345678";
+    config.clientSecret = "test";
+    const login = await app.request("/settings/login");
+    expect(login.status).toBe(302);
+    const state = new URL(login.headers.get("location") ?? "").searchParams.get("state");
+    const oauthCookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+    const fetchDiscord = spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 503 }));
+    try {
+      const failed = await app.request(`/settings/oauth/callback?code=test&state=${state}`, {
+        headers: { Cookie: oauthCookie },
+      });
+      expect(fetchDiscord).toHaveBeenCalledTimes(1);
+      for (const [response, status, key] of [
+        [unavailable, 503, "site_oauth_unconfigured"],
+        [invalid, 400, "site_oauth_invalid_state"],
+        [failed, 502, "site_oauth_failed"],
+      ] as const) {
+        expect(response.status).toBe(status);
+        expect(response.headers.get("content-type")).toContain("text/html");
+        expect(response.headers.get("set-cookie") ?? "").not.toContain(`${SESSION_COOKIE}=`);
+        const html = await response.text();
+        expect(html).toContain(localizedCopy("en-US", `general.dashboard.${key}`));
+        expect(html).toContain('href="/settings"');
+        expect(html).not.toContain("/settings/assets/app.js");
+      }
+      expect(failed.headers.get("set-cookie")).toContain(`${OAUTH_STATE_COOKIE}=`);
+    } finally {
+      fetchDiscord.mockRestore();
+    }
   });
 
   it("serves every dashboard asset from the source tree", async () => {
