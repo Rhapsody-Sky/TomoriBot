@@ -788,8 +788,66 @@
     );
   }
 
-  function navButton(id, label, adminOnly = false) {
-    if (adminOnly && !state.overview?.canManage) return "";
+  function dashboardNavigation() {
+    const groups = [];
+    const overview = state.overview;
+    if (overview) {
+      const isDirectMessage = overview.guild.isDirectMessage;
+      groups.push(
+        {
+          title: ui("nav_global"),
+          links: [
+            { view: "profile", title: ui("my_settings") },
+            { view: "personal-memory", title: ui("global_memory"), hint: ui("global_memory_hint") },
+            {
+              view: "personal-providers",
+              title: ui("nav_personal_providers"),
+              scope: "personal",
+              providerPanel: "connections",
+            },
+          ],
+        },
+        {
+          title: ui("nav_server_settings"),
+          links: [
+            { view: "overview", title: ui("overview_title"), hint: ui("overview_hint") },
+            { view: "personas", title: ui("personas_title") },
+            ...(isDirectMessage
+              ? []
+              : [{ view: "personal-spotlights", title: ui("spotlights"), hint: ui("spotlights_hint") }]),
+            { view: "lorebooks", title: ui("lorebooks") },
+          ],
+        },
+      );
+      if (overview.canManage) {
+        groups.push({
+          title: ui("nav_server_administration"),
+          links: [
+            {
+              view: "server-providers",
+              title: ui("nav_server_providers"),
+              scope: "server",
+              providerPanel: "connections",
+            },
+            ...(isDirectMessage
+              ? []
+              : [
+                  { view: "channel-settings", title: ui("channel_settings"), channelTab: "settings" },
+                  { view: "moderation", title: ui("moderation"), moderationTab: "roles" },
+                ]),
+            { view: "settings", title: ui("nav_server_settings"), settingsGroup: "conversation" },
+          ],
+        });
+      }
+    }
+    if (state.session?.user.isGlobalAdmin && state.publicSite) {
+      const { admin, title, hint } = state.publicSite.copy;
+      groups.push({ title: admin, links: [{ view: "site-admin", title, hint }] });
+    }
+    return groups;
+  }
+
+  function navButton(id, label) {
     return `<a href="#${id}" data-nav="${id}" aria-current="${state.view === id ? "location" : "false"}">${navigationIcon(navigationIcons[id])}<span class="sidebar-link-label">${escapeHtml(label)}</span></a>`;
   }
 
@@ -853,33 +911,12 @@
         <div class="shell"><div class="sidebar-rail"><aside class="sidebar" data-variant="detailed">
           <nav class="nav-stack sidebar-sections" id="dashboard-navigation" aria-label="Dashboard">
             ${state.overview || (state.session?.user.isGlobalAdmin && state.publicSite) ? `<button class="button sidebar-search" type="button" data-settings-search-open aria-haspopup="dialog">${navigationIcon("search")}${escapeHtml(ui("settings_search"))}</button>` : ""}
-            ${
-              state.overview
-                ? `
-            <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_global"))}</h2><div class="sidebar-group-links">
-            ${navButton("profile", ui("my_settings"))}
-            ${navButton("personal-memory", ui("global_memory"))}
-            ${navButton("personal-providers", ui("nav_personal_providers"))}
-            </div></section>
-            <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_settings"))}</h2><div class="sidebar-group-links">
-            ${navButton("overview", "Overview")}
-            ${navButton("personas", "Personas")}
-            ${state.overview.guild.isDirectMessage ? "" : navButton("personal-spotlights", ui("spotlights"))}
-            ${navButton("lorebooks", ui("lorebooks"))}
-            </div></section>
-            ${
-              state.overview?.canManage
-                ? `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_administration"))}</h2><div class="sidebar-group-links">
-                   ${navButton("server-providers", ui("nav_server_providers"), true)}
-                   ${state.overview.guild.isDirectMessage ? "" : navButton("channel-settings", ui("channel_settings"), true)}
-                   ${state.overview.guild.isDirectMessage ? "" : navButton("moderation", ui("moderation"), true)}
-                   ${navButton("settings", "Server settings", true)}</div></section>`
-                : ""
-            }
-            `
-                : ""
-            }
-            ${state.session?.user.isGlobalAdmin && state.publicSite ? `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(state.publicSite.copy.admin)}</h2><div class="sidebar-group-links">${navButton("site-admin", state.publicSite.copy.title)}</div></section>` : ""}
+            ${dashboardNavigation()
+              .map(
+                ({ title, links }) =>
+                  `<section class="sidebar-group"><h2 class="group-label">${escapeHtml(title)}</h2><div class="sidebar-group-links">${links.map(({ view, title }) => navButton(view, title)).join("")}</div></section>`,
+              )
+              .join("")}
             ${renderPublicLinks(true)}
           </nav>
           <section class="sidebar-context sidebar-account" aria-label="${escapeHtml(ui("account"))}"><div class="row">
@@ -1281,7 +1318,7 @@
   }
 
   function buildSettingsSearchIndex() {
-    const entries = [];
+    const entries = dashboardNavigation().flatMap(({ title, links }) => links.map((link) => ({ path: title, ...link })));
     const addMarkup = (html, route, path) => {
       const template = document.createElement("template");
       template.innerHTML = html;
@@ -1330,25 +1367,39 @@
     const page = (view, title, extra = {}) => entries.push({ view, title, path: title, hint: "", ...extra });
     if (state.session?.user.isGlobalAdmin && state.publicSite) {
       const copy = state.publicSite.copy;
-      page("site-admin", copy.title, { hint: copy.hint });
       for (const siteTab of ["pages", "links"]) page("site-admin", copy[siteTab], { siteTab, path: copy.title });
+      const route = { siteTab: "links", path: `${copy.title} / ${copy.links}` };
+      page("site-admin", copy.show_on_login, { ...route, name: "showOnLogin", hint: copy.show_on_login_hint });
+      page("site-admin", copy.show_in_sidebar, { ...route, name: "showInSidebar" });
     }
     if (!state.overview) return entries;
-    page("overview", ui("overview_title"), { hint: ui("overview_hint") });
-    page("profile", ui("my_settings"));
+    const statsPath = `${ui("overview_title")} / ${ui("stats_title")}`;
+    page("overview", ui("stats_title"), {
+      path: ui("overview_title"),
+      selector: '[data-history-timeframe][aria-selected="true"]',
+    });
+    page("overview", ui("stats_custom"), { path: statsPath, statsRangeEditing: true, name: "from" });
     for (const profileTab of Object.keys(profileTabs))
       addMarkup(renderProfilePanel(profileTab), { view: "profile", profileTab }, ui("my_settings"));
-    page("personal-memory", ui("global_memory"), { hint: ui("global_memory_hint") });
     page("personal-memory", ui("personal_stm"), {
       path: ui("global_memory"),
       hint: ui("personal_stm_hint"),
       tag: "h3",
     });
-    if (!state.overview.guild?.isDirectMessage)
-      page("personal-spotlights", ui("spotlights"), { hint: ui("spotlights_hint") });
-    page("lorebooks", ui("lorebooks"));
+    if (!state.overview.guild.isDirectMessage) {
+      const path = ui("spotlights");
+      page("personal-spotlights", ui("spotlight_auto"), {
+        path,
+        name: "autoTriggerPersonaId",
+        hint: ui("spotlight_auto_hint"),
+      });
+      page("personal-spotlights", ui("spotlight_hours"), {
+        path,
+        name: "durationHours",
+        hint: ui("spotlight_hours_hint"),
+      });
+    }
     if (state.overview.canManage) {
-      page("settings", ui("nav_server_settings"), { settingsGroup: "conversation" });
       if (!state.overview.guild.isDirectMessage) {
         for (const [moderationTab, [key]] of Object.entries(moderationTabs)) {
           page("moderation", ui(key), { moderationTab, path: ui("moderation") });
@@ -1394,7 +1445,6 @@
       if (!state.overview.guild.isDirectMessage) {
         const path = ui("channel_settings");
         const route = { view: "channel-settings", channelTab: "settings", channelSelection: true };
-        page("channel-settings", path, { channelTab: "settings" });
         for (const [sectionId, key] of channelSettingsFields) {
           const field = state.overview.settings.catalog
             .find((section) => section.id === sectionId)
@@ -1628,8 +1678,13 @@
     if (entry.personaHome) target = root.querySelector(".banner");
     else if (entry.channelTab === "allowlist") target = root.querySelector("[data-channel-allowlist]");
     else if (entry.channelSelection) target = channelSearchDestination(root, entry);
-    else if (entry.siteTab) target = root.querySelector(`#site-tab-${entry.siteTab}`);
-    else if (entry.lorebookEntryField) {
+    else if (entry.selector) target = root.querySelector(entry.selector);
+    else if (entry.siteTab) {
+      if (entry.name) {
+        const stage = root.querySelector(`#site-admin-stage[aria-labelledby="site-tab-${entry.siteTab}"]`);
+        if (stage) target = searchField(stage, entry.name) || stage.querySelector("[data-site-add]");
+      } else target = root.querySelector(`#site-tab-${entry.siteTab}`);
+    } else if (entry.lorebookEntryField) {
       const editor = root.querySelector("#lorebook-editor-host:not([hidden])");
       if (editor) target = searchField(editor, entry.name);
     } else if (entry.name || entry.tag) {
@@ -1673,12 +1728,15 @@
 
   function revealSearchDestination(target) {
     target.scrollIntoView({ block: "center", behavior: "instant" });
+    const controls = [
+      ...target.querySelectorAll(
+        'input:not([type="hidden"]):not(:disabled), select:not(.control-native-select):not(:disabled), textarea:not(:disabled), button:not(:disabled)',
+      ),
+    ].filter((element) => element.getClientRects().length);
     const control =
-      [
-        ...target.querySelectorAll(
-          'input:not([type="hidden"]):not(:disabled), select:not(.control-native-select):not(:disabled), textarea:not(:disabled), button:not(:disabled)',
-        ),
-      ].find((element) => element.getClientRects().length) || target;
+      (target.matches(".field") && controls.find((element) => element.matches('input[type="number"]'))) ||
+      controls[0] ||
+      target;
     if (control === target && !target.matches("button, a[href]")) target.tabIndex = -1;
     control.focus({ preventScroll: true });
     showSearchSpotlight(target);
@@ -8801,6 +8859,7 @@
           if (pendingSearchDestination === destination) pendingSearchDestination = null;
         }, 10000);
       state.view = entry.view;
+      if (entry.statsRangeEditing) state.statsRangeEditing = true;
       if (entry.profileTab) profileTab = entry.profileTab;
       if (entry.settingsGroup) state.settingsGroup = entry.settingsGroup;
       if (entry.personaPanel) {

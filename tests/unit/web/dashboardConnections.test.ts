@@ -77,7 +77,9 @@ describe("dashboard connections", () => {
   });
 
   it("indexes visible dashboard destinations for the workspace and account permissions", async () => {
-    const source = await dashboardFunction("buildSettingsSearchIndex");
+    const source = await Promise.all(
+      ["dashboardNavigation", "buildSettingsSearchIndex", "filterSettingsSearch"].map(dashboardFunction),
+    );
     const overview = {
       canManage: true,
       guild: { isDirectMessage: false },
@@ -93,39 +95,64 @@ describe("dashboard connections", () => {
       overview: overview as typeof overview | null,
       providerData: {},
       session: { user: { isGlobalAdmin: false } },
-      publicSite: { copy: { title: "site_title", pages: "site_pages", links: "site_links" } },
-    };
-    const build = runInNewContext(`${source}; buildSettingsSearchIndex`, {
-      state,
-      ui: String,
-      profileTabs: { profile: "user-round", privacy: "brain", conversation: "message-circle" },
-      moderationTabs: {},
-      settingsGroups: [],
-      channelSettingsFields: [],
-      personaKnowledgeTabs: () => [],
-      settingSearchText: (element: { textContent: string }) => element.textContent,
-      document: {
-        createElement: () => {
-          const template = {
-            innerHTML: "",
-            content: {
-              querySelectorAll: () =>
-                template.innerHTML
-                  ? [{ tagName: "h3", textContent: template.innerHTML, closest: () => null, querySelector: () => null }]
-                  : [],
-            },
-          };
-          return template;
+      publicSite: {
+        copy: {
+          title: "site_title",
+          admin: "site_admin",
+          pages: "site_pages",
+          links: "site_links",
+          show_on_login: "show_on_login",
+          show_in_sidebar: "show_in_sidebar",
         },
       },
-      renderProfilePanel: (section: string) => `${section} options`,
-      renderPersonaNaming: () => "How this persona addresses you",
-      renderPersonaSettings: () => "",
-      renderPersonaAppearance: () => "",
-      renderChannelOverrides: () => "",
-    }) as () => {
+    };
+    const { buildSettingsSearchIndex: build, filterSettingsSearch: filter } = runInNewContext(
+      `${source.join("\n")}\n({ buildSettingsSearchIndex, filterSettingsSearch })`,
+      {
+        state,
+        ui: String,
+        profileTabs: { profile: "user-round", privacy: "brain", conversation: "message-circle" },
+        moderationTabs: {},
+        settingsGroups: [],
+        channelSettingsFields: [],
+        personaKnowledgeTabs: () => [],
+        settingSearchText: (element: { textContent: string }) => element.textContent,
+        document: {
+          createElement: () => {
+            const template = {
+              innerHTML: "",
+              content: {
+                querySelectorAll: () =>
+                  template.innerHTML
+                    ? [
+                        {
+                          tagName: "h3",
+                          textContent: template.innerHTML,
+                          closest: () => null,
+                          querySelector: () => null,
+                        },
+                      ]
+                    : [],
+              },
+            };
+            return template;
+          },
+        },
+        renderProfilePanel: (section: string) => `${section} options`,
+        renderPersonaNaming: () => "How this persona addresses you",
+        renderPersonaSettings: () => "",
+        renderPersonaAppearance: () => "",
+        renderChannelOverrides: () => "",
+      },
+    ) as {
+      buildSettingsSearchIndex: () => SearchEntry[];
+      filterSettingsSearch: (entries: SearchEntry[], query: string) => SearchEntry[];
+    };
+    type SearchEntry = {
       view: string;
-      title?: string;
+      title: string;
+      path: string;
+      statsRangeEditing?: boolean;
       profileTab?: string;
       personaId?: number;
       personaHome?: boolean;
@@ -133,14 +160,46 @@ describe("dashboard connections", () => {
       name?: string;
       siteTab?: string;
       channelSelection?: boolean;
-    }[];
+    };
+    const commonPages = {
+      my_settings: "profile",
+      global_memory: "personal-memory",
+      nav_personal_providers: "personal-providers",
+      overview_title: "overview",
+      personas_title: "personas",
+      spotlights: "personal-spotlights",
+      lorebooks: "lorebooks",
+    };
+    const managerPages = {
+      nav_server_providers: "server-providers",
+      channel_settings: "channel-settings",
+      moderation: "moderation",
+      nav_server_settings: "settings",
+    };
     for (const canManage of [true, false]) {
       overview.canManage = canManage;
       const entries = build();
-      expect(entries.some((entry) => entry.view === "overview" && entry.title === "overview_title")).toBe(true);
-      expect(entries.some((entry) => entry.view === "settings" && entry.title === "nav_server_settings")).toBe(
-        canManage,
-      );
+      for (const [title, view] of Object.entries({ ...commonPages, ...(canManage ? managerPages : {}) })) {
+        expect(filter(entries, title)[0]).toMatchObject({ view, title });
+      }
+      if (!canManage) {
+        for (const view of Object.values(managerPages))
+          expect(entries.some((entry) => entry.view === view)).toBe(false);
+      }
+      expect(filter(entries, "stats_title")[0]).toMatchObject({ view: "overview", title: "stats_title" });
+      expect(filter(entries, "stats_custom")[0]).toMatchObject({
+        view: "overview",
+        statsRangeEditing: true,
+        name: "from",
+      });
+      expect(filter(entries, "spotlight_auto")[0]).toMatchObject({
+        view: "personal-spotlights",
+        name: "autoTriggerPersonaId",
+      });
+      expect(filter(entries, "spotlight_hours")[0]).toMatchObject({
+        view: "personal-spotlights",
+        name: "durationHours",
+      });
       expect(entries.some((entry) => entry.view === "channel-settings" && entry.channelSelection)).toBe(canManage);
       expect(entries.some((entry) => entry.view === "site-admin")).toBe(false);
       expect(entries.find((entry) => entry.title === "conversation options")?.profileTab).toBe("conversation");
@@ -155,14 +214,56 @@ describe("dashboard connections", () => {
     }
     overview.canManage = true;
     overview.guild.isDirectMessage = true;
-    expect(build().some((entry) => entry.view === "channel-settings")).toBe(false);
+    const dmEntries = build();
+    for (const view of ["channel-settings", "moderation", "personal-spotlights"])
+      expect(dmEntries.some((entry) => entry.view === view)).toBe(false);
 
     state.session.user.isGlobalAdmin = true;
     state.overview = null;
     const entriesWithoutServer = build();
     expect(entriesWithoutServer.every((entry) => entry.view === "site-admin")).toBe(true);
-    expect(entriesWithoutServer.some((entry) => entry.title === "site_title")).toBe(true);
+    expect(filter(entriesWithoutServer, "site_title")[0]).toMatchObject({ view: "site-admin", path: "site_admin" });
     expect(entriesWithoutServer.some((entry) => entry.siteTab === "links")).toBe(true);
+    expect(filter(entriesWithoutServer, "show_on_login")[0]).toMatchObject({ siteTab: "links", name: "showOnLogin" });
+    expect(filter(entriesWithoutServer, "show_in_sidebar")[0]).toMatchObject({
+      siteTab: "links",
+      name: "showInSidebar",
+    });
+  });
+
+  it("waits for the external links tab before revealing a link setting or the add button", async () => {
+    const source = await dashboardFunction("focusSearchDestination");
+    const field = { matches: () => false };
+    const addLink = { matches: () => false };
+    const stage = { querySelector: () => addLink };
+    let linksLoaded = false;
+    let linkExists = true;
+    const root = {
+      querySelector: (selector: string) =>
+        linksLoaded && selector === '#site-admin-stage[aria-labelledby="site-tab-links"]' ? stage : null,
+    };
+    const destination = { view: "site-admin", guildId: null, siteTab: "links", name: "showOnLogin" };
+    const revealed: unknown[] = [];
+    const context = {
+      state: { view: "site-admin", guildId: null },
+      pendingSearchDestination: destination as typeof destination | null,
+      document: { querySelector: () => root },
+      searchField: (scope: unknown, name: string) =>
+        scope === stage && name === destination.name && linkExists ? field : null,
+      revealSearchDestination: (target: unknown) => revealed.push(target),
+    };
+    const focus = runInNewContext(`${source}\nfocusSearchDestination`, context) as () => void;
+    focus();
+    expect(context.pendingSearchDestination).toEqual(destination);
+    expect(revealed).toEqual([]);
+    linksLoaded = true;
+    focus();
+    expect(context.pendingSearchDestination).toBeNull();
+    expect(revealed).toEqual([field]);
+    context.pendingSearchDestination = destination;
+    linkExists = false;
+    focus();
+    expect(revealed).toEqual([field, addLink]);
   });
 
   it("keeps a channel field destination pending until the channel settings are visible", async () => {
