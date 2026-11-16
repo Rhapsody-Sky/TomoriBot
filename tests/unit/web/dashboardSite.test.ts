@@ -78,6 +78,7 @@ describe("dashboard public pages", () => {
     expect(response.status).toBe(200);
     expect(response.headers.has("set-cookie")).toBe(false);
     const html = await response.text();
+    expect(html).not.toContain("data-dashboard-entry=");
     expect(html).toContain(OAUTH_STATE_COOKIE);
     expect(html).toContain(SESSION_COOKIE);
     expect(html).toContain('href="https://discord.com/terms/cookie-policy"');

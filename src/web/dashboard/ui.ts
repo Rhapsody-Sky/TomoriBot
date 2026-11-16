@@ -1,3 +1,7 @@
+import english from "@/locales/en-US/general";
+
+const loadingTitle = english.general.dashboard.interface_entry_loading;
+
 export function renderDashboardHtml(content?: string): string {
   return `<!doctype html>
 <html lang="en">
@@ -32,10 +36,18 @@ export function renderDashboardHtml(content?: string): string {
     <div id="app" class="app-shell">
       ${
         content ??
-        `<div class="boot-screen">
-        <img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="boot-logo">
-        <div class="loading"></div>
-      </div>`
+        `<main class="app-main" data-dashboard-entry="loading" aria-busy="true">
+        <div class="stack" data-entry-layout>
+          <section class="banner compact" aria-labelledby="entry-title">
+            <div class="banner-info"><div class="stack">
+              <p class="crumb">TomoriBot Control</p>
+              <h1 id="entry-title">${loadingTitle}</h1>
+              <div class="loading" role="progressbar" aria-labelledby="entry-title"></div>
+            </div></div>
+            <div class="banner-art" aria-hidden="true"><span class="sticker emblem"><img src="/settings/assets/tomori_companion_logo.svg" alt=""></span></div>
+          </section>
+        </div>
+      </main>`
       }
     </div>
     <div id="toast-region" class="toasts" role="status"></div>

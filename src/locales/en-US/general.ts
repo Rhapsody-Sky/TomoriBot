@@ -57,6 +57,16 @@ export default {
       site_missing: "This page is not available.",
       site_load_failed: "Public pages could not be loaded. Please try again.",
       site_link_hint: "Link to your documentation, support community, Ko-fi, Patreon or another website.",
+      interface_entry_loading: "Loading dashboard",
+      interface_entry_sign_in: "Continue with Discord",
+      interface_entry_sign_in_hint:
+        "Sign in with Discord to manage your own Tomori data and the servers you administer.",
+      interface_entry_another_greeting: "Another greeting from Tomori",
+      interface_entry_no_shared_servers: "No shared servers",
+      interface_entry_no_shared_servers_hint: "TomoriBot is not in one of your servers yet.",
+      interface_entry_sign_out: "Sign out",
+      interface_entry_load_failed: "This server could not be loaded.",
+      interface_entry_retry: "Retry",
       interface_channel_settings: "Channel settings",
       interface_channel_single_hint:
         "Edit this channel's settings. Use default removes a channel override and restores Tomori's normal configuration.",

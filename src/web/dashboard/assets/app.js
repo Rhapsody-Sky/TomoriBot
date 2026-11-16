@@ -1,6 +1,7 @@
 (() => {
   const BASE = "/settings/api";
   const app = document.querySelector("#app");
+  const initialLoadingScreen = app.querySelector('[data-dashboard-entry="loading"]');
   const toastRegion = document.querySelector("#toast-region");
   const loginMessages = [
     "Not today satan",
@@ -34,7 +35,7 @@
     "Dramatic chipmunk energy",
     "I'm in your walls",
   ];
-  const loginMessage = loginMessages[Math.floor(Math.random() * loginMessages.length)];
+  let loginMessage = loginMessages[Math.floor(Math.random() * loginMessages.length)];
 
   const { palettes, designStorageKey, appearance, applyAppearance, remembered } = window.TomoriDesign;
   let rememberDesign = remembered;
@@ -694,19 +695,56 @@
     return response;
   }
 
+  function renderEntryScreen(screen, title, description, action) {
+    const login = screen === "login";
+    const failure = screen === "failed";
+    const logo = '<img src="/settings/assets/tomori_companion_logo.svg" alt="" data-entry-logo>';
+    const greetingLabel = escapeHtml(ui("entry_another_greeting") || "Another greeting from Tomori");
+    app.innerHTML = `<main class="app-main" data-dashboard-entry="${screen}">
+      <div class="stack" data-entry-layout>
+        <section class="banner${login ? " tinted" : " compact"}"${login ? ' data-tint="tomori"' : ""} aria-labelledby="entry-title">
+          <div class="banner-info"><div class="stack">
+            <p class="crumb">${login ? logo : ""}TomoriBot Control</p>
+            <h1 id="entry-title"${login ? ' data-fx="split" aria-live="polite" aria-atomic="true"' : ""}>${escapeHtml(title)}</h1>
+            <p class="${failure ? "notice error" : "banner-text"}"${failure ? ' role="alert"' : ""}>${escapeHtml(description)}</p>
+            <div class="row">${action}</div>
+          </div></div>
+          <div class="banner-art" aria-hidden="true">
+            ${
+              login
+                ? `<div class="art-stage"><img class="art-full" src="/settings/assets/persona-art-tomori.png" alt="" data-fx="tilt"></div>
+              <span class="sparkle">✦</span><span class="sparkle s2">✦</span>`
+                : `<span class="sticker emblem">${logo}</span>`
+            }
+          </div>
+          ${
+            login
+              ? `<div class="banner-menu">
+            <button class="button icon" type="button" data-entry-greeting data-fx="spark" aria-label="${greetingLabel}">${navigationIcon("message-circle")}</button>
+          </div>`
+              : ""
+          }
+        </section>
+        ${login ? renderPublicLinks() : ""}
+      </div>
+    </main>`;
+    window.TomoriControls?.enhance(app);
+    window.TomoriFX?.enhance(app);
+  }
+
   function renderLoggedOut() {
-    app.innerHTML = `
-      <main class="login-screen">
-        <div class="login-brand">
-          <img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="login-logo">
-          <div class="login-rule"></div>
-          <p class="login-kicker">Tomoribot Control</p>
-          <h1>${escapeHtml(loginMessage)}</h1>
-          <p class="login-copy">Sign in with Discord to manage your own Tomori data and the servers you administer.</p>
-          <a class="button primary login-button" href="/settings/login">Continue with Discord</a>
-          ${renderPublicLinks()}
-        </div>
-      </main>`;
+    renderEntryScreen(
+      "login",
+      loginMessage,
+      ui("entry_sign_in_hint") || "Sign in with Discord to manage your own Tomori data and the servers you administer.",
+      `<a class="button primary" href="/settings/login">${escapeHtml(ui("entry_sign_in") || "Continue with Discord")}</a>`,
+    );
+    app.querySelector("[data-entry-greeting]").addEventListener("click", () => {
+      const greetings = loginMessages.filter((message) => message !== loginMessage);
+      loginMessage = greetings[Math.floor(Math.random() * greetings.length)];
+      const heading = document.getElementById("entry-title");
+      window.TomoriFX.split(heading, loginMessage);
+    });
   }
 
   function loadingBar(label) {
@@ -718,20 +756,17 @@
   }
 
   function renderBootScreen() {
-    if (app.querySelector(".boot-screen")) return;
-    app.innerHTML = `<div class="boot-screen"><img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="boot-logo"><div class="loading"></div></div>`;
+    if (!app.querySelector('[data-dashboard-entry="loading"]'))
+      app.replaceChildren(initialLoadingScreen.cloneNode(true));
   }
 
   function renderNoGuilds() {
-    app.innerHTML = `
-      <main class="login-screen">
-        <div class="login-brand">
-          <img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="login-logo">
-          <p class="login-kicker">No shared servers</p>
-          <h1>TomoriBot is not in one of your servers yet.</h1>
-          <a class="button secondary login-button" href="/settings/logout">Sign out</a>
-        </div>
-      </main>`;
+    renderEntryScreen(
+      "no-servers",
+      ui("entry_no_shared_servers") || "No shared servers",
+      ui("entry_no_shared_servers_hint") || "TomoriBot is not in one of your servers yet.",
+      `<a class="button secondary" href="/settings/logout">${escapeHtml(ui("entry_sign_out") || "Sign out")}</a>`,
+    );
   }
 
   function navButton(id, label, adminOnly = false) {
@@ -7607,7 +7642,12 @@
         state.view = "overview";
       renderShell();
     } catch (error) {
-      app.innerHTML = `<main class="login-screen"><div class="login-brand"><img src="/settings/assets/tomori_companion_logo.svg" alt="TomoriBot" class="login-logo"><h1>This server could not be loaded.</h1><p class="login-copy">${escapeHtml(error.message)}</p><button class="button secondary" id="retry-boot">Retry</button></div></main>`;
+      renderEntryScreen(
+        "failed",
+        ui("entry_load_failed") || "This server could not be loaded.",
+        error.message,
+        `<button class="button secondary" id="retry-boot" type="button">${escapeHtml(ui("entry_retry") || "Retry")}</button>`,
+      );
       document.querySelector("#retry-boot")?.addEventListener("click", () => selectGuild(guildId));
     }
   }

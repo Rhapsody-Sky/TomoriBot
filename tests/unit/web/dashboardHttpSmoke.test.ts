@@ -94,6 +94,8 @@ describe("dashboard HTTP shell", () => {
     expect(html).not.toContain("/settings/assets/companion.css");
     expect(html).not.toContain("/settings/assets/app.css");
     expect(html).toContain("/settings/assets/app.js");
+    expect(html).toContain('data-dashboard-entry="loading" aria-busy="true"');
+    expect(html).toContain('role="progressbar" aria-labelledby="entry-title"');
   });
 
   it("serves every dashboard asset from the source tree", async () => {
