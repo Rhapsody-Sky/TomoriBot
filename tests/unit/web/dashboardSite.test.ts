@@ -82,6 +82,7 @@ describe("dashboard public pages", () => {
     expect(html).toContain(OAUTH_STATE_COOKIE);
     expect(html).toContain(SESSION_COOKIE);
     expect(html).toContain('href="https://discord.com/terms/cookie-policy"');
+    expect(html).toContain('href="/settings/pages/cookies" aria-current="page"');
     expect(save).not.toHaveBeenCalled();
     const admin = await (await app.request("/settings/api/site-admin/entries", { headers })).json();
     const { title, content, position } = admin.entries.find((entry: DashboardSiteEntry) => entry.id === "cookies");
@@ -101,7 +102,11 @@ describe("dashboard public pages", () => {
 
   it("keeps hidden content out of public navigation and direct URLs", async () => {
     const { app, seed } = setup();
-    seed([storedPage, { ...storedPage, id: "cookies", enabled: false, content: "<p>unpublished</p>" }]);
+    seed([
+      storedPage,
+      { ...storedPage, id: "cookies", enabled: false, content: "<p>unpublished</p>" },
+      { id: "9bcd3efa-4408-4389-819a-93091ae8f0ec", ...link, enabled: false, showOnLogin: false, showInSidebar: true },
+    ]);
     const response = await app.request("/settings/api/site");
     expect(response.status).toBe(200);
     const payload = await response.json();
@@ -111,7 +116,10 @@ describe("dashboard public pages", () => {
     const publicPage = await app.request("/settings/pages/imprint");
     expect(publicPage.status).toBe(200);
     expect(publicPage.headers.get("cache-control")).toBe("no-store");
-    expect(await publicPage.text()).toContain("<p>Sample content</p>");
+    const html = await publicPage.text();
+    expect(html).toContain("<p>Sample content</p>");
+    expect(html).not.toContain('href="/settings/pages/cookies"');
+    expect(html).not.toContain(link.url);
   });
 
   it("requires an installation admin and CSRF even when the user manages a server", async () => {

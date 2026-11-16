@@ -541,26 +541,34 @@ body[data-theme="dark"] .topbar-logo {
   }
 }
 
-.app-main[data-dashboard-entry] {
+.app-main:is([data-dashboard-entry], [data-public-page]) {
   display: grid;
-  align-content: center;
   block-size: auto;
-  min-block-size: 100dvh;
-  padding-block: calc(2 * var(--space-8));
   overflow: visible;
   scrollbar-gutter: auto;
 }
 
-[data-dashboard-entry] .banner {
+.app-main[data-dashboard-entry] {
+  align-content: center;
+  min-block-size: 100dvh;
+  padding-block: calc(2 * var(--space-8));
+}
+
+:is([data-dashboard-entry], [data-public-page]) .banner {
   margin-block-end: 0;
 }
 
-[data-dashboard-entry] [data-entry-layout] {
+[data-public-page] .banner-info {
+  align-content: center;
+}
+
+[data-entry-layout],
+[data-public-page-layout] {
   inline-size: min(100%, calc(var(--boxed) / 1.618));
   justify-self: center;
 }
 
-[data-dashboard-entry] .emblem > img {
+:is([data-dashboard-entry], [data-public-page]) .emblem > img {
   inline-size: 64%;
   block-size: 64%;
   align-self: center;
@@ -896,17 +904,17 @@ body[data-theme="dark"] [data-dashboard-entry="login"] [data-entry-logo] {
   color: var(--ink);
 }
 
-[data-dashboard-entry="login"] .site-public-links {
+:is([data-dashboard-entry="login"], [data-public-page]) .site-public-links {
   margin-block-start: 0;
 }
 
-.public-site-page {
-  width: min(960px, calc(100% - 32px));
-  margin: 32px auto;
+[data-public-page] .site-public-links a[aria-current="page"] {
+  color: var(--ink);
+  font-weight: 700;
 }
 
-.public-site-page > .button {
-  justify-self: start;
+[data-public-page] .site-prose p {
+  max-inline-size: none;
 }
 
 .site-prose {
@@ -915,12 +923,16 @@ body[data-theme="dark"] [data-dashboard-entry="login"] [data-entry-logo] {
 }
 
 .site-prose > * + * {
-  margin-top: var(--space-3);
+  margin-block-start: var(--space-3);
+}
+
+[data-public-page] .site-prose > * + :where(h2) {
+  margin-block-start: var(--space-6);
 }
 
 .site-prose ul,
 .site-prose ol {
-  padding-inline-start: 24px;
+  padding-inline-start: var(--space-6);
 }
 
 .site-editor-toolbar {

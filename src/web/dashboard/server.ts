@@ -586,21 +586,35 @@ export function createDashboardApp(client: Client) {
   app.get(`${BASE_PATH}/pages/:pageId`, async (context) => {
     context.header("Cache-Control", "no-store");
     const entries = await site.list();
+    const copy = siteCopy();
     const page = entries.find((entry) => entry.kind === "page" && entry.id === context.req.param("pageId"));
-    if (!page) return context.text(siteCopy().missing, 404);
+    if (!page) return context.text(copy.missing, 404);
     const links = entries
       .filter((entry) => entry.kind === "page" || entry.showOnLogin)
-      .map(
-        (entry) =>
-          `<a href="${escapeHtml(entry.kind === "page" ? `${BASE_PATH}/pages/${entry.id}` : entry.url)}">${escapeHtml(entry.title)}</a>`,
-      )
+      .map((entry) => {
+        const href = entry.kind === "page" ? `${BASE_PATH}/pages/${entry.id}` : entry.url;
+        const current = entry.id === page.id ? ' aria-current="page"' : "";
+        return `<a href="${escapeHtml(href)}"${current}>${escapeHtml(entry.title)}</a>`;
+      })
       .join("");
     return context.html(
-      renderDashboardHtml(`<main class="public-site-page stack">
-      <a class="button" href="${BASE_PATH}">${escapeHtml(siteCopy().back)}</a>
-      <article class="panel"><header class="panel-header"><div class="heading"><h1>${escapeHtml(page.title)}</h1></div></header>
-      <div class="site-prose">${page.content}</div></article>
-      <nav class="site-public-links" aria-label="${escapeHtml(siteCopy().public_links)}">${links}</nav></main>`),
+      renderDashboardHtml(`<main class="app-main" data-public-page>
+        <div class="stack" data-public-page-layout>
+          <header class="banner compact">
+            <div class="banner-info">
+              <div class="row"><a class="button" href="${BASE_PATH}"><svg class="glyph" aria-hidden="true"><use href="${BASE_PATH}/assets/navigation-icons.svg#arrow-left"></use></svg>${escapeHtml(copy.back)}</a></div>
+              <h1 id="public-page-title">${escapeHtml(page.title)}</h1>
+            </div>
+            <div class="banner-art" aria-hidden="true">
+              <span class="sticker emblem"><img src="${BASE_PATH}/assets/tomori_companion_logo.svg" alt=""></span>
+            </div>
+          </header>
+          <div class="stage">
+            <article class="card" aria-labelledby="public-page-title"><div class="site-prose">${page.content}</div></article>
+            <nav class="site-public-links" aria-label="${escapeHtml(copy.public_links)}">${links}</nav>
+          </div>
+        </div>
+      </main>`),
     );
   });
   app.use(`${BASE_PATH}/api/site-admin/*`, async (context, next) => {
