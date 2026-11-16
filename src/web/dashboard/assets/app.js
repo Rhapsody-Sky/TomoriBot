@@ -778,10 +778,13 @@
       ? `<img class="${collection ? "avatar" : "server-icon"}" src="${escapeHtml(selected.iconUrl)}" alt="">`
       : `<span class="${collection ? "avatar" : "server-icon server-icon-fallback"}">${escapeHtml((selected?.name || "?").slice(0, 1))}</span>`;
     const serverLabel = `<span${collection ? "" : ' class="server-label"'}><small>${escapeHtml(ui("server"))}</small><strong>${escapeHtml(selected?.name || ui("switch_server"))}</strong></span>${navigationIcon("arrow-up-down")}`;
-    const serverButton = `<button class="button ${collection ? "server-switch" : "topbar-server-button"}" type="button" data-server-picker-open aria-haspopup="dialog" aria-label="${escapeHtml(ui("switch_server"))}">${serverIdentity}${serverLabel}</button>`;
+    const serverButton = selected
+      ? `<button class="button ${collection ? "server-switch" : "topbar-server-button"}" type="button" data-server-picker-open aria-haspopup="dialog" aria-label="${escapeHtml(ui("switch_server"))}">${serverIdentity}${serverLabel}</button>`
+      : "";
     const navigationButton = `<button class="button icon ${collection ? "menu-toggle" : "mobile-nav-trigger"}" type="button" data-navigation-menu="dashboard-navigation" aria-label="${escapeHtml(ui("navigation_menu"))}">${navigationIcon("menu")}</button>`;
+    const home = selected ? "overview" : "site-admin";
     const brand = collection
-      ? `<a class="frame-brand" href="#overview" data-nav="overview" aria-label="${escapeHtml(ui("overview_title"))}"><img src="/settings/assets/tomori_companion_logo.svg" alt=""><span><strong>TomoriBot</strong><small>companion control</small></span></a>`
+      ? `<a class="frame-brand" href="#${home}" data-nav="${home}" aria-label="${escapeHtml(selected ? ui("overview_title") : state.publicSite.copy.title)}"><img src="/settings/assets/tomori_companion_logo.svg" alt=""><span><strong>TomoriBot</strong><small>companion control</small></span></a>`
       : '<button class="brand brand-button" type="button" data-nav="overview" aria-label="Open overview"><img src="/settings/assets/tomori_companion_logo.svg" alt="" class="topbar-logo"><span class="brand-copy"><strong>TomoriBot</strong><small>companion control</small></span></button>';
     const designButton = `<button class="button" id="design-trigger" type="button" popovertarget="design-settings" aria-label="${escapeHtml(ui("design_title"))}" data-tooltip="${escapeHtml(ui("design_title"))}"><span class="palette-orb" aria-hidden="true"></span><span class="${collection ? "design-label" : "design-trigger-label"}">${escapeHtml(ui("design_title"))}</span></button>`;
     app.innerHTML = `
@@ -1035,13 +1038,6 @@
     });
   }
 
-  function pageHeader(eyebrow, title, copy, actions = "") {
-    return `<header class="page-header">
-      <div class="heading">${eyebrow ? `<p class="eyebrow">${escapeHtml(eyebrow)}</p>` : ""}<h1>${escapeHtml(title)}</h1>${copy ? `<p>${escapeHtml(copy)}</p>` : ""}</div>
-      ${actions ? `<div class="actions">${actions}</div>` : ""}
-    </header>`;
-  }
-
   const navigationIcons = {
     "site-admin": "settings-2",
     overview: "house",
@@ -1118,6 +1114,7 @@
       "server-providers",
       "moderation",
       "personal-spotlights",
+      "site-admin",
     ].includes(state.view);
   }
 
@@ -1131,13 +1128,14 @@
       workspace.dataset.dashboardView = state.view;
       workspace.scrollTop = 0;
     }
-    if (state.view === "site-admin" && state.session?.user.isGlobalAdmin) {
+    if (state.view === "site-admin" && state.session?.user.isGlobalAdmin && state.publicSite) {
       initNavigationMenus();
       window.TomoriSite.renderAdmin(workspace, {
         api,
         escapeHtml,
         fieldLabel,
-        pageHeader,
+        personaCardHead,
+        cardSaveActions,
         navigationIcon,
         toast,
         confirmAction,
@@ -1145,6 +1143,7 @@
         initDraftForms,
         enhanceDashboard,
         completeFormSave,
+        showFormError,
         isCurrent: () => state.view === "site-admin",
         copy: state.publicSite.copy,
         afterSave: async () => {
@@ -8482,7 +8481,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-profile-tab], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], .deck-card[aria-pressed]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-profile-tab], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], [data-site-tab][role=tab], [data-site-page][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];
@@ -10238,6 +10237,8 @@
       if (window.location.hash === "#channel-settings") state.view = "channel-settings";
       if (window.location.hash === "#server-providers") state.view = "server-providers";
       if (window.location.hash === "#personal-providers") state.view = "personal-providers";
+      if (window.location.hash === "#site-admin" && session.user.isGlobalAdmin && state.publicSite)
+        state.view = "site-admin";
       if (window.location.hash === "#moderation") state.view = "moderation";
       if (window.location.hash === "#personal-spotlights") state.view = "personal-spotlights";
       await selectGuild(guild.id);

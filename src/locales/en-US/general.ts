@@ -27,6 +27,7 @@ export default {
       site_save: "Save",
       site_saved: "Saved",
       site_add_link: "Add link",
+      site_no_links: "No external links yet.",
       site_link_title: "Link label",
       site_url: "Web address",
       site_position: "Display order",

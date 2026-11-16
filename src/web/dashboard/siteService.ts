@@ -46,6 +46,7 @@ export function siteCopy(): Record<string, string> {
     "save",
     "saved",
     "add_link",
+    "no_links",
     "link_title",
     "url",
     "position",

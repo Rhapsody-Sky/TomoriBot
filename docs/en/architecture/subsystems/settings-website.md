@@ -27,9 +27,10 @@ from this list, never from Discord guild permissions. This designation does not 
 access to guild data or other users' private memories.
 
 Global Administration includes Pages & links, available even without a shared guild.
-Global administrators edit Imprint, Data protection, and Cookie notice with a rich-text
-editor, and add external links such as support pages. Each item has a title, display
-order, and visibility settings. Imprint and Data protection start empty and hidden.
+In Public pages, global administrators edit Imprint, Data protection, and Cookie
+notice with a rich-text editor and preview. In External links, each link has its
+own card. Each item saves independently and has a title, display order, and
+visibility settings. Imprint and Data protection start empty and hidden.
 The built-in Cookie notice is public until a global administrator replaces or hides it.
 Published pages appear below the login and in the dashboard sidebar.
 Hiding a page makes its public URL return 404 without deleting its draft. External
