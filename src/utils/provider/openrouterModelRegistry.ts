@@ -5,10 +5,18 @@ import type {
   TranscriptionModelRow,
   VideoGenerationModelRow,
 } from "@/types/db/schema";
-import { getOpenRouterPricing, getOrFetchOpenRouterCapabilities } from "@/utils/cache/openrouterCapabilityCache";
+import {
+  getOpenRouterCapabilities,
+  getOpenRouterPricing,
+  getOrFetchOpenRouterCapabilities,
+  type ModelCapabilities,
+} from "@/utils/cache/openrouterCapabilityCache";
 import { getOrFetchOpenRouterEmbeddingModel } from "@/utils/cache/openrouterEmbeddingModelCache";
 import { getOrFetchOpenRouterImageModel } from "@/utils/cache/openrouterImageModelCache";
-import { getOrFetchOpenRouterVideoModelCapabilities } from "@/utils/cache/openrouterVideoModelCache";
+import {
+  getCachedOpenRouterVideoModelCapabilities,
+  getOrFetchOpenRouterVideoModelCapabilities,
+} from "@/utils/cache/openrouterVideoModelCache";
 import { getOrFetchOpenRouterDecisionModel } from "@/utils/cache/openrouterDecisionModelCache";
 import { log } from "@/utils/misc/logger";
 import { llmModelRepo, llmProviderRepo } from "@/utils/db/repositories";
@@ -37,6 +45,11 @@ export interface RegisteredOpenRouterModelEntry {
   codename: string;
   description: string | null;
   modelId: number;
+  features?: Partial<ModelCapabilities & ImageEndpointSupports> & {
+    firstFrame?: boolean;
+    lastFrame?: boolean;
+    choiceDecisions?: boolean;
+  };
 }
 
 export type RegisterOpenRouterModelResult =
@@ -73,6 +86,12 @@ function buildRegisteredEntryFromLlm(llm: LlmRow): RegisteredOpenRouterModelEntr
     codename: llm.llm_codename,
     description: resolveDescription(llm.descriptions, "en-US") ?? llm.llm_codename,
     modelId: llm.llm_id,
+    features: getOpenRouterCapabilities(llm.llm_codename) ?? {
+      hasTools: llm.has_tools,
+      seesImages: llm.sees_images,
+      seesVideos: llm.sees_videos,
+      supportsStructuredOutput: llm.supports_structoutput,
+    },
   };
 }
 
@@ -99,6 +118,12 @@ function buildRegisteredEntryFromDiffusionModel(model: DiffusionModelRow): Regis
     codename: model.codename,
     description: resolveDescription(model.descriptions, "en-US") ?? model.codename,
     modelId: model.diffusion_model_id,
+    features: {
+      txt2img: model.supports_txt2img ?? undefined,
+      img2img: model.supports_img2img ?? undefined,
+      inpaint: model.supports_inpaint ?? undefined,
+      negative_prompt: model.supports_negative_prompt ?? undefined,
+    },
   };
 }
 
@@ -107,11 +132,18 @@ function buildRegisteredEntryFromVideoModel(model: VideoGenerationModelRow): Reg
     return null;
   }
 
+  const capabilities = getCachedOpenRouterVideoModelCapabilities(model.codename);
   return {
     capability: "video",
     codename: model.codename,
     description: resolveDescription(model.descriptions, "en-US") ?? model.codename,
     modelId: model.video_model_id,
+    features: capabilities
+      ? {
+          firstFrame: capabilities.supportedFrameImages.includes("first_frame"),
+          lastFrame: capabilities.supportedFrameImages.includes("last_frame"),
+        }
+      : undefined,
   };
 }
 
@@ -237,8 +269,12 @@ export async function loadRegisteredOpenRouterEntriesForCapability(
         .map((model) => ({
           capability,
           codename: model.codename,
-          description: null,
+          description: resolveDescription(model.descriptions, "en-US"),
           modelId: model.decision_model_id,
+          features: {
+            seesImages: model.sees_images,
+            choiceDecisions: model.supported_primitives.some((primitive) => primitive === "choice"),
+          },
         }));
   }
 }

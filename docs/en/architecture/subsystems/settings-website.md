@@ -234,8 +234,9 @@ Adding a provider key can fill an empty transcription slot with that provider's
 default, as in Discord. Replacing a key leaves the selection unchanged.
 Turning off `Post speech transcripts in Discord` hides them from the channel
 without disabling transcription or removing transcripts from Tomori's context.
-In an OpenRouter connection, registering a transcription model also selects it
-for that workspace. A saved OpenRouter key is required.
+OpenRouter's `Add model` dialog registers a model for a selected capability.
+Registering a transcription model also selects it for that workspace and
+requires a saved OpenRouter key.
 Under `Persona settings`, the Humanizer can inherit the server settings or use
 custom delivery switches for that persona.
 Persona-specific naming stays under Personas > My preferences and affects only

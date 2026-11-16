@@ -16,8 +16,16 @@ import {
 import * as savedProviders from "@/utils/provider/savedProviderConfig";
 import * as providerActivation from "@/utils/provider/providerActivation";
 import * as openRouterModels from "@/utils/provider/openrouterModelRegistry";
+import * as openRouterCapabilities from "@/utils/cache/openrouterCapabilityCache";
+import * as openRouterVideoModels from "@/utils/cache/openrouterVideoModelCache";
 import * as crypto from "@/utils/security/crypto";
-import { customEndpointSchema, savedProviderConfigSchema, userSavedProviderConfigSchema } from "@/types/db/schema";
+import {
+  customEndpointSchema,
+  diffusionModelSchema,
+  savedProviderConfigSchema,
+  userSavedProviderConfigSchema,
+  videoGenerationModelSchema,
+} from "@/types/db/schema";
 import { type DashboardProviderCore, DashboardProviderService } from "@/web/dashboard/providerService";
 import { loadAdvancedServerModels } from "@/web/dashboard/serverModelService";
 import type { DashboardActor, DashboardGuildSnapshot } from "@/web/dashboard/types";
@@ -354,6 +362,81 @@ describe("dashboard provider policy", () => {
     loadPersonal.mockResolvedValue(personalRow);
     expect(await savePersonal()).toBe(true);
     expect(activate).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports separately registered OpenRouter model features from stored or cached data", async () => {
+    const scope = { kind: "personal", ownerId: 7 } as const;
+    spyOn(openRouterCapabilities, "getOpenRouterCapabilities").mockImplementation((codename) =>
+      codename === "sample/cached"
+        ? { hasTools: true, seesImages: true, seesVideos: false, supportsStructuredOutput: true }
+        : undefined,
+    );
+    spyOn(llmProviderRepo, "loadScopedOpenRouterModels").mockResolvedValue([
+      createLlmRow({
+        llm_id: 81,
+        llm_provider: "openrouter",
+        llm_codename: "sample/stored",
+        is_scoped_registration: true,
+        has_tools: true,
+      }),
+      createLlmRow({
+        llm_id: 82,
+        llm_provider: "openrouter",
+        llm_codename: "sample/cached",
+        is_scoped_registration: true,
+      }),
+    ]);
+    spyOn(llmProviderRepo, "loadScopedOpenRouterDiffusionModels").mockResolvedValue([
+      diffusionModelSchema.parse({
+        diffusion_model_id: 83,
+        provider: "openrouter",
+        codename: "sample/image",
+        is_scoped_registration: true,
+        supports_img2img: true,
+        supports_inpaint: null,
+      }),
+    ]);
+    spyOn(llmProviderRepo, "loadScopedOpenRouterVideoGenerationModels").mockResolvedValue([
+      videoGenerationModelSchema.parse({
+        video_model_id: 84,
+        provider: "openrouter",
+        codename: "sample/video",
+        is_scoped_registration: true,
+      }),
+    ]);
+    const cachedVideo = spyOn(openRouterVideoModels, "getCachedOpenRouterVideoModelCapabilities").mockReturnValue(
+      undefined,
+    );
+
+    const read = (capability: "text" | "image" | "video") =>
+      openRouterModels.loadRegisteredOpenRouterEntriesForCapability(scope, capability);
+    expect(await read("text")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          codename: "sample/stored",
+          capability: "text",
+          features: expect.objectContaining({ hasTools: true }),
+        }),
+        expect.objectContaining({
+          codename: "sample/cached",
+          capability: "text",
+          features: expect.objectContaining({ seesImages: true, supportsStructuredOutput: true }),
+        }),
+      ]),
+    );
+    const image = (await read("image")).find((model) => model.codename === "sample/image");
+    expect(image).toMatchObject({ capability: "image", features: { img2img: true } });
+    expect(image?.features?.inpaint).toBeUndefined();
+    expect((await read("video")).find((model) => model.codename === "sample/video")?.features).toBeUndefined();
+
+    cachedVideo.mockReturnValue(
+      openRouterVideoModels.parseOpenRouterVideoModelList({
+        data: [{ id: "sample/video", supported_frame_images: ["first_frame"] }],
+      })[0],
+    );
+    expect(await read("video")).toContainEqual(
+      expect.objectContaining({ capability: "video", features: { firstFrame: true, lastFrame: false } }),
+    );
   });
 
   it("registers and selects OpenRouter transcription only for a workspace with a saved key", async () => {

@@ -535,7 +535,6 @@
     const humanizerFields = form.querySelector("[data-persona-humanizer-fields]");
     if (humanizerFields) humanizerFields.hidden = form.elements.humanizerMode.value === "inherit";
     if (form.id === "fallback-form") updateFallbackSlots(form);
-    if (form.id === "openrouter-form") updateOpenRouterHint(form);
     resizeAutoGrowTextareas(form);
     form.dispatchEvent(new Event("dashboard:restore"));
     if (form.dataset.fx === "track") form.dispatchEvent(new Event("input"));
@@ -1232,7 +1231,9 @@
     const addMarkup = (html, route, path) => {
       const template = document.createElement("template");
       template.innerHTML = html;
-      for (const element of template.content.querySelectorAll("label.field, label.toggle, h2, h3, legend")) {
+      for (const element of template.content.querySelectorAll(
+        "label.field, label.toggle, h2, h3, legend, [data-openrouter-model-add]",
+      )) {
         if (element.closest(".entry-list, [data-persona-entries], .chat, .chat-dock")) continue;
         const title = settingSearchText(element);
         if (!title) continue;
@@ -1577,7 +1578,7 @@
       target.querySelector(
         'input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), button',
       ) || target;
-    if (control === target) target.tabIndex = -1;
+    if (control === target && !target.matches("button")) target.tabIndex = -1;
     control.focus({ preventScroll: true });
     showSearchSpotlight(target);
   }
@@ -6645,6 +6646,29 @@
       .join("");
   }
 
+  const providerModelFeatureLabels = {
+    requiresAuth: "connection_model_auth",
+    hasTools: "endpoint_tools",
+    seesImages: "endpoint_images",
+    seesVideos: "endpoint_videos",
+    supportsStructuredOutput: "endpoint_structured",
+    txt2img: "openrouter_feature_text_to_image",
+    img2img: "openrouter_feature_image_to_image",
+    inpaint: "openrouter_feature_inpainting",
+    negative_prompt: "endpoint_model_negative_prompt",
+    firstFrame: "openrouter_feature_first_frame",
+    lastFrame: "openrouter_feature_last_frame",
+    choiceDecisions: "openrouter_feature_choice_decisions",
+  };
+
+  function renderProviderModelFeatures(features) {
+    const chips = Object.entries(providerModelFeatureLabels)
+      .filter(([feature]) => features?.[feature] === true)
+      .map(([, label]) => `<span class="chip">${escapeHtml(ui(label))}</span>`)
+      .join("");
+    return chips ? `<div class="chips">${chips}</div>` : "&ndash;";
+  }
+
   function renderEndpointModels(endpoints, scope) {
     const rows = endpoints
       .map((endpoint) => {
@@ -6656,19 +6680,12 @@
         const edit = editable
           ? `<button class="button small" type="button" data-endpoint-model-edit="${endpoint.id}" data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${escapeHtml(ui("endpoint_model_edit"))}</button>`
           : "";
-        const features = [
-          endpoint.requiresAuth && "connection_model_auth",
-          endpoint.hasTools && "endpoint_tools",
-          endpoint.seesImages && "endpoint_images",
-          endpoint.seesVideos && "endpoint_videos",
-          endpoint.supportsStructOutput && "endpoint_structured",
-        ].filter(Boolean);
         return `<tr>
           <th scope="row">${escapeHtml(name)}</th>
           <td>${escapeHtml(ui(`model_${endpoint.capability}`))}</td>
           <td>${escapeHtml(endpoint.apiStyle)}</td>
           <td class="num">${endpoint.numCtx ? new Intl.NumberFormat().format(endpoint.numCtx) : "&ndash;"}</td>
-          <td>${features.length ? `<div class="chips">${features.map((key) => `<span class="chip">${escapeHtml(ui(key))}</span>`).join("")}</div>` : "&ndash;"}</td>
+          <td>${renderProviderModelFeatures({ ...endpoint, supportsStructuredOutput: endpoint.supportsStructOutput })}</td>
           <td data-provider-model-actions>${edit}</td>
         </tr>`;
       })
@@ -6699,6 +6716,7 @@
         return `<tr>
           <th scope="row">${escapeHtml(model.codename)}${description ? `<br><small>${escapeHtml(description)}</small>` : ""}</th>
           <td>${escapeHtml(ui(`model_${model.capability}`))}</td>
+          <td>${renderProviderModelFeatures(model.features)}</td>
           <td data-provider-model-actions>${remove}</td>
         </tr>`;
       })
@@ -6706,7 +6724,8 @@
     return `<div class="table-wrap"><table aria-label="${escapeHtml(ui("connection_registered_models"))}">
       <thead><tr>
         <th scope="col">${escapeHtml(ui("endpoint_model_name"))}</th>
-        <th scope="col">${escapeHtml(ui("connection_model_capability"))}</th>
+        <th scope="col">${escapeHtml(ui("connection_model_registered_for"))}</th>
+        <th scope="col">${escapeHtml(ui("connection_model_features"))}</th>
         <th scope="col" data-provider-model-actions>${escapeHtml(ui("persona_actions"))}</th>
       </tr></thead><tbody>${rows}</tbody>
     </table></div>`;
@@ -7259,41 +7278,25 @@
       ${personaCardHead(connection.name, endpoint?.endpointUrl, controls ? `<div class="actions">${controls}</div>` : "")}
       <div class="stack">
         ${credentialStatus || activeTextProvider ? `<div class="chips">${credentialStatus ? `<span class="chip">${escapeHtml(credentialStatus)}</span>` : ""}${activeTextProvider ? `<span class="chip tone">${escapeHtml(ui("connection_active_text"))}</span>` : ""}</div>` : ""}
-        ${models}
+        ${openRouter ? "" : models}
       </div>
     </section>`;
     const parameterCards = parameters.length ? renderPersonalParameters({ parameters }, scope) : "";
-    if (endpoint) {
-      const add =
-        endpoint.connectionId && !["speech", "transcription"].includes(endpoint.capability)
-          ? `<div class="actions"><button class="button small primary" type="button" data-endpoint-model-add data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("endpoint_model_add"))}</button></div>`
+    if (endpoint || openRouter) {
+      const addAction = openRouter
+        ? "data-openrouter-model-add"
+        : endpoint.connectionId && !["speech", "transcription"].includes(endpoint.capability)
+          ? `data-endpoint-model-add data-endpoint-connection="${endpoint.connectionId}"`
           : "";
+      const add = addAction
+        ? `<div class="actions"><button class="button small primary" type="button" ${addAction} data-provider-scope="${scope}" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("endpoint_model_add"))}</button></div>`
+        : "";
       return `<div class="stack">${connectionCard}<section class="card">
         ${personaCardHead(ui("connection_registered_models"), "", add)}
-        ${renderEndpointModels(connection.endpoints, scope)}
-      </section>${parameterCards}</div>`;
+        ${openRouter ? renderOpenRouterModels(data, scope) : renderEndpointModels(connection.endpoints, scope)}
+      </section>${openRouter ? `<section class="card">${personaCardHead(ui("connection_available_models"))}${models}</section>` : ""}${parameterCards}</div>`;
     }
-    const openRouterCards = openRouter
-      ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterModels(data, scope)}</section>${renderOpenRouterRegistration(scope)}`
-      : "";
-    return openRouterCards || parameterCards
-      ? `<div class="card-columns">${connectionCard}${openRouterCards}${parameterCards}</div>`
-      : connectionCard;
-  }
-
-  function renderOpenRouterRegistration(scope) {
-    return `<form class="card" id="openrouter-form" data-provider-scope="${scope}" data-settings-key="${scope}-openrouter-registration" data-fx="track">
-        ${personaCardHead(ui("connection_register_model"), ui("connection_models_hint"))}
-          <div class="grid"><label class="field">${fieldLabel("Capability", "Determines which Tomori model selector may use this registration.")}<select name="capability"><option value="text">Text</option><option value="embedding">Embeddings</option><option value="image">Images</option><option value="video">Video</option><option value="decision">Decision</option><option value="transcription">${escapeHtml(ui("model_transcription"))}</option></select></label>
-            <label class="field">${fieldLabel("Model codename", "Exact OpenRouter identifier, usually in provider/model-name format.")}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label></div>
-          <p class="hint" data-openrouter-transcription-hint hidden>${escapeHtml(ui("openrouter_transcription_hint"))}</p>
-        ${cardSaveActions(ui("connection_register_model"))}
-      </form>`;
-  }
-
-  function updateOpenRouterHint(form) {
-    form.querySelector("[data-openrouter-transcription-hint]").hidden =
-      form.elements.capability.value !== "transcription";
+    return parameterCards ? `<div class="card-columns">${connectionCard}${parameterCards}</div>` : connectionCard;
   }
 
   function renderProviderEndpointFields() {
@@ -7737,6 +7740,66 @@
       form,
       fields: form.querySelector("[data-editor-fields]"),
       save: form.querySelector('[type="submit"]'),
+    };
+  }
+
+  function openOpenRouterModelEditor(button) {
+    const guildId = state.guildId;
+    const scope = button.dataset.providerScope;
+    const { dialog, form, fields, save } = openDashboardEditor(button, "endpoint_model_add");
+    form.querySelector("[data-editor-context]").textContent = "OpenRouter";
+    fields.innerHTML = `
+      <label class="field">${fieldLabel(ui("connection_model_registered_for"))}<select name="capability">
+        ${["text", "embedding", "image", "video", "decision", "transcription"].map((value) => `<option value="${value}">${escapeHtml(ui(`model_${value}`))}</option>`).join("")}
+      </select></label>
+      <p class="hint" data-openrouter-transcription-hint hidden>${escapeHtml(ui("openrouter_transcription_hint"))}</p>
+      <label class="field">${fieldLabel(ui("endpoint_model_name"), ui("openrouter_model_identifier_hint"))}<input name="modelName" placeholder="provider/model-name" maxlength="240" required></label>`;
+    const transcriptionHint = fields.querySelector("[data-openrouter-transcription-hint]");
+    form.elements.capability.addEventListener("change", () => {
+      transcriptionHint.hidden = form.elements.capability.value !== "transcription";
+    });
+    save.textContent = ui("endpoint_model_add");
+    save.hidden = false;
+    save.disabled = true;
+    const modelNameInput = form.elements.modelName;
+    modelNameInput.addEventListener("input", () => {
+      save.disabled = !modelNameInput.value.trim();
+    });
+    enhanceDashboard(dialog);
+    modelNameInput.focus({ preventScroll: true });
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const modelName = modelNameInput.value.trim();
+      if (!modelName || state.guildId !== guildId || form.classList.contains("is-saving")) return;
+      let result;
+      try {
+        result = await withBusyForm(form, () =>
+          api(`/guilds/${guildId}/providers/${scope}/openrouter`, {
+            method: "POST",
+            body: JSON.stringify({ capability: form.elements.capability.value, modelName }),
+          }),
+        );
+      } catch (error) {
+        if (dialog.open) showFormError(form, error);
+        return;
+      }
+      dialog.close();
+      const message =
+        result.model?.capability === "transcription"
+          ? ui("openrouter_transcription_saved")
+          : result.status === "already_available"
+            ? ui("openrouter_model_in_catalog")
+            : result.status === "already_registered"
+              ? ui("openrouter_model_already_registered")
+              : ui("openrouter_model_registered");
+      toast(message);
+      if (state.guildId !== guildId) return;
+      try {
+        await refreshProviders(scope);
+        if (state.guildId === guildId) focusNavigation(`[data-openrouter-model-add][data-provider-scope="${scope}"]`);
+      } catch (error) {
+        toast(error.message, "error");
+      }
     };
   }
 
@@ -9041,6 +9104,11 @@
       void openConnectionEditor(endpointEdit.dataset.providerScope, endpointEdit.dataset.endpointEdit);
       return;
     }
+    const openRouterModelAdd = event.target.closest("[data-openrouter-model-add]");
+    if (openRouterModelAdd) {
+      openOpenRouterModelEditor(openRouterModelAdd);
+      return;
+    }
     const endpointModelAction = event.target.closest("[data-endpoint-model-edit], [data-endpoint-model-add]");
     if (endpointModelAction) {
       void openEndpointModelEditor(endpointModelAction);
@@ -9337,9 +9405,6 @@
     }
     if (event.target.matches("[data-persona-humanizer-mode]")) {
       event.target.form.querySelector("[data-persona-humanizer-fields]").hidden = event.target.value === "inherit";
-    }
-    if (event.target.matches('#openrouter-form select[name="capability"]')) {
-      updateOpenRouterHint(event.target.form);
     }
     if (event.target.id === "character-reference-file") {
       const file = event.target.files?.[0];
@@ -9732,40 +9797,6 @@
       } catch (error) {
         if (endpoint) showFormError(form, error);
         else toast(error.message, "error");
-      }
-      return;
-    }
-
-    if (event.target.id === "openrouter-form") {
-      event.preventDefault();
-      const form = event.target;
-      const scope = form.dataset.providerScope;
-      try {
-        let result;
-        await withBusyForm(form, async () => {
-          result = await api(`/guilds/${state.guildId}/providers/${scope}/openrouter`, {
-            method: "POST",
-            body: JSON.stringify({
-              capability: form.elements.capability.value,
-              modelName: form.elements.modelName.value,
-            }),
-          });
-        });
-        form.reset();
-        updateOpenRouterHint(form);
-        completeFormSave(form);
-        const message =
-          result?.model?.capability === "transcription"
-            ? ui("openrouter_transcription_saved")
-            : result?.status === "already_available"
-              ? "This model is already in Tomori's built-in OpenRouter catalog"
-              : result?.status === "already_registered"
-                ? "This OpenRouter model was already registered for this scope"
-                : "OpenRouter model registered";
-        toast(message);
-        await refreshProviders(scope);
-      } catch (error) {
-        toast(error.message, "error");
       }
       return;
     }
