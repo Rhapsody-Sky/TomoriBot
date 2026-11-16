@@ -137,7 +137,7 @@
       context.enhanceDashboard(host);
     }
 
-    const emptyLinks = `<section class="card"><div class="empty-note"><strong>${e(c.no_links)}</strong></div></section>`;
+    const emptyLinks = `<section class="card"><div class="empty-note"><strong>${e(c.no_links)}</strong><p>${e(c.link_hint)}</p></div></section>`;
 
     function renderSection(animate = false) {
       dock.querySelectorAll("[data-site-tab]").forEach((button) => {
@@ -150,7 +150,7 @@
       const html =
         activeTab === "pages"
           ? `<div class="toolbar" data-site-page-toolbar></div><div id="site-page-editor">${formHtml(entries.find(({ id }) => id === activePage))}</div>`
-          : `<div class="toolbar"><p class="hint">${e(c.link_hint)}</p><div class="actions"><button class="button small primary" type="button" data-site-add>${navigationIcon("plus")}${e(c.add_link)}</button></div></div>
+          : `<div class="toolbar"><div class="actions"><button class="button small primary" type="button" data-site-add>${navigationIcon("plus")}${e(c.add_link)}</button></div></div>
            <div${links.length ? ' class="card-columns"' : ""} data-site-links>${links.length ? links.map(formHtml).join("") : emptyLinks}</div>`;
       if (animate) window.TomoriFX.swap(stage, html);
       else stage.innerHTML = html;
