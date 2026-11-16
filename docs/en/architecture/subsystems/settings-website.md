@@ -330,6 +330,11 @@ The two memory tables intentionally have different rules:
 Repository writes include exact owner, server, and lineage guards. The
 dashboard never relies only on a row ID supplied by the browser.
 
+Global memory searches saved personal memories by text and tags. Refresh,
+import, and export are in the saved-memory actions menu. The short-term
+memory card shows the account-wide entry count and lets users request deletion
+of those entries.
+
 Server memories no longer accept keyword tags. Upstream migrations move tagged
 server memories into lorebooks; personal memory tags are unchanged. The server
 memory editor offers visible, allowlisted text and announcement channels. Text

@@ -18,8 +18,9 @@ async function dashboardFunction(name: string): Promise<string> {
 describe("dashboard memory requests", () => {
   it("offers personal tags and transfer while disabling server memory transfer", async () => {
     const source = await dashboardFunction("renderMemoryCollection");
+    const overview = { canManage: true, memoryPolicy: {}, profile: { privacyLevel: 0 } };
     const render = runInNewContext(`(${source})`, {
-      state: { overview: { canManage: true, memoryPolicy: {}, profile: { privacyLevel: 0 } } },
+      state: { overview },
       ui: (key: string) => key,
       escapeHtml: (value: string) => value,
       refreshButton: () => "",
@@ -31,6 +32,7 @@ describe("dashboard memory requests", () => {
     const persona = { nickname: "Juno" };
     const personal = render({ personal: true, persona });
     const server = render({ personal: false, persona });
+    const global = render({ personal: true, global: true });
     expect(personal).toContain('name="tags"');
     expect(personal).toContain('data-memory-add aria-controls="memory-compose-form" aria-expanded="false"');
     expect(personal).toMatch(/id="memory-compose-form"[^>]* hidden>/);
@@ -40,6 +42,13 @@ describe("dashboard memory requests", () => {
     expect(server).toMatch(/id="memory-compose-form"[^>]* hidden>/);
     expect(server).toContain('data-memory-export type="button" aria-disabled="true" data-tooltip=');
     expect(server).toContain('data-memory-import type="button" aria-disabled="true" data-tooltip=');
+    expect(global).toContain('data-memory-import type="button">');
+    expect(global).toContain('id="personal-stm"');
+    overview.profile.privacyLevel = 2;
+    const optedOut = render({ personal: true, global: true });
+    expect(optedOut).not.toContain("data-memory-add");
+    expect(optedOut).toContain('data-memory-import type="button" aria-disabled="true"');
+    expect(optedOut).toContain('data-memory-export type="button">');
   });
 
   it("ignores stale responses and failures across scopes and repeated refreshes", async () => {
@@ -105,6 +114,7 @@ describe("dashboard memory requests", () => {
     let refreshed = false;
     const importMemories = runInNewContext(`(${importSource})`, {
       state: { guildId: "1", memoryKind: "personal", lineageId: 1 },
+      ui: (key: string) => key,
       api: async (_path: string, options: { body: string }) => {
         body = options.body;
         return { inserted: 1, skipped: 0, invalid: 1, failed: 1 };

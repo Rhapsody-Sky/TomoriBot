@@ -145,8 +145,7 @@ describe("dashboard HTTP shell", () => {
     expect(source).toContain("input.form?.requestSubmit()");
     expect(source).toContain('role="switch"');
     expect(source).toContain("data-avatar-fallback");
-    expect(source).toContain("'s memories about you");
-    expect(source).toContain("Private facts about you that are only available to this persona when you are around.");
+    expect(source).toContain("data-persona-memory-search");
     expect(source).toContain("data-palette-choice");
     expect(source).toContain("data-theme-toggle");
     expect(source).toContain("function renderBootScreen()");

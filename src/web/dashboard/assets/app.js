@@ -802,7 +802,7 @@
             <button class="button${collection ? " sidebar-search" : ""}" type="button" data-settings-search-open aria-haspopup="dialog">${collection ? navigationIcon("search") : ""}${escapeHtml(ui("settings_search"))}</button>
             <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_global"))}</h2><div class="sidebar-group-links">
             ${navButton("profile", ui("my_settings"))}
-            ${navButton("personal-memory", "Global memory")}
+            ${navButton("personal-memory", ui("global_memory"))}
             ${navButton("personal-providers", "My providers")}
             </div></section>
             <section class="sidebar-group"><h2 class="group-label">${escapeHtml(ui("nav_server_settings"))}</h2><div class="sidebar-group-links">
@@ -879,18 +879,18 @@
           </div>
         </form>
       </dialog>
-      <dialog id="memory-dialog" class="dialog" aria-labelledby="memory-dialog-title">
-        <form method="dialog" id="memory-edit-form">
-          <header class="panel-header"><div class="heading"><p class="eyebrow">Memory</p><h2 id="memory-dialog-title">Update this memory</h2></div></header>
+      <dialog id="memory-dialog" aria-labelledby="memory-dialog-title">
+        <form class="stack" method="dialog" id="memory-edit-form">
+          <header class="panel-header"><div class="heading"><h2 id="memory-dialog-title">${escapeHtml(ui("memory_edit_title"))}</h2></div></header>
           <div class="stack">
-            <label class="field"><span class="field-label">Memory</span><textarea name="content" rows="4" required></textarea></label>
-            <label class="field" data-memory-tags><span class="field-label">Tags</span><input name="tags" type="text" placeholder="character, preference"></label>
+            <label class="field">${fieldLabel(ui("memory"))}<textarea name="content" rows="4" required></textarea></label>
+            <label class="field" data-memory-tags>${fieldLabel(ui("memory_tags"), ui("memory_personal_tags_hint"))}<input name="tags" type="text"></label>
             <div class="subsection" data-memory-channel-scope hidden></div>
           </div>
           <input name="memoryId" type="hidden">
           <div class="actions">
-            <button type="button" class="button " data-dialog-close="memory-dialog">Cancel</button>
-            <button value="save" class="button primary" data-edit-action hidden>${escapeHtml(ui("save"))}</button>
+            <button type="button" class="button small" data-dialog-close="memory-dialog">${escapeHtml(ui("persona_cancel"))}</button>
+            <button type="submit" value="save" class="button small primary" data-fx="spark" data-edit-action hidden>${escapeHtml(ui("save"))}</button>
           </div>
         </form>
       </dialog>
@@ -1109,6 +1109,7 @@
   function usesCollectionFrame() {
     return [
       "profile",
+      "personal-memory",
       "personas",
       "overview",
       "lorebooks",
@@ -1161,8 +1162,6 @@
         renderProfile(workspace);
         break;
       case "personal-memory":
-        state.memoryKind = "personal";
-        state.lineageId = 0;
         renderGlobalMemories(workspace);
         break;
       case "lorebooks":
@@ -1270,11 +1269,11 @@
     page("profile", ui("my_settings"));
     for (const profileTab of Object.keys(profileTabs))
       addMarkup(renderProfilePanel(profileTab), { view: "profile", profileTab }, ui("my_settings"));
-    page("personal-memory", "Global memory");
+    page("personal-memory", ui("global_memory"), { hint: ui("global_memory_hint") });
     page("personal-memory", ui("personal_stm"), {
-      path: "Global memory",
+      path: ui("global_memory"),
       hint: ui("personal_stm_hint"),
-      tag: "h2",
+      tag: "h3",
     });
     if (!state.overview.guild?.isDirectMessage)
       page("personal-spotlights", ui("spotlights"), { hint: ui("spotlights_hint") });
@@ -2995,83 +2994,85 @@
     const serverWritesDisabled =
       !personal && !state.overview.canManage && !state.overview.memoryPolicy.serverMemoryTeachingEnabled;
     const personalCreationDisabled = personal && state.overview.profile.privacyLevel === 2;
-    const title = global
-      ? "Global personal memory"
-      : personal
-        ? `${persona.nickname}'s memories about you`
-        : ui("persona_server_memory");
+    const title = ui(global ? "global_memory_saved" : personal ? "persona_personal_memory" : "persona_server_memory");
     const copy = global
-      ? "Private facts available to your Tomori experience across persona lineages."
+      ? ""
       : personal
         ? "Private facts about you that are only available to this persona when you are around."
         : state.overview.canManage
           ? `Shared facts for ${persona.nickname}. As an administrator, you can manage every entry.`
           : `Shared facts you personally taught ${persona.nickname}. Other members' entries remain hidden.`;
-
-    const collection = Boolean(persona);
     const transferAttributes = personal
       ? ""
       : ` aria-disabled="true" data-tooltip="${escapeHtml(ui("memory_server_transfer_unavailable"))}"`;
-
+    const importAttributes =
+      global && personalCreationDisabled
+        ? ` aria-disabled="true" data-tooltip="${escapeHtml(ui("memory_creation_disabled"))}"`
+        : transferAttributes;
+    const buttonSize = global ? " small" : "";
+    const menuLabel = escapeHtml(ui("persona_memory_actions"));
     const add =
       serverWritesDisabled || personalCreationDisabled
         ? ""
-        : `<button class="button primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false"${personal ? "" : " disabled"}${collection ? ' data-fx="spark"' : ""}>${collection ? navigationIcon("plus") : ""}${escapeHtml(ui("memory_add"))}</button>`;
-    const transfers = `<button class="button" data-memory-export type="button"${transferAttributes}>${escapeHtml(ui("persona_memory_export") || "Export")}</button>
-      <button class="button" data-memory-import type="button"${transferAttributes}>${escapeHtml(ui("persona_memory_import") || "Import")}</button>`;
-    const actions = collection
-      ? `<div data-persona-memory-actions hidden>
-          <button class="button icon" type="button" popovertarget="persona-memory-menu" aria-label="${escapeHtml(ui("persona_memory_actions"))}">${navigationIcon("ellipsis")}</button>
-          <div class="action-menu" id="persona-memory-menu" popover aria-label="${escapeHtml(ui("persona_memory_actions"))}">
-            <button class="button" type="button" data-memory-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_memories"))}</button>
-            ${transfers}
-          </div>
-          ${add}
-        </div>`
-      : `<div class="actions">${refreshButton("memory", ui("refresh_memories"))}${transfers}${add}</div>`;
+        : `<button class="button${buttonSize} primary" type="button" data-memory-add aria-controls="memory-compose-form" aria-expanded="false"${personal ? "" : " disabled"} data-fx="spark">${navigationIcon("plus")}${escapeHtml(ui("memory_add"))}</button>`;
+    const actions = `<button class="button${buttonSize} icon" type="button" popovertarget="persona-memory-menu" aria-label="${menuLabel}">${navigationIcon("ellipsis")}</button>
+      <div class="action-menu" id="persona-memory-menu" popover aria-label="${menuLabel}">
+        <button class="button" type="button" data-memory-refresh>${navigationIcon("refresh-cw")}${escapeHtml(ui("refresh_memories"))}</button>
+        <button class="button" data-memory-export type="button"${transferAttributes}>${escapeHtml(ui("persona_memory_export"))}</button>
+        <button class="button" data-memory-import type="button"${importAttributes}>${escapeHtml(ui("persona_memory_import"))}</button>
+      </div>
+      ${add}`;
+    const search = escapeHtml(ui("persona_memories_search"));
 
     return `
-      ${collection ? '<div class="split">' : ""}
-      <section class="${collection ? "card" : "panel"}" data-memory-card>
-        <header class="${collection ? "card-head" : "panel-header"}">
-          ${
-            collection
-              ? `<h3>${escapeHtml(ui(personal ? "persona_personal_memory" : "persona_server_memory"))}<small data-persona-memory-list-count></small></h3>
-              <label class="field"><span class="field-label sr-only">${escapeHtml(ui("persona_memories_search"))}</span><input type="search" data-persona-memory-search placeholder="${escapeHtml(ui("persona_memories_search"))}"></label>`
-              : `<div class="heading"><p class="eyebrow">${personal ? "Personal" : "Shared server context"}</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div>`
-          }
-          ${actions}
-          <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
-        </header>
-      <div class="stack">
-      ${collection ? `<p class="hint">${escapeHtml(copy)}</p>` : ""}
-      ${
-        serverWritesDisabled || personalCreationDisabled
-          ? `<div class="notice info"><strong>${personalCreationDisabled ? "New personal memories are disabled by your privacy setting." : "Member teaching is disabled for this server."}</strong><p>Existing entries remain visible according to your access.</p></div>`
-          : `<form id="memory-compose-form"${collection ? ' class="compose"' : ""} hidden>
-              <div class="stack">
-                <label class="field">${fieldLabel("New memory", "Write one concise fact. Its visibility follows the memory scope shown above.")}<textarea name="content" rows="3" required placeholder="A concise fact Tomori should remember"></textarea></label>
-                ${personal ? "" : '<div class="subsection" data-memory-channel-scope hidden></div>'}
-                ${personal ? `<label class="field">${fieldLabel("Tags", ui("memory_personal_tags_hint"))}<input name="tags" placeholder="preference, character"></label>` : ""}
-              </div>
-              <div class="actions"><button class="button small" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></div>
-            </form>`
-      }
-      <section id="memory-list" class="${collection ? "rows" : "stack"}">${loadingBar(ui("memory_loading"))}</section></div></section>
-      ${
-        collection
-          ? `<aside class="card" data-persona-memory-summary hidden>
-        ${personaCardHead(ui("persona_memory_summary"))}
-        <div class="stack">
-          <div class="stats"><div><strong data-persona-memory-total></strong><small>${escapeHtml(ui(personal ? "persona_personal_memory" : "persona_server_memory"))}</small></div><div><strong>#${persona.lineageId}</strong><small>${escapeHtml(ui("persona_main_lineage"))}</small></div></div>
-          <div class="field" data-persona-memory-capacity hidden>
-            <span class="field-label">${escapeHtml(ui("persona_memory_capacity"))}<small data-persona-memory-usage></small></span>
-            <div class="progress-track" role="progressbar" aria-label="${escapeHtml(ui("persona_memory_capacity"))}" aria-valuemin="0"><div class="progress-fill"></div></div>
+      ${global ? `<div class="toolbar"><div class="actions">${actions}</div></div>` : ""}
+      <div class="split">
+        <section class="card" data-memory-card>
+          <header class="card-head">
+            <h3>${escapeHtml(title)}<small data-persona-memory-list-count></small></h3>
+            <label class="field"><span class="field-label sr-only">${search}</span><input type="search" data-persona-memory-search placeholder="${search}"></label>
+            ${global ? "" : `<div data-persona-memory-actions hidden>${actions}</div>`}
+            <input id="memory-import-file" type="file" accept="application/json,.json" hidden>
+          </header>
+          <div class="stack">
+            ${copy ? `<p class="hint">${escapeHtml(copy)}</p>` : ""}
+            ${
+              serverWritesDisabled || personalCreationDisabled
+                ? `<div class="notice info stack"><strong>${escapeHtml(ui(personalCreationDisabled ? "memory_creation_disabled" : "memory_teaching_disabled"))}</strong><span>${escapeHtml(ui("memory_existing_access"))}</span></div>`
+                : `<form id="memory-compose-form" class="compose" hidden>
+                    <div class="stack">
+                      <label class="field">${fieldLabel(ui("memory_add"), ui("memory_compose_hint"))}<textarea name="content" rows="3" required></textarea></label>
+                      ${personal ? "" : '<div class="subsection" data-memory-channel-scope hidden></div>'}
+                      ${personal ? `<label class="field">${fieldLabel(ui("memory_tags"), ui("memory_personal_tags_hint"))}<input name="tags"></label>` : ""}
+                    </div>
+                    <div class="actions"><button class="button small" type="button" data-memory-cancel>${escapeHtml(ui("persona_cancel"))}</button><button class="button small primary" type="submit" data-edit-action data-fx="spark" hidden>${escapeHtml(ui("save"))}</button></div>
+                  </form>`
+            }
+            <section id="memory-list" class="rows">${loadingBar(ui("memory_loading"))}</section>
           </div>
-        </div>
-      </aside></div>`
-          : ""
-      }`;
+        </section>
+        ${
+          global
+            ? `<aside class="card" id="personal-stm">
+                ${personaCardHead(ui("personal_stm"), "", `<div class="actions"><button class="button small icon" type="button" data-personal-stm-refresh aria-label="${escapeHtml(ui("personal_stm_refresh"))}">${navigationIcon("refresh-cw")}</button></div>`)}
+                <div class="stack">
+                  <p class="hint">${escapeHtml(ui("personal_stm_hint"))}</p>
+                  <div data-personal-stm-status role="status"></div>
+                  <div class="actions"><button class="button small danger" type="button" data-personal-stm-clear>${escapeHtml(ui("personal_stm_clear"))}</button></div>
+                </div>
+              </aside>`
+            : `<aside class="card" data-persona-memory-summary hidden>
+                ${personaCardHead(ui("persona_memory_summary"))}
+                <div class="stack">
+                  <div class="stats"><div><strong data-persona-memory-total></strong><small>${escapeHtml(ui(personal ? "persona_personal_memory" : "persona_server_memory"))}</small></div><div><strong>#${persona.lineageId}</strong><small>${escapeHtml(ui("persona_main_lineage"))}</small></div></div>
+                  <div class="field" data-persona-memory-capacity hidden>
+                    <span class="field-label">${escapeHtml(ui("persona_memory_capacity"))}<small data-persona-memory-usage></small></span>
+                    <div class="progress-track" role="progressbar" aria-label="${escapeHtml(ui("persona_memory_capacity"))}" aria-valuemin="0"><div class="progress-fill"></div></div>
+                  </div>
+                </div>
+              </aside>`
+        }
+      </div>`;
   }
 
   function setMemoryComposer(form, open) {
@@ -3092,20 +3093,19 @@
   function renderGlobalMemories(workspace) {
     state.memoryKind = "personal";
     state.lineageId = 0;
+    state.memoryData = null;
     workspace.innerHTML = `
-      ${pageHeader("Personal", "Global memory", ui("global_memory_hint"))}
-      <div class="stack">
-        <section class="panel stack" id="personal-stm">
-          ${dashboardPanelHeading("personal_stm", "personal_stm_hint", refreshButton("personal-stm", ui("refresh_memories")))}
-          <div class="row">
-            <div data-personal-stm-status role="status"></div>
-            <button class="button danger" type="button" data-personal-stm-clear>${escapeHtml(ui("personal_stm_clear"))}</button>
-          </div>
-        </section>
-        ${renderMemoryCollection({ personal: true, global: true })}
-      </div>`;
+      <section class="banner compact" aria-labelledby="global-memory-title">
+        <div class="banner-info"><div class="stack">
+          <p class="crumb">${escapeHtml(ui("nav_global"))}</p>
+          <h1 id="global-memory-title" data-fx="split">${escapeHtml(ui("global_memory"))}</h1>
+          <p class="banner-text">${escapeHtml(ui("global_memory_hint"))}</p>
+        </div></div>
+        <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("brain")}</span></div>
+      </section>
+      <section class="stage" data-global-memory>${renderMemoryCollection({ personal: true, global: true })}</section>`;
     void loadPersonalStm(workspace.querySelector("#personal-stm"));
-    loadMemories();
+    void loadMemories();
   }
 
   const personalStmPath = "/profile/short-term-memory";
@@ -3129,7 +3129,14 @@
   }
 
   async function clearPersonalStm(panel) {
-    if (!(await confirmAction(ui("personal_stm_confirm_title"), ui("personal_stm_confirm_detail")))) return;
+    if (
+      !(await confirmAction(
+        ui("personal_stm_confirm_title"),
+        ui("personal_stm_confirm_detail"),
+        ui("personal_stm_clear"),
+      ))
+    )
+      return;
     if (!panel.isConnected || panel.hasAttribute("aria-busy")) return;
     try {
       await withBusyForm(panel, () => api(personalStmPath, { method: "DELETE" }));
@@ -3158,6 +3165,8 @@
       const data = await api(path);
       if (!isCurrent()) return;
       state.memoryData = data;
+      const count = list.closest("[data-memory-card]")?.querySelector("[data-persona-memory-list-count]");
+      if (count) count.textContent = String(data.memories.length);
       if (memoryKind === "server") {
         const panel = list.closest("[data-memory-card]");
         const form = panel.querySelector("#memory-compose-form");
@@ -3168,15 +3177,15 @@
       renderMemoryList(true);
       const summary = list.closest(".split")?.querySelector("[data-persona-memory-summary]");
       if (summary) updatePersonaMemorySummary(summary, data, memoryKind);
+      return true;
     } catch (error) {
       if (!isCurrent()) return;
-      list.innerHTML = `<div class="empty"><strong>Memories could not be loaded.</strong><span>${escapeHtml(error.message)}</span></div>`;
+      list.innerHTML = `<div class="notice error stack" role="alert"><strong>${escapeHtml(ui("memory_load_failed"))}</strong><span>${escapeHtml(error.message)}</span></div>`;
     }
   }
 
   function updatePersonaMemorySummary(summary, data, kind) {
     const count = data.memories.length;
-    summary.closest(".split").querySelector("[data-persona-memory-list-count]").textContent = String(count);
     const limit =
       kind === "personal"
         ? data.limits.maxPersonalMemories
@@ -3202,52 +3211,43 @@
   function renderMemoryList(animate = false) {
     const list = document.querySelector("#memory-list");
     if (!list) return;
-    const collection = state.view === "personas";
     const memories = state.memoryData?.memories || [];
     const query = document.querySelector("[data-persona-memory-search]")?.value.trim().toLowerCase();
     const rows = query
       ? memories.filter((memory) => [memory.content, ...(memory.tags || [])].join(" ").toLowerCase().includes(query))
       : memories;
     if (!rows.length) {
-      list.innerHTML = collection
-        ? `<div class="empty-note"><span class="mark" aria-hidden="true">✦</span><p>${escapeHtml(ui(query ? "persona_memories_no_matches" : "persona_memory_empty"))}</p></div>`
-        : '<div class="empty"><strong>No memories in this scope.</strong><span>The first one you add will appear here.</span></div>';
+      list.innerHTML = `<div class="empty-note"><span class="mark" aria-hidden="true">✦</span><p>${escapeHtml(ui(query ? "persona_memories_no_matches" : "persona_memory_empty"))}</p></div>`;
       return;
     }
+    const personal = state.memoryKind === "personal";
     const serverWritesDisabled =
-      state.memoryKind === "server" &&
-      !state.overview.canManage &&
-      !state.overview.memoryPolicy.serverMemoryTeachingEnabled;
+      !personal && !state.overview.canManage && !state.overview.memoryPolicy.serverMemoryTeachingEnabled;
     list.innerHTML = rows
-      .map(
-        (memory) => `<article class="${collection ? "item" : "memory-row"}">
-          <div${collection ? "" : ' class="stack"'}>
-            ${collection ? "" : `<span class="badge">#${memory.id}</span>`}
-            <p>${escapeHtml(memory.content)}</p>
-            <div class="${collection ? "item-meta" : "row hint"}">
-              ${state.memoryKind === "personal" ? (memory.tags || []).map((tag) => `<span${collection ? ' class="chip"' : ""}>${escapeHtml(tag)}</span>`).join("") : ""}
-              ${state.memoryKind === "server" && !state.overview.guild?.isDirectMessage ? `<span>${escapeHtml(memoryChannelSummary(memory, state.memoryData))}</span>` : ""}
-              ${memory.updatedAt || memory.createdAt ? `<time>${escapeHtml(formatDate(memory.updatedAt || memory.createdAt))}</time>` : ""}
-              ${state.memoryKind === "server" && state.overview.canManage && memory.taughtByUserId ? `<small>Teacher #${memory.taughtByUserId}</small>` : ""}
-            </div>
+      .map((memory) => {
+        const editedAt = memory.updatedAt || memory.createdAt;
+        return `<article class="item">
+        <div>
+          <p dir="auto">${escapeHtml(memory.content)}</p>
+          <div class="item-meta">
+            ${personal ? (memory.tags || []).map((tag) => `<span class="chip" dir="auto">${escapeHtml(tag)}</span>`).join("") : ""}
+            ${!personal && !state.overview.guild?.isDirectMessage ? `<span>${escapeHtml(memoryChannelSummary(memory, state.memoryData))}</span>` : ""}
+            ${editedAt ? `<time datetime="${escapeHtml(editedAt)}">${escapeHtml(formatDate(editedAt))}</time>` : ""}
+            ${!personal && state.overview.canManage && memory.taughtByUserId ? `<small>${escapeHtml(ui("memory_teacher").replace("{id}", () => String(memory.taughtByUserId)))}</small>` : ""}
           </div>
-          ${
-            memory.editable === false || serverWritesDisabled
-              ? ""
-              : collection
-                ? `<div class="item-actions">
-                    <button class="button small icon" data-memory-edit="${memory.id}" type="button" aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button>
-                    <button class="button small icon danger" data-memory-delete="${memory.id}" type="button" aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button>
-                  </div>`
-                : `<div class="actions">
-                    <button class="button" data-memory-edit="${memory.id}" type="button">Edit</button>
-                    <button class="button danger" data-memory-delete="${memory.id}" type="button">Delete</button>
-                </div>`
-          }
-        </article>`,
-      )
+        </div>
+        ${
+          memory.editable === false || serverWritesDisabled
+            ? ""
+            : `<div class="item-actions">
+          <button class="button small icon" data-memory-edit="${memory.id}" type="button" aria-haspopup="dialog" aria-label="${escapeHtml(ui("persona_edit"))}">${navigationIcon("pencil")}</button>
+          <button class="button small icon danger" data-memory-delete="${memory.id}" type="button" aria-haspopup="dialog" aria-label="${escapeHtml(ui("persona_delete_entry"))}">${navigationIcon("trash-2")}</button>
+        </div>`
+        }
+      </article>`;
+      })
       .join("");
-    if (collection && animate && !query) window.TomoriFX.stagger(list);
+    if (animate && !query) window.TomoriFX.stagger(list);
   }
 
   function memoryChannelSummary(memory, data) {
@@ -3465,6 +3465,11 @@
 
   async function confirmDashboardSectionChange() {
     if (state.view === "personas") return confirmPersonaSectionChange(document.querySelector("[data-persona-content]"));
+    if (state.view === "personal-memory") {
+      const composer = document.querySelector("#memory-compose-form:not([hidden])");
+      if (composer?.elements.content.value.trim() || composer?.elements.tags.value.trim())
+        return confirmAction(ui("discard_title"), ui("discard_detail"), ui("discard"));
+    }
     if (state.view === "lorebooks") return confirmDraftDiscard(document.querySelector("#lorebook-workspace"));
     if (state.view === "personal-spotlights")
       return confirmDraftDiscard(document.querySelector("#personal-spotlights"));
@@ -7652,12 +7657,12 @@
   }
 
   async function deleteMemory(memoryId) {
-    if (!(await confirmAction("Delete memory?", "This removes the memory immediately and cannot be undone."))) return;
+    if (!(await confirmAction(ui("memory_delete_title"), ui("memory_delete_hint"), ui("persona_delete_entry")))) return;
     try {
       await api(`/guilds/${state.guildId}/memories/${state.memoryKind}/${memoryId}?lineageId=${state.lineageId}`, {
         method: "DELETE",
       });
-      toast("Memory deleted");
+      toast(ui("memory_deleted"));
       await loadMemories();
     } catch (error) {
       toast(error.message, "error");
@@ -8262,7 +8267,7 @@
       link.download = `tomoribot-${state.memoryKind}-memories-${state.lineageId}.json`;
       link.click();
       URL.revokeObjectURL(url);
-      toast("Memory export created");
+      toast(ui("memory_export_created"));
     } catch (error) {
       toast(error.message, "error");
     }
@@ -8272,7 +8277,7 @@
     try {
       const data = JSON.parse(await file.text());
       const memoriesPayload = Array.isArray(data) ? data : data.memories;
-      if (!Array.isArray(memoriesPayload)) throw new Error("This file does not contain a memory list.");
+      if (!Array.isArray(memoriesPayload)) throw new Error(ui("memory_import_invalid"));
       const result = await api(`/guilds/${state.guildId}/memories/import`, {
         method: "POST",
         body: JSON.stringify({
@@ -8281,7 +8286,9 @@
           memories: memoriesPayload.map((entry) => (typeof entry === "string" ? { content: entry, tags: [] } : entry)),
         }),
       });
-      const summary = `Imported ${result.inserted}; duplicates ${result.skipped}; invalid ${result.invalid}; failed ${result.failed}`;
+      const summary = ui("memory_import_result").replace(/\{(inserted|skipped|invalid|failed)\}/g, (_, key) =>
+        String(result[key]),
+      );
       toast(summary, result.failed ? "error" : result.invalid || !result.inserted ? "warning" : "success");
       await loadMemories();
     } catch (error) {
@@ -8579,7 +8586,7 @@
       searchResult.closest("dialog").close();
       const unsaved = [...document.querySelectorAll(localEditForms)].some(
         (form) =>
-          !form.closest("[data-persona-content]") &&
+          !form.closest("[data-persona-content], [data-global-memory]") &&
           formBaselines.has(form) &&
           (form.dataset.editFile !== undefined ||
             JSON.stringify(formSnapshot(form)) !== JSON.stringify(formBaselines.get(form))),
@@ -9285,10 +9292,7 @@
     if (edit) return openMemoryEditor(Number(edit.dataset.memoryEdit));
     const remove = event.target.closest("[data-memory-delete]");
     if (remove) return deleteMemory(Number(remove.dataset.memoryDelete));
-    if (event.target.closest("[data-memory-refresh]")) {
-      await loadMemories();
-      toast("Memories refreshed");
-    }
+    if (event.target.closest("[data-memory-refresh]") && (await loadMemories())) toast(ui("memory_refreshed"));
     if (event.target.closest('[data-memory-export]:not([aria-disabled="true"])')) await exportMemories();
     if (event.target.closest('[data-memory-import]:not([aria-disabled="true"])'))
       document.querySelector("#memory-import-file")?.click();
@@ -9942,7 +9946,7 @@
         );
         if (!form.isConnected) return;
         setMemoryComposer(form, false);
-        toast("Memory saved");
+        toast(ui("memory_saved"));
         await loadMemories();
       } catch (error) {
         toast(error.message, "error");
@@ -9968,7 +9972,7 @@
           }),
         );
         document.querySelector("#memory-dialog").close();
-        toast("Memory updated");
+        toast(ui("memory_updated"));
         await loadMemories();
       } catch (error) {
         toast(error.message, "error");
@@ -10224,6 +10228,7 @@
       const guildId = new URLSearchParams(window.location.search).get("guild");
       const guild = session.guilds.find((item) => item.id === guildId) || session.guilds[0];
       if (window.location.hash === "#profile") state.view = "profile";
+      if (window.location.hash === "#personal-memory") state.view = "personal-memory";
       if (window.location.hash === "#lorebooks") state.view = "lorebooks";
       if (window.location.hash === "#settings") state.view = "settings";
       if (window.location.hash === "#channel-settings") state.view = "channel-settings";
