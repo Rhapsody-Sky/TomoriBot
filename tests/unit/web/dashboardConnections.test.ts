@@ -91,6 +91,7 @@ describe("dashboard connections", () => {
     const build = runInNewContext(`${source}; buildSettingsSearchIndex`, {
       state: { overview, providerData: {} },
       ui: String,
+      profileTabs: { profile: "user-round", privacy: "brain", conversation: "message-circle" },
       moderationTabs: {},
       personaKnowledgeTabs: () => [],
       settingSearchText: (element: { textContent: string }) => element.textContent,
@@ -108,14 +109,22 @@ describe("dashboard connections", () => {
           return template;
         },
       },
-      renderProfilePanel: () => "",
+      renderProfilePanel: (section: string) => `${section} options`,
       renderPersonaNaming: () => "How this persona addresses you",
       renderPersonaSettings: () => "",
       renderPersonaAppearance: () => "",
-    }) as () => { personaId?: number; personaHome?: boolean; personaPanel?: string; name?: string }[];
+    }) as () => {
+      title?: string;
+      profileTab?: string;
+      personaId?: number;
+      personaHome?: boolean;
+      personaPanel?: string;
+      name?: string;
+    }[];
     for (const canManage of [true, false]) {
       overview.canManage = canManage;
       const entries = build();
+      expect(entries.find((entry) => entry.title === "conversation options")?.profileTab).toBe("conversation");
       expect(entries.filter((entry) => entry.personaHome).map((entry) => entry.personaId)).toEqual([2, 3]);
       for (const personaId of [2, 3]) {
         expect(entries.some((entry) => entry.personaId === personaId && entry.personaPanel === "preferences")).toBe(

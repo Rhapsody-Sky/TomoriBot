@@ -228,11 +228,13 @@ body[data-theme="dark"] .boot-logo {
   opacity: 1;
 }
 
-[data-persona-reference] .art-preview {
+[data-persona-reference] .art-preview,
+#character-reference-controls .art-preview {
   grid-template-columns: minmax(0, 1fr);
 }
 
-[data-persona-reference] .art-preview img {
+[data-persona-reference] .art-preview img,
+#character-reference-controls .art-preview img {
   max-inline-size: 100%;
   object-fit: contain;
 }
@@ -772,14 +774,6 @@ body[data-theme="dark"] .boot-logo {
   .channel-choices {
     max-height: 320px;
   }
-}
-.character-reference-preview {
-  width: 100%;
-  max-width: 280px;
-  max-height: 280px;
-  object-fit: contain;
-  object-position: left center;
-  border-radius: 8px;
 }
 .settings-search-results {
   display: grid;

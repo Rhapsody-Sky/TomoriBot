@@ -1108,6 +1108,7 @@
 
   function usesCollectionFrame() {
     return [
+      "profile",
       "personas",
       "overview",
       "lorebooks",
@@ -1267,8 +1268,8 @@
     };
     const page = (view, title, extra = {}) => entries.push({ view, title, path: title, hint: "", ...extra });
     page("profile", ui("my_settings"));
-    for (const section of ["profile", "privacy", "conversation"])
-      addMarkup(renderProfilePanel(section), { view: "profile" }, ui("my_settings"));
+    for (const profileTab of Object.keys(profileTabs))
+      addMarkup(renderProfilePanel(profileTab), { view: "profile", profileTab }, ui("my_settings"));
     page("personal-memory", "Global memory");
     page("personal-memory", ui("personal_stm"), {
       path: "Global memory",
@@ -2128,107 +2129,125 @@
     }
   }
 
+  const profileTabs = { profile: "user-round", privacy: "brain", conversation: "message-circle" };
+  let profileTab = "profile";
+
+  function renderProfileCard(section, title, hint, fields) {
+    return `<form class="card" data-profile-section="${section}" data-fx="track">
+      ${personaCardHead(title, hint)}
+      <div class="stack">${fields}</div>
+      ${cardSaveActions(ui("save"))}
+    </form>`;
+  }
+
   function renderProfilePanel(section) {
     const profile = state.overview.profile;
-    return `<form class="panel stack" data-profile-section="${section}">
-        <div class="panel-header"><div class="heading"><p class="eyebrow">Personal</p><h2>${escapeHtml(ui(section))}</h2><p>${escapeHtml(ui(`${section}_hint`))}</p></div></div>
-        ${
-          section === "profile"
-            ? `
+    if (section === "profile") {
+      const identity = renderProfileCard(
+        "profile",
+        ui("persona_identity_title"),
+        ui("profile_hint"),
+        `
+        <label class="field">${fieldLabel(ui("persona_nickname"), ui("profile_nickname_hint"))}<input name="user_nickname" value="${escapeHtml(profile.nickname ?? "")}" maxlength="${profile.limits.nickname}"></label>
         <div class="grid">
-          <label class="field">${fieldLabel("Nickname", "Your personal display name when Tomori refers to you. Empty uses your current Discord display name.")}<input name="user_nickname" value="${escapeHtml(profile.nickname ?? "")}" maxlength="${profile.limits.nickname}"></label>
-          <label class="field">${fieldLabel(ui("discord_language"), ui("discord_language_hint"))}<select name="language_pref">
-            ${(profile.languages || [])
-              .map(
-                ({ value, label }) =>
-                  `<option value="${escapeHtml(value)}"${value === profile.language ? " selected" : ""}>${escapeHtml(label)}</option>`,
-              )
-              .join("")}
-          </select></label>
           <label class="field">${fieldLabel(profile.copy.prefix, profile.copy.prefixHint)}<input name="prefix_override" value="${escapeHtml(profile.prefix ?? "")}" maxlength="${profile.limits.affix}"></label>
           <label class="field">${fieldLabel(profile.copy.suffix, profile.copy.suffixHint)}<input name="suffix_override" value="${escapeHtml(profile.suffix ?? "")}" maxlength="${profile.limits.affix}"></label>
           <label class="field">${fieldLabel(profile.copy.gender, profile.copy.genderHint)}<input name="gender_identity" value="${escapeHtml(profile.genderIdentity ?? "")}" maxlength="${profile.limits.identity}"></label>
           <label class="field">${fieldLabel(profile.copy.pronouns, profile.copy.pronounsHint)}<input name="pronouns" value="${escapeHtml(profile.pronouns ?? "")}" maxlength="${profile.limits.identity}"></label>
-          <label class="field">${fieldLabel(profile.copy.addressingStyle, profile.copy.addressingStyleHint)}<select name="addressing_style">
-            ${[
-              ["", profile.copy.styleDefault],
-              ["neutral", profile.copy.styleNeutral],
-              ["masculine", profile.copy.styleMasculine],
-              ["feminine", profile.copy.styleFeminine],
-            ]
-              .map(
-                ([value, label]) =>
-                  `<option value="${value}"${(profile.addressingStyle ?? "") === value ? " selected" : ""}>${escapeHtml(label)}</option>`,
-              )
-              .join("")}
-          </select></label>
         </div>
-        <label class="field">${fieldLabel("Physical appearance tags", "Comma-separated traits used when image generation needs to depict you.")}<input name="physical_appearance_tags" value="${escapeHtml((profile.physicalAppearanceTags || []).join(", "))}"></label>
-        <section class="subsection stack" id="character-reference-controls">${renderCharacterReference()}</section>
+        <label class="field">${fieldLabel(profile.copy.addressingStyle, profile.copy.addressingStyleHint)}<select name="addressing_style">
+          ${[
+            ["", profile.copy.styleDefault],
+            ["neutral", profile.copy.styleNeutral],
+            ["masculine", profile.copy.styleMasculine],
+            ["feminine", profile.copy.styleFeminine],
+          ]
+            .map(
+              ([value, label]) =>
+                `<option value="${value}"${(profile.addressingStyle ?? "") === value ? " selected" : ""}>${escapeHtml(label)}</option>`,
+            )
+            .join("")}
+        </select></label>`,
+      );
+      const language = renderProfileCard(
+        "language",
+        ui("discord_language"),
+        ui("discord_language_hint"),
+        `<label class="field"><span class="field-label sr-only">${escapeHtml(ui("discord_language"))}</span><select name="language_pref">
+          ${profile.languages.map(({ value, label }) => `<option value="${escapeHtml(value)}"${value === profile.language ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+        </select></label>`,
+      );
+      const appearance = renderProfileCard(
+        "appearance",
+        ui("persona_appearance_tab"),
+        "",
         `
-            : ""
-        }
-        ${
-          section === "privacy"
-            ? `
-          <label class="field">${fieldLabel("Privacy level", "Controls which personal memory features may store information about you.")}
-            <select name="privacy_level">
-              <option value="0"${profile.privacyLevel === 0 ? " selected" : ""}>Minimal</option>
-              <option value="1"${profile.privacyLevel === 1 ? " selected" : ""}>Partial</option>
-              <option value="2"${profile.privacyLevel === 2 ? " selected" : ""}>Full opt-out</option>
-            </select>
-          </label>
-          <label class="toggle span-all"><span class="field-label"><strong>Cross-server short-term memory</strong><small>Share recent context between servers you use.</small></span>
-            <input name="shortterm_cache_crossserver_opt_in" type="checkbox"${profile.crossServerShortTermMemory ? " checked" : ""}>
-          </label>
+        <label class="field">${fieldLabel(ui("profile_appearance_tags"), ui("profile_appearance_tags_hint"))}<input name="physical_appearance_tags" value="${escapeHtml((profile.physicalAppearanceTags || []).join(", "))}"></label>`,
+      );
+      return `<div class="split">${identity}<div class="col">${language}${appearance}<section class="card" id="character-reference-controls">${renderCharacterReference()}</section></div></div>`;
+    }
+    if (section === "privacy") {
+      return renderProfileCard(
+        section,
+        ui(section),
+        ui("privacy_hint"),
         `
-            : ""
-        }
-        ${
-          section === "conversation"
-            ? `
-        <div class="grid">
-          <label class="field">${fieldLabel("Personal trigger mode", "Overrides or follows the server's deliberate persona-trigger behavior for you.")}
-            <select name="personal_dtm">
-              ${["off", "follow", "on"].map((value) => `<option value="${value}"${profile.personalDtm === value ? " selected" : ""}>${value[0].toUpperCase() + value.slice(1)}</option>`).join("")}
-            </select>
-          </label>
-          <label class="field">${fieldLabel("Personal tool mode", "Overrides or follows the server's deliberate tool-use behavior for your requests.")}
-            <select name="personal_deliberate_tool_mode">
-              ${["off", "follow", "on"].map((value) => `<option value="${value}"${profile.personalDeliberateToolMode === value ? " selected" : ""}>${value[0].toUpperCase() + value.slice(1)}</option>`).join("")}
-            </select>
-          </label>
-          <label class="field">${fieldLabel("Timezone offset", "Your UTC offset for personal date and time context. Empty follows the server default.")}<input name="timezone_offset" type="number" min="-12" max="14" step="0.25" value="${profile.timezoneOffset ?? ""}"></label>
-        </div>
-        <label class="toggle span-all"><span class="field-label"><strong>${escapeHtml(profile.copy.nudgeOptOut)}</strong><small>${escapeHtml(profile.copy.nudgeOptOutHint)}</small></span>
-          <input name="natural_nudge_opt_out" type="checkbox"${profile.naturalNudgeOptOut ? " checked" : ""}>
+        <label class="field">${fieldLabel(ui("profile_privacy_level"), ui("profile_privacy_level_hint"))}
+          <select name="privacy_level">
+            ${["minimal", "partial", "full_opt_out"].map((mode, index) => `<option value="${index}"${profile.privacyLevel === index ? " selected" : ""}>${escapeHtml(ui(`profile_privacy_${mode}`))}</option>`).join("")}
+          </select>
         </label>
-        <label class="field">${fieldLabel("Impersonation prompt", "Instructions Tomori uses when generating a message in your voice.")}<textarea name="impersonation_prompt" rows="5">${escapeHtml(profile.impersonationPrompt || "")}</textarea></label>
-        `
-            : ""
-        }
-        ${
-          section === "fallback"
-            ? `
-        <label class="toggle span-all"><span class="field-label"><strong>${escapeHtml(profile.copy.serverFallback)}</strong><small>${escapeHtml(profile.copy.serverFallbackHint)}</small></span>
-          <input name="personal_server_fallback_enabled" type="checkbox"${profile.personalServerFallback ? " checked" : ""}>
-        </label>`
-            : ""
-        }
-        <div class="actions form-actions"><button class="button primary" type="submit">${escapeHtml(ui("save"))}</button></div>
-      </form>`;
+        <label class="toggle"><span class="field-label"><strong>${escapeHtml(ui("profile_cross_server_memory"))}</strong><small>${escapeHtml(ui("profile_cross_server_memory_hint"))}</small></span>
+          <input name="shortterm_cache_crossserver_opt_in" type="checkbox" role="switch"${profile.crossServerShortTermMemory ? " checked" : ""}>
+        </label>`,
+      );
+    }
+    const modeOptions = (selected) =>
+      ["off", "follow", "on"]
+        .map(
+          (mode) =>
+            `<option value="${mode}"${selected === mode ? " selected" : ""}>${escapeHtml(ui(`profile_mode_${mode}`))}</option>`,
+        )
+        .join("");
+    return renderProfileCard(
+      section,
+      ui(section),
+      ui("conversation_hint"),
+      `
+      <div class="grid">
+        <label class="field">${fieldLabel(ui("profile_trigger_mode"), ui("profile_trigger_mode_hint"))}
+          <select name="personal_dtm">${modeOptions(profile.personalDtm)}</select>
+        </label>
+        <label class="field">${fieldLabel(ui("profile_tool_mode"), ui("profile_tool_mode_hint"))}
+          <select name="personal_deliberate_tool_mode">${modeOptions(profile.personalDeliberateToolMode)}</select>
+        </label>
+        <label class="field">${fieldLabel(ui("profile_timezone"), ui("profile_timezone_hint"))}<input name="timezone_offset" type="number" min="-12" max="14" step="0.25" value="${profile.timezoneOffset ?? ""}"></label>
+      </div>
+      <label class="toggle"><span class="field-label"><strong>${escapeHtml(profile.copy.nudgeOptOut)}</strong><small>${escapeHtml(profile.copy.nudgeOptOutHint)}</small></span>
+        <input name="natural_nudge_opt_out" type="checkbox" role="switch"${profile.naturalNudgeOptOut ? " checked" : ""}>
+      </label>
+      <label class="field">${fieldLabel(ui("profile_impersonation"), ui("profile_impersonation_hint"))}<textarea name="impersonation_prompt" rows="5">${escapeHtml(profile.impersonationPrompt || "")}</textarea></label>`,
+    );
   }
 
   function renderCharacterReference() {
-    return `<div class="heading"><h3>${escapeHtml(ui("character_reference"))}</h3><p>${escapeHtml(ui("character_reference_hint"))}</p></div>
-      ${state.overview.profile.hasCharacterReference ? `<img class="character-reference-preview" src="${BASE}/profile/character-reference?v=${Date.now()}" alt="${escapeHtml(ui("character_reference"))}">` : ""}
-      <div class="actions"><button class="button" type="button" data-character-reference-upload>${escapeHtml(ui("character_reference_upload"))}</button>
-      ${state.overview.profile.hasCharacterReference ? `<button class="button danger" type="button" data-character-reference-remove>${escapeHtml(ui("character_reference_remove"))}</button>` : ""}</div>
-      <input type="file" id="character-reference-file" accept="image/*" hidden>`;
+    const hasReference = state.overview.profile.hasCharacterReference;
+    const title = ui("character_reference");
+    return `${personaCardHead(title, ui("character_reference_hint"))}
+      <div class="stack">
+        ${hasReference ? `<div class="art-preview"><img src="${BASE}/profile/character-reference?v=${Date.now()}" alt="${escapeHtml(title)}"></div>` : ""}
+        <div class="row">
+          <button class="button small" type="button" data-character-reference-upload>${escapeHtml(ui("character_reference_upload"))}</button>
+          ${hasReference ? `<button class="button small danger" type="button" data-character-reference-remove>${escapeHtml(ui("character_reference_remove"))}</button>` : ""}
+        </div>
+        <input type="file" id="character-reference-file" accept="image/*" aria-label="${escapeHtml(ui("character_reference_upload"))}" hidden>
+      </div>`;
   }
 
   async function saveCharacterReference(file) {
     const controls = document.getElementById("character-reference-controls");
+    if (!controls) return;
+    if (savingForms) return toast(ui("saving"));
     try {
       await withBusyForm(controls, async () => {
         const body = new FormData();
@@ -2238,8 +2257,9 @@
           ...(file ? { body } : {}),
         });
         state.overview.profile.hasCharacterReference = result.hasCharacterReference;
-        controls.innerHTML = renderCharacterReference();
+        window.TomoriFX.swap(controls, renderCharacterReference());
       });
+      controls.querySelector("[data-character-reference-upload]")?.focus({ preventScroll: true });
       toast(ui("character_reference_saved"));
     } catch (error) {
       toast(error.message, "error");
@@ -2247,8 +2267,36 @@
   }
 
   function renderProfile(workspace) {
-    workspace.innerHTML = `${pageHeader("Personal", ui("my_settings"), "These preferences belong to you, not to the selected server.")}
-      <div class="grid"><div class="stack">${renderProfilePanel("profile")}</div><div class="stack">${["privacy", "conversation"].map(renderProfilePanel).join("")}</div></div>`;
+    const title = escapeHtml(ui("my_settings"));
+    if (!workspace.querySelector("#profile-stage")) {
+      workspace.innerHTML = `<section class="banner compact" aria-labelledby="profile-title">
+        <div class="banner-info"><div class="stack">
+          <p class="crumb">${escapeHtml(ui("nav_global"))}</p>
+          <h1 id="profile-title" data-fx="split">${title}</h1>
+          <p class="banner-text">${escapeHtml(ui("profile_banner_hint"))}</p>
+        </div></div>
+        <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("user-round")}</span></div>
+      </section>
+      <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${title}">
+        ${Object.entries(profileTabs)
+          .map(
+            ([id, icon]) =>
+              `<button type="button" id="profile-tab-${id}" role="tab" aria-controls="profile-stage" data-profile-tab="${id}">${navigationIcon(icon)}${escapeHtml(ui(id))}</button>`,
+          )
+          .join("")}
+      </nav>
+      <section class="stage" id="profile-stage" role="tabpanel"></section>`;
+    }
+    for (const button of workspace.querySelectorAll("[data-profile-tab]")) {
+      const active = profileTab === button.dataset.profileTab;
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    const stage = workspace.querySelector("#profile-stage");
+    stage.setAttribute("aria-labelledby", `profile-tab-${profileTab}`);
+    window.TomoriFX.swap(stage, renderProfilePanel(profileTab));
+    initDraftForms(stage);
+    enhanceDashboard(workspace);
   }
 
   function renderPersonalSpotlights(workspace) {
@@ -8380,7 +8428,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], .deck-card[aria-pressed]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-profile-tab], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];
@@ -8543,6 +8591,7 @@
         if (pendingSearchDestination === entry) pendingSearchDestination = null;
       }, 10000);
       state.view = entry.view;
+      if (entry.profileTab) profileTab = entry.profileTab;
       if (entry.settingsGroup) state.settingsGroup = entry.settingsGroup;
       if (entry.personaPanel) {
         state.personaPanel = entry.personaPanel;
@@ -8838,7 +8887,7 @@
     if (
       savingForms &&
       event.target.closest(
-        "[data-nav], [data-persona-select], [data-persona-panel], [data-settings-group], [data-provider-panel], [data-guild-select], [data-overview-refresh], [data-provider-refresh]",
+        "[data-nav], [data-persona-select], [data-persona-panel], [data-profile-tab], [data-settings-group], [data-provider-panel], [data-guild-select], [data-overview-refresh], [data-provider-refresh]",
       )
     ) {
       toast(ui("saving"));
@@ -9183,6 +9232,14 @@
     const promptPresets = event.target.closest("[data-system-prompt-presets]");
     if (promptPresets) {
       void openSystemPromptPresets(promptPresets);
+      return;
+    }
+    const profileSection = event.target.closest("[data-profile-tab]");
+    if (profileSection) {
+      if (profileTab === profileSection.dataset.profileTab) return;
+      profileTab = profileSection.dataset.profileTab;
+      renderProfile(profileSection.closest("[data-dashboard-view]"));
+      profileSection.focus({ preventScroll: true });
       return;
     }
     const settingsGroup = event.target.closest("[data-settings-group]");
@@ -9832,6 +9889,7 @@
 
     if (event.target.matches("[data-profile-section]")) {
       event.preventDefault();
+      if (savingForms) return toast(ui("saving"));
       const form = event.target;
       const baseline = formBaselines.get(form);
       const patch = {};
@@ -9859,7 +9917,7 @@
           }
           completeFormSave(form);
         });
-        toast("Profile saved");
+        toast(ui("settings_card_saved").replace("{name}", () => form.querySelector("h3").textContent));
       } catch (error) {
         showFormError(form, error);
       }
@@ -10165,6 +10223,7 @@
       }
       const guildId = new URLSearchParams(window.location.search).get("guild");
       const guild = session.guilds.find((item) => item.id === guildId) || session.guilds[0];
+      if (window.location.hash === "#profile") state.view = "profile";
       if (window.location.hash === "#lorebooks") state.view = "lorebooks";
       if (window.location.hash === "#settings") state.view = "settings";
       if (window.location.hash === "#channel-settings") state.view = "channel-settings";

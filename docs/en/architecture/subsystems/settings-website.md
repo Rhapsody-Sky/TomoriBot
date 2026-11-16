@@ -217,8 +217,9 @@ member's Discord permissions. A visible channel under a hidden category has no
 category label. An active allowlist stays active even if none of its channels are
 visible.
 
-My settings groups profile and appearance, privacy and memory, and personal
-conversation preferences into separately saved panels. Personal provider
+My settings uses a Collection dock for profile and appearance, privacy and memory,
+and conversation. Each card saves independently. The character reference uploads
+as soon as you choose an image. Personal provider
 fallback belongs to My providers; server BYOK policy belongs to Server providers.
 Both provider pages use Connections, Model routing, and Fallbacks tabs, with the
 same mobile category menu as Server settings. Each scope keeps its selected tab.
