@@ -1010,6 +1010,8 @@ export function createDashboardApp(client: Client) {
           "rotation_clear_hint",
           "rotation_cleared",
           "endpoint_model_edit",
+          "endpoint_model_add",
+          "endpoint_model_added",
           "endpoint_model_name",
           "endpoint_model_context",
           "endpoint_model_input_limit",
@@ -1035,6 +1037,7 @@ export function createDashboardApp(client: Client) {
           "endpoint_model_markup_emoji",
           "endpoint_model_voice_instruct",
           "endpoint_model_workflow",
+          "endpoint_model_add_workflow",
           "endpoint_model_workflow_hint",
           "endpoint_model_workflow_invalid",
           "endpoint_model_saved",
@@ -2715,6 +2718,41 @@ export function createDashboardApp(client: Client) {
               connectionId,
               await context.req.json().catch(() => null),
             ),
+      );
+    },
+  );
+
+  app.on(
+    ["GET", "POST"],
+    `${BASE_PATH}/api/guilds/:guildId/providers/:scope/connections/:connectionId/models`,
+    bodyLimit({ maxSize: ENDPOINT_WORKFLOW_MAX_BYTES + 4096 }),
+    async (context) => {
+      const scope = context.req.param("scope");
+      if (scope !== "personal" && scope !== "server") return context.notFound();
+      const result = await requireProviderConnectionContext(context, scope);
+      if (result instanceof Response) return result;
+      const rawId = context.req.param("connectionId") ?? "";
+      const connectionId = Number(rawId);
+      if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(connectionId))
+        throw new DashboardServiceError(
+          "endpoint_edit_not_found",
+          404,
+          localizer("en-US", "general.dashboard.endpoint_edit_not_found"),
+        );
+      context.header("Cache-Control", "no-store");
+      if (context.req.method === "GET")
+        return context.json(
+          await providers.loadEndpointModelCreateEditor(scope, result.actor, result.snapshot, connectionId),
+        );
+      return context.json(
+        await providers.createEndpointModel(
+          scope,
+          result.actor,
+          result.snapshot,
+          connectionId,
+          await context.req.json().catch(() => null),
+        ),
+        201,
       );
     },
   );

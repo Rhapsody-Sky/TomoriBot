@@ -411,7 +411,9 @@ The integration is isolated under `src/web`:
   active text connection before removing it.
 - The Connections submenu on both provider pages selects the connection to manage.
   Choose `Other provider` in `Add provider` to register a custom endpoint.
-  Its model registrations and provider parameters appear below. Primary models
+  For an existing connection, `Add model` uses the saved URL, protocol, and
+  credential. Image and video models on ComfyUI need a workflow file.
+  Registered models and provider parameters appear below the connection. Primary models
   and the fallback chain have their own sections. Removing a saved provider uses the Discord operation. The
   active text provider is protected. Removing another provider also removes its
   saved credential, rotation keys, and server-specific model registrations.

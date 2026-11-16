@@ -75,6 +75,7 @@ export interface CustomEndpointRegistrationInput {
   // the panel reads the endpoint row, so both must carry the same value.
   verbatimToolCalling?: boolean;
   extraConfig?: Record<string, unknown>;
+  existingConnectionId?: number;
   // When set, edit that exact endpoint row in place (update its model + row by id) instead of
   // registering a new model. Add flows omit it; the edit command supplies the selected row's id.
   editingEndpointId?: number;
@@ -520,17 +521,18 @@ export async function registerCustomEndpoint(
   }
 
   // The connection must exist before synthetic models and saved configs can reference its stable ID.
-  const connectionId = isEdit
-    ? editingRow?.connection_id
-    : await llmProviderRepo.upsertCustomEndpointConnection({
-        serverId: input.scope.kind === "server" ? input.scope.ownerId : null,
-        userId: input.scope.kind === "personal" ? input.scope.ownerId : null,
-        label: input.label,
-        capability: input.capability,
-        apiStyle: input.apiStyle,
-        endpointUrl: input.endpointUrl,
-        requiresAuth: Boolean(input.authToken?.trim()),
-      });
+  const connectionId =
+    editingRow?.connection_id ??
+    input.existingConnectionId ??
+    (await llmProviderRepo.upsertCustomEndpointConnection({
+      serverId: input.scope.kind === "server" ? input.scope.ownerId : null,
+      userId: input.scope.kind === "personal" ? input.scope.ownerId : null,
+      label: input.label,
+      capability: input.capability,
+      apiStyle: input.apiStyle,
+      endpointUrl: input.endpointUrl,
+      requiresAuth: Boolean(input.authToken?.trim()),
+    }));
 
   if (!connectionId) {
     return null;
@@ -576,6 +578,7 @@ export async function registerCustomEndpoint(
       verbatimToolCalling: input.verbatimToolCalling ?? false,
       isDefault: shouldBeDefault,
       customEndpointId: isEdit ? input.editingEndpointId : null,
+      existingConnectionId: input.existingConnectionId,
     },
     serverScope ? { serverDiscId: serverScope.serverDiscId } : {},
   );

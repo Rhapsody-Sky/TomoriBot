@@ -1,6 +1,7 @@
 import type {
   CustomEndpointApiStyle,
   CustomEndpointCapability,
+  CustomEndpointRow,
   FallbackModelRef,
   PersonalProviderCapability,
 } from "@/types/db/schema";
@@ -10,8 +11,12 @@ import { QUICK_TOGGLE_CAPABILITIES, ROUTING_CAPABILITY_LOCALE_KEYS } from "@/uti
 import { offeredChatCompatFlags } from "@/utils/discord/ui/providersPanel";
 import { invalidateUserCache } from "@/utils/cache/userCache";
 import { llmProviderRepo, toolRepository } from "@/utils/db/repositories";
-import { readImageEndpointSupports } from "@/utils/provider/customImageEndpointSupport";
-import { buildCustomProviderName } from "@/utils/provider/customProviderUtils";
+import {
+  getDefaultImageEndpointSupports,
+  imageEndpointSupportsFromSubmittedValues,
+  readImageEndpointSupports,
+} from "@/utils/provider/customImageEndpointSupport";
+import { buildCustomProviderName, buildSyntheticCustomModelCodename } from "@/utils/provider/customProviderUtils";
 import { registerCustomEndpoint } from "@/utils/provider/customEndpointService";
 import {
   readSpeechEndpointSettings,
@@ -159,6 +164,59 @@ const endpointModelSchema = z.strictObject({
     .refine((value) => Object.keys(value).length > 0)
     .optional(),
 });
+const newEndpointModelSchema = endpointModelSchema
+  .omit({ voiceMode: true, scriptMarkup: true, supportsInstruct: true })
+  .required({ codeName: true });
+
+function endpointModelOptions(
+  entryId: string,
+  capability: CustomEndpointCapability,
+  apiStyle: CustomEndpointApiStyle,
+  row?: CustomEndpointRow,
+) {
+  const compat = offeredChatCompatFlags("endpoint", entryId);
+  const flags =
+    capability === "text"
+      ? {
+          hasTools: row?.has_tools ?? false,
+          seesImages: row?.sees_images ?? false,
+          seesVideos: row?.sees_videos ?? false,
+          supportsStructOutput: row?.supports_structoutput ?? false,
+          ...(compat.includes("strict-roles") ? { strictRoleAlternation: row?.strict_role_alternation ?? false } : {}),
+          ...(compat.includes("prefix") ? { supportsPrefixCompletion: row?.supports_prefix_completion ?? false } : {}),
+          ...(compat.includes("prefill") ? { supportsAssistantPrefill: row?.supports_assistant_prefill ?? false } : {}),
+          ...(compat.includes("verbatim-tools") ? { verbatimToolCalling: row?.verbatim_tool_calling ?? false } : {}),
+        }
+      : null;
+  return {
+    flags,
+    imageSupports:
+      capability === "image"
+        ? row
+          ? readImageEndpointSupports(row)
+          : getDefaultImageEndpointSupports(apiStyle)
+        : null,
+    allowInpaint: apiStyle === "comfyui",
+    workflowMaxBytes:
+      apiStyle === "comfyui" && (capability === "image" || capability === "video") ? ENDPOINT_WORKFLOW_MAX_BYTES : null,
+  };
+}
+
+function hasInvalidEndpointModelFields(
+  patch: z.infer<typeof endpointModelSchema>,
+  capability: CustomEndpointCapability,
+  editor: ReturnType<typeof endpointModelOptions>,
+) {
+  return (
+    (patch.numCtx !== undefined && capability !== "text" && capability !== "decision") ||
+    (capability === "decision" && patch.numCtx === null) ||
+    (patch.flags && Object.keys(patch.flags).some((key) => !editor.flags || !Object.hasOwn(editor.flags, key))) ||
+    (patch.imageSupports &&
+      (!editor.imageSupports || (!editor.allowInpaint && patch.imageSupports.includes("inpaint")))) ||
+    (patch.workflow &&
+      (!editor.workflowMaxBytes || Buffer.byteLength(JSON.stringify(patch.workflow)) > editor.workflowMaxBytes))
+  );
+}
 
 function connectionError(code: string, status: DashboardServiceError["status"], key = `general.dashboard.${code}`) {
   return new DashboardServiceError(code, status, localizer("en-US", key));
@@ -781,36 +839,102 @@ export class DashboardProviderService {
         : row.server_id !== snapshot.serverId || row.user_id != null)
     )
       throw connectionError("endpoint_model_not_found", 404);
-    const compat = offeredChatCompatFlags("endpoint", entry.id);
-    const flags =
-      row.capability === "text"
-        ? {
-            hasTools: row.has_tools,
-            seesImages: row.sees_images,
-            seesVideos: row.sees_videos,
-            supportsStructOutput: row.supports_structoutput,
-            ...(compat.includes("strict-roles") ? { strictRoleAlternation: row.strict_role_alternation } : {}),
-            ...(compat.includes("prefix") ? { supportsPrefixCompletion: row.supports_prefix_completion } : {}),
-            ...(compat.includes("prefill") ? { supportsAssistantPrefill: row.supports_assistant_prefill } : {}),
-            ...(compat.includes("verbatim-tools") ? { verbatimToolCalling: row.verbatim_tool_calling } : {}),
-          }
-        : null;
     const editor = {
       connectionName: entry.displayName,
       capability: row.capability,
       codeName: row.capability === "speech" ? null : row.model_name || row.label,
       numCtx: row.num_ctx ?? null,
-      flags,
-      imageSupports: row.capability === "image" ? readImageEndpointSupports(row) : null,
+      ...endpointModelOptions(entry.id, row.capability, row.api_style, row),
       speech: row.capability === "speech" ? readSpeechEndpointSettings(row) : null,
       allowVoiceMode: row.api_style === "tts-clone",
-      allowInpaint: row.api_style === "comfyui",
-      workflowMaxBytes:
-        row.api_style === "comfyui" && (row.capability === "image" || row.capability === "video")
-          ? ENDPOINT_WORKFLOW_MAX_BYTES
-          : null,
     };
     return { panel, entry, row, editor };
+  }
+
+  private async loadEndpointModelRegistration(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+  ) {
+    const { panel, entry } = await this.loadConnectionEntry(scope, actor, snapshot, connectionId);
+    const connection = entry.connectionDetails.find((detail) => detail.connectionId === connectionId);
+    if (!connection || connection.capability === "speech" || connection.capability === "transcription")
+      throw connectionError("endpoint_edit_not_found", 404);
+    const editor = {
+      connectionName: entry.displayName,
+      capability: connection.capability,
+      codeName: "",
+      numCtx: null,
+      ...endpointModelOptions(entry.id, connection.capability, connection.apiStyle),
+    };
+    return { panel, entry, connection, editor };
+  }
+
+  async loadEndpointModelCreateEditor(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+  ) {
+    return (await this.loadEndpointModelRegistration(scope, actor, snapshot, connectionId)).editor;
+  }
+
+  async createEndpointModel(
+    scope: "personal" | "server",
+    actor: DashboardActor,
+    snapshot: DashboardGuildSnapshot,
+    connectionId: number,
+    value: unknown,
+  ) {
+    const parsed = newEndpointModelSchema.safeParse(value);
+    if (!parsed.success) throw connectionError("endpoint_model_invalid", 422);
+    const { panel, entry, connection, editor } = await this.loadEndpointModelRegistration(
+      scope,
+      actor,
+      snapshot,
+      connectionId,
+    );
+    const { capability, apiStyle, endpointUrl } = connection;
+    const { codeName, numCtx, flags, imageSupports, workflow } = parsed.data;
+    if (
+      hasInvalidEndpointModelFields(parsed.data, capability, editor) ||
+      (capability === "decision" && numCtx == null) ||
+      (editor.workflowMaxBytes !== null && !workflow)
+    )
+      throw connectionError("endpoint_model_invalid", 422);
+    const endpoints = await llmProviderRepo.loadCustomEndpointsByConnectionId(connectionId);
+    if (endpoints.some((model) => buildSyntheticCustomModelCodename(model.label, model.model_name) === codeName))
+      throw connectionError("endpoint_model_exists", 409);
+
+    const result = await registerCustomEndpoint({
+      scope:
+        panel.scopeKind === "personal"
+          ? { kind: "personal", ownerId: actor.user.user_id, baseConfig: panel.state?.config }
+          : {
+              kind: "server",
+              ownerId: snapshot.serverId,
+              baseConfig: panel.state.config,
+              serverDiscId: snapshot.serverDiscordId,
+            },
+      existingConnectionId: connectionId,
+      label: entry.displayName,
+      capability,
+      apiStyle,
+      endpointUrl,
+      modelName: codeName,
+      numCtx,
+      ...flags,
+      extraConfig: {
+        ...(workflow ? { workflow } : {}),
+        ...(capability === "image"
+          ? { workflow_supports: imageEndpointSupportsFromSubmittedValues(imageSupports, apiStyle) }
+          : {}),
+      },
+    });
+    if (!result) throw connectionError("endpoint_model_failed", 422);
+    if (scope === "personal") invalidateUserCache(actor.discordId);
+    return { created: true };
   }
 
   async loadEndpointModelEditor(
@@ -843,16 +967,10 @@ export class DashboardProviderService {
     const patch = parsed.data;
     if (
       (patch.codeName !== undefined && editor.codeName === null) ||
-      (patch.numCtx !== undefined && row.capability !== "text" && row.capability !== "decision") ||
-      (row.capability === "decision" && patch.numCtx === null) ||
-      (patch.flags && Object.keys(patch.flags).some((key) => !editor.flags || !Object.hasOwn(editor.flags, key))) ||
-      (patch.imageSupports &&
-        (!editor.imageSupports || (!editor.allowInpaint && patch.imageSupports.includes("inpaint")))) ||
+      hasInvalidEndpointModelFields(patch, row.capability, editor) ||
       (patch.scriptMarkup !== undefined && !editor.speech) ||
       ((patch.voiceMode !== undefined || patch.supportsInstruct !== undefined) &&
-        (!editor.speech || !editor.allowVoiceMode)) ||
-      (patch.workflow &&
-        (!editor.workflowMaxBytes || Buffer.byteLength(JSON.stringify(patch.workflow)) > editor.workflowMaxBytes))
+        (!editor.speech || !editor.allowVoiceMode))
     )
       throw connectionError("endpoint_model_invalid", 422);
     const numCtx = patch.numCtx === undefined ? editor.numCtx : patch.numCtx;

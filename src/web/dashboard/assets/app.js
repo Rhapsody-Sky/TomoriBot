@@ -7251,21 +7251,34 @@
       : "";
     const openRouter = providerName?.toLowerCase() === "openrouter";
     const credentialStatus = provider ? ui(provider.hasApiKey ? "connection_key_stored" : "connection_no_key") : "";
-    const endpoints = endpoint ? renderEndpointModels(connection.endpoints, scope) : "";
     const models = brave
       ? `<p class="hint">${escapeHtml(ui("brave_search_key_hint"))}</p>`
       : renderConnectionModels(data, scope, providerName);
     const controls = actionItems.length > 2 ? actions : actionItems.join("");
-    const cards = `<section class="card">
+    const connectionCard = `<section class="card">
       ${personaCardHead(connection.name, endpoint?.endpointUrl, controls ? `<div class="actions">${controls}</div>` : "")}
       <div class="stack">
         ${credentialStatus || activeTextProvider ? `<div class="chips">${credentialStatus ? `<span class="chip">${escapeHtml(credentialStatus)}</span>` : ""}${activeTextProvider ? `<span class="chip tone">${escapeHtml(ui("connection_active_text"))}</span>` : ""}</div>` : ""}
-        ${endpoints}${models}
+        ${models}
       </div>
-    </section>
-    ${openRouter ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterModels(data, scope)}</section>${renderOpenRouterRegistration(scope)}` : ""}
-    ${parameters.length ? renderPersonalParameters({ parameters }, scope) : ""}`;
-    return openRouter || parameters.length ? `<div class="card-columns">${cards}</div>` : cards;
+    </section>`;
+    const parameterCards = parameters.length ? renderPersonalParameters({ parameters }, scope) : "";
+    if (endpoint) {
+      const add =
+        endpoint.connectionId && !["speech", "transcription"].includes(endpoint.capability)
+          ? `<div class="actions"><button class="button small primary" type="button" data-endpoint-model-add data-endpoint-connection="${endpoint.connectionId}" data-provider-scope="${scope}" aria-haspopup="dialog">${navigationIcon("plus")}${escapeHtml(ui("endpoint_model_add"))}</button></div>`
+          : "";
+      return `<div class="stack">${connectionCard}<section class="card">
+        ${personaCardHead(ui("connection_registered_models"), "", add)}
+        ${renderEndpointModels(connection.endpoints, scope)}
+      </section>${parameterCards}</div>`;
+    }
+    const openRouterCards = openRouter
+      ? `<section class="card">${personaCardHead(ui("connection_registered_models"))}${renderOpenRouterModels(data, scope)}</section>${renderOpenRouterRegistration(scope)}`
+      : "";
+    return openRouterCards || parameterCards
+      ? `<div class="card-columns">${connectionCard}${openRouterCards}${parameterCards}</div>`
+      : connectionCard;
   }
 
   function renderOpenRouterRegistration(scope) {
@@ -7929,8 +7942,13 @@
   async function openEndpointModelEditor(button) {
     const guildId = state.guildId;
     const { providerScope: scope, endpointConnection, endpointModelEdit } = button.dataset;
-    const path = `/guilds/${guildId}/providers/${scope}/connections/${endpointConnection}/models/${endpointModelEdit}`;
-    const { dialog, form, fields, save } = openDashboardEditor(button, "endpoint_model_edit", true);
+    const adding = endpointModelEdit === undefined;
+    const path = `/guilds/${guildId}/providers/${scope}/connections/${endpointConnection}/models${adding ? "" : `/${endpointModelEdit}`}`;
+    const { dialog, form, fields, save } = openDashboardEditor(
+      button,
+      adding ? "endpoint_model_add" : "endpoint_model_edit",
+      true,
+    );
     try {
       const model = await api(path);
       if (!dialog.open) return;
@@ -7992,7 +8010,7 @@
               )}</label>`
             : ""
         }
-        ${model.workflowMaxBytes ? `<label class="field">${fieldLabel(ui("endpoint_model_workflow"), ui("endpoint_model_workflow_hint"))}<input type="file" name="workflow" accept=".json,application/json"></label>` : ""}`;
+        ${model.workflowMaxBytes ? `<label class="field">${fieldLabel(ui(adding ? "endpoint_model_add_workflow" : "endpoint_model_workflow"), ui("endpoint_model_workflow_hint"))}<input type="file" name="workflow" accept=".json,application/json"${adding ? " required" : ""}></label>` : ""}`;
       enhanceDashboard(dialog);
       const initial = formSnapshot(form);
       const changes = () =>
@@ -8007,6 +8025,7 @@
       form.addEventListener("input", sync);
       form.addEventListener("change", sync);
       sync();
+      if (adding) save.textContent = ui("endpoint_model_add");
       save.hidden = false;
       form.onsubmit = async (event) => {
         event.preventDefault();
@@ -8035,11 +8054,12 @@
                 }
               } else patch[name] = name === "numCtx" ? (value ? Number(value) : null) : (checked ?? value);
             }
-            await api(path, { method: "PATCH", body: JSON.stringify(patch) });
+            await api(path, { method: adding ? "POST" : "PATCH", body: JSON.stringify(patch) });
           });
           dialog.close();
-          toast(ui("endpoint_model_saved"));
-          if (state.guildId === guildId) await loadProviderWorkspace(scope);
+          toast(ui(adding ? "endpoint_model_added" : "endpoint_model_saved"));
+          if (state.guildId === guildId && (await loadProviderWorkspace(scope)) && adding)
+            focusNavigation(`[data-endpoint-model-add][data-endpoint-connection="${endpointConnection}"]`);
         } catch (error) {
           if (dialog.open) showFormError(form, error);
         }
@@ -9021,9 +9041,9 @@
       void openConnectionEditor(endpointEdit.dataset.providerScope, endpointEdit.dataset.endpointEdit);
       return;
     }
-    const endpointModelEdit = event.target.closest("[data-endpoint-model-edit]");
-    if (endpointModelEdit) {
-      void openEndpointModelEditor(endpointModelEdit);
+    const endpointModelAction = event.target.closest("[data-endpoint-model-edit], [data-endpoint-model-add]");
+    if (endpointModelAction) {
+      void openEndpointModelEditor(endpointModelAction);
       return;
     }
     const rotationKeys = event.target.closest("[data-provider-rotation]");

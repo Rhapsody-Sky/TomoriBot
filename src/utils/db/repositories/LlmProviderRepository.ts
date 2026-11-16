@@ -2344,6 +2344,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
       supportsAssistantPrefill?: boolean;
       verbatimToolCalling?: boolean;
       isDefault?: boolean;
+      existingConnectionId?: number;
       // When set, update that exact row (edit path) instead of inserting. This lets an edit change
       // model_name without colliding with sibling models under the same label+capability.
       customEndpointId?: number | null;
@@ -2372,6 +2373,7 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
       verbatimToolCalling = false,
       isDefault = true,
       customEndpointId = null,
+      existingConnectionId,
     } = params;
 
     try {
@@ -2423,9 +2425,21 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
 
           return customEndpointId;
         });
-      } else if (serverId !== null) {
+      } else if (serverId !== null || userId !== null) {
         resolvedCustomEndpointId = await sql.begin(async (tx) => {
-          const [connRow] = await tx<[{ connection_id: number }]>`
+          const [connRow] =
+            existingConnectionId !== undefined
+              ? await tx<[{ connection_id: number }]>`
+                  SELECT connection_id
+                  FROM custom_endpoint_connections
+                  WHERE connection_id = ${existingConnectionId}
+                    AND server_id IS NOT DISTINCT FROM ${serverId}::int
+                    AND user_id IS NOT DISTINCT FROM ${userId}::int
+                    AND capability = ${capability}
+                  FOR KEY SHARE
+                `
+              : serverId !== null
+                ? await tx<[{ connection_id: number }]>`
             INSERT INTO custom_endpoint_connections (
               server_id, user_id, label, capability, api_style, endpoint_url, requires_auth
             ) VALUES (
@@ -2438,45 +2452,8 @@ class LlmProviderRepository implements IRepository<LlmProviderExportShape> {
               requires_auth = custom_endpoint_connections.requires_auth OR EXCLUDED.requires_auth,
               updated_at = CURRENT_TIMESTAMP
             RETURNING connection_id
-          `;
-          if (!connRow) return null;
-          const connectionId = connRow.connection_id;
-
-          const [epRow] = await tx<[{ custom_endpoint_id: number }]>`
-            INSERT INTO custom_endpoints (
-              connection_id, model_name, model_ref_id, num_ctx,
-              extra_config, has_tools, sees_images, sees_videos,
-              supports_structoutput, strict_role_alternation, supports_prefix_completion,
-              supports_assistant_prefill, verbatim_tool_calling, is_default
-            ) VALUES (
-              ${connectionId}, ${modelName}, ${modelRefId}, ${numCtx},
-              ${extraConfig}, ${hasTools}, ${seesImages}, ${seesVideos},
-              ${supportsStructOutput}, ${strictRoleAlternation}, ${supportsPrefixCompletion},
-              ${supportsAssistantPrefill}, ${verbatimToolCalling}, ${isDefault}
-            )
-            ON CONFLICT (connection_id, COALESCE(model_name, ''))
-            DO UPDATE SET
-              model_ref_id = EXCLUDED.model_ref_id,
-              num_ctx = EXCLUDED.num_ctx,
-              extra_config = EXCLUDED.extra_config,
-              has_tools = EXCLUDED.has_tools,
-              sees_images = EXCLUDED.sees_images,
-              sees_videos = EXCLUDED.sees_videos,
-              supports_structoutput = EXCLUDED.supports_structoutput,
-              strict_role_alternation = EXCLUDED.strict_role_alternation,
-              supports_prefix_completion = EXCLUDED.supports_prefix_completion,
-              supports_assistant_prefill = EXCLUDED.supports_assistant_prefill,
-              verbatim_tool_calling = EXCLUDED.verbatim_tool_calling,
-              is_default = EXCLUDED.is_default,
-              updated_at = CURRENT_TIMESTAMP
-            RETURNING custom_endpoint_id
-          `;
-          if (!epRow) return null;
-          return epRow.custom_endpoint_id;
-        });
-      } else if (userId !== null) {
-        resolvedCustomEndpointId = await sql.begin(async (tx) => {
-          const [connRow] = await tx<[{ connection_id: number }]>`
+          `
+                : await tx<[{ connection_id: number }]>`
             INSERT INTO custom_endpoint_connections (
               server_id, user_id, label, capability, api_style, endpoint_url, requires_auth
             ) VALUES (

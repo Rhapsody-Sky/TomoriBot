@@ -731,6 +731,8 @@ export default {
       provider_key_rejected: "The provider could not validate this key.",
       provider_credentials_failed: "The provider credential change could not be saved.",
       interface_endpoint_model_edit: "Edit model",
+      interface_endpoint_model_add: "Add model",
+      interface_endpoint_model_added: "Model added to connection",
       interface_endpoint_model_name: "Model identifier",
       interface_endpoint_model_context: "Context window (tokens)",
       interface_endpoint_model_input_limit: "Input token limit",
@@ -759,12 +761,14 @@ export default {
       interface_endpoint_model_markup_emoji: "Emoji cues",
       interface_endpoint_model_voice_instruct: "Accepts voice instructions",
       interface_endpoint_model_workflow: "Replace ComfyUI workflow",
+      interface_endpoint_model_add_workflow: "ComfyUI workflow",
       interface_endpoint_model_workflow_hint:
         "Choose a JSON file exported from ComfyUI in API format. Leave empty to keep the current workflow.",
       interface_endpoint_model_workflow_invalid: "Choose a valid ComfyUI workflow JSON file within the upload limit.",
       interface_endpoint_model_saved: "Endpoint model updated",
       endpoint_model_not_found: "This endpoint model no longer exists or is not yours to manage.",
       endpoint_model_invalid: "Check the model fields and use only options supported by this endpoint.",
+      endpoint_model_exists: "A model with this identifier is already registered on this connection.",
       endpoint_model_failed: "The endpoint model could not be saved. Check its identifier and settings.",
       interface_personal_fallbacks: "My model fallback chain",
       interface_personal_fallbacks_hint:

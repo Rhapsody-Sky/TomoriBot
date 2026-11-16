@@ -137,6 +137,35 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Decision model persistence", () => {
     expect(seeds.every((model) => model.provider === "openrouter")).toBe(true);
   });
 
+  it("adds a model by connection ID without rewriting the connection", async () => {
+    const input = {
+      scope: { kind: "personal" as const, ownerId: userId, baseConfig: createServerConfig() },
+      label: "fixture-shared-endpoint",
+      capability: "decision" as const,
+      apiStyle: "system-one" as const,
+      endpointUrl: "https://example.invalid/gateway/v1",
+      modelName: "sample-first",
+      numCtx: 8192,
+    };
+    const first = await registerCustomEndpoint(input);
+    if (!first) throw new Error("Missing registered model");
+    const connectionId = first.customEndpoint.connection_id;
+
+    const second = await registerCustomEndpoint({
+      ...input,
+      existingConnectionId: connectionId,
+      endpointUrl: "https://old.example.invalid/v1",
+      modelName: "sample-second",
+    });
+    expect(second?.customEndpoint).toMatchObject({
+      connection_id: connectionId,
+      endpoint_url: input.endpointUrl,
+      model_name: "sample-second",
+    });
+    const models = await llmProviderRepo.loadCustomEndpointsByConnectionId(connectionId);
+    expect(models.map((model) => model.model_name)).toEqual(["sample-first", "sample-second"]);
+  });
+
   it("registers and edits exact custom identities without activating text, then deletes only the owned registration", async () => {
     const input = {
       scope: { kind: "personal" as const, ownerId: userId, baseConfig: createServerConfig() },

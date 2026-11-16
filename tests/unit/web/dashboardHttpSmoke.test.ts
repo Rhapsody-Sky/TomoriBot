@@ -929,6 +929,119 @@ describe("dashboard memory and naming authorization", () => {
     );
   });
 
+  it("adds a model to the selected connection with its saved configuration and scope", async () => {
+    const { app, headers } = setup(true);
+    const guildId = "123456789012345678";
+    const state = createPersona({ server_id: 42 });
+    let managesGuild = false;
+    spyOn(fakeClient.guilds.cache, "get").mockReturnValue({
+      members: {
+        fetch: async () => ({
+          permissions: new PermissionsBitField(managesGuild ? PermissionFlagsBits.ManageGuild : 0n),
+        }),
+      },
+    } as unknown as Guild);
+    const entry: EndpointProviderPanelEntry = {
+      id: "endpoint:81",
+      kind: "endpoint",
+      displayName: "Local",
+      savedAt: null,
+      isPreset: false,
+      connectionIds: [81, 82],
+      connectionDetails: [
+        {
+          connectionId: 81,
+          endpointUrl: "https://example.invalid/v1",
+          apiStyle: "openai-compatible",
+          capability: "text",
+          vramHandoff: null,
+        },
+        {
+          connectionId: 82,
+          endpointUrl: "https://example.invalid/workflow",
+          apiStyle: "comfyui",
+          capability: "image",
+          vramHandoff: null,
+        },
+      ],
+      capabilities: [],
+    };
+    const data = { entries: [entry], initialEntryId: entry.id, readStatus: "fresh" as const };
+    const personal = spyOn(providerPanelOperations, "loadPersonalProviderPanelScope").mockResolvedValue({
+      scopeKind: "personal",
+      ownerId: 7,
+      state,
+      data,
+    });
+    spyOn(providerPanelOperations, "loadServerProviderPanelScope").mockResolvedValue({ state, data });
+    const row = customEndpointSchema.parse({
+      user_id: 7,
+      server_id: null,
+      connection_id: 81,
+      custom_endpoint_id: 23,
+      label: "Local",
+      capability: "text",
+      api_style: "openai-compatible",
+      endpoint_url: "https://example.invalid/v1",
+      model_name: "sample/already-added",
+      requires_auth: true,
+    });
+    spyOn(llmProviderRepo, "loadCustomEndpointsByConnectionId").mockResolvedValue([row]);
+    const register = spyOn(customEndpointService, "registerCustomEndpoint").mockResolvedValue({
+      provider: "custom:81",
+      customEndpoint: row,
+      modelId: 104,
+    });
+    const request = (scope: string, connectionId: number, value?: unknown) =>
+      app.request(`/settings/api/guilds/${guildId}/providers/${scope}/connections/${connectionId}/models`, {
+        method: value === undefined ? "GET" : "POST",
+        headers,
+        body: value === undefined ? undefined : JSON.stringify(value),
+      });
+
+    expect((await request("server", 81, { codeName: "sample/new" })).status).toBe(403);
+    expect((await request("personal", 83, { codeName: "sample/new" })).status).toBe(404);
+    personal.mockResolvedValueOnce({ scopeKind: "personal", ownerId: 8, state, data });
+    expect((await request("personal", 81, { codeName: "sample/new" })).status).toBe(404);
+    expect(
+      (await request("personal", 81, { codeName: "sample/new", endpointUrl: "https://unrelated.invalid/" })).status,
+    ).toBe(422);
+    expect((await request("personal", 81, { codeName: "sample/already-added" })).status).toBe(409);
+    expect((await request("personal", 82, { codeName: "sample/new" })).status).toBe(422);
+    expect(register).not.toHaveBeenCalled();
+
+    const editor = await request("personal", 81);
+    expect(editor.headers.get("cache-control")).toBe("no-store");
+    expect(await editor.json()).toMatchObject({ capability: "text", codeName: "", flags: { seesVideos: false } });
+    expect(
+      (await request("personal", 81, { codeName: "sample/new", numCtx: 8192, flags: { seesVideos: true } })).status,
+    ).toBe(201);
+    expect(register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: expect.objectContaining({ kind: "personal", ownerId: 7 }),
+        existingConnectionId: 81,
+        modelName: "sample/new",
+        endpointUrl: "https://example.invalid/v1",
+        label: "Local",
+        numCtx: 8192,
+        seesVideos: true,
+      }),
+    );
+    expect(register.mock.calls[0][0]).not.toHaveProperty("authToken");
+
+    managesGuild = true;
+    const workflow = { output: { class_type: "SaveImage" } };
+    expect((await request("server", 82, { codeName: "sample/image", workflow })).status).toBe(201);
+    expect(register).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        scope: expect.objectContaining({ kind: "server", ownerId: 42 }),
+        existingConnectionId: 82,
+        apiStyle: "comfyui",
+        extraConfig: expect.objectContaining({ workflow }),
+      }),
+    );
+  });
+
   it("edits an owned endpoint model in place and keeps its other flags and workflow", async () => {
     const { app, headers } = setup(true);
     const serverId = "123456789012345678";
