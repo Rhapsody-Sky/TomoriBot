@@ -124,11 +124,17 @@ export default {
       interface_channel_restrictions_confirm:
         "A nonempty channel allowlist excludes all other channels. A nonempty persona allowlist restricts that persona to its listed channels. Removing the last entry removes that restriction. Apply these changes?",
       interface_nav_global: "Global",
+      interface_nav_personal_providers: "My providers",
+      interface_personal_providers_hint: "Manage your personal provider credentials, models, and fallbacks.",
+      interface_personal_providers_byok_hint: "This server requires personal provider credentials.",
       interface_nav_server_settings: "Server Settings",
       interface_nav_server_administration: "Server Administration",
       interface_nav_server_providers: "Server providers",
       interface_server_providers_hint:
         "Manage provider credentials, custom endpoints, model assignments, and fallbacks.",
+      interface_connection_key_stored: "Encrypted key stored",
+      interface_connection_no_key: "No key stored",
+      interface_connection_remove_endpoint: "Remove connection",
       interface_server_primary_models_hint:
         "These models are the server defaults. Personas, channels, and personal providers can override them.",
       interface_channel_settings_hint: "Choose channels, then set how Tomori behaves and handles context in them.",

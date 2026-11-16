@@ -80,8 +80,19 @@ describe("dashboard personal models", () => {
           personal_server_fallback_enabled: serverFallback,
         },
       };
+      const chain = Object.entries(fallbackFields).map(([name, { value }]) => ({ name, value }));
+      const fallbackField = "personal_server_fallback_enabled";
+      const baseline = [
+        ...chain.map(({ name }) => ({ name, value: "" })),
+        { name: fallbackField, value: "on", checked: true },
+      ];
       const save = runInNewContext(`(${source})`, {
         state,
+        formBaselines: new Map([[form, baseline]]),
+        formSnapshot: () => [...chain, { name: fallbackField, value: "on", checked: serverFallback.checked }],
+        syncTrackedDraft: () => {},
+        captureDraft: () => {},
+        completeFormSave: () => {},
         api: async (path: string, options: { body: string }) => {
           const body = JSON.parse(options.body);
           calls.push({ path, body });
@@ -113,6 +124,8 @@ describe("dashboard personal models", () => {
       expect(state.overview.profile.personalServerFallback).toBe(serverFailed);
       if (failedPart) {
         expect(failure?.partial).toBe(failedPart !== "both");
+        expect(baseline[0].value).toBe(chainFailed ? "" : "llm:5");
+        expect(baseline.find(({ name }) => name === fallbackField)).toHaveProperty("checked", serverFailed);
         expect(refreshed).toBe(0);
         if (chainFailed) expect(failure?.message).toContain("fallback_chain_save_failed");
         if (serverFailed) expect(failure?.message).toContain("fallback_server_save_failed");
@@ -165,6 +178,8 @@ describe("dashboard personal models", () => {
       ui: (key: string) => key,
       escapeHtml: (value: string) => value.replaceAll('"', "&quot;"),
       fieldLabel: (label: string, hint: string) => `<span>${label}:${hint}</span>`,
+      personaCardHead: (title: string) => `<h3>${title}</h3>`,
+      cardSaveActions: () => '<button type="submit" hidden></button>',
     }) as (data: unknown) => string;
     const option = { id: 7, provider: "custom:1", label: "Model" };
     const html = render({
@@ -186,7 +201,8 @@ describe("dashboard personal models", () => {
     });
     expect(html).not.toContain("personal_model_unassigned");
     expect(html).not.toContain("personal_model_enabled");
-    expect(html).toContain("personal_model_disabled");
+    expect(html).not.toContain("personal_model_disabled");
+    expect(html).toContain('data-fx="track"');
     expect(html).toContain("personal_model_unavailable");
     expect(html).toContain("model_speech_design");
     expect(html).toContain("model_speech_clone");
@@ -238,7 +254,7 @@ describe("dashboard personal models", () => {
     await save({ dataset: { personalParameters: "openrouter", providerScope: "server" }, elements });
     expect(JSON.parse(body).patch.thinking_level).toBe("high");
     expect(refreshed).toBe("server");
-    expect(completedScopes).toEqual(["server"]);
+    expect(completedScopes).toEqual(["personal", "server"]);
   });
 
   it("retries only unsaved model changes after a partial failure", async () => {
@@ -250,8 +266,15 @@ describe("dashboard personal models", () => {
     const calls: string[] = [];
     let fail = true;
     let refreshed = 0;
+    const form = { querySelectorAll: () => fields };
+    const baseline = fields.map(({ name }) => ({ name, value: "" }));
     const save = runInNewContext(`(${await dashboardFunction("savePersonalModel")})`, {
       state: { guildId: "42" },
+      savingForms: 0,
+      formBaselines: new Map([[form, baseline]]),
+      syncTrackedDraft: () => {},
+      captureDraft: () => {},
+      completeFormSave: () => {},
       api: async (_path: string, options: { body: string }) => {
         const capability = JSON.parse(options.body).capability;
         calls.push(capability);
@@ -264,8 +287,8 @@ describe("dashboard personal models", () => {
         refreshed++;
       },
     }) as (form: unknown) => Promise<void>;
-    const form = { querySelectorAll: () => fields };
-    await expect(save(form)).rejects.toThrow();
+    await expect(save(form)).rejects.toMatchObject({ partial: true });
+    expect(baseline.map(({ value }) => value)).toEqual([fields[0].value, ""]);
     expect(refreshed).toBe(0);
     fail = false;
     await save(form);
@@ -281,6 +304,9 @@ describe("dashboard personal models", () => {
     let refreshed = "";
     const save = runInNewContext(`(${source})`, {
       state: { guildId: "42" },
+      savingForms: 0,
+      formBaselines: { get: () => [{ name: "image_nai", value: "" }] },
+      completeFormSave: () => {},
       api: async (path: string, options: { method: string; body: string }) => {
         request = { path, ...options };
       },

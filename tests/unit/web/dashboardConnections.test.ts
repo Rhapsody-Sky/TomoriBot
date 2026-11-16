@@ -395,20 +395,22 @@ describe("dashboard connections", () => {
   });
 
   it("keeps the active provider selected when the submenu needs a searchable select", async () => {
-    const source = await dashboardFunction("renderServerProviderPicker");
+    const source = await dashboardFunction("renderProviderPicker");
     const render = runInNewContext(`(${source})`, { ui: String, escapeHtml: String });
     const connections = Array.from({ length: 8 }, (_, index) => ({
       key: `endpoint:custom:${index + 1}`,
       name: `Local ${index + 1}`,
     }));
     const active = connections[2].key;
-    const segmented = render(connections.slice(0, 5), active);
-    expect(segmented.activeTab).toBe("server-connection-2");
-    expect(segmented.markup).toContain(`aria-selected="true" tabindex="0" data-connection-select="${active}"`);
-    const select = render(connections, active);
-    expect(select.markup).toContain("data-server-provider-select data-searchable");
-    expect(select.markup).toContain(`value="${active}" selected`);
-    for (const connection of connections) expect(select.markup).toContain(`value="${connection.key}"`);
+    for (const scope of ["personal", "server"]) {
+      const segmented = render(connections.slice(0, 5), active, scope);
+      expect(segmented.activeTab).toBe(`${scope}-connection-2`);
+      expect(segmented.markup).toContain(`aria-selected="true" tabindex="0" data-connection-select="${active}"`);
+      const select = render(connections, active, scope);
+      expect(select.markup).toContain(`data-provider-select="${scope}" data-searchable`);
+      expect(select.markup).toContain(`value="${active}" selected`);
+      for (const connection of connections) expect(select.markup).toContain(`value="${connection.key}"`);
+    }
   });
 
   it("lists only the selected provider's available models", async () => {

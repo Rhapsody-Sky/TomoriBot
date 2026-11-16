@@ -221,8 +221,9 @@ My settings uses a Collection dock for profile and appearance, privacy and memor
 and conversation. Each card saves independently. The character reference uploads
 as soon as you choose an image. Personal provider
 fallback belongs to My providers; server BYOK policy belongs to Server providers.
-Both provider pages use Connections, Model routing, and Fallbacks tabs, with the
-same mobile category menu as Server settings. Each scope keeps its selected tab.
+Both provider pages use the Collection dock for Connections, Primary models, and
+Fallbacks. The personal model and fallback tabs appear once the member has a
+connection. Each scope keeps its selected tab.
 Personal model choices share one save action. Only changed choices are sent to
 the existing per-capability operation, which enables those capabilities. If a
 request fails, retrying skips choices already saved by that action.
@@ -408,7 +409,7 @@ The integration is isolated under `src/web`:
   named connection while preserving its models. A blank token keeps the stored
   credential. Removing a connection removes its models; switch away from an
   active text connection before removing it.
-- The Connections submenu in `Server providers` selects the connection to manage.
+- The Connections submenu on both provider pages selects the connection to manage.
   Choose `Other provider` in `Add provider` to register a custom endpoint.
   Its model registrations and provider parameters appear below. Primary models
   and the fallback chain have their own sections. Removing a saved provider uses the Discord operation. The
