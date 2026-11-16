@@ -2792,14 +2792,17 @@
           ? ""
           : addButton("moderation_add_user");
       if (add) actions.insertAdjacentHTML("beforeend", add);
-      host.innerHTML = `<section class="card" data-moderation-list="${moderationTab}">${personaCardHead(ui(heading), ui(`${heading}_hint`))}
+      const search = escapeHtml(ui(searchLabel));
+      const searchField = tableRows.length
+        ? `<label class="field"><span class="field-label sr-only">${search}</span><input type="search" data-moderation-query placeholder="${search}" value="${escapeHtml(filters.query)}"></label>`
+        : "";
+      host.innerHTML = `<section class="card" data-moderation-list="${moderationTab}">${personaCardHead(ui(heading), ui(`${heading}_hint`), searchField)}
         ${
           tableRows.length
-            ? `<div class="stack"><div class="grid">
-          <label class="field">${fieldLabel(ui(searchLabel))}<input type="search" data-moderation-query value="${escapeHtml(filters.query)}"></label>
+            ? `<div class="stack">
           ${
             restrictions
-              ? `<label class="field">${fieldLabel(ui("moderation_restriction_type"))}<select data-restriction-filter>
+              ? `<div class="grid"><label class="field">${fieldLabel(ui("moderation_restriction_type"))}<select data-restriction-filter>
             ${[
               ["", "moderation_restriction_all_types"],
               ["mute", "moderation_persona_mute"],
@@ -2810,10 +2813,9 @@
                   `<option value="${value}"${value === filters.type ? " selected" : ""}>${escapeHtml(ui(key))}</option>`,
               )
               .join("")}
-          </select></label>`
+          </select></label></div>`
               : ""
           }
-        </div>
         <div class="table-wrap"><table aria-label="${escapeHtml(ui(heading))}">
           <thead><tr>
             <th scope="col">${escapeHtml(ui(roles ? "moderation_role_column" : "moderation_member_column"))}</th>
