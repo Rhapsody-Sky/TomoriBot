@@ -153,6 +153,9 @@ comes only from `WEB_SETTINGS_PUBLIC_URL`; there is no second database override.
 
 ## Settings Navigation
 
+The sidebar and search put the active page in the URL fragment. Opening that URL
+applies the same access checks as the sidebar.
+
 Channel selectors follow the server channel allowlist. The allowlist editor itself
 shows every channel. Saved selections outside the allowlist are preserved when
 editing other fields; filtering the choices does not delete stored assignments.

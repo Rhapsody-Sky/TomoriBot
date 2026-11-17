@@ -151,13 +151,18 @@ describe("dashboard lorebook UI", () => {
   });
 
   it("links to the matching server setting and focuses it without changing its value", async () => {
-    const source = await dashboardFunction("openChannelMemorySettings");
+    const source = await Promise.all(["openChannelMemorySettings", "setDashboardView"].map(dashboardFunction));
     const state = { overview: { canManage: true }, view: "lorebooks", settingsGroup: "conversation" };
     let focused = 0;
     let closed = 0;
     let rendered = 0;
-    const open = runInNewContext(`(${source})`, {
+    const location = { hash: "#lorebooks" };
+    const open = runInNewContext(`${source.join("\n")}\nopenChannelMemorySettings`, {
       state,
+      window: {
+        location,
+        history: { pushState: (_state: unknown, _unused: string, hash: string) => (location.hash = hash) },
+      },
       document: {
         querySelectorAll: () => [{ close: () => closed++ }],
         querySelector: (selector: string) => {
@@ -169,6 +174,7 @@ describe("dashboard lorebook UI", () => {
     }) as () => void;
     open();
     expect(state.view).toBe("settings");
+    expect(location.hash).toBe("#settings");
     expect(state.settingsGroup).toBe("memory");
     expect(focused).toBe(1);
     expect(closed).toBe(1);
@@ -178,7 +184,7 @@ describe("dashboard lorebook UI", () => {
   });
 
   it("opens a settings deep link on the requested shared server without admitting a foreign server", async () => {
-    const source = await dashboardFunction("boot");
+    const source = await Promise.all(["boot", "dashboardViewFromHash"].map(dashboardFunction));
     const shared = ["123456789012345678", "223456789012345678"];
     for (const [requested, expected] of [
       [shared[1], shared[1]],
@@ -187,13 +193,16 @@ describe("dashboard lorebook UI", () => {
       let selected = "";
       let opened = 0;
       let failed = false;
-      const boot = runInNewContext(`(${source})`, {
-        state: {},
+      const state = { overview: { canManage: false } };
+      const boot = runInNewContext(`${source.join("\n")}\nboot`, {
+        state,
         window: { location: { search: `?guild=${requested}`, hash: "#channel-scoped-memory" } },
         URLSearchParams,
         api: async () => ({ csrfToken: "preview", guilds: shared.map((id) => ({ id })) }),
-        selectGuild: async (id: string) => {
+        selectGuild: async (id: string, view: string) => {
+          expect(view).toBe("settings");
           selected = id;
+          state.overview.canManage = true;
         },
         openChannelMemorySettings: () => opened++,
         renderLoggedOut: () => {

@@ -415,6 +415,7 @@
     "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], #memory-compose-form, #memory-edit-form";
   const editForms = `${draftForms}, ${localEditForms}`;
   const editSubmit = 'button[type="submit"]:not([value="reset"]), button[value="save"]:not([type])';
+  const siteDraftPrefix = "site/";
   const drafts = new Map();
   const formBaselines = new WeakMap();
   const panelSizes = new Map();
@@ -549,7 +550,7 @@
     root.querySelectorAll(draftForms).forEach((form) => {
       if (formBaselines.has(form)) return;
       const key = form.dataset.siteEntry
-        ? `site/${form.dataset.siteEntry}`
+        ? `${siteDraftPrefix}${form.dataset.siteEntry}`
         : form.dataset.profileSection
           ? `profile/${form.dataset.profileSection}`
           : `${state.guildId}/${form.dataset.settingsKey || (form.dataset.personaNaming ? `naming/${form.dataset.personaNaming}` : "stm-categories")}`;
@@ -909,8 +910,8 @@
           }
         </header>
         <div class="shell"><div class="sidebar-rail"><aside class="sidebar" data-variant="detailed">
+          ${state.overview || (state.session?.user.isGlobalAdmin && state.publicSite) ? `<button class="button sidebar-search" type="button" data-settings-search-open aria-haspopup="dialog">${navigationIcon("search")}${escapeHtml(ui("settings_search"))}</button>` : ""}
           <nav class="nav-stack sidebar-sections" id="dashboard-navigation" aria-label="Dashboard">
-            ${state.overview || (state.session?.user.isGlobalAdmin && state.publicSite) ? `<button class="button sidebar-search" type="button" data-settings-search-open aria-haspopup="dialog">${navigationIcon("search")}${escapeHtml(ui("settings_search"))}</button>` : ""}
             ${dashboardNavigation()
               .map(
                 ({ title, links }) =>
@@ -1190,6 +1191,45 @@
     } else if (target) {
       if (!window.TomoriControls?.focusTab(target)) target.focus({ preventScroll: true });
     }
+  }
+
+  function dashboardViewFromHash(hash) {
+    return hash === "#channel-scoped-memory" ? "settings" : hash.slice(1);
+  }
+
+  function availableDashboardView(view) {
+    const available = dashboardNavigation().some(({ links }) => links.some((link) => link.view === view));
+    return available ? view : state.overview ? "overview" : "site-admin";
+  }
+
+  function setDashboardView(view, replace = false) {
+    state.view = view;
+    const hash = `#${view}`;
+    if (window.location.hash === hash) return;
+    if (replace && view === "settings" && window.location.hash === "#channel-scoped-memory") return;
+    if (replace) window.history.replaceState(window.history.state, "", hash);
+    else window.history.pushState(window.history.state, "", hash);
+  }
+
+  async function followDashboardHash() {
+    if (!document.querySelector("[data-dashboard-view]")) return;
+    const hash = window.location.hash;
+    const view = availableDashboardView(dashboardViewFromHash(hash));
+    const channelMemory = hash === "#channel-scoped-memory" && view === "settings";
+    if (state.view === view && !channelMemory) {
+      setDashboardView(view, true);
+      return;
+    }
+    if (savingForms || document.querySelector("#confirm-dialog[open]") || !(await confirmDashboardSectionChange())) {
+      if (window.location.hash === hash) setDashboardView(state.view);
+      return;
+    }
+    if (window.location.hash !== hash) return;
+    pendingSearchDestination = null;
+    setDashboardView(view, true);
+    state.memoryData = null;
+    if (channelMemory) openChannelMemorySettings();
+    else renderView();
   }
 
   function usesCollectionFrame() {
@@ -3669,15 +3709,15 @@
     );
   }
 
-  async function confirmDraftDiscard(editor) {
+  async function confirmDraftDiscard(editor, keys) {
     if (!editor) return true;
-    const changed = [...editor.querySelectorAll("form[data-draft-key]")].filter((form) =>
-      drafts.has(form.dataset.draftKey),
-    );
+    const candidates =
+      keys ?? [...editor.querySelectorAll("form[data-draft-key]")].map((form) => form.dataset.draftKey);
+    const changed = candidates.filter((key) => drafts.has(key));
     if (!changed.length) return true;
     if (!(await confirmAction(ui("discard_title"), ui("discard_detail"), ui("discard"))) || !editor.isConnected)
       return false;
-    for (const form of changed) drafts.delete(form.dataset.draftKey);
+    for (const key of changed) drafts.delete(key);
     return true;
   }
 
@@ -3691,6 +3731,10 @@
     if (state.view === "lorebooks") return confirmDraftDiscard(document.querySelector("#lorebook-workspace"));
     if (state.view === "personal-spotlights")
       return confirmDraftDiscard(document.querySelector("#personal-spotlights"));
+    if (state.view === "site-admin") {
+      const keys = [...drafts.keys()].filter((key) => key.startsWith(siteDraftPrefix));
+      return confirmDraftDiscard(document.querySelector('[data-dashboard-view="site-admin"]'), keys);
+    }
     if (state.view === "server-providers" || state.view === "personal-providers")
       return confirmDraftDiscard(document.getElementById(`${state.view}-stage`));
     return true;
@@ -6138,6 +6182,10 @@
     stage.setAttribute("aria-labelledby", `channel-tab-${channelTab}`);
     const channels = state.overview.channels;
     const guildId = state.guildId;
+    const restoredChannels =
+      pendingSearchDestination?.view === "channel-settings" && pendingSearchDestination.guildId === guildId
+        ? pendingSearchDestination.selectedChannels
+        : undefined;
     const renderRequest = ++channelRenderRequest;
     const current = () =>
       stage.isConnected &&
@@ -6183,9 +6231,10 @@
       return;
     }
     const visibleChannels = allowed.length ? channels.filter((channel) => allowed.includes(channel.id)) : channels;
+    const selectedChannels = visibleChannels.filter(({ id }) => restoredChannels?.includes(id)).map(({ id }) => id);
     stage.innerHTML = `<form class="split" data-channel-settings data-settings-key="channel-settings">
         <section class="card" data-channel-picker>
-          ${renderChannelSelector("selectedChannels", [], false, visibleChannels, { title: ui("channel_uncategorized") })}
+          ${renderChannelSelector("selectedChannels", selectedChannels, false, visibleChannels, { title: ui("channel_uncategorized") })}
         </section>
         <div class="col">
           <section class="card">
@@ -6855,7 +6904,7 @@
     document.querySelectorAll("dialog[open]").forEach((dialog) => {
       dialog.close();
     });
-    state.view = "settings";
+    setDashboardView("settings", window.location.hash === "#channel-scoped-memory");
     state.settingsGroup = "memory";
     renderShell();
     const input = document.querySelector('[name="channel_memory_enabled"]');
@@ -7800,7 +7849,7 @@
     return patch;
   }
 
-  async function selectGuild(guildId) {
+  async function selectGuild(guildId, requestedView = state.view) {
     state.guildId = guildId;
     state.overview = null;
     state.memoryData = null;
@@ -7822,13 +7871,7 @@
     renderBootScreen();
     try {
       state.overview = await api(`/guilds/${guildId}/overview`);
-      if (
-        (state.view === "personal-spotlights" && state.overview.guild.isDirectMessage) ||
-        (state.view === "server-providers" && !state.overview.canManage) ||
-        (["moderation", "channel-settings"].includes(state.view) &&
-          (!state.overview.canManage || state.overview.guild.isDirectMessage))
-      )
-        state.view = "overview";
+      setDashboardView(availableDashboardView(requestedView), true);
       renderShell();
     } catch (error) {
       renderEntryStatus(
@@ -7837,7 +7880,7 @@
         error.message,
         `<button class="button secondary" id="retry-boot" type="button">${escapeHtml(ui("entry_retry") || "Retry")}</button>`,
       );
-      document.querySelector("#retry-boot")?.addEventListener("click", () => selectGuild(guildId));
+      document.querySelector("#retry-boot")?.addEventListener("click", () => selectGuild(guildId, requestedView));
     }
   }
 
@@ -8872,12 +8915,17 @@
       if (entry.view === "personal-spotlights" && state.view === entry.view) {
         destination.spotlightChannel = document.querySelector("[data-spotlight-content]")?.dataset.spotlightChannel;
       }
+      if (entry.view === "channel-settings" && entry.channelTab === "settings" && state.view === entry.view) {
+        destination.selectedChannels = [
+          ...document.querySelectorAll('[data-channel-picker] [name="selectedChannels"]:checked'),
+        ].map((input) => input.value);
+      }
       pendingSearchDestination = destination;
       if (!entry.channelSelection)
         setTimeout(() => {
           if (pendingSearchDestination === destination) pendingSearchDestination = null;
         }, 10000);
-      state.view = entry.view;
+      setDashboardView(entry.view);
       if (entry.statsRangeEditing) state.statsRangeEditing = true;
       if (entry.profileTab) profileTab = entry.profileTab;
       if (entry.settingsGroup) state.settingsGroup = entry.settingsGroup;
@@ -9488,7 +9536,7 @@
         !(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))
       )
         return;
-      state.view = "personas";
+      setDashboardView("personas");
       personaSelect.closest("dialog")?.close();
       if (state.personaId === nextPersona) return;
       state.personaId = nextPersona;
@@ -9533,13 +9581,15 @@
     }
     const nav = event.target.closest("[data-nav]");
     if (nav) {
+      if (nav.matches("a[href]") && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
       event.preventDefault();
       if (state.view === nav.dataset.nav) {
         document.querySelector("#navigation-sheet[open]")?.close();
         return;
       }
       if (!(await confirmDashboardSectionChange())) return;
-      state.view = nav.dataset.nav;
+      pendingSearchDestination = null;
+      setDashboardView(nav.dataset.nav);
       state.memoryData = null;
       renderView();
       focusNavigation(`.nav-stack [data-nav="${state.view}"]`);
@@ -10460,30 +10510,20 @@
       state.csrfToken = session.csrfToken;
       if (!session.guilds.length) {
         if (session.user.isGlobalAdmin && state.publicSite) {
-          state.view = "site-admin";
+          setDashboardView("site-admin", true);
           return renderShell();
         }
         return renderNoGuilds();
       }
       const guildId = new URLSearchParams(window.location.search).get("guild");
       const guild = session.guilds.find((item) => item.id === guildId) || session.guilds[0];
-      if (window.location.hash === "#profile") state.view = "profile";
-      if (window.location.hash === "#personal-memory") state.view = "personal-memory";
-      if (window.location.hash === "#lorebooks") state.view = "lorebooks";
-      if (window.location.hash === "#settings") state.view = "settings";
-      if (window.location.hash === "#channel-settings") state.view = "channel-settings";
-      if (window.location.hash === "#server-providers") state.view = "server-providers";
-      if (window.location.hash === "#personal-providers") state.view = "personal-providers";
-      if (window.location.hash === "#site-admin" && session.user.isGlobalAdmin && state.publicSite)
-        state.view = "site-admin";
-      if (window.location.hash === "#moderation") state.view = "moderation";
-      if (window.location.hash === "#personal-spotlights") state.view = "personal-spotlights";
-      await selectGuild(guild.id);
-      if (window.location.hash === "#channel-scoped-memory") openChannelMemorySettings();
+      await selectGuild(guild.id, dashboardViewFromHash(window.location.hash));
+      if (window.location.hash === "#channel-scoped-memory" && state.overview?.canManage) openChannelMemorySettings();
     } catch {
       renderLoggedOut();
     }
   }
 
+  window.addEventListener("hashchange", followDashboardHash);
   boot();
 })();

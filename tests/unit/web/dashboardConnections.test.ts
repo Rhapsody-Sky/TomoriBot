@@ -291,6 +291,7 @@ describe("dashboard connections", () => {
         document: { querySelectorAll: () => [], querySelector: () => ({ dataset: { spotlightChannel: channel } }) },
         workspace,
         state: { view: "personal-spotlights", guildId: "123456789012345678" },
+        setDashboardView: () => {},
         savingForms: 0,
         settingsSearchEntries: [{ view: "personal-spotlights", name: "durationHours" }],
         localEditForms: "[data-settings-key]",
@@ -308,6 +309,78 @@ describe("dashboard connections", () => {
     ) as (event: object) => Promise<void>;
     await search(event);
     expect(await renderedChannel).toBe(channel);
+  });
+
+  it("carries all checked channels into a search destination on Channel settings", async () => {
+    const source = await dashboardFunction("handleDashboardAction");
+    const channels = ["123456789012345679", "123456789012345680"];
+    const result = { dataset: { settingsSearchResult: "0" }, closest: () => ({ close: () => {} }) };
+    const context = {
+      state: { view: "channel-settings", guildId: "123456789012345678" },
+      settingsSearchEntries: [{ view: "channel-settings", channelTab: "settings", channelSelection: true }],
+      document: {
+        querySelectorAll: (selector: string) =>
+          selector.includes("selectedChannels") ? channels.map((value) => ({ value })) : [],
+      },
+      localEditForms: "[data-settings-key]",
+      pendingSearchDestination: null,
+      channelTab: "settings",
+      savingForms: 0,
+      confirmDashboardSectionChange: async () => true,
+      setDashboardView: () => {},
+      renderShell: () => {},
+    };
+    const search = runInNewContext(`${source}\nhandleDashboardAction`, context) as (event: object) => Promise<void>;
+    await search({
+      target: { closest: (selector: string) => (selector === "[data-settings-search-result]" ? result : null) },
+    });
+    expect(context.pendingSearchDestination).toMatchObject({ selectedChannels: channels });
+  });
+
+  it("keeps link drafts on canceled navigation even when the link editor is out of view", async () => {
+    const source = await Promise.all(["confirmDashboardSectionChange", "confirmDraftDiscard"].map(dashboardFunction));
+    const link = "site/9bcd3efa-4408-4389-819a-93091ae8f0ec";
+    const settings = "123456789012345678/conversation";
+    const drafts = new Map([
+      [link, [{ name: "title", value: "Support" }]],
+      [settings, []],
+    ]);
+    let accepted = false;
+    const confirm = runInNewContext(`${source.join("\n")}\nconfirmDashboardSectionChange`, {
+      state: { view: "site-admin" },
+      document: { querySelector: () => ({ isConnected: true, querySelectorAll: () => [] }) },
+      drafts,
+      siteDraftPrefix: "site/",
+      confirmAction: async () => accepted,
+      ui: String,
+    }) as () => Promise<boolean>;
+    expect(await confirm()).toBe(false);
+    expect(drafts.has(link)).toBe(true);
+    accepted = true;
+    expect(await confirm()).toBe(true);
+    expect(drafts.has(link)).toBe(false);
+    expect(drafts.has(settings)).toBe(true);
+  });
+
+  it("resolves page fragments through the same access rules as the dashboard sidebar", async () => {
+    const source = await Promise.all(
+      ["dashboardViewFromHash", "availableDashboardView", "dashboardNavigation"].map(dashboardFunction),
+    );
+    const overview = { guild: { isDirectMessage: false }, canManage: false };
+    const { dashboardViewFromHash: fromHash, availableDashboardView: available } = runInNewContext(
+      `${source.join("\n")}\n({ dashboardViewFromHash, availableDashboardView })`,
+      { state: { overview }, ui: String },
+    ) as {
+      dashboardViewFromHash: (hash: string) => string;
+      availableDashboardView: (view: string) => string;
+    };
+    expect(available(fromHash("#personas"))).toBe("personas");
+    expect(available(fromHash("#moderation"))).toBe("overview");
+    expect(available(fromHash("#site-admin"))).toBe("overview");
+    overview.canManage = true;
+    expect(available(fromHash("#channel-scoped-memory"))).toBe("settings");
+    overview.guild.isDirectMessage = true;
+    expect(available(fromHash("#channel-settings"))).toBe("overview");
   });
 
   it("reports the number of visible results when dashboard search exceeds its limit", async () => {

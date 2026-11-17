@@ -45,6 +45,12 @@ body::-webkit-scrollbar,
   flex: none;
 }
 
+.sidebar > .sidebar-search {
+  flex: none;
+  width: auto;
+  margin: 0 var(--space-1);
+}
+
 @media (min-width: 801px) {
   .dashboard-shell {
     display: grid;
