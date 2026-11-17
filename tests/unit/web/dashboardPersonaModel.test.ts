@@ -38,7 +38,7 @@ describe("dashboard persona text model", () => {
 
   it("renders inherited and unavailable assignments and ignores a stale persona response", async () => {
     const source = await dashboardFunction("loadPersonaTextModel");
-    const state = { guildId: "42", personaId: 1, personaPanel: "settings", view: "personas" };
+    const state = { guildId: "42", personaId: 1, personaPanel: "behaviour", view: "personas" };
     let target = { innerHTML: "" };
     const pending: ((value: unknown) => void)[] = [];
     const load = runInNewContext(`let personaModelLoadVersion = 0; ${source}; loadPersonaTextModel`, {
@@ -72,7 +72,7 @@ describe("dashboard persona text model", () => {
     const requests: { path: string; method: string; body: string }[] = [];
     let reload = 0;
     const save = runInNewContext(`(${source})`, {
-      state: { guildId: "42", personaId: 2, personaPanel: "settings" },
+      state: { guildId: "42", personaId: 2, personaPanel: "behaviour" },
       api: async (path: string, options: { method: string; body: string }) => {
         requests.push({ path, ...options });
       },

@@ -301,7 +301,7 @@
     memoryData: null,
     personaId: 0,
     personaPanel: "personal",
-    personaKnowledgePanel: "personal",
+    personaSectionViews: {},
     lorebookBookId: null,
     lorebookData: null,
     lorebookImportReceipt: null,
@@ -796,10 +796,26 @@
       const isDirectMessage = overview.guild.isDirectMessage;
       groups.push(
         {
-          title: ui("nav_global"),
+          title: ui("nav_server"),
+          links: [
+            { view: "overview", title: ui("overview_title"), hint: ui("overview_hint") },
+            { view: "personas", title: ui("personas_title") },
+            { view: "lorebooks", title: ui("server_lorebooks") },
+            ...(isDirectMessage
+              ? []
+              : [{ view: "personal-spotlights", title: ui("spotlights"), hint: ui("spotlights_hint") }]),
+          ],
+        },
+        {
+          title: ui("nav_account"),
           links: [
             { view: "profile", title: ui("my_settings") },
-            { view: "personal-memory", title: ui("global_memory"), hint: ui("global_memory_hint") },
+            {
+              view: "personal-memory",
+              title: ui("my_memories"),
+              alias: ui("global_memory"),
+              hint: ui("global_memory_hint"),
+            },
             {
               view: "personal-providers",
               title: ui("nav_personal_providers"),
@@ -808,35 +824,22 @@
             },
           ],
         },
-        {
-          title: ui("nav_server_settings"),
-          links: [
-            { view: "overview", title: ui("overview_title"), hint: ui("overview_hint") },
-            { view: "personas", title: ui("personas_title") },
-            ...(isDirectMessage
-              ? []
-              : [{ view: "personal-spotlights", title: ui("spotlights"), hint: ui("spotlights_hint") }]),
-            { view: "lorebooks", title: ui("lorebooks") },
-          ],
-        },
       );
       if (overview.canManage) {
         groups.push({
           title: ui("nav_server_administration"),
           links: [
+            { view: "settings", title: ui("nav_server_settings"), settingsGroup: "conversation" },
+            ...(isDirectMessage
+              ? []
+              : [{ view: "channel-settings", title: ui("channel_settings"), channelTab: "settings" }]),
             {
               view: "server-providers",
               title: ui("nav_server_providers"),
               scope: "server",
               providerPanel: "connections",
             },
-            ...(isDirectMessage
-              ? []
-              : [
-                  { view: "channel-settings", title: ui("channel_settings"), channelTab: "settings" },
-                  { view: "moderation", title: ui("moderation"), moderationTab: "roles" },
-                ]),
-            { view: "settings", title: ui("nav_server_settings"), settingsGroup: "conversation" },
+            ...(isDirectMessage ? [] : [{ view: "moderation", title: ui("moderation"), moderationTab: "roles" }]),
           ],
         });
       }
@@ -1299,7 +1302,7 @@
         workspace.innerHTML = `<section class="banner compact" aria-labelledby="server-lorebooks-title">
           <div class="banner-info"><div class="stack" data-lorebook-summary>
             <p class="crumb">${escapeHtml(ui("lorebook_eyebrow"))}</p>
-            <h1 id="server-lorebooks-title" data-fx="split">${escapeHtml(ui("lorebooks"))}</h1>
+            <h1 id="server-lorebooks-title" data-fx="split">${escapeHtml(ui("server_lorebooks"))}</h1>
             <p class="banner-text">${escapeHtml(ui("lorebook_page_hint"))}</p>
             <div class="chips" data-lorebook-totals hidden></div>
           </div></div>
@@ -1424,7 +1427,7 @@
     for (const profileTab of Object.keys(profileTabs))
       addMarkup(renderProfilePanel(profileTab), { view: "profile", profileTab }, ui("my_settings"));
     page("personal-memory", ui("personal_stm"), {
-      path: ui("global_memory"),
+      path: ui("my_memories"),
       hint: ui("personal_stm_hint"),
       tag: "h3",
     });
@@ -1466,7 +1469,7 @@
           view: "lorebooks",
           title: ui(key),
           hint: ui(`${key}_hint`) || "",
-          path: ui("lorebooks"),
+          path: ui("server_lorebooks"),
           name,
           lorebookEntryField: true,
         });
@@ -1498,62 +1501,59 @@
         page("channel-settings", ui("channel_personas"), { ...route, channelPersonas: true, path });
       }
     }
+    const sections = personaSections();
     for (const persona of state.overview.personas.filter((entry) => entry.lineageId !== 0)) {
       const route = { view: "personas", personaId: persona.personaId };
+      const personaPath = `${ui("personas_title")} / ${persona.nickname}`;
       page("personas", persona.nickname, {
         ...route,
         personaPanel: "personal",
         personaHome: true,
-        path: `Personas / ${persona.nickname}`,
+        path: personaPath,
       });
-      const knowledgePath = `Personas / ${persona.nickname} / ${ui("persona_knowledge")}`;
-      for (const [panel, label] of personaKnowledgeTabs()) {
-        const title = ui(label);
-        page("personas", title, {
-          ...route,
-          personaPanel: panel,
-          path: knowledgePath,
-          ...(panel === "conditioning" ? { hint: ui("persona_conditioning_hint") } : {}),
-        });
-      }
-      addMarkup(
-        renderPersonaNaming(persona),
-        { ...route, personaPanel: "preferences" },
-        `Personas / ${persona.nickname} / ${state.overview.personaNaming.copy.tab}`,
-      );
-      if (state.overview.canManage) {
-        entries.push({
-          ...route,
-          personaPanel: "settings",
-          title: ui("persona_model_title"),
-          hint: ui("persona_model_hint"),
-          name: "modelId",
-          path: `Personas / ${persona.nickname} / Persona settings`,
-        });
-        addMarkup(
-          renderPersonaSettings(persona),
-          { ...route, personaPanel: "settings" },
-          `Personas / ${persona.nickname} / Persona settings`,
-        );
-        addMarkup(
-          renderPersonaAppearance(persona),
-          { ...route, personaPanel: "appearance" },
-          `Personas / ${persona.nickname} / Appearance & image prompt`,
-        );
-        const voicePath = `Personas / ${persona.nickname} / ${ui("persona_voice_title")}`;
-        page("personas", ui("persona_voice_title"), { ...route, personaPanel: "voice", path: voicePath });
-        for (const [name, key] of [
-          ["priority", "persona_voice_priority"],
-          ["designPrompt", "persona_voice_design_prompt"],
-        ]) {
-          page("personas", ui(key), { ...route, personaPanel: "voice", name, path: voicePath });
+      for (const section of sections) {
+        const sectionPath = `${personaPath} / ${section.title}`;
+        if (section.views) {
+          page("personas", section.title, {
+            ...route,
+            personaPanel: section.views[0].id,
+            path: personaPath,
+            alias: section.alias,
+          });
         }
-        page("personas", ui("sprites"), { ...route, personaPanel: "sprites", path: `Personas / ${persona.nickname}` });
-        page("personas", ui("persona_channels"), {
-          ...route,
-          personaPanel: "channels",
-          path: `Personas / ${persona.nickname}`,
-        });
+        for (const panel of section.views ?? [section]) {
+          const destination = { ...route, personaPanel: panel.id };
+          const path = section.views ? `${sectionPath} / ${panel.title}` : sectionPath;
+          page("personas", panel.title, {
+            ...destination,
+            path: section.views ? sectionPath : personaPath,
+            ...(panel.id === "conditioning" ? { hint: ui("persona_conditioning_hint") } : {}),
+          });
+          switch (panel.id) {
+            case "preferences":
+              addMarkup(renderPersonaNaming(persona), destination, path);
+              break;
+            case "identity":
+              addMarkup(renderPersonaIdentity(persona), destination, path);
+              break;
+            case "behaviour":
+              addMarkup(renderPersonaBehaviour(persona), destination, path);
+              page("personas", ui("persona_model_title"), {
+                ...destination,
+                path,
+                name: "modelId",
+                hint: ui("persona_model_hint"),
+              });
+              break;
+            case "images":
+              addMarkup(renderPersonaAppearance(persona), destination, path);
+              break;
+            case "voice":
+              page("personas", ui("persona_voice_priority"), { ...destination, path, name: "priority" });
+              page("personas", ui("persona_voice_design_prompt"), { ...destination, path, name: "designPrompt" });
+              break;
+          }
+        }
       }
     }
     for (const scope of state.overview.canManage ? ["personal", "server"] : ["personal"]) {
@@ -1611,18 +1611,21 @@
   }
 
   function filterSettingsSearch(entries, query) {
-    const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const needle = query.trim().toLocaleLowerCase();
+    const words = needle.split(/\s+/).filter(Boolean);
     return entries
       .map((entry) => {
         const title = entry.title.toLocaleLowerCase();
-        const text = `${title} ${entry.path} ${entry.hint || ""}`.toLocaleLowerCase();
+        const alias = entry.alias?.toLocaleLowerCase();
+        const location = `${title} ${entry.path}`.toLocaleLowerCase();
+        const text = `${location} ${alias || ""} ${entry.hint || ""}`.toLocaleLowerCase();
         return {
           entry,
           score: words.every((word) => text.includes(word))
-            ? title === query.toLocaleLowerCase().trim()
+            ? title === needle
               ? 3
-              : words.some((word) => title.includes(word)) &&
-                  words.every((word) => `${title} ${entry.path}`.toLocaleLowerCase().includes(word))
+              : alias === needle ||
+                  (words.some((word) => title.includes(word)) && words.every((word) => location.includes(word)))
                 ? 2
                 : 1
             : 0,
@@ -2498,7 +2501,7 @@
     if (!workspace.querySelector("#profile-stage")) {
       workspace.innerHTML = `<section class="banner compact" aria-labelledby="profile-title">
         <div class="banner-info"><div class="stack">
-          <p class="crumb">${escapeHtml(ui("nav_global"))}</p>
+          <p class="crumb">${escapeHtml(ui("nav_account"))}</p>
           <h1 id="profile-title" data-fx="split">${title}</h1>
           <p class="banner-text">${escapeHtml(ui("profile_banner_hint"))}</p>
         </div></div>
@@ -2529,7 +2532,7 @@
   function renderPersonalSpotlights(workspace) {
     workspace.innerHTML = `<section class="banner compact" aria-labelledby="spotlights-title">
       <div class="banner-info"><div class="stack">
-        <p class="crumb">${escapeHtml(ui("nav_server_settings"))}</p>
+        <p class="crumb">${escapeHtml(ui("nav_server"))}</p>
         <h1 id="spotlights-title" data-fx="split">${escapeHtml(ui("spotlights"))}</h1>
         <p class="banner-text">${escapeHtml(ui("spotlights_hint"))}</p>
       </div></div>
@@ -3335,8 +3338,8 @@
     workspace.innerHTML = `
       <section class="banner compact" aria-labelledby="global-memory-title">
         <div class="banner-info"><div class="stack">
-          <p class="crumb">${escapeHtml(ui("nav_global"))}</p>
-          <h1 id="global-memory-title" data-fx="split">${escapeHtml(ui("global_memory"))}</h1>
+          <p class="crumb">${escapeHtml(ui("nav_account"))}</p>
+          <h1 id="global-memory-title" data-fx="split">${escapeHtml(ui("my_memories"))}</h1>
           <p class="banner-text">${escapeHtml(ui("global_memory_hint"))}</p>
         </div></div>
         <div class="banner-art" aria-hidden="true"><span class="sticker emblem">${navigationIcon("brain")}</span></div>
@@ -4373,15 +4376,50 @@
     });
   }
 
-  function personaKnowledgeTabs() {
-    const tabs = [
-      ["personal", "persona_personal_memory"],
-      ["server", "persona_server_memory"],
-      ["lorebook", "lorebooks"],
+  function personaSections() {
+    const { canManage, guild, personaNaming, personaNamingHabits } = state.overview;
+    const sections = [
+      {
+        id: "knowledge",
+        title: ui("persona_knowledge"),
+        icon: "brain",
+        views: [
+          { id: "personal", title: ui("persona_personal_memory") },
+          { id: "server", title: ui("persona_server_memory") },
+          { id: "lorebook", title: ui("persona_lorebooks") },
+        ],
+      },
+      { id: "preferences", title: personaNaming.copy.tab, icon: "sliders-horizontal" },
     ];
-    if (state.overview.canManage && state.overview.personaNamingHabits && !state.overview.guild.isDirectMessage)
-      tabs.push(["conditioning", "persona_conditioning_tab"]);
-    return tabs;
+    if (canManage) {
+      const character = [
+        { id: "identity", title: ui("persona_identity_tab") },
+        { id: "behaviour", title: ui("persona_behaviour_tab") },
+      ];
+      if (personaNamingHabits && !guild.isDirectMessage)
+        character.push({ id: "conditioning", title: ui("persona_conditioning_tab") });
+      sections.push(
+        {
+          id: "character",
+          title: ui("persona_character_tab"),
+          icon: "user-round",
+          alias: ui("persona_settings_tab"),
+          views: character,
+        },
+        {
+          id: "appearance",
+          title: ui("persona_appearance_tab"),
+          icon: "image",
+          views: [
+            { id: "images", title: ui("persona_images_tab") },
+            { id: "sprites", title: ui("sprites") },
+          ],
+        },
+        { id: "voice", title: ui("persona_voice_title"), icon: "mic" },
+      );
+      if (!guild.isDirectMessage) sections.push({ id: "channels", title: ui("persona_channels"), icon: "radio" });
+    }
+    return sections;
   }
 
   const personaAttgFields = [
@@ -4590,21 +4628,13 @@
     }
   }
 
-  function renderPersonaSettings(persona) {
-    const saveActions = cardSaveActions(ui("persona_save"));
+  function renderPersonaIdentity(persona) {
     const attributes = persona.attributes || [];
-    const dialogues = persona.sampleDialogues || [];
     return `<div class="split"><div class="col">
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="identity">
           ${personaCardHead(ui("persona_identity_title"), ui("persona_identity_hint"))}
           <label class="field">${fieldLabel(ui("persona_nickname"), ui("persona_nickname_hint"))}<input name="nickname" value="${escapeHtml(persona.nickname)}" minlength="1" maxlength="100" required></label>
-          ${saveActions}
-        </form>
-
-        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
-          ${personaCardHead(ui("persona_triggers_title"), ui("persona_triggers_hint"))}
-          ${renderPersonaChipEditor("triggerWords", persona.triggerWords || [], "persona_triggers_add")}
-          ${saveActions}
+          ${cardSaveActions(ui("persona_save"))}
         </form>
 
         <section class="card" data-persona-id="${persona.personaId}">
@@ -4612,6 +4642,28 @@
           <div data-persona-entries>${personaEntryDrafts.has(personaEntryKey(persona.personaId, "attribute", "new")) ? renderPersonaEntry(persona, "attribute", "new", { text: "", isPublic: false }) : ""}${attributes.length ? `<div class="rows">${attributes.map((attribute, index) => renderPersonaEntry(persona, "attribute", index, attribute)).join("")}</div>` : `<div class="empty-note"><strong>${escapeHtml(ui("persona_attributes_empty"))}</strong></div>`}</div>
         </section>
 
+      </div><div class="col">
+        ${renderPersonaNamingHabits(persona)}
+        ${state.overview.personaGuildSettings ? personaSettingsPanel("persona_preset_title", "persona_preset_hint", "data-persona-preset-panel") : ""}
+        ${
+          persona.isAlter
+            ? `<section class="card" data-persona-id="${persona.personaId}">
+                ${personaCardHead(ui("persona_delete_alter"), ui("persona_delete_alter_hint"), `<div class="actions"><button class="button danger hold-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div>`)}
+              </section>`
+            : ""
+        }
+      </div></div>`;
+  }
+
+  function renderPersonaBehaviour(persona) {
+    const saveActions = cardSaveActions(ui("persona_save"));
+    const dialogues = persona.sampleDialogues || [];
+    return `<div class="split"><div class="col">
+        <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="prompt">
+          ${personaCardHead(ui("persona_triggers_title"), ui("persona_triggers_hint"))}
+          ${renderPersonaChipEditor("triggerWords", persona.triggerWords || [], "persona_triggers_add")}
+          ${saveActions}
+        </form>
         <form class="card" data-fx="track" data-persona-id="${persona.personaId}" data-persona-section="context">
           ${personaCardHead(ui("persona_context_title"), ui("persona_context_hint"))}
           <div class="stack">
@@ -4620,23 +4672,14 @@
           </div>
           ${saveActions}
         </form>
-        ${renderPersonaNamingHabits(persona)}
         ${renderPersonaHumanizer(persona)}
         ${state.overview.canManage ? `<div id="persona-text-model" data-persona-id="${persona.personaId}">${loadingBar(ui("persona_model_loading"))}</div>` : ""}
         ${renderPersonaAttg(persona.personaId)}
-        ${state.overview.personaGuildSettings ? personaSettingsPanel("persona_preset_title", "persona_preset_hint", "data-persona-preset-panel") : ""}
       </div><div class="col">
         <section class="card" data-persona-id="${persona.personaId}">
           <header class="card-head"><h3>${escapeHtml(ui("persona_dialogues_title"))}<small>${dialogues.length}</small></h3><button class="button small" type="button" data-entry-add="dialogue">${navigationIcon("plus")}${escapeHtml(ui("persona_add_dialogue"))}</button></header>
           <div data-persona-entries>${personaEntryDrafts.has(personaEntryKey(persona.personaId, "dialogue", "new")) ? renderPersonaEntry(persona, "dialogue", "new", { input: "", output: "" }) : ""}${dialogues.length ? `<div class="rows">${dialogues.map((dialogue, index) => renderPersonaEntry(persona, "dialogue", index, dialogue)).join("")}</div>` : `<div class="empty-note"><strong>${escapeHtml(ui("persona_dialogues_empty"))}</strong></div>`}</div>
         </section>
-        ${
-          persona.isAlter
-            ? `<section class="card" data-persona-id="${persona.personaId}">
-                ${personaCardHead(ui("persona_delete_alter"), ui("persona_delete_alter_hint"), `<div class="actions"><button class="button danger hold-button" type="button" data-hold data-persona-delete="${persona.personaId}" data-confirm-title="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}" data-confirm-description="${escapeHtml(ui("persona_delete_description"))}" aria-label="${escapeHtml(ui("persona_delete_title").replace("{name}", () => persona.nickname))}"><span>${escapeHtml(ui("control_hold_delete"))}</span></button></div>`)}
-              </section>`
-            : ""
-        }
       </div></div>`;
   }
 
@@ -5001,7 +5044,7 @@
     </div>`;
   }
 
-  function mountPersonaPage(workspace, personas, persona, primaryTabs, knowledgeTabs, canAdd) {
+  function mountPersonaPage(workspace, personas, persona, sections, canAdd) {
     const addActions = `<button class="button" type="button" data-persona-create-open data-fx="spark">${navigationIcon("plus")}${escapeHtml(ui("persona_create"))}</button>
       <button class="button" type="button" data-persona-import-open>${navigationIcon("download")}${escapeHtml(ui("persona_import_action"))}</button>`;
     const pickerActions = canAdd
@@ -5012,8 +5055,8 @@
       syncPersonaChat(workspace, null);
       return;
     }
-    const tab = ([key, label, icon]) =>
-      `<button type="button" id="persona-tab-${key}" role="tab" aria-selected="false" tabindex="-1" data-persona-panel="${key}">${icon ? navigationIcon(icon) : ""}${escapeHtml(label)}</button>`;
+    const tab = ({ id, title, icon }) =>
+      `<button type="button" id="persona-tab-${id}" role="tab" aria-selected="false" tabindex="-1" data-persona-panel="${id}">${icon ? navigationIcon(icon) : ""}${escapeHtml(title)}</button>`;
     workspace.innerHTML = `
       <section class="banner" data-persona-banner aria-labelledby="persona-name">
         <div class="banner-info">
@@ -5054,10 +5097,16 @@
         }
       </section>
       ${state.overview.guild.isDirectMessage ? `<p class="notice">${escapeHtml(ui("direct_messages_guild_only"))}</p>` : ""}
-      <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${escapeHtml(ui("personas_title"))}">${primaryTabs.map(tab).join("")}</nav>
+      <nav class="dock" data-fx="indicator" data-overflow role="tablist" aria-label="${escapeHtml(ui("personas_title"))}">${sections.map(tab).join("")}</nav>
       <section class="stage" data-persona-stage role="tabpanel">
-        <div class="toolbar" data-persona-knowledge-toolbar>
-          <nav class="segmented" data-fx="indicator" role="tablist" aria-label="${escapeHtml(ui("persona_knowledge"))}">${knowledgeTabs.map(([key, label]) => tab([key, ui(label)])).join("")}</nav>
+        <div class="toolbar" data-persona-toolbar>
+          ${sections
+            .filter(({ views }) => views)
+            .map(
+              ({ id, title, views }) =>
+                `<nav class="segmented" data-fx="indicator" data-overflow role="tablist" aria-label="${escapeHtml(title)}" data-persona-views="${id}" hidden>${views.map(tab).join("")}</nav>`,
+            )
+            .join("")}
           <div class="actions" data-persona-stage-actions hidden></div>
         </div>
         <div data-persona-content></div>
@@ -5155,68 +5204,51 @@
     const personas = (state.overview.personas || []).filter((persona) => persona.lineageId !== 0);
     const canAdd = state.overview.canManage && !state.overview.guild.isDirectMessage;
     const persona = personas.find((entry) => entry.personaId === state.personaId) || personas[0];
-    const knowledgeTabs = personaKnowledgeTabs();
-    const isKnowledge = (panel) => knowledgeTabs.some(([key]) => key === panel);
-    const primaryTabs = [["knowledge", ui("persona_knowledge"), "brain"]];
-    if (state.overview.canManage) {
-      primaryTabs.push(
-        ["settings", ui("persona_settings_tab"), "user-round"],
-        ["sprites", ui("sprites"), "palette"],
-        ["appearance", ui("persona_appearance_tab"), "image"],
-        ["voice", ui("persona_voice_title"), "mic"],
-      );
-      if (!state.overview.guild.isDirectMessage) primaryTabs.push(["channels", ui("persona_channels"), "radio"]);
-    }
-    primaryTabs.push(["preferences", state.overview.personaNaming.copy.tab, "sliders-horizontal"]);
-    const mountKey = JSON.stringify([canAdd, primaryTabs, knowledgeTabs]);
+    const sections = personaSections();
+    const mountKey = JSON.stringify([canAdd, sections]);
     const banner = workspace.querySelector("[data-persona-banner]");
     if (!persona || !banner || workspace.dataset.personaMount !== mountKey) {
-      mountPersonaPage(workspace, personas, persona, primaryTabs, knowledgeTabs, canAdd);
+      mountPersonaPage(workspace, personas, persona, sections, canAdd);
       workspace.dataset.personaMount = mountKey;
     }
     if (!persona) return;
     state.personaId = persona.personaId;
-    if (!isKnowledge(state.personaKnowledgePanel)) state.personaKnowledgePanel = "personal";
-    if (!isKnowledge(state.personaPanel) && !primaryTabs.some(([key]) => key === state.personaPanel)) {
-      state.personaPanel = "personal";
+    let section = sections.find((entry) =>
+      entry.views ? entry.views.some(({ id }) => id === state.personaPanel) : entry.id === state.personaPanel,
+    );
+    if (!section) {
+      section = sections[0];
+      state.personaPanel = section.views[0].id;
     }
     const panel = state.personaPanel;
-    const knowledgeActive = isKnowledge(panel);
-    if (knowledgeActive) state.personaKnowledgePanel = panel;
-    const primaryPanel = knowledgeActive ? "knowledge" : panel;
+    if (section.views) state.personaSectionViews[section.id] = panel;
     const stage = workspace.querySelector("[data-persona-stage]");
-    const toolbar = stage.querySelector("[data-persona-knowledge-toolbar]");
+    const toolbar = stage.querySelector("[data-persona-toolbar]");
     const content = stage.querySelector("[data-persona-content]");
     workspace.querySelectorAll("[data-persona-panel]").forEach((button) => {
-      const section = button.closest(".dock");
-      const selected = button.dataset.personaPanel === (section ? primaryPanel : state.personaKnowledgePanel);
+      const isDockTab = Boolean(button.closest(".dock"));
+      const selected = button.dataset.personaPanel === (isDockTab ? section.id : panel);
       button.setAttribute("aria-selected", String(selected));
       button.tabIndex = selected ? 0 : -1;
-      if (selected) button.setAttribute("aria-controls", section ? "persona-stage" : `persona-content-${panel}`);
+      if (selected) button.setAttribute("aria-controls", isDockTab ? "persona-stage" : `persona-content-${panel}`);
       else button.removeAttribute("aria-controls");
     });
-    toolbar.hidden = !knowledgeActive;
-    toolbar.querySelector(".segmented").hidden = !knowledgeActive;
+    toolbar.hidden = !section.views;
+    toolbar.querySelectorAll("[data-persona-views]").forEach((views) => {
+      views.hidden = views.dataset.personaViews !== section.id;
+    });
     const stageActions = stage.querySelector("[data-persona-stage-actions]");
     stageActions.hidden = true;
     stageActions.replaceChildren();
     stage.id = "persona-stage";
-    stage.setAttribute("aria-labelledby", `persona-tab-${primaryPanel}`);
+    stage.setAttribute("aria-labelledby", `persona-tab-${section.id}`);
     content.id = `persona-content-${panel}`;
-    if (knowledgeActive) {
+    if (section.views) {
       content.setAttribute("role", "tabpanel");
       content.setAttribute("aria-labelledby", `persona-tab-${panel}`);
     } else {
       content.removeAttribute("role");
       content.removeAttribute("aria-labelledby");
-    }
-    if (knowledgeActive) {
-      const segments = toolbar.querySelector(".segmented");
-      const active = segments.querySelector('[aria-selected="true"]');
-      const left = active.offsetLeft;
-      const right = left + active.offsetWidth;
-      if (left < segments.scrollLeft) segments.scrollLeft = left;
-      else if (right > segments.scrollLeft + segments.clientWidth) segments.scrollLeft = right - segments.clientWidth;
     }
     updatePersonaBanner(workspace, persona, personas);
     const memoryPanel = panel === "personal" || panel === "server";
@@ -5241,10 +5273,13 @@
       case "preferences":
         body = renderPersonaNaming(persona);
         break;
-      case "settings":
-        body = renderPersonaSettings(persona);
+      case "identity":
+        body = renderPersonaIdentity(persona);
         break;
-      case "appearance":
+      case "behaviour":
+        body = renderPersonaBehaviour(persona);
+        break;
+      case "images":
         body = renderPersonaAppearance(persona);
         break;
       case "voice":
@@ -5290,8 +5325,8 @@
       void refresh();
     } else {
       resizeAutoGrowTextareas(workspace);
-      if (panel === "settings") {
-        loadPersonaTextModel(persona.personaId);
+      if (panel === "behaviour") void loadPersonaTextModel(persona.personaId);
+      if (panel === "identity") {
         const preset = workspace.querySelector("[data-persona-preset-panel]");
         if (preset) void loadPersonaPreset(preset, persona.personaId);
       }
@@ -5485,7 +5520,7 @@
       guildId === state.guildId &&
       personaId === state.personaId &&
       state.view === "personas" &&
-      state.personaPanel === "settings" &&
+      state.personaPanel === "behaviour" &&
       document.querySelector("#persona-text-model") === target;
     try {
       const data = await api(`/guilds/${guildId}/personas/${personaId}/text-model`);
@@ -5524,7 +5559,7 @@
       });
     });
     toast(ui("persona_model_saved"));
-    if (guildId === state.guildId && personaId === state.personaId && state.personaPanel === "settings") {
+    if (guildId === state.guildId && personaId === state.personaId && state.personaPanel === "behaviour") {
       await loadPersonaTextModel(personaId);
     }
   }
@@ -7720,7 +7755,7 @@
       workspace.innerHTML = `
         <section class="banner compact" aria-labelledby="${scope}-providers-title">
           <div class="banner-info"><div class="stack">
-            <p class="crumb">${escapeHtml(ui(server ? "nav_server_administration" : "nav_global"))}${server ? `<span class="kind">${escapeHtml(ui("settings_managers_only"))}</span>` : ""}</p>
+            <p class="crumb">${escapeHtml(ui(server ? "nav_server_administration" : "nav_account"))}${server ? `<span class="kind">${escapeHtml(ui("settings_managers_only"))}</span>` : ""}</p>
             <h1 id="${scope}-providers-title" data-fx="split">${title}</h1>
             <p class="banner-text" data-provider-hint>${escapeHtml(ui(hint))}</p>
           </div></div>
@@ -7864,7 +7899,7 @@
     state.lineageId = 0;
     state.personaId = 0;
     state.personaPanel = "personal";
-    state.personaKnowledgePanel = "personal";
+    state.personaSectionViews = {};
     state.personaTestChats = {};
     state.personaChatOpen = false;
     state.personaTestChatBusy = false;
@@ -9549,7 +9584,8 @@
     const personaPanel = event.target.closest("[data-persona-panel]");
     if (personaPanel) {
       const tab = personaPanel.dataset.personaPanel;
-      const panel = tab === "knowledge" ? state.personaKnowledgePanel : tab;
+      const views = personaSections().find(({ id }) => id === tab)?.views;
+      const panel = views ? (views.find(({ id }) => id === state.personaSectionViews[tab]) ?? views[0]).id : tab;
       if (panel === state.personaPanel) return;
       if (!(await confirmPersonaSectionChange(document.querySelector("[data-persona-content]")))) return;
       state.personaPanel = panel;
@@ -9943,7 +9979,7 @@
         });
         document.querySelector("#persona-create-dialog")?.close();
         form.reset();
-        state.personaPanel = "settings";
+        state.personaPanel = "identity";
         await refreshPersonas(result?.persona?.personaId, "Persona created");
       } catch (error) {
         toast(error.message, "error");
@@ -9965,7 +10001,7 @@
         });
         document.querySelector("#persona-import-dialog")?.close();
         form.reset();
-        state.personaPanel = "settings";
+        state.personaPanel = "identity";
         await refreshPersonas(result?.persona?.personaId, "Persona imported");
       } catch (error) {
         toast(error.message, "error");

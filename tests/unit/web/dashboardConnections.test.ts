@@ -80,7 +80,9 @@ describe("dashboard connections", () => {
 
   it("indexes visible dashboard destinations for the workspace and account permissions", async () => {
     const source = await Promise.all(
-      ["dashboardNavigation", "buildSettingsSearchIndex", "filterSettingsSearch"].map(dashboardFunction),
+      ["dashboardNavigation", "personaSections", "buildSettingsSearchIndex", "filterSettingsSearch"].map(
+        dashboardFunction,
+      ),
     );
     const overview = {
       canManage: true,
@@ -91,6 +93,7 @@ describe("dashboard connections", () => {
         { personaId: 3, lineageId: 5, nickname: "Mirri" },
       ],
       personaNaming: { copy: { tab: "preferences" } },
+      personaNamingHabits: {},
       settings: { catalog: [] },
     };
     const state = {
@@ -108,8 +111,12 @@ describe("dashboard connections", () => {
         },
       },
     };
-    const { buildSettingsSearchIndex: build, filterSettingsSearch: filter } = runInNewContext(
-      `${source.join("\n")}\n({ buildSettingsSearchIndex, filterSettingsSearch })`,
+    const {
+      buildSettingsSearchIndex: build,
+      filterSettingsSearch: filter,
+      dashboardNavigation: navigation,
+    } = runInNewContext(
+      `${source.join("\n")}\n({ buildSettingsSearchIndex, filterSettingsSearch, dashboardNavigation })`,
       {
         state,
         ui: String,
@@ -117,7 +124,6 @@ describe("dashboard connections", () => {
         moderationTabs: {},
         settingsGroups: [],
         channelSettingsFields: [],
-        personaKnowledgeTabs: () => [],
         settingSearchText: (element: { textContent: string }) => element.textContent,
         document: {
           createElement: () => {
@@ -142,13 +148,15 @@ describe("dashboard connections", () => {
         },
         renderProfilePanel: (section: string) => `${section} options`,
         renderPersonaNaming: () => "How this persona addresses you",
-        renderPersonaSettings: () => "",
+        renderPersonaIdentity: () => "Display identity",
+        renderPersonaBehaviour: () => "Sample dialogues",
         renderPersonaAppearance: () => "",
         renderChannelOverrides: () => "",
       },
     ) as {
       buildSettingsSearchIndex: () => SearchEntry[];
       filterSettingsSearch: (entries: SearchEntry[], query: string) => SearchEntry[];
+      dashboardNavigation: () => { title: string; links: { view: string }[] }[];
     };
     type SearchEntry = {
       view: string;
@@ -165,12 +173,12 @@ describe("dashboard connections", () => {
     };
     const commonPages = {
       my_settings: "profile",
-      global_memory: "personal-memory",
+      my_memories: "personal-memory",
       nav_personal_providers: "personal-providers",
       overview_title: "overview",
       personas_title: "personas",
       spotlights: "personal-spotlights",
-      lorebooks: "lorebooks",
+      server_lorebooks: "lorebooks",
     };
     const managerPages = {
       nav_server_providers: "server-providers",
@@ -181,9 +189,20 @@ describe("dashboard connections", () => {
     for (const canManage of [true, false]) {
       overview.canManage = canManage;
       const entries = build();
+      expect(navigation().map(({ links }) => links.map(({ view }) => view))).toEqual([
+        ["overview", "personas", "lorebooks", "personal-spotlights"],
+        ["profile", "personal-memory", "personal-providers"],
+        ...(canManage ? [["settings", "channel-settings", "server-providers", "moderation"]] : []),
+      ]);
       for (const [title, view] of Object.entries({ ...commonPages, ...(canManage ? managerPages : {}) })) {
         expect(filter(entries, title)[0]).toMatchObject({ view, title });
       }
+      expect(filter(entries, "global_memory")[0]).toMatchObject({ view: "personal-memory", title: "my_memories" });
+      expect(filter(entries, "Juno persona_lorebooks")[0]).toMatchObject({
+        personaId: 2,
+        personaPanel: "lorebook",
+        path: "personas_title / Juno / persona_knowledge",
+      });
       if (!canManage) {
         for (const view of Object.values(managerPages))
           expect(entries.some((entry) => entry.view === view)).toBe(false);
@@ -211,6 +230,24 @@ describe("dashboard connections", () => {
           true,
         );
         expect(entries.some((entry) => entry.personaId === personaId && entry.name === "modelId")).toBe(canManage);
+        expect(entries.some((entry) => entry.personaId === personaId && entry.personaPanel === "conditioning")).toBe(
+          canManage,
+        );
+      }
+      if (canManage) {
+        for (const [query, personaPanel, path] of [
+          ["Display identity", "identity", "persona_character_tab / persona_identity_tab"],
+          ["Sample dialogues", "behaviour", "persona_character_tab / persona_behaviour_tab"],
+          ["persona_model_title", "behaviour", "persona_character_tab / persona_behaviour_tab"],
+          ["sprites", "sprites", "persona_appearance_tab"],
+          ["persona_conditioning_tab", "conditioning", "persona_character_tab"],
+        ]) {
+          expect(filter(entries, `Juno ${query}`)[0]).toMatchObject({
+            personaId: 2,
+            personaPanel,
+            path: `personas_title / Juno / ${path}`,
+          });
+        }
       }
       expect(entries.some((entry) => entry.personaId === 1)).toBe(false);
     }
@@ -219,6 +256,9 @@ describe("dashboard connections", () => {
     const dmEntries = build();
     for (const view of ["channel-settings", "moderation", "personal-spotlights"])
       expect(dmEntries.some((entry) => entry.view === view)).toBe(false);
+    expect(dmEntries.some((entry) => entry.personaPanel === "channels" || entry.personaPanel === "conditioning")).toBe(
+      false,
+    );
 
     state.session.user.isGlobalAdmin = true;
     state.overview = null;

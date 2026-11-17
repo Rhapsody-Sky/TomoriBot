@@ -10,8 +10,9 @@ handling do not depend on it.
 
 ## Current Coverage
 
-The sidebar separates cross-server preferences under Global, the selected server's
-workspace under Server Settings, and guild management under Server Administration.
+The sidebar opens with the selected server's workspace. `My account` holds
+cross-server preferences and memories, and `Server administration` holds guild
+management pages.
 
 The workspace selector also includes an initialized DM workspace owned by the
 signed-in user. Its scope is the authenticated Discord user ID, never a supplied
@@ -102,15 +103,15 @@ Members with Manage Server or Administrator can additionally:
   sample dialogues, context note, and appearance data from the same persona
   workspace as its memories;
 - set a persona's default prefix, suffix, and address term for each addressing
-  style under **Persona settings**. Individual members' affix overrides still
+  style under `Character` > `Identity`. Individual members' affix overrides still
   take precedence;
-- upload a persona's image-generation reference under `Appearance & image prompt`;
-- set NovelAI writing metadata and resync a customized identity with its preset
-  under `Persona settings`. Resync keeps the persona's lineage, including its
+- upload a persona's image-generation reference under `Appearance` > `Images`;
+- set NovelAI writing metadata under `Character` > `Behaviour` and resync a
+  customized identity with its preset under `Identity`. Resync keeps the persona's lineage, including its
   memories and lorebooks;
 - choose a voice description, server sample or ElevenLabs voice, and source
   priority under `Voice`. The owner of a DM workspace can also edit its voice;
-- review and remove history entries under `Knowledge` > `Reward & Punishment`
+- review and remove history entries under `Character` > `Reward & Punishment`
   for a persona on the selected server;
 - test a selected persona against the configured text model in an isolated,
   request-local preview chat, with sprite portraits and identity names for each
@@ -241,11 +242,11 @@ without disabling transcription or removing transcripts from Tomori's context.
 OpenRouter's `Add model` dialog registers a model for a selected capability.
 Registering a transcription model also selects it for that workspace and
 requires a saved OpenRouter key.
-Under `Persona settings`, the Humanizer can inherit the server settings or use
+Under `Character` > `Behaviour`, the Humanizer can inherit the server settings or use
 custom delivery switches for that persona.
 Persona-specific naming stays under Personas > My preferences and affects only
 the signed-in member. Administrative persona settings remain permission-gated.
-`Lorebooks` opens serverwide collections. `Personas` > `Knowledge` > `Lorebooks`
+`Server lorebooks` opens serverwide collections. `Personas` > `Knowledge` > `Persona lorebooks`
 opens the selected persona lineage. Members can read both scopes; only server
 managers can write.
 The collection list shows each book and its entry count beside the selected
@@ -305,7 +306,8 @@ to Notices & diagnostics.
 
 The mobile navigation drawer uses the same permitted destinations as the desktop
 sidebar. On Personas, the dock keeps the current section visible and puts sections
-that do not fit under More. Knowledge views use the segmented control below it.
+that do not fit under More. Knowledge, Character, and Appearance use the
+segmented control below the dock.
 Navigation icons are bundled Lucide assets with their license alongside them;
 the dashboard does not fetch icons from an external service.
 
@@ -336,7 +338,7 @@ The two memory tables intentionally have different rules:
 Repository writes include exact owner, server, and lineage guards. The
 dashboard never relies only on a row ID supplied by the browser.
 
-Global memory searches saved personal memories by text and tags. Refresh,
+`My memories` searches saved personal memories by text and tags. Refresh,
 import, and export are in the saved-memory actions menu. The short-term
 memory card shows the account-wide entry count and lets users request deletion
 of those entries.
