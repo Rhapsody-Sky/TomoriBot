@@ -1318,7 +1318,9 @@
   }
 
   function buildSettingsSearchIndex() {
-    const entries = dashboardNavigation().flatMap(({ title, links }) => links.map((link) => ({ path: title, ...link })));
+    const entries = dashboardNavigation().flatMap(({ title, links }) =>
+      links.map((link) => ({ path: title, ...link })),
+    );
     const addMarkup = (html, route, path) => {
       const template = document.createElement("template");
       template.innerHTML = html;
@@ -1593,17 +1595,24 @@
 
   function updateSettingsSearch(dialog) {
     const matches = filterSettingsSearch(settingsSearchEntries, dialog.querySelector("input").value);
+    const visibleMatches = matches.slice(0, 60);
     const list = dialog.querySelector("[data-search-results]");
-    list.innerHTML = matches
-      .slice(0, 60)
+    list.innerHTML = visibleMatches
       .map((entry) => {
         const persona = state.overview?.personas.find((persona) => persona.personaId === entry.personaId);
         return `<button type="button" class="settings-search-result" data-settings-search-result="${settingsSearchEntries.indexOf(entry)}">${persona ? personaAvatar(persona, "avatar") : ""}<span class="settings-search-copy"><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.path)}</small>${entry.hint ? `<span>${escapeHtml(entry.hint)}</span>` : ""}</span></button>`;
       })
       .join("");
-    dialog.querySelector("[role=status]").textContent = matches.length
-      ? ui("settings_search_count").replace("{count}", String(matches.length))
-      : ui("settings_search_empty");
+    const count = dialog.querySelector("[data-search-count]");
+    if (visibleMatches.length < matches.length) {
+      count.textContent = ui("settings_search_limited_count")
+        .replace("{shown}", String(visibleMatches.length))
+        .replace("{count}", String(matches.length));
+    } else {
+      count.textContent = matches.length
+        ? ui("settings_search_count").replace("{count}", String(matches.length))
+        : ui("settings_search_empty");
+    }
   }
 
   async function openSettingsSearch() {
@@ -1616,7 +1625,7 @@
     const dialog = document.createElement("dialog");
     dialog.className = "dialog wide settings-search";
     dialog.setAttribute("aria-labelledby", "settings-search-title");
-    dialog.innerHTML = `<header class="panel-header"><div class="heading"><h2 id="settings-search-title">${escapeHtml(ui("settings_search"))}</h2></div><button class="button icon" type="button" data-search-close aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header><label class="field"><span class="sr-only">${escapeHtml(ui("settings_search"))}</span><input type="search" placeholder="${escapeHtml(ui("settings_search_placeholder"))}" autocomplete="off"></label><p class="hint" role="status"></p><div class="settings-search-results" data-search-results></div>`;
+    dialog.innerHTML = `<header class="panel-header"><div class="heading"><h2 id="settings-search-title">${escapeHtml(ui("settings_search"))}</h2></div><button class="button icon" type="button" data-search-close aria-label="${escapeHtml(ui("navigation_close"))}">${navigationIcon("x")}</button></header><label class="field"><span class="sr-only">${escapeHtml(ui("settings_search"))}</span><input type="search" placeholder="${escapeHtml(ui("settings_search_placeholder"))}" autocomplete="off"></label><p class="hint" role="status"><span data-search-count></span> <span data-search-partial hidden>${escapeHtml(ui("settings_search_partial"))}</span></p><div class="settings-search-results" data-search-results></div>`;
     document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
     dialog.querySelector("[data-search-close]").onclick = () => dialog.close();
@@ -1648,7 +1657,7 @@
         settingsSearchEntries = buildSettingsSearchIndex();
         updateSettingsSearch(dialog);
       } catch {
-        if (dialog.open) dialog.querySelector("[role=status]").textContent = ui("settings_search_partial");
+        if (dialog.open) dialog.querySelector("[data-search-partial]").hidden = false;
       }
     }
   }
@@ -2492,6 +2501,13 @@
     </section>`;
     const refresh = workspace.querySelector("[data-spotlight-refresh]");
     const host = workspace.querySelector("[data-spotlight-content]");
+    if (
+      pendingSearchDestination?.view === "personal-spotlights" &&
+      pendingSearchDestination.guildId === state.guildId &&
+      pendingSearchDestination.spotlightChannel
+    ) {
+      host.dataset.spotlightChannel = pendingSearchDestination.spotlightChannel;
+    }
     const path = `/guilds/${state.guildId}/personal-spotlights`;
     const load = async () => {
       if (savingForms || refresh.disabled) return;
@@ -8853,6 +8869,9 @@
       if (unsaved && !(await confirmAction(ui("discard_title"), ui("leave_detail")))) return;
       if (!(await confirmDashboardSectionChange())) return;
       const destination = { ...entry, guildId: state.guildId };
+      if (entry.view === "personal-spotlights" && state.view === entry.view) {
+        destination.spotlightChannel = document.querySelector("[data-spotlight-content]")?.dataset.spotlightChannel;
+      }
       pendingSearchDestination = destination;
       if (!entry.channelSelection)
         setTimeout(() => {

@@ -384,6 +384,7 @@ export default {
       interface_settings_search: "Search",
       interface_settings_search_placeholder: "Search by name or description...",
       interface_settings_search_count: "{count} results",
+      interface_settings_search_limited_count: "{shown} of {count} results",
       interface_settings_search_empty: "No matching settings. Try a different word.",
       interface_settings_search_partial:
         "Some provider settings could not be loaded. Close and reopen search to retry.",

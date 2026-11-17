@@ -1273,6 +1273,7 @@ export function createDashboardApp(client: Client) {
           "settings_search",
           "settings_search_placeholder",
           "settings_search_count",
+          "settings_search_limited_count",
           "settings_search_empty",
           "settings_search_partial",
           "character_reference",

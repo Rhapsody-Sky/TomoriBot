@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import { initializeLocalizer } from "@/utils/text/localizer";
+import { localizedCopy } from "../../helpers/localeCases";
 
 async function dashboardFunction(name: string): Promise<string> {
   const source = await Bun.file("src/web/dashboard/assets/app.js").text();
@@ -264,6 +266,81 @@ describe("dashboard connections", () => {
     linkExists = false;
     focus();
     expect(revealed).toEqual([field, addLink]);
+  });
+
+  it("opens the spotlight field in the selected channel after replacing the workspace", async () => {
+    const source = await Promise.all(["handleDashboardAction", "renderPersonalSpotlights"].map(dashboardFunction));
+    const channel = "123456789012345681";
+    const host = {
+      dataset: {} as { spotlightChannel?: string },
+      isConnected: true,
+      setAttribute: () => {},
+      removeAttribute: () => {},
+    };
+    const workspace = {
+      querySelector: (selector: string) => (selector === "[data-spotlight-content]" ? host : { disabled: false }),
+    };
+    const result = { dataset: { settingsSearchResult: "0" }, closest: () => ({ close: () => {} }) };
+    const event = {
+      target: { closest: (selector: string) => (selector === "[data-settings-search-result]" ? result : null) },
+    };
+    const { promise: renderedChannel, resolve } = Promise.withResolvers<string | undefined>();
+    const search = runInNewContext(
+      `${source.join("\n")}\nfunction renderShell() { renderPersonalSpotlights(workspace); }\nhandleDashboardAction`,
+      {
+        document: { querySelectorAll: () => [], querySelector: () => ({ dataset: { spotlightChannel: channel } }) },
+        workspace,
+        state: { view: "personal-spotlights", guildId: "123456789012345678" },
+        savingForms: 0,
+        settingsSearchEntries: [{ view: "personal-spotlights", name: "durationHours" }],
+        localEditForms: "[data-settings-key]",
+        pendingSearchDestination: null,
+        confirmDashboardSectionChange: async () => true,
+        confirmDraftDiscard: async () => true,
+        setTimeout: () => {},
+        ui: String,
+        escapeHtml: String,
+        navigationIcon: String,
+        loadingBar: String,
+        api: async () => ({}),
+        renderPersonalSpotlightWorkspace: (content: typeof host) => resolve(content.dataset.spotlightChannel),
+      },
+    ) as (event: object) => Promise<void>;
+    await search(event);
+    expect(await renderedChannel).toBe(channel);
+  });
+
+  it("reports the number of visible results when dashboard search exceeds its limit", async () => {
+    await initializeLocalizer();
+    const source = await Promise.all(["filterSettingsSearch", "updateSettingsSearch"].map(dashboardFunction));
+    const entries = Array.from({ length: 61 }, (_, i) => ({
+      title: `Setting ${i + 1}`,
+      path: "Personas",
+      hint: i < 60 ? "Channel" : "",
+    }));
+    const input = { value: "" };
+    const list = { innerHTML: "" };
+    const count = { textContent: "" };
+    const elements: Record<string, object> = { input, "[data-search-results]": list, "[data-search-count]": count };
+    const dialog = { querySelector: (selector: string) => elements[selector] };
+    const copy = (key: string, variables?: Record<string, number>) =>
+      localizedCopy("en-US", `general.dashboard.interface_${key}`, variables);
+    const update = runInNewContext(`${source.join("\n")}\nupdateSettingsSearch`, {
+      state: {},
+      settingsSearchEntries: entries,
+      ui: copy,
+      escapeHtml: String,
+    }) as (dialog: object) => void;
+    for (const [query, shown, key, variables] of [
+      ["Personas", 60, "settings_search_limited_count", { shown: 60, count: 61 }],
+      ["Channel", 60, "settings_search_count", { count: 60 }],
+      ["Missing title", 0, "settings_search_empty", undefined],
+    ] as const) {
+      input.value = query;
+      update(dialog);
+      expect(list.innerHTML.match(/data-settings-search-result=/g) ?? []).toHaveLength(shown);
+      expect(count.textContent).toBe(copy(key, variables));
+    }
   });
 
   it("keeps a channel field destination pending until the channel settings are visible", async () => {
