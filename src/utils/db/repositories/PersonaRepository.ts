@@ -53,6 +53,8 @@ import { decryptApiKey } from "@/utils/security/crypto";
 import { llmProviderRepo } from "@/utils/db/repositories/LlmProviderRepository";
 import { userNamingRepository } from "@/utils/db/repositories/UserNamingRepository";
 import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
+import { lorebookRepository } from "@/modules/lorebooks/db/repositories";
+import type { LorebookEntryInput, LorebookEntryRow } from "@/modules/lorebooks/db/types";
 import { type MemoryValidationResult, getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { getUnconfiguredLlm } from "@/utils/provider/unconfiguredLlm";
 import { log } from "@/utils/misc/logger";
@@ -1200,9 +1202,13 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     serverId: number;
     card: PresetExportData;
     avatarUrl?: string | null;
+    lorebookEntries?: readonly LorebookEntryInput[];
+    expectedLorebookEntries?: readonly LorebookEntryRow[];
+    expectedLineageId?: number;
   }): Promise<PersonaCharacterReplacementResult | null> {
     try {
       return await sql.transaction(async (tx) => {
+        await tx`SELECT server_id FROM servers WHERE server_id = ${params.serverId} FOR UPDATE`;
         const [source] = await tx<
           Array<{
             persona_id: number;
@@ -1222,6 +1228,9 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         }
 
         const personaLineageId = Number(source.persona_lineage_id);
+        if (params.expectedLineageId !== undefined && params.expectedLineageId !== personaLineageId) {
+          throw new Error("Persona lineage changed during replacement.");
+        }
         if (!Number.isSafeInteger(personaLineageId) || personaLineageId <= 0) {
           throw new Error(`Persona replacement source ${params.personaId} has an invalid lineage id.`);
         }
@@ -1317,6 +1326,29 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         // Persona cards do not contain sprite archives. Remove the previous
         // character's rows so stale expressions are never shown as the new one.
         await tx`DELETE FROM persona_sprites WHERE persona_id = ${params.personaId}`;
+
+        if (
+          params.expectedLorebookEntries !== undefined &&
+          !(await lorebookRepository.matchesLineageSnapshot(
+            params.serverId,
+            personaLineageId,
+            params.expectedLorebookEntries,
+            tx,
+          ))
+        ) {
+          throw new Error("Persona lorebook changed during confirmation.");
+        }
+        if (
+          params.lorebookEntries !== undefined &&
+          (await lorebookRepository.replaceLineageEntries(
+            params.serverId,
+            personaLineageId,
+            params.lorebookEntries,
+            tx,
+          )) !== "replaced"
+        ) {
+          throw new Error("Persona lorebook replacement failed.");
+        }
 
         return {
           personaId: source.persona_id,
@@ -1458,6 +1490,10 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     triggerWords?: string[];
     personaPrompt?: string | null;
     preservedNamingConfig?: PersonaNamingConfig;
+    lorebookEntries?: readonly LorebookEntryInput[];
+    expectedLorebookEntries?: readonly LorebookEntryRow[];
+    expectedServerId?: number;
+    expectedLineageId?: number;
   }): Promise<TomoriRow | null> {
     const pointerLineageId = normalizeLineageId(params.preset.preset_lineage_id);
     if (pointerLineageId === null) {
@@ -1467,6 +1503,9 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
     try {
       const row = await sql.transaction(async (tx) => {
+        if (params.expectedServerId !== undefined) {
+          await tx`SELECT server_id FROM servers WHERE server_id = ${params.expectedServerId} FOR UPDATE`;
+        }
         const [updatedRow] = await tx`
           UPDATE personas
           SET
@@ -1488,6 +1527,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
             applied_avatar_hash = NULL,
             updated_at = NOW()
           WHERE persona_id = ${params.personaId}
+            AND (${params.expectedServerId ?? null}::int IS NULL OR server_id = ${params.expectedServerId ?? null})
+            AND (${params.expectedLineageId ?? null}::bigint IS NULL OR persona_lineage_id = ${params.expectedLineageId ?? null})
           RETURNING *
         `;
         if (!updatedRow?.persona_id) {
@@ -1515,6 +1556,29 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           WHERE persona_id = ${params.personaId}
         `;
         await naturalNudgeRepository.clearPersonaConfig(tx, params.personaId);
+
+        if (
+          params.expectedLorebookEntries !== undefined &&
+          !(await lorebookRepository.matchesLineageSnapshot(
+            Number(updatedRow.server_id),
+            Number(updatedRow.persona_lineage_id),
+            params.expectedLorebookEntries,
+            tx,
+          ))
+        ) {
+          throw new Error("Persona lorebook changed during confirmation.");
+        }
+        if (
+          params.lorebookEntries !== undefined &&
+          (await lorebookRepository.replaceLineageEntries(
+            Number(updatedRow.server_id),
+            Number(updatedRow.persona_lineage_id),
+            params.lorebookEntries,
+            tx,
+          )) !== "replaced"
+        ) {
+          throw new Error("Persona lorebook replacement failed.");
+        }
 
         return updatedRow;
       });

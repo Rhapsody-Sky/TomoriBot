@@ -252,6 +252,7 @@ Gerenciar predefinições de personalidade
 | `/persona generate` | Geração de personalidade baseada em IA (requer um provedor compatível) |
 | `/persona import` | Importar uma persona a partir de um arquivo PNG, JSON, CHARX ou pacote ZIP TomoriBot |
 | `/persona remove` | Remover um alter do servidor |
+| `/persona replace` | Replace a persona's character while preserving its identity and memories |
 
 ## `/personal`
 

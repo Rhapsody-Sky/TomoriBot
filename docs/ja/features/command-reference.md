@@ -252,6 +252,7 @@ Discordチャンネルを双方向リレーでMatrixルームにリンクしま�
 | `/persona generate` | AIによる人格生成（対応プロバイダーが必要） |
 | `/persona import` | PNG、JSON、CHARX、またはTomoriBot ZIPバンドルからペルソナをインポートする |
 | `/persona remove` | サーバーからオルタペルソナを削除する |
+| `/persona replace` | ペルソナのIDと記憶を維持したままキャラクターを置き換える |
 
 ## `/personal`
 

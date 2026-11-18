@@ -65,12 +65,15 @@ describe("catalog attribute visibility", () => {
 
   it("keeps other lineages private when flags are omitted", async () => {
     preset.lineageId = 999999;
-    PRESET_NATURAL_NUDGE_DEFAULTS[999999] = PRESET_NATURAL_NUDGE_DEFAULTS[1337]!;
+    Object.defineProperty(PRESET_NATURAL_NUDGE_DEFAULTS, 999999, {
+      value: PRESET_NATURAL_NUDGE_DEFAULTS[1337],
+      configurable: true,
+    });
     try {
       await seedPersonasFromCatalog(client);
       expect(fixtureRow()).toContain("ARRAY[false, false]::BOOLEAN[]");
     } finally {
-      delete PRESET_NATURAL_NUDGE_DEFAULTS[999999];
+      Reflect.deleteProperty(PRESET_NATURAL_NUDGE_DEFAULTS, 999999);
     }
   });
 

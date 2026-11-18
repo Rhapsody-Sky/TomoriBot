@@ -252,6 +252,7 @@ Manage personality presets
 | `/persona generate` | AI-powered personality generation (requires a compatible provider) |
 | `/persona import` | Import a persona from a PNG, JSON, CHARX, or TomoriBot ZIP bundle |
 | `/persona remove` | Remove an alter persona from the server |
+| `/persona replace` | Replace a persona's character while preserving its identity and memories |
 
 ## `/personal`
 

@@ -134,6 +134,19 @@ The shared schema used by other providers stays unchanged. Local validation stil
 noncompliant output without exporting a card; validation receipts preserve the inputs and show the
 failed requirement without suggesting an API-key problem.
 
+## Explicit persona replacement
+
+`/persona replace` requires Discord's `Administrator` permission. Its optional `lorebook` choice
+defaults to preserving the existing book, including when the new card carries lore. Importing a book
+requires a character card with `lorebook_entries`; a missing field is rejected and an empty array
+clears the book. The clear choice removes the target lineage's book without requiring a card.
+
+The confirmation names the target and replacement, shows the lorebook action, and warns that all
+personas sharing the target lineage on this server see the same changed book. Character and lorebook
+writes commit together. Serverwide books, other lineages, server memories, and personal memories
+remain intact. Permissions and the target's identity are checked again after confirmation. If the
+lorebook has changed since the preview, the transaction aborts without replacing the character or book.
+
 ## Source pointers
 
 - `src/db/seed/catalog/personas/` & `src/db/seed/catalog/personaSeed.ts`: Canonical preset catalog and startup seed logic.

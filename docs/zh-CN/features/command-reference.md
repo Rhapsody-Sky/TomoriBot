@@ -252,6 +252,7 @@ Open the TomoriBot settings dashboard
 | `/persona generate` | 用 AI 生成人格（需要兼容的提供方） |
 | `/persona import` | 从 PNG、JSON、CHARX 或 TomoriBot ZIP 压缩包导入人格 |
 | `/persona remove` | 从服务器移除一个副人格 |
+| `/persona replace` | Replace a persona's character while preserving its identity and memories |
 
 ## `/personal`
 

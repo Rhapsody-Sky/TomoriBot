@@ -3,12 +3,15 @@ import { SQL } from "bun";
 import { runMigrations } from "@/db/migrationRunner";
 import { resetDatabaseConnection } from "@/utils/db/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import type { TomoriPresetRow } from "@/types/db/schema";
 import { LorebookRepository, lorebookRepository } from "@/modules/lorebooks/db/repositories";
 import {
   LOREBOOK_ENTRIES_PER_SCOPE_MAX,
   lorebookEntryToInput,
   type LorebookEntryInput,
 } from "@/modules/lorebooks/db/types";
+import type { PresetExportData } from "@/types/preset/presetExport";
+import { personaRepository } from "@/utils/db/repositories";
 import { cleanupFixtures, insertFixtures, type FixtureRefs } from "./setup/fixtures";
 import { DB_TESTS_AVAILABLE, executeTestSqlFile, setupTestDb, testSql } from "./setup/testDb";
 
@@ -26,6 +29,17 @@ function input(overrides: Partial<LorebookEntryInput> = {}): LorebookEntryInput 
     constant: false,
     enabled: true,
     channel_disc_ids: [],
+    ...overrides,
+  };
+}
+
+function characterCard(nickname: string, overrides: Partial<PresetExportData> = {}): PresetExportData {
+  return {
+    tomori_nickname: nickname,
+    attribute_list: [],
+    sample_dialogues_in: [],
+    sample_dialogues_out: [],
+    trigger_words: [],
     ...overrides,
   };
 }
@@ -61,6 +75,22 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("lorebook storage contracts", () => {
     const result = await lorebookRepository.insert(serverId, scope, input(patch));
     if (typeof result !== "number") throw new Error(`Fixture insert failed: ${result}`);
     return result;
+  }
+
+  async function addPersona(
+    nickname: string,
+    personaLineageId?: number,
+  ): Promise<{ personaId: number; lineageId: number }> {
+    const persona = await personaRepository.createAlterPersona({
+      serverId: refs.serverId,
+      nickname,
+      attributes: [],
+      sampleDialoguesIn: [],
+      sampleDialoguesOut: [],
+      personaLineageId,
+    });
+    if (!persona?.persona_id) throw new Error("Persona fixture creation failed");
+    return { personaId: persona.persona_id, lineageId: Number(persona.persona_lineage_id) };
   }
 
   it("wipes only Serverwide lore and its pending scopes when personas are preserved", async () => {
@@ -230,6 +260,248 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("lorebook storage contracts", () => {
     expect(
       (await lorebookRepository.loadEnabledForScope(refs.serverId, lineage + 1)).map((row) => row.entry_id),
     ).toEqual([global, other]);
+  });
+
+  it("preserves lineage lore when a character card embeds entries without an explicit lore replacement", async () => {
+    const nickname = `_rt_card_lore_preserve_${Date.now()}`;
+    const { personaId } = await addPersona(nickname, lineage);
+
+    try {
+      await add(lineage, { title: "Existing lineage lore", keys: ["existing"] });
+      const result = await personaRepository.replaceCharacterFromCard({
+        personaId,
+        serverId: refs.serverId,
+        card: characterCard("_rt_card_lore_replaced", {
+          lorebook_entries: [input({ title: "Embedded card lore", keys: ["embedded"] })],
+        }),
+        expectedLineageId: lineage,
+      });
+      expect(result?.personaId).toBe(personaId);
+      expect((await lorebookRepository.listScope(refs.serverId, lineage)).entries.map((entry) => entry.title)).toEqual([
+        "Existing lineage lore",
+      ]);
+      const [stored] = await testSql`SELECT persona_nickname FROM personas WHERE persona_id = ${personaId}`;
+      expect(stored.persona_nickname).toBe("_rt_card_lore_replaced");
+    } finally {
+      await testSql`DELETE FROM personas WHERE persona_id = ${personaId}`;
+    }
+  });
+
+  it("replaces and clears shared lineage lore without changing Serverwide or unrelated lineage entries", async () => {
+    const nickname = `_rt_card_lore_replace_${Date.now()}`;
+    const { personaId, lineageId } = await addPersona(nickname, lineage);
+
+    try {
+      const serverwide = await add(null, { title: "Serverwide lore", keys: ["serverwide"] });
+      const unrelated = await add(lineage + 1, { title: "Unrelated lore", keys: ["unrelated"] });
+      await add(lineage, { title: "Old lineage lore", keys: ["old"] });
+      const replaced = await personaRepository.replaceCharacterFromCard({
+        personaId,
+        serverId: refs.serverId,
+        card: characterCard("_rt_card_lore_imported"),
+        lorebookEntries: [input({ title: "Imported lineage lore", keys: ["imported"] })],
+        expectedLineageId: lineageId,
+      });
+      expect(replaced?.personaLineageId).toBe(lineageId);
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineageId)).entries.map((entry) => entry.title),
+      ).toEqual(["Imported lineage lore"]);
+      const [sharedPersona] = await testSql`
+        SELECT persona_lineage_id FROM personas WHERE persona_id = ${refs.personaId}
+      `;
+      expect(Number(sharedPersona.persona_lineage_id)).toBe(lineageId);
+      expect(
+        (await lorebookRepository.loadEnabledForScope(refs.serverId, Number(sharedPersona.persona_lineage_id))).map(
+          (entry) => entry.title,
+        ),
+      ).toEqual(["Serverwide lore", "Imported lineage lore"]);
+      expect((await lorebookRepository.listScope(refs.serverId, null)).entries.map((entry) => entry.entry_id)).toEqual([
+        serverwide,
+      ]);
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineage + 1)).entries.map((entry) => entry.entry_id),
+      ).toEqual([unrelated]);
+
+      const cleared = await personaRepository.replaceCharacterFromCard({
+        personaId,
+        serverId: refs.serverId,
+        card: characterCard("_rt_card_lore_cleared"),
+        lorebookEntries: [],
+        expectedLineageId: lineageId,
+      });
+      expect(cleared?.personaId).toBe(personaId);
+      expect((await lorebookRepository.listScope(refs.serverId, lineageId)).entries).toEqual([]);
+      expect((await lorebookRepository.listScope(refs.serverId, null)).entries.map((entry) => entry.entry_id)).toEqual([
+        serverwide,
+      ]);
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineage + 1)).entries.map((entry) => entry.entry_id),
+      ).toEqual([unrelated]);
+    } finally {
+      await testSql`DELETE FROM personas WHERE persona_id = ${personaId}`;
+    }
+  });
+
+  it("refuses a confirmed replacement when another admin edits the lorebook", async () => {
+    const nickname = "_rt_lore_confirmation";
+    const { personaId, lineageId } = await addPersona(nickname, lineage);
+    try {
+      const entryId = await add(lineageId);
+      const snapshot = await lorebookRepository.listScope(refs.serverId, lineageId);
+      expect(snapshot.status).toBe("fresh");
+      const edited = input({ content: "Another admin changed this entry." });
+      expect(await lorebookRepository.update(refs.serverId, lineageId, entryId, edited)).toBe("updated");
+      const result = await personaRepository.replaceCharacterFromCard({
+        personaId,
+        serverId: refs.serverId,
+        card: characterCard("_rt_stale_lore_card"),
+        lorebookEntries: [],
+        expectedLineageId: lineageId,
+        expectedLorebookEntries: snapshot.entries,
+      });
+      expect(result).toBeNull();
+      const [stored] = await testSql`SELECT persona_nickname FROM personas WHERE persona_id = ${personaId}`;
+      expect(stored.persona_nickname).toBe(nickname);
+      expect((await lorebookRepository.listScope(refs.serverId, lineageId)).entries[0]?.content).toBe(edited.content);
+    } finally {
+      await testSql`DELETE FROM personas WHERE persona_id = ${personaId}`;
+    }
+  });
+
+  it("rolls back character and lineage lore changes when a card lore replacement fails", async () => {
+    const nickname = `_rt_card_lore_rollback_${Date.now()}`;
+    const { personaId, lineageId } = await addPersona(nickname, lineage);
+
+    try {
+      const oldEntry = await add(lineageId, { title: "Existing rollback lore", keys: ["existing"] });
+      await testSql`ALTER TABLE persona_lorebook_entries ADD CONSTRAINT rt_lore_card_reject CHECK (title <> '_rt_card_reject') NOT VALID`;
+      try {
+        const result = await personaRepository.replaceCharacterFromCard({
+          personaId,
+          serverId: refs.serverId,
+          card: characterCard("_rt_card_lore_should_rollback"),
+          lorebookEntries: [
+            input({ title: "New lore before rejection", keys: ["new"] }),
+            input({ title: "_rt_card_reject", keys: ["reject"] }),
+          ],
+          expectedLineageId: lineageId,
+        });
+        expect(result).toBeNull();
+      } finally {
+        await testSql`ALTER TABLE persona_lorebook_entries DROP CONSTRAINT rt_lore_card_reject`;
+      }
+
+      const [stored] = await testSql`SELECT persona_nickname FROM personas WHERE persona_id = ${personaId}`;
+      expect(stored.persona_nickname).toBe(nickname);
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineageId)).entries.map((entry) => entry.entry_id),
+      ).toEqual([oldEntry]);
+    } finally {
+      await testSql`DELETE FROM personas WHERE persona_id = ${personaId}`;
+    }
+  });
+
+  it("applies preset lore clears atomically and rejects stale server or lineage selections", async () => {
+    const nickname = `_rt_pointer_lore_${Date.now()}`;
+    const { personaId, lineageId } = await addPersona(nickname);
+    const presetName = `_rt_pointer_lore_${personaId}`;
+
+    try {
+      const presetLineageId = 910_001 + personaId;
+      const [preset] = await testSql<TomoriPresetRow[]>`
+        INSERT INTO persona_presets (
+          persona_preset_name, persona_preset_desc, preset_lineage_id, preset_attribute_list,
+          preset_attribute_public_flags, preset_sample_dialogues_in, preset_sample_dialogues_out,
+          preset_language, preset_trigger_words
+        ) VALUES (
+          ${presetName}, '_rt_pointer_lore_prompt', ${presetLineageId}, ARRAY['_rt_pointer_lore_attribute']::TEXT[],
+          ARRAY[false]::BOOLEAN[], ARRAY[]::TEXT[], ARRAY[]::TEXT[], 'en-US', ARRAY['_rt_pointer_lore_trigger']::TEXT[]
+        ) RETURNING *
+      `;
+      const serverwide = await add(null, { title: "Pointer serverwide lore", keys: ["pointer-serverwide"] });
+      const unrelated = await add(lineageId + 1, { title: "Pointer unrelated lore", keys: ["pointer-unrelated"] });
+      const oldEntry = await add(lineageId, { title: "Pointer old lore", keys: ["pointer-old"] });
+      const staleServer = await personaRepository.applyPresetPointerToPersona({
+        personaId,
+        nickname: "_rt_pointer_stale_server",
+        preset,
+        personaLineageId: lineageId,
+        lorebookEntries: [],
+        expectedServerId: otherServer,
+        expectedLineageId: lineageId,
+      });
+      expect(staleServer).toBeNull();
+      const staleLineage = await personaRepository.applyPresetPointerToPersona({
+        personaId,
+        nickname: "_rt_pointer_stale_lineage",
+        preset,
+        personaLineageId: lineageId,
+        lorebookEntries: [],
+        expectedServerId: refs.serverId,
+        expectedLineageId: lineageId + 1,
+      });
+      expect(staleLineage).toBeNull();
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineageId)).entries.map((entry) => entry.entry_id),
+      ).toEqual([oldEntry]);
+      const [unchanged] = await testSql`
+        SELECT persona_nickname, is_pointer, persona_lineage_id
+        FROM personas WHERE persona_id = ${personaId}
+      `;
+      expect(unchanged).toMatchObject({ persona_nickname: nickname, is_pointer: false });
+      expect(Number(unchanged.persona_lineage_id)).toBe(lineageId);
+
+      await testSql`ALTER TABLE persona_lorebook_entries ADD CONSTRAINT rt_lore_preset_reject CHECK (title <> '_rt_preset_reject') NOT VALID`;
+      try {
+        const failedReplacement = await personaRepository.applyPresetPointerToPersona({
+          personaId,
+          nickname: "_rt_pointer_should_rollback",
+          preset,
+          personaLineageId: lineageId,
+          lorebookEntries: [
+            input({ title: "Preset lore before rejection", keys: ["before-rejection"] }),
+            input({ title: "_rt_preset_reject", keys: ["reject"] }),
+          ],
+          expectedServerId: refs.serverId,
+          expectedLineageId: lineageId,
+        });
+        expect(failedReplacement).toBeNull();
+      } finally {
+        await testSql`ALTER TABLE persona_lorebook_entries DROP CONSTRAINT rt_lore_preset_reject`;
+      }
+
+      const [rolledBack] = await testSql`
+        SELECT persona_nickname, is_pointer, persona_lineage_id
+        FROM personas WHERE persona_id = ${personaId}
+      `;
+      expect(rolledBack).toMatchObject({ persona_nickname: nickname, is_pointer: false });
+      expect(Number(rolledBack.persona_lineage_id)).toBe(lineageId);
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineageId)).entries.map((entry) => entry.entry_id),
+      ).toEqual([oldEntry]);
+
+      const applied = await personaRepository.applyPresetPointerToPersona({
+        personaId,
+        nickname: "_rt_pointer_lore_cleared",
+        preset,
+        personaLineageId: lineageId,
+        lorebookEntries: [],
+        expectedServerId: refs.serverId,
+        expectedLineageId: lineageId,
+      });
+      expect(applied?.is_pointer).toBe(true);
+      expect(Number(applied?.persona_lineage_id)).toBe(lineageId);
+      expect((await lorebookRepository.listScope(refs.serverId, lineageId)).entries).toEqual([]);
+      expect((await lorebookRepository.listScope(refs.serverId, null)).entries.map((entry) => entry.entry_id)).toEqual([
+        serverwide,
+      ]);
+      expect(
+        (await lorebookRepository.listScope(refs.serverId, lineageId + 1)).entries.map((entry) => entry.entry_id),
+      ).toEqual([unrelated]);
+    } finally {
+      await testSql`DELETE FROM personas WHERE persona_id = ${personaId}`;
+      await testSql`DELETE FROM persona_presets WHERE persona_preset_name = ${presetName}`;
+    }
   });
 
   it("appends only unseen entries and refuses a batch that would cross the scope limit", async () => {

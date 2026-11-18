@@ -9,7 +9,10 @@ import type {
   ModalSubmitInteraction,
   SlashCommandSubcommandBuilder,
 } from "discord.js";
-import { AttachmentBuilder, EmbedBuilder, MessageFlags } from "discord.js";
+import { AttachmentBuilder, ButtonStyle, EmbedBuilder, MessageFlags } from "discord.js";
+import { lorebookRepository } from "@/modules/lorebooks/db/repositories";
+import type { LorebookEntryRow } from "@/modules/lorebooks/db/types";
+import { promptWithConfirmation } from "@/utils/discord/ui/confirmation";
 import type { TomoriPresetRow, UserRow } from "@/types/db/schema";
 import type { SelectOption } from "@/types/discord/modal";
 import { invalidatePersonaSpriteCache } from "@/utils/cache/personaSpriteCache";
@@ -51,6 +54,16 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
         .setName("file")
         .setDescription(localizer("en-US", "commands.persona.replace.file_description"))
         .setRequired(false),
+    )
+    .addStringOption((option) =>
+      option
+        .setName("lorebook")
+        .setDescription(localizer("en-US", "commands.persona.replace.lorebook_description"))
+        .addChoices(
+          { name: localizer("en-US", "commands.persona.replace.preserve_option"), value: "preserve" },
+          { name: localizer("en-US", "commands.persona.replace.import_option"), value: "import" },
+          { name: localizer("en-US", "commands.persona.replace.clear_option"), value: "clear" },
+        ),
     );
 
 function presetTriggerWords(preset: TomoriPresetRow, locale: string): string[] {
@@ -198,6 +211,16 @@ export async function execute(
     }
 
     const attachment = interaction.options.getAttachment("file");
+    const lorebookMode = interaction.options.getString("lorebook") ?? "preserve";
+    if (!["preserve", "import", "clear"].includes(lorebookMode) || (lorebookMode === "import" && !attachment)) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.persona.replace.invalid_file_title",
+        descriptionKey: "commands.persona.replace.lorebook_missing_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     if (attachment) {
       const normalizedName = attachment.name.toLowerCase();
       if (!normalizedName.endsWith(".png") && !normalizedName.endsWith(".json")) {
@@ -220,7 +243,7 @@ export async function execute(
       }
     }
 
-    const allPersonas = await personaRepository.loadAllForServer(interaction.guild.id, { alwaysResolve: true });
+    const allPersonas = await personaRepository.loadAllForServer(interaction.guild.id);
     if (allPersonas.length === 0) {
       await replyInfoEmbed(interaction, locale, {
         titleKey: "general.errors.tomori_not_setup_title",
@@ -231,7 +254,7 @@ export async function execute(
       return;
     }
 
-    const presets = attachment ? [] : ((await configRepository.loadPresetRowsByLocale(locale)) ?? []);
+    const presets = attachment ? [] : ((await configRepository.loadPresetRowsByLocale(locale, { nsfw: false })) ?? []);
     if (!attachment && presets.length === 0) {
       await replyInfoEmbed(interaction, locale, {
         titleKey: "commands.persona.default.no_presets_title",
@@ -311,7 +334,82 @@ export async function execute(
     let replacementAvatar: Buffer | null | undefined;
     let replacementKind: "preset" | "file";
     let uploadedAvatarUrl: string | null | undefined;
-    const previousSprites = await personaSpriteRepository.listForPersona(sourcePersonaId);
+    let previousSprites = await personaSpriteRepository.listForPersona(sourcePersonaId);
+    const replacementSource = sourcePersona;
+    const guild = interaction.guild;
+    let confirmedLorebook: LorebookEntryRow[] | undefined;
+
+    async function confirmReplacement(replacement: string, entryCount: number): Promise<boolean> {
+      const lineageId = Number(replacementSource.persona_lineage_id);
+      let existingCount = 0;
+      if (lorebookMode !== "preserve") {
+        const book = await lorebookRepository.listScope(replacementSource.server_id, lineageId);
+        if (book.status !== "fresh") {
+          await replyInfoEmbed(modalInteraction, locale, {
+            titleKey: "general.errors.update_failed_title",
+            descriptionKey: "general.errors.update_failed_description",
+            color: ColorCode.ERROR,
+          });
+          return false;
+        }
+        existingCount = book.entries.length;
+        confirmedLorebook = book.entries;
+      }
+      const shared = allPersonas.filter((persona) => Number(persona.persona_lineage_id) === lineageId);
+      const confirmation = await promptWithConfirmation(modalInteraction, locale, {
+        embedTitleKey: "commands.persona.replace.confirm_title",
+        embedDescriptionKey: "commands.persona.replace.confirm_description",
+        embedDescriptionVars: {
+          source: replacementSource.persona_nickname,
+          replacement,
+          lorebook: localizer(locale, `commands.persona.replace.lorebook_${lorebookMode}_receipt`, {
+            existing: existingCount,
+            count: entryCount,
+          }),
+          shared:
+            lorebookMode === "preserve"
+              ? ""
+              : localizer(locale, "commands.persona.replace.shared_lorebook_warning", {
+                  count: shared.length,
+                  lineage: lineageId,
+                }),
+        },
+        continueLabelKey: "commands.persona.replace.confirm_button",
+        cancelLabelKey: "general.pagination.cancel",
+        continueCustomId: `persona_replace_confirm_${interaction.id}`,
+        cancelCustomId: `persona_replace_cancel_${interaction.id}`,
+        continueStyle: ButtonStyle.Danger,
+        timeout: 60_000,
+      });
+      if (confirmation.outcome !== "continue") return false;
+      await modalInteraction.editReply({ components: [] });
+      const member = await guild.members.fetch(interaction.user.id);
+      if (!member.permissions.has("Administrator")) {
+        await replyInfoEmbed(modalInteraction, locale, {
+          titleKey: "commands.persona.replace.no_permission_title",
+          descriptionKey: "commands.persona.replace.no_permission_description",
+          color: ColorCode.ERROR,
+        });
+        return false;
+      }
+      const current = (await personaRepository.loadAllForServer(guild.id)).find(
+        (persona) => persona.persona_id === sourcePersonaId,
+      );
+      if (
+        !current ||
+        current.server_id !== replacementSource.server_id ||
+        Number(current.persona_lineage_id) !== lineageId
+      ) {
+        await replyInfoEmbed(modalInteraction, locale, {
+          titleKey: "commands.persona.replace.invalid_selection_title",
+          descriptionKey: "commands.persona.replace.invalid_selection_description",
+          color: ColorCode.ERROR,
+        });
+        return false;
+      }
+      previousSprites = await personaSpriteRepository.listForPersona(sourcePersonaId);
+      return true;
+    }
 
     if (attachment) {
       const quota = reserveImportQuota(interaction.user.id);
@@ -357,6 +455,22 @@ export async function execute(
       replacementName = resolved.presetData.tomori_nickname;
       replacementAvatar = resolved.avatarImageBuffer;
       replacementKind = "file";
+      if (resolved.presetData.is_nsfw) {
+        await replyInfoEmbed(modalInteraction, locale, {
+          titleKey: "commands.persona.replace.invalid_file_title",
+          descriptionKey: "commands.persona.replace.nsfw_card_description",
+          color: ColorCode.ERROR,
+        });
+        return;
+      }
+      if (lorebookMode === "import" && resolved.presetData.lorebook_entries === undefined) {
+        await replyInfoEmbed(modalInteraction, locale, {
+          titleKey: "commands.persona.replace.invalid_file_title",
+          descriptionKey: "commands.persona.replace.lorebook_missing_description",
+          color: ColorCode.ERROR,
+        });
+        return;
+      }
 
       if (
         allPersonas.some(
@@ -373,6 +487,8 @@ export async function execute(
         });
         return;
       }
+
+      if (!(await confirmReplacement(replacementName, resolved.presetData.lorebook_entries?.length ?? 0))) return;
 
       if (replacementAvatar) {
         uploadedAvatarUrl = await uploadPersonaAvatarToStorage({
@@ -395,6 +511,10 @@ export async function execute(
         personaId: sourcePersonaId,
         serverId: sourcePersona.server_id,
         card: resolved.presetData,
+        expectedLineageId: Number(sourcePersona.persona_lineage_id),
+        expectedLorebookEntries: confirmedLorebook,
+        lorebookEntries:
+          lorebookMode === "clear" ? [] : lorebookMode === "import" ? resolved.presetData.lorebook_entries : undefined,
         // JSON cards have no image bytes. Persist the currently resolved avatar
         // explicitly so materializing an official pointer does not lose its art.
         avatarUrl: replacementAvatar === null ? sourcePersona.webhook_avatar_url : uploadedAvatarUrl,
@@ -439,6 +559,8 @@ export async function execute(
         return;
       }
 
+      if (!(await confirmReplacement(replacementName, 0))) return;
+
       const lineageId = Number(sourcePersona.persona_lineage_id);
       if (!Number.isSafeInteger(lineageId) || lineageId <= 0) {
         await replyInfoEmbed(modalInteraction, locale, {
@@ -453,6 +575,10 @@ export async function execute(
         nickname: replacementName,
         preset: selectedPreset,
         personaLineageId: lineageId,
+        expectedServerId: sourcePersona.server_id,
+        expectedLineageId: lineageId,
+        expectedLorebookEntries: confirmedLorebook,
+        lorebookEntries: lorebookMode === "clear" ? [] : undefined,
         triggerWords: presetTriggerWords(selectedPreset, locale),
         personaPrompt: selectedPreset.persona_preset_desc,
       });
@@ -492,6 +618,7 @@ export async function execute(
         replacement: replacementName,
       }),
       localizer(locale, "commands.persona.replace.identity_preserved_description"),
+      localizer(locale, `commands.persona.replace.lorebook_${lorebookMode}_success`),
     ];
     if (replacementKind === "file") {
       descriptionLines.push(localizer(locale, "commands.persona.replace.file_sprites_removed_description"));

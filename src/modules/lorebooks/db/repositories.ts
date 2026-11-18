@@ -373,6 +373,20 @@ export class LorebookRepository {
     return this.replaceScopeEntries(serverId, lineageId, entries, transaction);
   }
 
+  async matchesLineageSnapshot(
+    serverId: number,
+    lineageId: number,
+    expected: readonly LorebookEntryRow[],
+    transaction: TransactionSQL,
+  ): Promise<boolean> {
+    await transaction`SELECT server_id FROM servers WHERE server_id = ${serverId} FOR UPDATE`;
+    await transaction`SELECT entry_id FROM persona_lorebook_entries
+      WHERE server_id = ${serverId} AND persona_lineage_id = ${lineageId}
+      ORDER BY entry_id FOR UPDATE`;
+    const current = await this.listScope(serverId, lineageId, transaction);
+    return current.status === "fresh" && JSON.stringify(current.entries) === JSON.stringify(expected);
+  }
+
   async replaceScopeEntries(
     serverId: number,
     lineageId: number | null,

@@ -702,7 +702,7 @@ export function safeSelectOptionText(text: string, maxLength = 100): string {
  * Handles interaction replies, button filtering, and timeouts.
  */
 export async function promptWithConfirmation(
-  interaction: ChatInputCommandInteraction | ButtonInteraction,
+  interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
   locale: string,
   options: ConfirmationOptions,
 ): Promise<ConfirmationResult> {

@@ -252,6 +252,7 @@ Administra los preajustes de personalidad
 | `/persona generate` | Generación de personalidad con IA (requiere un proveedor compatible) |
 | `/persona import` | Importa una persona desde un PNG, JSON, CHARX o paquete ZIP de TomoriBot |
 | `/persona remove` | Elimina un alter del servidor |
+| `/persona replace` | Replace a persona's character while preserving its identity and memories |
 
 ## `/personal`
 
