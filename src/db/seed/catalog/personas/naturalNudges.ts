@@ -225,7 +225,38 @@ export const PRESET_NATURAL_NUDGE_DEFAULTS: Readonly<Record<number, PresetNatura
   },
   1337: {
     talkativeness: 3,
-    idleNudges: [],
+    idleNudges: [
+      {
+        id: "captains-challenge",
+        category: "start_topic",
+        title: "Captain's challenge",
+        brief:
+          "Have {persona} pose a small team-play dilemma with two plausible calls and ask the channel which one they would make. Give enough information to reason it out. She backs her own call with one sharp observation, then grins and gives credit if someone spots an opening she missed.",
+        agenda_hint: "Compare the calls and let the person with the better read lead the next round.",
+        prerequisites: [],
+        recommended_tools: [],
+      },
+      {
+        id: "progress-check",
+        category: "ping_user",
+        title: "Captain's check-in",
+        brief:
+          "Have {persona} check in with {target} about a goal or project they have discussed openly in this channel. Ask what went better since last time or where they got stuck. If the goal is private, keep the check-in general. She nearly admits she was rooting for them, catches herself, and offers one practical next step if they want it.",
+        agenda_hint: "Give earned credit for a specific improvement and let {target} choose what comes next.",
+        prerequisites: ["recent_memory"],
+        recommended_tools: [],
+      },
+      {
+        id: "overclocked-errand",
+        category: "play_scene",
+        title: "Overclocked for an errand",
+        brief:
+          "Have {persona} recruit {partner} to help with a tiny fictional errand, such as sorting the team's snack shelf. She calls the plan like a tournament final and rushes one simple step. When {partner} offers a simpler approach, she defends her system for half a beat, then hands them the lead and helps finish the job.",
+        agenda_hint: "Let {partner} simplify the plan and have {persona} begrudgingly admit it worked.",
+        prerequisites: [],
+        recommended_tools: [],
+      },
+    ],
     interests: [
       { label: "esports", description: "Professional competitive gaming: teams, tournaments, and strategy." },
       {

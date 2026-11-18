@@ -42,6 +42,8 @@ import { persona as lockeEs419 } from "./unhinged/es-419";
 import { persona as lockeZhTw } from "./unhinged/zh-TW";
 import { persona as lockeVi } from "./unhinged/vi";
 import { persona as lockeZhCn } from "./unhinged/zh-CN";
+import { persona as zayaEn } from "./prideful/en-US";
+import { persona as zayaJa } from "./prideful/ja";
 
 export const personaSections: CatalogSection<PersonaInput>[] = [
   { comment: "Tomori-kun", rows: [defaultEn] },
@@ -50,6 +52,7 @@ export const personaSections: CatalogSection<PersonaInput>[] = [
   { comment: "Shy Tomori (Lilya)", rows: [shyEn] },
   { comment: "Nerine (Discontinued Model)", rows: [nerineEn] },
   { comment: "Unhinged Tomori (Locke)", rows: [lockeEn] },
+  { comment: "Zaya (Prideful Champion)", rows: [zayaEn] },
   { comment: "Tomori-kun (Japanese)", rows: [defaultJa] },
   // The メスガキトモリ label moves from 716/ja to 256/ja, so the renamed row must seed first:
   // persona_preset_name is globally unique and rows apply in this order.
@@ -89,4 +92,5 @@ export const personaSections: CatalogSection<PersonaInput>[] = [
   { comment: "Shy Tomori (Lilya) Simplified Chinese Version", rows: [shyZhCn] },
   { comment: "Loyal Tomori (Simplified Chinese)", rows: [nerineZhCn] },
   { comment: "Unhinged Tomori (Simplified Chinese)", rows: [lockeZhCn] },
+  { comment: "ザヤ（誇り高きチャンピオン）(Japanese)", rows: [zayaJa] },
 ];

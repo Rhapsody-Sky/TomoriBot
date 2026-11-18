@@ -9,6 +9,8 @@ describe("official persona naming catalog", () => {
         .map((persona) => [`${persona.lineageId}:${persona.language}`, persona.namingConfig]),
     );
     expect(actual).toEqual({
+      "1337:en-US": { prefixes: {}, suffixes: {}, addressTerms: {} },
+      "1337:ja": { prefixes: {}, suffixes: {}, addressTerms: {} },
       "4:en-US": {
         prefixes: {},
         suffixes: {},

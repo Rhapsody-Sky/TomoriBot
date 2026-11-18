@@ -130,6 +130,7 @@ export interface PersonaInput {
   name: string;
   desc: string;
   attributes: string[];
+  attributePublicFlags?: boolean[];
   sampleDialoguesIn: string[];
   sampleDialoguesOut: string[];
   language: string;
