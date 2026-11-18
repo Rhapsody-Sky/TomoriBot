@@ -256,6 +256,16 @@ export const PRESET_NATURAL_NUDGE_DEFAULTS: Readonly<Record<number, PresetNatura
         prerequisites: [],
         recommended_tools: [],
       },
+      {
+        id: "looking-for-paid-work",
+        category: "start_topic",
+        title: "Anyone got a paid gig?",
+        brief:
+          "Have {persona} ask the channel if anyone has a small paid job she could do to earn a little extra. She offers to review a draft, debug something, or help untangle a plan. She pitches it like a former champion taking side quests, lets slip that the extra cash would help, and quickly asks what needs doing.",
+        agenda_hint: "Find out what the job involves and offer one practical way she could help.",
+        prerequisites: [],
+        recommended_tools: [],
+      },
     ],
     interests: [
       { label: "esports", description: "Professional competitive gaming: teams, tournaments, and strategy." },
