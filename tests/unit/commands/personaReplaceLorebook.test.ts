@@ -12,6 +12,7 @@ import { configRepository, personaRepository, personaSpriteRepository } from "@/
 import * as confirmation from "@/utils/discord/ui/confirmation";
 import * as modals from "@/utils/discord/ui/modals";
 import * as avatarHelper from "@/utils/image/avatarHelper";
+import * as guildIdentity from "@/utils/discord/guildIdentity";
 import * as rateLimiter from "@/utils/security/rateLimiter";
 import * as safeDownloadModule from "@/utils/security/safeDownload";
 import { initializeLocalizer } from "@/utils/text/localizer";
@@ -320,4 +321,53 @@ it("rechecks Administrator after confirmation before writing the replacement", a
   );
   expect(flow.presetWrites).not.toHaveBeenCalled();
   expect(flow.sourceWrites).not.toHaveBeenCalled();
+});
+
+it("clears the guild avatar when the replacement preset has no avatar", async () => {
+  const flow = prepareFlow();
+  flow.sourcePersona.is_alter = false;
+  const nickname = trackedSpy(spyOn(guildIdentity, "setGuildBotNickname")).mockResolvedValue({ success: true });
+  const avatar = trackedSpy(spyOn(guildIdentity, "setGuildBotAvatar")).mockResolvedValue({ success: true });
+  trackedSpy(spyOn(personaRepository, "markServerMainAvatarSynced")).mockResolvedValue(undefined);
+
+  await execute({} as Client, flow.interaction, createUserRow(), "en-US");
+
+  expect(nickname).toHaveBeenCalledWith(GUILD_ID, "New Character");
+  expect(avatar).toHaveBeenCalledWith(GUILD_ID, null);
+});
+
+it("preserves the guild avatar for a JSON replacement without an image", async () => {
+  const cardBuffer = makeCardBuffer();
+  const attachment = { name: "character.json", size: cardBuffer.length, url: "https://cdn.example.com/character.json" };
+  const flow = prepareFlow({ attachment, cardBuffer });
+  flow.sourcePersona.is_alter = false;
+  trackedSpy(spyOn(guildIdentity, "setGuildBotNickname")).mockResolvedValue({ success: true });
+  const avatar = trackedSpy(spyOn(guildIdentity, "setGuildBotAvatar")).mockResolvedValue({ success: true });
+
+  await execute({} as Client, flow.interaction, createUserRow(), "en-US");
+
+  expect(flow.sourceWrites).toHaveBeenCalledTimes(1);
+  expect(avatar).not.toHaveBeenCalled();
+});
+
+it("preserves the preset avatar reference when JSON materializes a main pointer", async () => {
+  const flow = prepareFlow({
+    attachment: { name: "replacement.json", size: 100, url: "https://cdn.example.com/card.json" },
+    cardBuffer: makeCardBuffer(),
+  });
+  Object.assign(flow.sourcePersona, {
+    is_alter: false,
+    is_pointer: true,
+    preset_lineage_id: 77,
+    preset_language: "ja",
+    webhook_avatar_url: null,
+  });
+  const sourcePreset = { ...makePreset(), preset_avatar_shared_url: "presets/current-avatar.png" };
+  const loadPreset = trackedSpy(spyOn(configRepository, "loadPresetByReference")).mockResolvedValue(sourcePreset);
+  trackedSpy(spyOn(guildIdentity, "setGuildBotNickname")).mockResolvedValue({ success: true });
+
+  await execute({} as Client, flow.interaction, createUserRow(), "en-US");
+
+  expect(loadPreset).toHaveBeenCalledWith(77, "ja");
+  expect(flow.sourceWrites.mock.calls[0]?.[0].avatarUrl).toBe(sourcePreset.preset_avatar_shared_url);
 });

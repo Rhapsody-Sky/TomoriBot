@@ -16,8 +16,7 @@ import { memoryGuard, IMPORT_LIMITS, reserveImportQuota } from "../../utils/secu
 import { invalidateTomoriStateCache } from "../../utils/cache/tomoriStateCache";
 import { presetRepository } from "@/utils/db/repositories/PresetRepository";
 import type { PresetExportData } from "../../types/preset/presetExport";
-import { extractMetadataFromPNG, extractSillyTavernMetadataFromPNG } from "../../utils/image/pngMetadata";
-import { validatePNGBuffer } from "../../utils/image/avatarHelper";
+import { resolvePersonaCardFile } from "@/utils/persona/resolvePersonaCardFile";
 import { personaRepository } from "@/utils/db/repositories";
 import { buildExportFilename } from "@/utils/discord/attachmentFilename";
 import { safeDownload } from "@/utils/security/safeDownload";
@@ -118,14 +117,6 @@ function buildSillyTavernDebugText(options: {
     "=== Parsed JSON ===",
     parsedPretty,
   ].join("\n");
-}
-
-function parseJsonAttachment(buffer: Buffer): unknown {
-  const rawText = buffer
-    .toString("utf8")
-    .replace(/^\uFEFF/, "")
-    .trim();
-  return JSON.parse(rawText);
 }
 
 function parseCommaSeparatedTriggers(input: string): string[] {
@@ -676,118 +667,60 @@ export async function importPersona(
       log.info(
         `[Persona Import] Converted Character Card V3 archive to preset format for "${conversion.data.tomori_nickname}" (ignored ${archive.ignoredAssetCount} embedded asset(s))`,
       );
-    } else if (isPngImport) {
-      const pngValidation = validatePNGBuffer(importFileBuffer, MAX_FILE_SIZE);
-      if (!pngValidation.isValid) {
-        log.warn(`Invalid PNG buffer during preset import: ${pngValidation.error}`);
-        await replyInfoEmbed(interaction, locale, {
-          titleKey: "commands.persona.import.invalid_png_title",
-          descriptionKey: "commands.persona.import.invalid_png_description",
-          color: ColorCode.ERROR,
-        });
-        return;
-      }
-
-      const metadata = extractMetadataFromPNG(importFileBuffer);
-      if (metadata) {
-        const validation = presetRepository.validatePresetFile(metadata);
-
-        if (!validation.valid || !validation.data) {
-          await replyInvalidFile(interaction, locale, validation.error);
-          return;
-        }
-
-        resolvedImport = {
-          avatarImageBuffer: importFileBuffer,
-          presetData: validation.data,
-          source: "tomori-png",
-        };
-      } else {
-        const sillyTavernData = extractSillyTavernMetadataFromPNG(importFileBuffer);
-        if (!sillyTavernData) {
+    } else {
+      const card = resolvePersonaCardFile(attachment.name, importFileBuffer, MAX_FILE_SIZE);
+      if (!card.ok) {
+        if (card.reason === "conversion_failed" && card.debugText) {
+          await interaction.editReply({
+            embeds: [
+              new EmbedBuilder()
+                .setTitle(localizer(locale, "commands.persona.import.card_conversion_failed_title"))
+                .setDescription(
+                  localizer(locale, "commands.persona.import.card_conversion_failed_description", {
+                    source: card.source === "png" ? "PNG metadata" : "JSON attachment",
+                  }),
+                )
+                .setColor(ColorCode.WARN),
+            ],
+            files: [
+              new AttachmentBuilder(
+                truncateBufferForAttachment(
+                  Buffer.from(card.debugText, "utf8"),
+                  MAX_SILLY_TAVERN_DEBUG_BYTES,
+                  "\n\n[Truncated: decoded payload exceeded attachment size budget.]",
+                ),
+                { name: `sillytavern-${card.source}-decode-${Date.now()}.txt` },
+              ),
+            ],
+          });
+        } else if (card.reason === "invalid_png" || card.reason === "missing_metadata") {
           await replyInfoEmbed(interaction, locale, {
-            titleKey: "commands.persona.import.no_metadata_title",
-            descriptionKey: "commands.persona.import.no_metadata_description",
+            titleKey:
+              card.reason === "invalid_png"
+                ? "commands.persona.import.invalid_png_title"
+                : "commands.persona.import.no_metadata_title",
+            descriptionKey:
+              card.reason === "invalid_png"
+                ? "commands.persona.import.invalid_png_description"
+                : "commands.persona.import.no_metadata_description",
             color: ColorCode.ERROR,
           });
-          return;
-        }
-
-        const conversion = presetRepository.convertSillyTavernMetadataToPresetData(sillyTavernData);
-        if (!conversion.success) {
-          await replyCardConversionFailure({
+        } else {
+          await replyInvalidFile(
             interaction,
             locale,
-            parsedJson: sillyTavernData.parsedJson,
-            conversionError: conversion.error,
-            sourceLabel: "PNG metadata",
-            attachmentName: "sillytavern-decode",
-            debugContext: {
-              metadataKey: sillyTavernData.metadataKey,
-              rawValueLength: sillyTavernData.rawValue.length,
-              decodedValueLength: sillyTavernData.decodedValue.length,
-              decodedFromBase64: sillyTavernData.decodedFromBase64,
-            },
-          });
-          return;
+            card.reason === "invalid_json" ? "commands.persona.import.error_not_json" : card.validationError,
+          );
         }
-
-        resolvedImport = {
-          avatarImageBuffer: importFileBuffer,
-          presetData: conversion.data,
-          source: "sillytavern-png",
-          unmappedCardFields: describeUnmappedCardFields(sillyTavernData.parsedJson),
-        };
-        log.info(
-          `[Persona Import] Converted SillyTavern PNG card to preset format for "${conversion.data.tomori_nickname}"`,
-        );
-      }
-    } else {
-      let parsedJson: unknown;
-      try {
-        parsedJson = parseJsonAttachment(importFileBuffer);
-      } catch (error) {
-        log.warn("Persona import JSON parse failed", error);
-        await replyInvalidFile(interaction, locale, "commands.persona.import.error_not_json");
         return;
       }
-
-      const validation = presetRepository.validatePresetFile(parsedJson);
-      if (validation.valid && validation.data) {
-        resolvedImport = {
-          avatarImageBuffer: null,
-          presetData: validation.data,
-          source: "tomori-json",
-        };
-      } else if (presetRepository.looksLikeSillyTavernCardJson(parsedJson)) {
-        const conversion = presetRepository.convertSillyTavernJsonToPresetData(parsedJson);
-        if (!conversion.success) {
-          await replyCardConversionFailure({
-            interaction,
-            locale,
-            parsedJson,
-            conversionError: conversion.error,
-            sourceLabel: "JSON attachment",
-            attachmentName: "sillytavern-json-decode",
-          });
-          return;
-        }
-
-        resolvedImport = {
-          avatarImageBuffer: null,
-          presetData: conversion.data,
-          source: "sillytavern-json",
-          unmappedCardFields: describeUnmappedCardFields(parsedJson),
-        };
-        log.info(
-          `[Persona Import] Converted SillyTavern JSON card to preset format for "${conversion.data.tomori_nickname}"`,
-        );
-      } else {
-        await replyInvalidFile(interaction, locale, validation.error);
-        return;
-      }
+      resolvedImport = {
+        avatarImageBuffer: card.avatarImageBuffer,
+        presetData: card.presetData,
+        source: card.source,
+        unmappedCardFields: card.sourceJson ? describeUnmappedCardFields(card.sourceJson) : undefined,
+      };
     }
-
     const presetDataFromFile = resolvedImport?.presetData ?? null;
     const avatarImageBuffer = resolvedImport?.avatarImageBuffer ?? null;
 

@@ -29,7 +29,12 @@
   };
 
   // ---- indicator ---------------------------------------------------------------------------
-  const selected = ['[aria-selected="true"]', '[aria-pressed="true"]', '[aria-checked="true"]', '[aria-current]:not([aria-current="false"])'];
+  const selected = [
+    '[aria-selected="true"]',
+    '[aria-pressed="true"]',
+    '[aria-checked="true"]',
+    '[aria-current]:not([aria-current="false"])',
+  ];
   const selectedChild = selected.map((s) => `:scope > ${s}:not([hidden])`).join(", ");
 
   function placeIndicator(group, instant = false) {
@@ -174,7 +179,9 @@
 
   // ---- stagger -----------------------------------------------------------------------------
   function stagger(el) {
-    [...el.children].forEach((child, index) => child.style.setProperty("--i", String(index)));
+    [...el.children].forEach((child, index) => {
+      child.style.setProperty("--i", String(index));
+    });
     if (still()) return;
     el.classList.remove("fx-stagger-run");
     void el.offsetWidth;
@@ -206,7 +213,9 @@
     function measure() {
       const items = tabs();
       const focused = document.activeElement;
-      items.forEach((b) => (b.hidden = false));
+      items.forEach((b) => {
+        b.hidden = false;
+      });
       more.hidden = true;
       if (nav.scrollWidth <= nav.clientWidth + 1) {
         const restoreTab = menu.contains(focused)
@@ -261,7 +270,10 @@
     });
     resize.observe(nav);
     if (nav.parentElement) resize.observe(nav.parentElement);
-    new MutationObserver(() => requestAnimationFrame(measure)).observe(nav, { subtree: true, attributeFilter: ["aria-selected"] });
+    new MutationObserver(() => requestAnimationFrame(measure)).observe(nav, {
+      subtree: true,
+      attributeFilter: ["aria-selected"],
+    });
     document.fonts?.ready.then(measure);
     measure();
     window.TomoriControls?.enhance(nav);
@@ -278,9 +290,13 @@
 
   function reflowActions(row, update) {
     if (!row) return update();
-    const controls = [...row.children].filter((control) => !control.hidden && !control.hasAttribute("data-edit-action"));
+    const controls = [...row.children].filter(
+      (control) => !control.hidden && !control.hasAttribute("data-edit-action"),
+    );
     const before = controls.map((control) => control.getBoundingClientRect());
-    controls.forEach((control) => actionMoves.get(control)?.cancel());
+    controls.forEach((control) => {
+      actionMoves.get(control)?.cancel();
+    });
     update();
     if (still()) return;
     controls.forEach((control, index) => {
@@ -288,10 +304,13 @@
       const x = before[index].left - after.left;
       const y = before[index].top - after.top;
       if (!before[index].width || !after.width || (Math.abs(x) < 1 && Math.abs(y) < 1)) return;
-      actionMoves.set(control, control.animate(
-        [{ translate: `${x}px ${y}px` }, { translate: "0 0" }],
-        { duration: 320, easing: "cubic-bezier(.22,.61,.36,1)" },
-      ));
+      actionMoves.set(
+        control,
+        control.animate([{ translate: `${x}px ${y}px` }, { translate: "0 0" }], {
+          duration: 320,
+          easing: "cubic-bezier(.22,.61,.36,1)",
+        }),
+      );
     });
   }
 
@@ -301,7 +320,9 @@
     const fields = fieldsOf(form);
     const now = fields.map(stateOf);
     const changed = now.length !== base.length || now.some((entry, index) => entry !== base[index]);
-    fields.forEach((el, index) => el.closest(".field, .toggle")?.classList.toggle("is-changed", now[index] !== base[index]));
+    fields.forEach((el, index) => {
+      el.closest(".field, .toggle")?.classList.toggle("is-changed", now[index] !== base[index]);
+    });
     const was = form.hasAttribute("data-changed");
     form.toggleAttribute("data-changed", changed);
     const actions = [...form.querySelectorAll("[data-edit-action]")].filter((button) => button.hidden === changed);
@@ -392,7 +413,13 @@
       entry.height = card.offsetHeight;
       if (from && entry.height) resizeCard(card, entry, from, entry.height);
     }
-  }).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden", "open", "rows"] });
+  }).observe(document.body, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["hidden", "open", "rows"],
+  });
 
   // A card that changes size for another reason (the window, a column) just remembers its height.
   const cardSizes = new ResizeObserver((entries) => {
@@ -446,7 +473,8 @@
     if (!current) return;
     const box = nav.getBoundingClientRect();
     const link = current.getBoundingClientRect();
-    if (link.top < box.top || link.bottom > box.bottom) nav.scrollTop += link.top - box.top - box.height / 2 + link.height / 2;
+    if (link.top < box.top || link.bottom > box.bottom)
+      nav.scrollTop += link.top - box.top - box.height / 2 + link.height / 2;
   }
   keepNavigation();
 

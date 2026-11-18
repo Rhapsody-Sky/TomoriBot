@@ -53,6 +53,7 @@ import { decryptApiKey } from "@/utils/security/crypto";
 import { llmProviderRepo } from "@/utils/db/repositories/LlmProviderRepository";
 import { userNamingRepository } from "@/utils/db/repositories/UserNamingRepository";
 import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
+import { DEFAULT_NATURAL_NUDGE_TALKATIVENESS } from "@/modules/natural-nudges/db/types";
 import { lorebookRepository } from "@/modules/lorebooks/db/repositories";
 import type { LorebookEntryInput, LorebookEntryRow } from "@/modules/lorebooks/db/types";
 import { type MemoryValidationResult, getMemoryLimits } from "@/utils/misc/memoryLimits";
@@ -1193,8 +1194,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
 
   /**
    * Replaces a persona's materialized character definition from an imported card.
-   * Identity and operational state are deliberately untouched: persona id, memory
-   * lineage, main/alter role, reminders, memories, assignments, and runtime state
+   * Identity and non-character operational state are deliberately untouched:
+   * persona id, memory lineage, role, reminders, non-voice assignments, and runtime state
    * continue to belong to the same row.
    */
   async replaceCharacterFromCard(params: {
@@ -1207,8 +1208,13 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     expectedLineageId?: number;
   }): Promise<PersonaCharacterReplacementResult | null> {
     try {
-      return await sql.transaction(async (tx) => {
-        await tx`SELECT server_id FROM servers WHERE server_id = ${params.serverId} FOR UPDATE`;
+      const result = await sql.transaction(async (tx) => {
+        const [server] = await tx<Array<{ server_disc_id: string }>>`
+          SELECT server_disc_id FROM servers WHERE server_id = ${params.serverId} FOR UPDATE
+        `;
+        if (!server) {
+          throw new Error("Persona replacement server was not found.");
+        }
         const [source] = await tx<
           Array<{
             persona_id: number;
@@ -1247,8 +1253,9 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
               ELSE webhook_avatar_url
             END,
             is_pointer = false,
-            preset_lineage_id = NULL,
+            preset_lineage_id = ${params.card.preset_lineage_id ?? null},
             preset_language = NULL,
+            is_nsfw = ${params.card.is_nsfw === true},
             applied_avatar_hash = NULL,
             updated_at = NOW()
           WHERE persona_id = ${params.personaId}
@@ -1273,8 +1280,8 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
           `;
         }
 
-        // Only card-owned fields are replaced. Operational overrides such as the
-        // persona LLM, humanizer, conditioning toggles, voice, and context note remain.
+        // Character cards replace voice settings but leave the persona LLM, humanizer,
+        // conditioning toggles, and context note intact.
         await tx`
           INSERT INTO persona_configs (persona_id, trigger_words, persona_prompt)
           VALUES (
@@ -1322,6 +1329,55 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
             nai_attg_stars = EXCLUDED.nai_attg_stars,
             updated_at = NOW()
         `;
+        await tx`
+          INSERT INTO persona_voice_configs (
+            persona_id, speech_voice_sample_id, speech_voice_id, speech_voice_name,
+            speech_voice_design_prompt, voice_source_priority
+          )
+          VALUES (
+            ${params.personaId},
+            NULL,
+            NULL,
+            NULL,
+            ${params.card.speech_voice_design_prompt ?? null},
+            ${params.card.voice_source_priority ?? "design"}
+          )
+          ON CONFLICT (persona_id) DO UPDATE SET
+            speech_voice_sample_id = EXCLUDED.speech_voice_sample_id,
+            speech_voice_id = EXCLUDED.speech_voice_id,
+            speech_voice_name = EXCLUDED.speech_voice_name,
+            speech_voice_design_prompt = EXCLUDED.speech_voice_design_prompt,
+            voice_source_priority = EXCLUDED.voice_source_priority,
+            updated_at = NOW()
+        `;
+        if (
+          !(await naturalNudgeRepository.savePersonaConfig(
+            params.personaId,
+            {
+              talkativeness: params.card.natural_nudge_talkativeness ?? DEFAULT_NATURAL_NUDGE_TALKATIVENESS,
+              interests: params.card.natural_nudge_interests ?? [],
+            },
+            tx,
+          ))
+        ) {
+          throw new Error("Persona Natural Nudges replacement failed.");
+        }
+        await tx`
+          UPDATE persona_natural_nudge_configs
+          SET authored_idle_nudges = ${params.card.natural_nudge_idle_nudges ?? []}::jsonb,
+            disabled_idle_nudge_ids = '[]'::jsonb
+          WHERE persona_id = ${params.personaId}
+        `;
+        await userNamingRepository.savePersonaConfig(
+          params.personaId,
+          params.card.naming_config ?? EMPTY_PERSONA_NAMING_CONFIG,
+          tx,
+        );
+        await tx`
+          UPDATE speech_voice_bindings
+          SET pending_delete = true
+          WHERE persona_id = ${params.personaId}
+        `;
 
         // Persona cards do not contain sprite archives. Remove the previous
         // character's rows so stale expressions are never shown as the new one.
@@ -1351,12 +1407,20 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         }
 
         return {
-          personaId: source.persona_id,
-          personaLineageId,
-          wasMain: !source.is_alter,
-          previousAvatarUrl: source.webhook_avatar_url,
+          replacement: {
+            personaId: source.persona_id,
+            personaLineageId,
+            wasMain: !source.is_alter,
+            previousAvatarUrl: source.webhook_avatar_url,
+          },
+          serverDiscId: server.server_disc_id,
         };
       });
+      if (result) {
+        invalidateTomoriStateCache(result.serverDiscId);
+        invalidatePersonaSpriteCache(params.personaId);
+      }
+      return result?.replacement ?? null;
     } catch (error) {
       log.error(`Error replacing character data for persona ${params.personaId}:`, error);
       return null;
@@ -1494,6 +1558,7 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
     expectedLorebookEntries?: readonly LorebookEntryRow[];
     expectedServerId?: number;
     expectedLineageId?: number;
+    replaceCharacterConfig?: boolean;
   }): Promise<TomoriRow | null> {
     const pointerLineageId = normalizeLineageId(params.preset.preset_lineage_id);
     if (pointerLineageId === null) {
@@ -1536,14 +1601,18 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         }
 
         await this.replacePresetAttributesWithClient(tx, params.personaId, params.preset);
+        const preservePresetIdentity =
+          params.replaceCharacterConfig !== true && params.preservedNamingConfig !== undefined;
         await this.writePresetPersonaConfigWithClient(
           tx,
           params.personaId,
           params.triggerWords ?? resolvePresetTriggerWords(params.preset),
           params.personaPrompt ?? resolvePresetPersonaPrompt(params.preset),
-          params.preservedNamingConfig !== undefined,
+          preservePresetIdentity,
         );
-        if (params.preservedNamingConfig) {
+        if (params.replaceCharacterConfig === true) {
+          await userNamingRepository.savePersonaConfig(params.personaId, params.preset.preset_naming_config, tx);
+        } else if (params.preservedNamingConfig) {
           await userNamingRepository.savePersonaConfig(params.personaId, params.preservedNamingConfig, tx);
         }
         // Re-pointing resets sprites: drop the persona's own rows so it resolves
@@ -1551,10 +1620,53 @@ class PersonaRepository implements IRepository<PersonaExportShape> {
         // are cleaned up by the caller (the shared preset images are immutable).
         await tx`DELETE FROM persona_sprites WHERE persona_id = ${params.personaId}`;
         // Same for the character reference; the caller deletes a server-owned image.
-        await tx`
-          UPDATE persona_imagegen_configs SET char_ref_url = NULL, updated_at = NOW()
-          WHERE persona_id = ${params.personaId}
-        `;
+        if (params.replaceCharacterConfig === true) {
+          await tx`
+            INSERT INTO persona_imagegen_configs (persona_id, physical_appearance_tags, char_ref_url)
+            VALUES (${params.personaId}, ARRAY[]::TEXT[], NULL)
+            ON CONFLICT (persona_id) DO UPDATE SET
+              physical_appearance_tags = EXCLUDED.physical_appearance_tags,
+              char_ref_url = EXCLUDED.char_ref_url,
+              updated_at = NOW()
+          `;
+          await tx`
+            INSERT INTO persona_textgen_configs (
+              persona_id, nai_attg_author, nai_attg_title, nai_attg_tags, nai_attg_genre, nai_attg_stars
+            )
+            VALUES (${params.personaId}, NULL, NULL, NULL, NULL, NULL)
+            ON CONFLICT (persona_id) DO UPDATE SET
+              nai_attg_author = NULL,
+              nai_attg_title = NULL,
+              nai_attg_tags = NULL,
+              nai_attg_genre = NULL,
+              nai_attg_stars = NULL,
+              updated_at = NOW()
+          `;
+          await tx`
+            INSERT INTO persona_voice_configs (
+              persona_id, speech_voice_sample_id, speech_voice_id, speech_voice_name,
+              speech_voice_design_prompt, voice_source_priority
+            )
+            VALUES (${params.personaId}, NULL, NULL, NULL, NULL, 'design')
+            ON CONFLICT (persona_id) DO UPDATE SET
+              speech_voice_sample_id = NULL,
+              speech_voice_id = NULL,
+              speech_voice_name = NULL,
+              speech_voice_design_prompt = NULL,
+              voice_source_priority = 'design',
+              updated_at = NOW()
+          `;
+          await tx`
+            UPDATE speech_voice_bindings
+            SET pending_delete = true
+            WHERE persona_id = ${params.personaId}
+          `;
+        } else {
+          await tx`
+            UPDATE persona_imagegen_configs SET char_ref_url = NULL, updated_at = NOW()
+            WHERE persona_id = ${params.personaId}
+          `;
+        }
         await naturalNudgeRepository.clearPersonaConfig(tx, params.personaId);
 
         if (

@@ -1,11 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHmac } from "node:crypto";
 import type { Client } from "discord.js";
+import JSZip from "jszip";
 import { createDashboardApp } from "@/web/dashboard/server";
 import { TomoriDashboardCore } from "@/web/dashboard/core";
 import { DashboardSessionStore, SESSION_COOKIE } from "@/web/dashboard/auth";
 import { configSpriteOperations } from "@/utils/discord/interactions/configSpriteOperations";
 import { personaSpriteRepository } from "@/utils/db/repositories";
+import { IMPORT_LIMITS } from "@/utils/security/rateLimiter";
 import { initializeLocalizer, localizer } from "@/utils/text/localizer";
 import { SPRITE_UPLOAD_MAX_BYTES } from "@/web/dashboard/spriteService";
 import { createPersona, createServerConfig, createUserRow } from "../../helpers/fixtures";
@@ -200,18 +202,46 @@ describe("dashboard sprites", () => {
   });
 
   it("exports the shared archive with skipped-image metadata", async () => {
-    const { app, headers } = setup();
-    spyOn(configSpriteOperations, "exportSprites").mockResolvedValue({
+    const { app, headers, persona } = setup();
+    const exportSprites = spyOn(configSpriteOperations, "exportSprites").mockResolvedValue({
       status: "success",
-      buffer: Buffer.from("zip-fixture"),
-      filename: "mirri-sprites.zip",
+      files: [{ buffer: Buffer.from("zip-fixture"), filename: "mirri-sprites.zip" }],
       spriteCount: 2,
       skippedCount: 1,
     });
     const response = await app.request(`${base}/export`, { headers });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/zip");
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="mirri-sprites.zip"');
     expect(response.headers.get("x-sprite-skipped")).toBe("1");
     expect(await response.text()).toBe("zip-fixture");
+    expect(exportSprites.mock.calls[0][0]).toEqual({
+      persona,
+      maxArchiveBytes: IMPORT_LIMITS.MAX_PERSONA_IMPORT_SIZE_MB * 1024 * 1024,
+    });
+  });
+
+  it("bundles every split sprite archive for a single browser download", async () => {
+    const { app, headers } = setup();
+    spyOn(configSpriteOperations, "exportSprites").mockResolvedValue({
+      status: "success",
+      files: [
+        { buffer: Buffer.from("zip-part-one"), filename: "mirri-sprites-part-1-of-2.zip" },
+        { buffer: Buffer.from("zip-part-two"), filename: "mirri-sprites-part-2-of-2.zip" },
+      ],
+      spriteCount: 4,
+      skippedCount: 0,
+    });
+
+    const response = await app.request(`${base}/export`, { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="sprites-export.zip"');
+    const archive = await JSZip.loadAsync(await response.arrayBuffer());
+    expect(Object.keys(archive.files).sort()).toEqual([
+      "mirri-sprites-part-1-of-2.zip",
+      "mirri-sprites-part-2-of-2.zip",
+    ]);
+    expect(await archive.file("mirri-sprites-part-1-of-2.zip")?.async("string")).toBe("zip-part-one");
+    expect(await archive.file("mirri-sprites-part-2-of-2.zip")?.async("string")).toBe("zip-part-two");
   });
 });

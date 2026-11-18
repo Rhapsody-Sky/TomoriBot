@@ -141,6 +141,13 @@ defaults to preserving the existing book, including when the new card carries lo
 requires a character card with `lorebook_entries`; a missing field is rejected and an empty array
 clears the book. The clear choice removes the target lineage's book without requiring a card.
 
+PNG and JSON cards replace the prompt, attributes, examples, triggers, naming, voice description,
+Natural Nudges, image-generation metadata, and text-generation metadata. Missing optional card fields
+use the import defaults. Local voice assignments are cleared and generated voice bindings are retired;
+server voice samples and provider settings remain available. Official preset replacement restores its
+shared sprites and default character configuration. Cards carry no sprite images, so their previous
+sprites are removed. A JSON card keeps the current avatar because it contains no image.
+
 The confirmation names the target and replacement, shows the lorebook action, and warns that all
 personas sharing the target lineage on this server see the same changed book. Character and lorebook
 writes commit together. Serverwide books, other lineages, server memories, and personal memories

@@ -683,8 +683,11 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     const serverMemoryContent = `_rt_replace_server_memory_${Date.now()}`;
     const personalMemoryContent = `_rt_replace_personal_memory_${Date.now()}`;
     let targetPersonaId: number | null = null;
+    let savedConfigId: number | null = null;
 
-    const [targetRow] = await testSql<Array<{ persona_id: number; persona_lineage_id: number | string }>>`
+    const [targetRow] = await testSql<
+      Array<{ persona_id: number; persona_lineage_id: number | string; preset_lineage_id: number }>
+    >`
       INSERT INTO personas (
         server_id,
         persona_nickname,
@@ -692,7 +695,9 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         sample_dialogues_in,
         sample_dialogues_out,
         webhook_avatar_url,
-        is_alter
+        is_alter,
+        preset_lineage_id,
+        preset_language
       )
       VALUES (
         ${refs.serverId},
@@ -701,9 +706,11 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         ARRAY['_rt_replace_target_input']::TEXT[],
         ARRAY['_rt_replace_target_output']::TEXT[],
         '_rt_preserved_avatar',
-        true
+        true,
+        900_200,
+        'en-US'
       )
-      RETURNING persona_id, persona_lineage_id
+      RETURNING persona_id, persona_lineage_id, preset_lineage_id
     `;
     targetPersonaId = targetRow.persona_id;
     const targetLineageId = Number(targetRow.persona_lineage_id);
@@ -734,6 +741,44 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       INSERT INTO persona_sprites (persona_id, sprite_name, sprite_key, avatar_url)
       VALUES (${targetPersonaId}, 'Old Sprite', 'old-sprite', '_rt_old_sprite_url')
     `;
+    await testSql`
+      INSERT INTO persona_natural_nudge_configs (
+        persona_id, talkativeness, interests, authored_idle_nudges, disabled_idle_nudge_ids
+      ) VALUES (
+        ${targetPersonaId},
+        0,
+        '[{"label":"Old interest","description":"Old description"}]'::jsonb,
+        '[{"id":"old-id","category":"start_topic","title":"Old idle","brief":"Old brief","agenda_hint":null,"prerequisites":[],"recommended_tools":[]}]'::jsonb,
+        '["old-id"]'::jsonb
+      )
+    `;
+    await testSql`
+      INSERT INTO persona_naming_configs (persona_id, prefixes, suffixes, address_terms)
+      VALUES (
+        ${targetPersonaId},
+        '{"neutral":"Old"}'::jsonb,
+        '{}'::jsonb,
+        '{"neutral":"old friend"}'::jsonb
+      )
+    `;
+    await personaRepository.setVoiceConfig(targetPersonaId, {
+      speech_voice_sample_id: null,
+      speech_voice_id: "_rt_old_voice_id",
+      speech_voice_name: "Old voice",
+      speech_voice_design_prompt: "Old voice design",
+      voice_source_priority: "clone",
+    });
+    const [savedConfig] = await testSql<Array<{ saved_config_id: number }>>`
+      INSERT INTO saved_provider_configs (server_id, provider)
+      VALUES (${refs.serverId}, ${`_rt_replace_google_${Date.now()}`})
+      RETURNING saved_config_id
+    `;
+    savedConfigId = savedConfig.saved_config_id;
+    await testSql`
+      INSERT INTO speech_voice_bindings (
+        persona_id, saved_config_id, credential_revision, transport, prompt_hash, voice_id
+      ) VALUES (${targetPersonaId}, ${savedConfigId}, 1, 'google', '_rt_old_voice_hash', '_rt_old_google_voice')
+    `;
 
     try {
       const result = await personaRepository.replaceCharacterFromCard({
@@ -748,6 +793,28 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
           trigger_words: ["_rt_replacement_trigger"],
           persona_prompt: "_rt_replacement_prompt",
           persona_lineage_id: 999_999,
+          preset_lineage_id: 900_201,
+          is_nsfw: true,
+          naming_config: {
+            prefixes: { neutral: "New" },
+            suffixes: {},
+            addressTerms: { neutral: "new friend" },
+          },
+          speech_voice_design_prompt: "_rt_replacement_voice_design",
+          voice_source_priority: "clone",
+          natural_nudge_talkativeness: 4,
+          natural_nudge_interests: [{ label: "New interest", description: "New description" }],
+          natural_nudge_idle_nudges: [
+            {
+              id: "new-id",
+              category: "start_topic",
+              title: "New idle",
+              brief: "New brief",
+              agenda_hint: null,
+              prerequisites: [],
+              recommended_tools: [],
+            },
+          ],
           physical_appearance_tags: ["_rt_replacement_tag"],
           char_ref_url: "_rt_replacement_reference",
           nai_attg_author: "_rt_replacement_author",
@@ -771,6 +838,9 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         Array<{
           is_alter: boolean;
           persona_lineage_id: number | string;
+          preset_lineage_id: number | string | null;
+          preset_language: string | null;
+          is_nsfw: boolean;
           attribute_list: string[];
           webhook_avatar_url: string | null;
           persona_prompt: string | null;
@@ -783,6 +853,9 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         SELECT
           p.is_alter,
           p.persona_lineage_id,
+          p.preset_lineage_id,
+          p.preset_language,
+          p.is_nsfw,
           p.attribute_list,
           p.webhook_avatar_url,
           pc.persona_prompt,
@@ -797,6 +870,9 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       expect(sourceAfter.is_alter).toBe(false);
       expect(targetAfter.is_alter).toBe(true);
       expect(Number(targetAfter.persona_lineage_id)).toBe(targetLineageId);
+      expect(Number(targetAfter.preset_lineage_id)).toBe(900_201);
+      expect(targetAfter.preset_language).toBeNull();
+      expect(targetAfter.is_nsfw).toBe(true);
       expect(targetAfter.attribute_list).toEqual(["_rt_replacement_private", "_rt_replacement_public"]);
       expect(targetAfter.webhook_avatar_url).toBe("_rt_preserved_avatar");
       expect(targetAfter.persona_prompt).toBe("_rt_replacement_prompt");
@@ -861,6 +937,56 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         nai_attg_stars: 4,
       });
 
+      const [voiceConfig] = await testSql`
+        SELECT speech_voice_sample_id, speech_voice_id, speech_voice_name,
+          speech_voice_design_prompt, voice_source_priority
+        FROM persona_voice_configs WHERE persona_id = ${targetPersonaId}
+      `;
+      expect(voiceConfig).toEqual({
+        speech_voice_sample_id: null,
+        speech_voice_id: null,
+        speech_voice_name: null,
+        speech_voice_design_prompt: "_rt_replacement_voice_design",
+        voice_source_priority: "clone",
+      });
+
+      const [nudgeConfig] = await testSql`
+        SELECT talkativeness, interests, authored_idle_nudges, disabled_idle_nudge_ids
+        FROM persona_natural_nudge_configs WHERE persona_id = ${targetPersonaId}
+      `;
+      expect(nudgeConfig).toEqual({
+        talkativeness: 4,
+        interests: [{ label: "New interest", description: "New description" }],
+        authored_idle_nudges: [
+          {
+            id: "new-id",
+            category: "start_topic",
+            title: "New idle",
+            brief: "New brief",
+            agenda_hint: null,
+            prerequisites: [],
+            recommended_tools: [],
+          },
+        ],
+        disabled_idle_nudge_ids: [],
+      });
+
+      const [namingConfig] = await testSql`
+        SELECT prefixes, suffixes, address_terms
+        FROM persona_naming_configs WHERE persona_id = ${targetPersonaId}
+      `;
+      expect(namingConfig).toEqual({
+        prefixes: { neutral: "New" },
+        suffixes: {},
+        address_terms: { neutral: "new friend" },
+      });
+
+      const [binding] = await testSql`
+        SELECT pending_delete FROM speech_voice_bindings
+        WHERE persona_id = ${targetPersonaId} AND saved_config_id = ${savedConfigId}
+      `;
+      expect(binding.pending_delete).toBe(true);
+
       const [serverMemory] = await testSql<Array<{ persona_id: number; persona_lineage_id: number | string }>>`
         SELECT persona_id, persona_lineage_id
         FROM server_memories
@@ -878,9 +1004,175 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     } finally {
       await testSql`DELETE FROM server_memories WHERE content = ${serverMemoryContent}`;
       await testSql`DELETE FROM personal_memories WHERE content = ${personalMemoryContent}`;
+      if (savedConfigId !== null) {
+        await testSql`DELETE FROM saved_provider_configs WHERE saved_config_id = ${savedConfigId}`;
+      }
       if (targetPersonaId !== null) {
         await testSql`DELETE FROM personas WHERE persona_id = ${targetPersonaId}`;
       }
+    }
+  });
+
+  it("replaceCharacterConfig resets character-scoped settings before applying a preset pointer", async () => {
+    const suffix = Date.now();
+    const presetName = `_rt_replace_config_preset_${suffix}`;
+    const memoryContent = `_rt_replace_config_memory_${suffix}`;
+    const presetNamingConfig = {
+      prefixes: { neutral: "Preset" },
+      suffixes: {},
+      addressTerms: { neutral: "friend" },
+    };
+    let personaId: number | null = null;
+    let savedConfigId: number | null = null;
+
+    const [preset] = await testSql<TomoriPresetRow[]>`
+      INSERT INTO persona_presets (
+        persona_preset_name, persona_preset_desc, preset_lineage_id, preset_language,
+        preset_attribute_list, preset_attribute_public_flags, preset_sample_dialogues_in,
+        preset_sample_dialogues_out, preset_trigger_words, preset_naming_config
+      ) VALUES (
+        ${presetName}, '_rt_replace_config_prompt', ${900_300 + (suffix % 1000)}, 'en-US',
+        ARRAY['_rt_replace_config_attribute']::TEXT[], ARRAY[false]::BOOLEAN[],
+        ARRAY['_rt_replace_config_input']::TEXT[], ARRAY['_rt_replace_config_output']::TEXT[],
+        ARRAY['_rt_replace_config_trigger']::TEXT[], ${JSON.stringify(presetNamingConfig)}::jsonb
+      ) RETURNING *
+    `;
+    const persona = await personaRepository.createAlterPersona({
+      serverId: refs.serverId,
+      nickname: `_rt_replace_config_persona_${suffix}`,
+      attributes: ["_rt_old_config_attribute"],
+      sampleDialoguesIn: [],
+      sampleDialoguesOut: [],
+    });
+    if (!persona?.persona_id) throw new Error("Could not create preset replacement fixture");
+    personaId = persona.persona_id;
+    const personaLineageId = Number(persona.persona_lineage_id);
+
+    try {
+      expect(await personaRepository.setPhysicalAppearanceTags(personaId, ["_rt_old_config_tag"])).toBe(true);
+      expect(await personaRepository.setCharRef(personaId, "_rt_old_config_reference")).toBe(true);
+      expect(
+        await personaRepository.setNaiAttg(personaId, {
+          nai_attg_author: "_rt_old_config_author",
+          nai_attg_title: "_rt_old_config_title",
+          nai_attg_tags: "_rt_old_config_tags",
+          nai_attg_genre: "_rt_old_config_genre",
+          nai_attg_stars: 3,
+        }),
+      ).toBe(true);
+      expect(
+        await personaRepository.setVoiceConfig(personaId, {
+          speech_voice_sample_id: null,
+          speech_voice_id: "_rt_old_config_voice_id",
+          speech_voice_name: "Old voice",
+          speech_voice_design_prompt: "_rt_old_config_voice_prompt",
+          voice_source_priority: "clone",
+        }),
+      ).toBe(true);
+      expect(
+        await personaRepository.updateNamingConfig(personaId, {
+          prefixes: { neutral: "Old" },
+          suffixes: {},
+          addressTerms: { neutral: "old friend" },
+        }),
+      ).toBe(true);
+      await testSql`
+        INSERT INTO persona_natural_nudge_configs (
+          persona_id, talkativeness, interests, authored_idle_nudges, disabled_idle_nudge_ids
+        ) VALUES (
+          ${personaId}, 4, '[{"label":"Old","description":"Old interest"}]'::jsonb,
+          '[{"id":"old-id","category":"start_topic","title":"Old idle","brief":"Old brief","agenda_hint":null,"prerequisites":[],"recommended_tools":[]}]'::jsonb,
+          '["old-id"]'::jsonb
+        )
+      `;
+      const [savedConfig] = await testSql<Array<{ saved_config_id: number }>>`
+        INSERT INTO saved_provider_configs (server_id, provider)
+        VALUES (${refs.serverId}, ${`_rt_replace_pointer_google_${suffix}`})
+        RETURNING saved_config_id
+      `;
+      savedConfigId = savedConfig.saved_config_id;
+      await testSql`
+        INSERT INTO speech_voice_bindings (
+          persona_id, saved_config_id, credential_revision, transport, prompt_hash, voice_id
+        ) VALUES (${personaId}, ${savedConfigId}, 1, 'google', '_rt_old_config_voice_hash', '_rt_old_config_google_voice')
+      `;
+      const [memory] = await testSql`
+        INSERT INTO server_memories (server_id, persona_id, persona_lineage_id, user_id, content)
+        VALUES (${refs.serverId}, ${personaId}, ${personaLineageId}, ${refs.userId}, ${memoryContent})
+        RETURNING server_memory_id
+      `;
+
+      const applied = await personaRepository.applyPresetPointerToPersona({
+        personaId,
+        nickname: `_rt_replaced_with_${presetName}`,
+        preset,
+        personaLineageId,
+        expectedServerId: refs.serverId,
+        expectedLineageId: personaLineageId,
+        replaceCharacterConfig: true,
+      });
+      expect(applied?.is_pointer).toBe(true);
+      expect(Number(applied?.persona_lineage_id)).toBe(personaLineageId);
+
+      const [characterConfigs] = await testSql`
+        SELECT pic.physical_appearance_tags, pic.char_ref_url,
+          ptc.nai_attg_author, ptc.nai_attg_title, ptc.nai_attg_tags, ptc.nai_attg_genre, ptc.nai_attg_stars
+        FROM persona_imagegen_configs pic
+        JOIN persona_textgen_configs ptc ON ptc.persona_id = pic.persona_id
+        WHERE pic.persona_id = ${personaId}
+      `;
+      expect(characterConfigs).toEqual({
+        physical_appearance_tags: [],
+        char_ref_url: null,
+        nai_attg_author: null,
+        nai_attg_title: null,
+        nai_attg_tags: null,
+        nai_attg_genre: null,
+        nai_attg_stars: null,
+      });
+      const [voiceConfig] = await testSql`
+        SELECT speech_voice_sample_id, speech_voice_id, speech_voice_name,
+          speech_voice_design_prompt, voice_source_priority
+        FROM persona_voice_configs WHERE persona_id = ${personaId}
+      `;
+      expect(voiceConfig).toEqual({
+        speech_voice_sample_id: null,
+        speech_voice_id: null,
+        speech_voice_name: null,
+        speech_voice_design_prompt: null,
+        voice_source_priority: "design",
+      });
+      const [namingConfig] = await testSql`
+        SELECT prefixes, suffixes, address_terms
+        FROM persona_naming_configs WHERE persona_id = ${personaId}
+      `;
+      expect(namingConfig).toEqual({
+        prefixes: { neutral: "Preset" },
+        suffixes: {},
+        address_terms: { neutral: "friend" },
+      });
+      const [nudgeConfigCount] = await testSql`
+        SELECT COUNT(*)::int AS count FROM persona_natural_nudge_configs WHERE persona_id = ${personaId}
+      `;
+      expect(nudgeConfigCount.count).toBe(0);
+      const [binding] = await testSql`
+        SELECT pending_delete FROM speech_voice_bindings
+        WHERE persona_id = ${personaId} AND saved_config_id = ${savedConfigId}
+      `;
+      expect(binding.pending_delete).toBe(true);
+      const [keptMemory] = await testSql`
+        SELECT persona_id, persona_lineage_id FROM server_memories WHERE server_memory_id = ${memory.server_memory_id}
+      `;
+      expect(keptMemory).toEqual({ persona_id: personaId, persona_lineage_id: personaLineageId });
+    } finally {
+      await testSql`DELETE FROM server_memories WHERE content = ${memoryContent}`;
+      if (savedConfigId !== null) {
+        await testSql`DELETE FROM saved_provider_configs WHERE saved_config_id = ${savedConfigId}`;
+      }
+      if (personaId !== null) {
+        await testSql`DELETE FROM personas WHERE persona_id = ${personaId}`;
+      }
+      await testSql`DELETE FROM persona_presets WHERE persona_preset_name = ${presetName}`;
     }
   });
 

@@ -185,6 +185,7 @@ describe("dashboard connections", () => {
       channel_settings: "channel-settings",
       moderation: "moderation",
       nav_server_settings: "settings",
+      nudge_title: "natural-nudges",
     };
     for (const canManage of [true, false]) {
       overview.canManage = canManage;
@@ -192,7 +193,7 @@ describe("dashboard connections", () => {
       expect(navigation().map(({ links }) => links.map(({ view }) => view))).toEqual([
         ["overview", "personas", "lorebooks", "personal-spotlights"],
         ["profile", "personal-memory", "personal-providers"],
-        ...(canManage ? [["settings", "channel-settings", "server-providers", "moderation"]] : []),
+        ...(canManage ? [["settings", "channel-settings", "server-providers", "moderation", "natural-nudges"]] : []),
       ]);
       for (const [title, view] of Object.entries({ ...commonPages, ...(canManage ? managerPages : {}) })) {
         expect(filter(entries, title)[0]).toMatchObject({ view, title });

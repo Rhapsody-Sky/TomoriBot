@@ -33,6 +33,8 @@ import {
 import { getBaseTriggerWords, localizer } from "@/utils/text/localizer";
 import { dedupeTriggerWords } from "@/utils/text/triggerWords";
 import { resolvePersonaCardFile, type PersonaCardResolution } from "@/utils/persona/resolvePersonaCardFile";
+import { isNsfwPersonaImport } from "@/commands/persona/import";
+import { setGuildBotAvatar, setGuildBotNickname } from "@/utils/discord/guildIdentity";
 
 const MODAL_CUSTOM_ID = "persona_replace_modal";
 const SOURCE_SELECT_ID = "source_persona";
@@ -143,43 +145,20 @@ async function syncMainIdentity(
   nickname: string,
   avatarBuffer: Buffer | null | undefined,
 ): Promise<IdentitySyncResult> {
-  const result: IdentitySyncResult = {
-    nicknameUpdated: false,
-    avatarUpdated: avatarBuffer === undefined,
+  const guildId = interaction.guildId;
+  if (!guildId) return { nicknameUpdated: false, avatarUpdated: false };
+  const nicknameResult = await setGuildBotNickname(guildId, nickname);
+  const avatarResult =
+    avatarBuffer === undefined
+      ? null
+      : await setGuildBotAvatar(
+          guildId,
+          avatarBuffer ? `data:image/png;base64,${(await convertToPNG(avatarBuffer)).toString("base64")}` : null,
+        );
+  return {
+    nicknameUpdated: nicknameResult.success,
+    avatarUpdated: avatarResult?.success ?? avatarBuffer === undefined,
   };
-
-  try {
-    await interaction.guild?.members.me?.setNickname(nickname);
-    result.nicknameUpdated = true;
-  } catch (error) {
-    log.warn(`Failed to update the guild nickname during persona replacement: ${String(error)}`);
-  }
-
-  if (avatarBuffer === undefined) return result;
-
-  try {
-    const avatar = avatarBuffer
-      ? `data:image/png;base64,${(await convertToPNG(avatarBuffer)).toString("base64")}`
-      : null;
-    const response = await fetch(`https://discord.com/api/v10/guilds/${interaction.guildId}/members/@me`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ avatar }),
-    });
-    result.avatarUpdated = response.ok;
-    if (!response.ok) {
-      log.warn(
-        `Failed to update the guild avatar during persona replacement: ${response.status} ${response.statusText}`,
-      );
-    }
-  } catch (error) {
-    log.warn(`Failed to update the guild avatar during persona replacement: ${String(error)}`);
-  }
-
-  return result;
 }
 
 export async function execute(
@@ -455,7 +434,7 @@ export async function execute(
       replacementName = resolved.presetData.tomori_nickname;
       replacementAvatar = resolved.avatarImageBuffer;
       replacementKind = "file";
-      if (resolved.presetData.is_nsfw) {
+      if (await isNsfwPersonaImport(resolved.presetData)) {
         await replyInfoEmbed(modalInteraction, locale, {
           titleKey: "commands.persona.replace.invalid_file_title",
           descriptionKey: "commands.persona.replace.nsfw_card_description",
@@ -507,6 +486,16 @@ export async function execute(
         }
       }
 
+      let preservedAvatarUrl = sourcePersona.webhook_avatar_url;
+      if (replacementAvatar === null && !preservedAvatarUrl && sourcePersona.is_pointer) {
+        const sourcePreset = await configRepository.loadPresetByReference(
+          Number(sourcePersona.preset_lineage_id ?? sourcePersona.persona_lineage_id),
+          sourcePersona.preset_language ?? locale,
+        );
+        if (!sourcePreset) throw new Error("Could not resolve the current persona preset avatar.");
+        preservedAvatarUrl = sourcePreset.preset_avatar_shared_url ?? null;
+      }
+
       const replaced = await personaRepository.replaceCharacterFromCard({
         personaId: sourcePersonaId,
         serverId: sourcePersona.server_id,
@@ -515,9 +504,7 @@ export async function execute(
         expectedLorebookEntries: confirmedLorebook,
         lorebookEntries:
           lorebookMode === "clear" ? [] : lorebookMode === "import" ? resolved.presetData.lorebook_entries : undefined,
-        // JSON cards have no image bytes. Persist the currently resolved avatar
-        // explicitly so materializing an official pointer does not lose its art.
-        avatarUrl: replacementAvatar === null ? sourcePersona.webhook_avatar_url : uploadedAvatarUrl,
+        avatarUrl: replacementAvatar === null ? preservedAvatarUrl : uploadedAvatarUrl,
       });
       if (!replaced) {
         if (uploadedAvatarUrl) await deletePersonaAvatarFromStorage(uploadedAvatarUrl);
@@ -572,6 +559,7 @@ export async function execute(
       }
       const replaced = await personaRepository.applyPresetPointerToPersona({
         personaId: sourcePersonaId,
+        replaceCharacterConfig: true,
         nickname: replacementName,
         preset: selectedPreset,
         personaLineageId: lineageId,
@@ -606,7 +594,11 @@ export async function execute(
 
     let identitySync: IdentitySyncResult | null = null;
     if (!sourcePersona.is_alter) {
-      identitySync = await syncMainIdentity(interaction, replacementName, replacementAvatar ?? undefined);
+      identitySync = await syncMainIdentity(
+        interaction,
+        replacementName,
+        replacementKind === "file" && replacementAvatar === null ? undefined : replacementAvatar,
+      );
       if (replacementKind === "preset" && identitySync.avatarUpdated) {
         await personaRepository.markServerMainAvatarSynced(interaction.guild.id);
       }

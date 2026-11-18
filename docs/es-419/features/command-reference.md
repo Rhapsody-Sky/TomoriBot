@@ -11,7 +11,7 @@ sidebar:
 
 Todos los comandos de barra que TomoriBot tiene registrados actualmente, generados a partir de los mismos constructores de comandos y descripciones en español que se usan para el registro en Discord (las descripciones sin traducir aparecen en inglés).
 
-Grupos de comandos de nivel superior: **45**. Comandos de barra ejecutables: **92**.
+Grupos de comandos de nivel superior: **45**. Comandos de barra ejecutables: **93**.
 
 ## `/booru`
 

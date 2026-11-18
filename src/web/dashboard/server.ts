@@ -13,6 +13,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { Hono } from "hono";
 import { z } from "zod";
+import JSZip from "jszip";
 import { log } from "@/utils/misc/logger";
 import { convertToPNG } from "@/utils/image/imageProcessor";
 import { getStmCount } from "@/utils/discord/interactions/personalConfigLoaders";
@@ -2775,7 +2776,12 @@ export function createDashboardApp(client: Client) {
       return context.json(
         context.req.method === "GET"
           ? await providers.loadRotationKeys(result.snapshot, provider)
-          : await providers.updateRotationKeys(result.snapshot, provider, await context.req.json().catch(() => null)),
+          : await providers.updateRotationKeys(
+              result.actor,
+              result.snapshot,
+              provider,
+              await context.req.json().catch(() => null),
+            ),
       );
     },
   );
@@ -3512,10 +3518,21 @@ export function createDashboardApp(client: Client) {
   app.get(`${spriteRoot}/export`, async (context) => {
     const { snapshot, personaId } = context.get("spriteContext");
     const result = await sprites.export(snapshot, personaId);
+    const [download] = result.files;
+    let filename = download.filename;
+    let buffer = download.buffer;
+    if (result.files.length > 1) {
+      const archive = new JSZip();
+      for (const file of result.files) {
+        archive.file(file.filename, file.buffer, { compression: "STORE" });
+      }
+      filename = "sprites-export.zip";
+      buffer = await archive.generateAsync({ type: "nodebuffer", compression: "STORE" });
+    }
     context.header("Content-Type", "application/zip");
-    context.header("Content-Disposition", `attachment; filename="${result.filename}"`);
+    context.header("Content-Disposition", `attachment; filename="${filename}"`);
     context.header("X-Sprite-Skipped", String(result.skippedCount));
-    return context.body(new Uint8Array(result.buffer));
+    return context.body(new Uint8Array(buffer));
   });
   app.get(`${spriteRoot}/image`, async (context) => {
     const { snapshot, personaId } = context.get("spriteContext");

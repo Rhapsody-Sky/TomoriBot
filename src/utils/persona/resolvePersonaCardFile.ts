@@ -11,6 +11,7 @@ export type PersonaCardResolution =
       avatarImageBuffer: Buffer | null;
       presetData: PresetExportData;
       source: PersonaCardSource;
+      sourceJson?: unknown;
     }
   | {
       ok: false;
@@ -111,6 +112,7 @@ export function resolvePersonaCardFile(fileName: string, buffer: Buffer, maxFile
       avatarImageBuffer: buffer,
       presetData: conversion.data,
       source: "sillytavern-png",
+      sourceJson: sillyTavernData.parsedJson,
     };
   }
 
@@ -149,5 +151,6 @@ export function resolvePersonaCardFile(fileName: string, buffer: Buffer, maxFile
     avatarImageBuffer: null,
     presetData: conversion.data,
     source: "sillytavern-json",
+    sourceJson: parsedJson,
   };
 }

@@ -11,7 +11,7 @@ sidebar:
 
 Tất cả các lệnh slash hiện được TomoriBot đăng ký, được tạo từ cùng trình xây dựng lệnh và mô tả tiếng Việt dùng để đăng ký trên Discord (mô tả chưa được dịch sẽ hiển thị bằng tiếng Anh).
 
-Các nhóm lệnh cấp cao nhất: **45**. Các lệnh slash có thể thực thi: **92**.
+Các nhóm lệnh cấp cao nhất: **45**. Các lệnh slash có thể thực thi: **93**.
 
 ## `/booru`
 

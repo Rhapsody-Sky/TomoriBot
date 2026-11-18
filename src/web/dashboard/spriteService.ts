@@ -17,6 +17,7 @@ const metadataSchema = z
 
 export const SPRITE_UPLOAD_MAX_BYTES =
   Math.max(PERSONA_LIMITS.MAX_AVATAR_SIZE_MB, IMPORT_LIMITS.MAX_PERSONA_IMPORT_SIZE_MB) * 1024 * 1024;
+const SPRITE_EXPORT_MAX_BYTES = IMPORT_LIMITS.MAX_PERSONA_IMPORT_SIZE_MB * 1024 * 1024;
 
 function spriteError(code: string, status: 404 | 422 | 429 | 503 = 422): never {
   const keys: Record<string, string> = {
@@ -156,7 +157,12 @@ export class DashboardSpriteService {
   }
 
   async export(snapshot: DashboardGuildSnapshot, personaId: number) {
-    return assertResult(await configSpriteOperations.exportSprites({ persona: this.persona(snapshot, personaId) }));
+    return assertResult(
+      await configSpriteOperations.exportSprites({
+        persona: this.persona(snapshot, personaId),
+        maxArchiveBytes: SPRITE_EXPORT_MAX_BYTES,
+      }),
+    );
   }
 
   async image(snapshot: DashboardGuildSnapshot, personaId: number, key: string) {

@@ -11,7 +11,7 @@ sidebar:
 
 Every slash command currently registered by TomoriBot, generated from the same command builders and English locale descriptions used for Discord registration.
 
-Top-level command groups: **45**. Runnable slash commands: **92**.
+Top-level command groups: **45**. Runnable slash commands: **93**.
 
 ## `/booru`
 

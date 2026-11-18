@@ -15,12 +15,36 @@
    ========================================================================================== */
 
 /* Hue and chroma are registered numbers, so a tinted area morphs when its palette changes. */
-@property --h { syntax: "<number>"; inherits: true; initial-value: 28; }
-@property --c { syntax: "<number>"; inherits: true; initial-value: 0.16; }
-@property --ah { syntax: "<number>"; inherits: true; initial-value: 90; }
-@property --ac { syntax: "<number>"; inherits: true; initial-value: 0.16; }
-@property --kh { syntax: "<number>"; inherits: true; initial-value: 8; }
-@property --kc { syntax: "<number>"; inherits: true; initial-value: 0.15; }
+@property --h {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 28;
+}
+@property --c {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.16;
+}
+@property --ah {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 90;
+}
+@property --ac {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.16;
+}
+@property --kh {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 8;
+}
+@property --kc {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.15;
+}
 
 :root {
   --pad: var(--space-6); /* inner padding of every frame; text edge = frame edge + pad */
@@ -31,7 +55,8 @@
 
 /* Defined on body, where --ink exists; on :root it would resolve to nothing. */
 body {
-  --dots: radial-gradient(circle, color-mix(in oklch, var(--ink) 16%, transparent) 1.2px, transparent 1.6px) 0 0 / 12px 12px;
+  --dots:
+    radial-gradient(circle, color-mix(in oklch, var(--ink) 16%, transparent) 1.2px, transparent 1.6px) 0 0 / 12px 12px;
 }
 
 /* ==========================================================================================
@@ -77,13 +102,62 @@ body[data-theme="light"] .tinted {
   --pink-soft: oklch(0.93 calc(var(--kc) * 0.35) var(--kh));
 }
 
-.tinted[data-tint="tomori"] { --h: 28; --c: 0.16; --ah: 90; --ac: 0.16; --kh: 8; --kc: 0.15; }
-.tinted[data-tint="lilya"] { --h: 195; --c: 0.12; --ah: 78; --ac: 0.15; --kh: 12; --kc: 0.14; }
-.tinted[data-tint="aphel"] { --h: 350; --c: 0.13; --ah: 80; --ac: 0.13; --kh: 22; --kc: 0.13; }
-.tinted[data-tint="nerine"] { --h: 145; --c: 0.12; --ah: 82; --ac: 0.14; --kh: 12; --kc: 0.13; }
-.tinted[data-tint="zaya"] { --h: 300; --c: 0.15; --ah: 196; --ac: 0.12; --kh: 330; --kc: 0.14; }
-.tinted[data-tint="temari"] { --h: 250; --c: 0.14; --ah: 240; --ac: 0.025; --kh: 260; --kc: 0.1; }
-.tinted[data-tint="locke"] { --h: 20; --c: 0.16; --ah: 85; --ac: 0.12; --kh: 8; --kc: 0.14; }
+.tinted[data-tint="tomori"] {
+  --h: 28;
+  --c: 0.16;
+  --ah: 90;
+  --ac: 0.16;
+  --kh: 8;
+  --kc: 0.15;
+}
+.tinted[data-tint="lilya"] {
+  --h: 195;
+  --c: 0.12;
+  --ah: 78;
+  --ac: 0.15;
+  --kh: 12;
+  --kc: 0.14;
+}
+.tinted[data-tint="aphel"] {
+  --h: 350;
+  --c: 0.13;
+  --ah: 80;
+  --ac: 0.13;
+  --kh: 22;
+  --kc: 0.13;
+}
+.tinted[data-tint="nerine"] {
+  --h: 145;
+  --c: 0.12;
+  --ah: 82;
+  --ac: 0.14;
+  --kh: 12;
+  --kc: 0.13;
+}
+.tinted[data-tint="zaya"] {
+  --h: 300;
+  --c: 0.15;
+  --ah: 196;
+  --ac: 0.12;
+  --kh: 330;
+  --kc: 0.14;
+}
+.tinted[data-tint="temari"] {
+  --h: 250;
+  --c: 0.14;
+  --ah: 240;
+  --ac: 0.025;
+  --kh: 260;
+  --kc: 0.1;
+}
+.tinted[data-tint="locke"] {
+  --h: 20;
+  --c: 0.16;
+  --ah: 85;
+  --ac: 0.12;
+  --kh: 8;
+  --kc: 0.14;
+}
 
 /* ==========================================================================================
    Frame: top bar, sidebar and a scrolling main column that fill the window
@@ -285,7 +359,9 @@ body[data-layout="full"] .app-main {
   border: 4px solid #fff;
   border-radius: 28%;
   background: linear-gradient(150deg, oklch(0.7 0.13 var(--sh)), oklch(0.48 0.12 var(--sh)));
-  box-shadow: 0 6px 0 -2px color-mix(in oklch, var(--primary) 45%, transparent), 0 12px 24px #0005;
+  box-shadow:
+    0 6px 0 -2px color-mix(in oklch, var(--primary) 45%, transparent),
+    0 12px 24px #0005;
   color: #fff;
   font-weight: 800;
   overflow: hidden;
@@ -302,7 +378,9 @@ body[data-layout="full"] .app-main {
 }
 
 body[data-theme="light"] .sticker {
-  box-shadow: 0 6px 0 -2px color-mix(in oklch, var(--primary) 30%, transparent), 0 10px 20px #3c285022;
+  box-shadow:
+    0 6px 0 -2px color-mix(in oklch, var(--primary) 30%, transparent),
+    0 10px 20px #3c285022;
 }
 
 /* a place for a sticker that does not exist yet */
@@ -343,7 +421,11 @@ body[data-theme="light"] .sticker {
       color-mix(in oklch, var(--pink) calc(60% * var(--light-intensity)), transparent),
       transparent calc(47% * var(--light-spread))
     ),
-    linear-gradient(var(--glass-angle), var(--paper) 30%, color-mix(in oklch, var(--accent) calc(28% * var(--light-intensity)), var(--paper)));
+    linear-gradient(
+      var(--glass-angle),
+      var(--paper) 30%,
+      color-mix(in oklch, var(--accent) calc(28% * var(--light-intensity)), var(--paper))
+    );
   box-shadow:
     inset 0 0 0 1px color-mix(in oklch, var(--primary) 32%, transparent),
     0 20px 44px #0004;
@@ -430,7 +512,11 @@ body[data-theme="light"] .sticker {
   width: min(78%, 230px);
   aspect-ratio: 1;
   border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, var(--primary-glow), color-mix(in oklch, var(--primary) 30%, transparent) 70%);
+  background: radial-gradient(
+    circle at 40% 35%,
+    var(--primary-glow),
+    color-mix(in oklch, var(--primary) 30%, transparent) 70%
+  );
   opacity: calc(0.35 + var(--light-intensity) * 0.4);
 }
 
@@ -463,7 +549,11 @@ body[data-theme="light"] .sticker {
   height: 74%;
   aspect-ratio: 1;
   border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, var(--primary-glow), color-mix(in oklch, var(--primary) 30%, transparent) 70%);
+  background: radial-gradient(
+    circle at 40% 35%,
+    var(--primary-glow),
+    color-mix(in oklch, var(--primary) 30%, transparent) 70%
+  );
   opacity: calc(0.35 + var(--light-intensity) * 0.4);
   translate: -50% -50%;
 }
@@ -538,7 +628,8 @@ body[data-theme="light"] .sticker {
 
 /* monogram cards get the halftone and a name label so they look made, not missing */
 .card-stack .front.mono {
-  background: var(--dots), radial-gradient(circle at 30% 25%, oklch(0.8 0.12 var(--sh)), oklch(0.45 0.13 var(--sh)) 75%);
+  background:
+    var(--dots), radial-gradient(circle at 30% 25%, oklch(0.8 0.12 var(--sh)), oklch(0.45 0.13 var(--sh)) 75%);
   text-shadow: 0 4px 0 oklch(0.35 0.1 var(--sh));
 }
 
@@ -610,7 +701,9 @@ body[data-theme="light"] .sticker {
 
 .quick > .fx-indicator {
   border-radius: 34%;
-  box-shadow: 0 0 0 3px var(--primary), 0 0 18px color-mix(in oklch, var(--primary) 60%, transparent);
+  box-shadow:
+    0 0 0 3px var(--primary),
+    0 0 18px color-mix(in oklch, var(--primary) 60%, transparent);
 }
 
 .quick button,
@@ -783,7 +876,11 @@ body[data-theme="light"] .sticker {
 
 .dock > .fx-indicator {
   border-radius: var(--radius-pill);
-  background: linear-gradient(135deg, color-mix(in oklch, var(--primary) 26%, transparent), color-mix(in oklch, var(--accent) 18%, transparent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklch, var(--primary) 26%, transparent),
+    color-mix(in oklch, var(--accent) 18%, transparent)
+  );
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 40%, transparent);
 }
 
@@ -871,7 +968,9 @@ body[data-theme="light"] .sticker {
 .segmented > .fx-indicator {
   border-radius: var(--radius-pill);
   background: var(--paper);
-  box-shadow: 0 2px 10px #0003, inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent);
+  box-shadow:
+    0 2px 10px #0003,
+    inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent);
 }
 
 .segmented button {
@@ -965,7 +1064,9 @@ body[data-theme="light"] .sticker {
   border-radius: var(--radius-xl);
   background: var(--surface-fill);
   backdrop-filter: blur(var(--surface-blur));
-  box-shadow: inset 0 0 0 1px var(--line), 0 10px 30px #0000001f;
+  box-shadow:
+    inset 0 0 0 1px var(--line),
+    0 10px 30px #0000001f;
 }
 
 .card-head {
@@ -1960,7 +2061,9 @@ dialog.collection[open] {
   padding: var(--space-2) var(--space-3);
   border-radius: 18px 18px 18px 6px;
   background: color-mix(in oklch, var(--primary) 20%, var(--paper));
-  box-shadow: 0 1px 0 color-mix(in oklch, var(--ink) 6%, transparent), 0 4px 12px #0002;
+  box-shadow:
+    0 1px 0 color-mix(in oklch, var(--ink) 6%, transparent),
+    0 4px 12px #0002;
   overflow-wrap: anywhere;
 }
 
@@ -1982,7 +2085,9 @@ dialog.collection[open] {
   align-self: flex-start;
   width: 76px;
   border-width: 3px;
-  box-shadow: 0 4px 0 -1px color-mix(in oklch, var(--primary) 45%, transparent), 0 8px 16px #0005;
+  box-shadow:
+    0 4px 0 -1px color-mix(in oklch, var(--primary) 45%, transparent),
+    0 8px 16px #0005;
   animation: pop-in 480ms var(--spring) both;
 }
 
@@ -2054,7 +2159,9 @@ dialog.collection[open] {
   background: var(--gradient-primary);
   color: var(--bg);
   font-weight: 800;
-  box-shadow: 0 10px 28px color-mix(in oklch, var(--primary) 35%, #0000), 0 4px 12px #0005;
+  box-shadow:
+    0 10px 28px color-mix(in oklch, var(--primary) 35%, #0000),
+    0 4px 12px #0005;
   transition:
     translate var(--dur-base) var(--spring),
     box-shadow var(--dur-base);
@@ -2076,7 +2183,9 @@ dialog.collection[open] {
 @media (hover: hover) {
   .chat-fab:hover {
     translate: 0 -3px;
-    box-shadow: 0 14px 34px color-mix(in oklch, var(--primary) 45%, #0000), 0 6px 14px #0005;
+    box-shadow:
+      0 14px 34px color-mix(in oklch, var(--primary) 45%, #0000),
+      0 6px 14px #0005;
   }
 
   .chat-fab:hover .sticker {
@@ -2310,7 +2419,9 @@ body[data-color-mode="reduced"] .banner {
       transparent calc(41% * var(--light-spread))
     ),
     var(--paper);
-  box-shadow: inset 0 0 0 1px var(--line), 0 12px 30px #0003;
+  box-shadow:
+    inset 0 0 0 1px var(--line),
+    0 12px 30px #0003;
 }
 
 body[data-color-mode="reduced"] .banner::before,

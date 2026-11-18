@@ -944,6 +944,7 @@ describe("dashboard memory and naming authorization", () => {
     expect(invalid.status).toBe(422);
     expect(await invalid.text()).not.toContain(credential.apiKey);
     expect(add).toHaveBeenCalledWith(expect.objectContaining({ ...credential, serverDiscId: serverId }));
+    expect(add).toHaveBeenCalledWith(expect.objectContaining({ actorDiscId: session.user.id }));
     add.mockResolvedValue({ status: "success", entryId: "brave", displayName: "Brave Search", updated: false });
     expect(await (await send("/server/credentials", "POST", credential)).json()).toEqual({ saved: true });
     expect((await send("/server/credentials/brave", "DELETE")).status).toBe(200);
@@ -957,6 +958,7 @@ describe("dashboard memory and naming authorization", () => {
     expect((await send(rotation, "PATCH", { action: "add", key: "test-rotation-key" })).status).toBe(200);
     expect(edit).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        actorDiscId: session.user.id,
         provider: "openrouter",
         apiKey: "",
         rotationKey: "test-rotation-key",
@@ -965,7 +967,13 @@ describe("dashboard memory and naming authorization", () => {
     );
     expect((await send(rotation, "PATCH", { action: "clear" })).status).toBe(200);
     expect(edit).toHaveBeenLastCalledWith(
-      expect.objectContaining({ provider: "openrouter", apiKey: "", rotationKey: "", deleteRotationKeys: true }),
+      expect.objectContaining({
+        actorDiscId: session.user.id,
+        provider: "openrouter",
+        apiKey: "",
+        rotationKey: "",
+        deleteRotationKeys: true,
+      }),
     );
   });
 
@@ -1397,9 +1405,8 @@ describe("dashboard memory and naming authorization", () => {
       readStatus: "fresh",
       memberAccess: {
         serverMemteachingEnabled: false,
-        attributeMemteachingEnabled: false,
-        sampledialogueMemteachingEnabled: false,
         promptSnapshotEnabled: false,
+        personaExportEnabled: false,
       },
       serverModelAccess: { allowServerModels: true },
       userBlacklist: {
