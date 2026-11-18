@@ -3,6 +3,8 @@ export default {
     description: `プロバイダーの認証情報、エンドポイント、モデルカタログの追加・表示・編集・削除を行います。`,
     title: `サーバープロバイダー`,
     personal_title: `個人プロバイダー`,
+    credential_missing: "この保存済み設定のAPIキーがありません。**編集**から再度追加してください。",
+    credential_retention: "この環境では、認証済みリクエストのない保存済みキーは{days}日後に自動削除されます。",
     selector_guidance: "下のドロップダウンでプロバイダーやエンドポイントを **選択**または**追加**してください。",
     select_placeholder: `プロバイダー、エンドポイント、または操作を選択...`,
     select_add_provider: `+ 新しいプロバイダーを追加`,
@@ -93,6 +95,8 @@ export default {
     validation_failed: `プロバイダーがそのAPIキーを拒否したか、検証できませんでした。何も保存されていません。`,
     validation_no_balance:
       "プロバイダーはそのAPIキーを認識しましたが、アカウントの残高がないため、まだメッセージに応答できません。プロバイダーのウェブサイトで残高を追加してから、同じキーを再送信してください。何も保存されていません。",
+    host_restricted: `TomoriBotのホスト管理者は、特定のサーバーやユーザーにのみGoogle Vertex AIの利用を許可しており、ここは対象に含まれていません。別のプロバイダーを選択してください。何も保存されていません。`,
+    vertex_config_invalid: `Google Vertex AIの設定は、\`project-id::location\`（例：\`my-project::global\`）の形式である必要があります。プロジェクトとロケーションには英数字とハイフンのみ使用できます。何も保存されていません。`,
     missing_default_model: `認証情報は保存されましたが、このプロバイダーには有効化できるデフォルトのテキストモデルがありません。`,
     write_failed: `プロバイダーを保存または有効化できませんでした。もう一度お試しください。`,
     add_endpoint_modal_title: `カスタムエンドポイントを追加`,
@@ -181,6 +185,16 @@ export default {
     model_compat_label: `チャット補完の互換性`,
     model_compat_description: `厳格なバックエンド向けのメッセージ形式とプロトコルの回避策です。不要な場合はオフのままにしてください。`,
     model_image_supports_label: `画像機能`,
+    model_image_request_format_label: `画像リクエスト形式`,
+    model_image_request_format_description: `この画像モデルが受け付けるAPI形式に合わせます。`,
+    image_request_formats: {
+      images: `画像API`,
+      "chat-completions": `チャット補完`,
+    },
+    image_request_format_descriptions: {
+      images: `プロンプトを /images/generations に送信します。`,
+      "chat-completions": `画像リクエストをチャットメッセージとして /chat/completions に送信します。`,
+    },
     model_image_supports_description: `このモデルとエンドポイントが実際に対応する画像機能のみを選択してください。`,
     model_image_supports: {
       txt2img: `テキストから画像`,

@@ -1,3 +1,4 @@
+import type { LocalizerVariables } from "@/types/discord/global";
 import type { PanelReceipt } from "@/types/discord/panel";
 import { ChannelType, type ModalSubmitInteraction } from "discord.js";
 import type { PanelAction } from "@/constants/panelActions";
@@ -37,7 +38,6 @@ import {
   CONFIG_CHANNEL_AUTO_TRIGGER_CHECKBOX_PREFIX,
   CONFIG_CHANNEL_AUTO_TRIGGER_CHANNEL_FIELD,
   CONFIG_CHANNEL_AUTO_TRIGGER_ENABLED_FIELD,
-  CONFIG_CHANNEL_AUTO_TRIGGER_MAX_THRESHOLD_FIELD,
   CONFIG_CHANNEL_AUTO_TRIGGER_PERSONA_FIELD,
   CONFIG_CHANNEL_AUTO_TRIGGER_THRESHOLD_FIELD,
   buildConfigAutoTriggerChannelsModal,
@@ -61,7 +61,12 @@ import {
 } from "@/utils/discord/ui/configChannelModals";
 import { buildConfigModalFieldId } from "@/utils/discord/ui/configModals";
 import { localizer } from "@/utils/text/localizer";
-import { rollAutochatTarget, validateThresholdInput } from "@/utils/discord/autoTriggerThreshold";
+import {
+  MAX_THRESHOLD,
+  parseThresholdInput,
+  rollAutochatTarget,
+  validateThresholdInput,
+} from "@/utils/discord/autoTriggerThreshold";
 import type { AutochatPersonaOverride, ChannelPromptMode, TomoriState } from "@/types/db/schema";
 import { combineModalPromptParts } from "@/utils/text/modalPromptParts";
 import type { ConfigPanelView } from "@/utils/discord/ui/configPanel";
@@ -164,16 +169,17 @@ function receipt(
   tone: "success" | "info" | "warning" | "error",
   headingKey: string,
   detailKey: string,
+  vars?: LocalizerVariables,
 ): PanelReceipt {
   return {
     tone,
     heading: localizer(locale, headingKey),
-    detail: localizer(locale, detailKey),
+    detail: localizer(locale, detailKey, vars),
   };
 }
 
-function invalid(locale: string, detailKey: string): PanelReceipt {
-  return receipt(locale, "error", "commands.config.panel.channels_invalid_input_heading", detailKey);
+function invalid(locale: string, detailKey: string, vars?: LocalizerVariables): PanelReceipt {
+  return receipt(locale, "error", "commands.config.panel.channels_invalid_input_heading", detailKey, vars);
 }
 
 function externalReceipt(
@@ -254,12 +260,6 @@ function rangeCount(channelCount: number): number {
 function rangeChannels<T>(channels: readonly T[], rangeIndex: number): T[] {
   const start = rangeIndex * CHECKLIST_CHANNELS_PER_PAGE;
   return channels.slice(start, start + CHECKLIST_CHANNELS_PER_PAGE);
-}
-
-function parseThresholdText(value: string): number | null {
-  if (!/^\d+$/.test(value.trim())) return null;
-  const parsed = Number.parseInt(value.trim(), 10);
-  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 async function repaintDestinations(
@@ -409,7 +409,9 @@ function channelRulesAvailable(
   view: Awaited<ReturnType<ConfigRouteDependencies["loadChannelsView"]>>,
   collection: ConfigChannelRulesCollection,
 ) {
-  return collection === "blocklist" ? view.availableBlocklistChannels : view.availableTextChannels;
+  if (collection === "blocklist") return view.availableBlocklistChannels;
+  if (collection === "private") return view.availableTextChannels.filter((channel) => !channel.privacyReason);
+  return view.availableTextChannels;
 }
 
 function channelRulesSelectedIds(state: TomoriState, collection: ConfigChannelRulesCollection): readonly string[] {
@@ -587,7 +589,10 @@ async function runChannelRulesWrite(
     }
   }
 
-  const previousSelectedIds = visibleChannelRulesIds(state, collection, availableChannels);
+  const previousSelectedIds =
+    collection === "private"
+      ? new Set(state.config.private_channel_ids ?? [])
+      : visibleChannelRulesIds(state, collection, availableChannels);
   const nextSelectedIds = new Set(previousSelectedIds);
   for (const channelId of presentedIds) nextSelectedIds.delete(channelId);
   for (const channelId of checkedIds) nextSelectedIds.add(channelId);
@@ -804,32 +809,19 @@ async function runAutoTriggerWrite(
   }
 
   if (route.action === "channels-autoch-threshold-submit") {
-    const threshold = parseThresholdText(
-      submitted.fields.fields.has(buildConfigModalFieldId(CONFIG_CHANNEL_AUTO_TRIGGER_THRESHOLD_FIELD, route.nonce))
-        ? submitted.fields.getTextInputValue(
-            buildConfigModalFieldId(CONFIG_CHANNEL_AUTO_TRIGGER_THRESHOLD_FIELD, route.nonce),
-          )
-        : "",
+    const thresholdField = buildConfigModalFieldId(CONFIG_CHANNEL_AUTO_TRIGGER_THRESHOLD_FIELD, route.nonce);
+    const parsed = parseThresholdInput(
+      submitted.fields.fields.has(thresholdField) ? submitted.fields.getTextInputValue(thresholdField) : "",
     );
-    const rawMax = submitted.fields.fields.has(
-      buildConfigModalFieldId(CONFIG_CHANNEL_AUTO_TRIGGER_MAX_THRESHOLD_FIELD, route.nonce),
-    )
-      ? submitted.fields.getTextInputValue(
-          buildConfigModalFieldId(CONFIG_CHANNEL_AUTO_TRIGGER_MAX_THRESHOLD_FIELD, route.nonce),
-        )
-      : "";
-    const maxThreshold = rawMax.trim() ? parseThresholdText(rawMax) : threshold;
-    if (threshold === null || maxThreshold === null) {
+    const validation = parsed ? validateThresholdInput(parsed.threshold, parsed.maxThreshold) : null;
+    if (!parsed || !validation?.isValid) {
       return {
-        receipt: invalid(route.locale, "commands.config.panel.channels_auto_trigger_threshold_invalid_detail"),
+        receipt: invalid(route.locale, "commands.config.panel.channels_auto_trigger_threshold_invalid_detail", {
+          max: MAX_THRESHOLD,
+        }),
       };
     }
-    const validation = validateThresholdInput(threshold, maxThreshold);
-    if (!validation.isValid) {
-      return {
-        receipt: invalid(route.locale, "commands.config.panel.channels_auto_trigger_threshold_invalid_detail"),
-      };
-    }
+    const { threshold, maxThreshold } = parsed;
     const currentThreshold = state.config.autoch_threshold ?? 0;
     const currentMaxThreshold = state.config.autoch_threshold_max ?? currentThreshold;
     if (threshold === currentThreshold && maxThreshold === currentMaxThreshold) {

@@ -3,6 +3,8 @@ export default {
     description: `新增、查看、編輯與移除供應商憑證、端點與模型目錄。`,
     title: `伺服器供應商`,
     personal_title: `個人供應商`,
+    credential_missing: "我沒有這個已儲存設定的 API 金鑰。請使用**編輯**重新新增。",
+    credential_retention: "此安裝環境會在 {days} 天沒有驗證請求後移除已儲存的金鑰。",
     selector_guidance: "用下方的下拉選單**選擇**或**新增**一個 供應商或端點。",
     select_placeholder: `選擇供應商、端點或動作...`,
     select_add_provider: `+ 新增供應商`,
@@ -92,6 +94,8 @@ export default {
     validation_failed: `供應商拒絕了這組 API 金鑰，或無法驗證它。沒有儲存任何內容。`,
     validation_no_balance:
       "供應商已識別這組API金鑰，但帳戶沒有餘額，暫時無法回覆訊息。請到供應商網站儲值，再重新提交同一組金鑰。沒有儲存任何內容。",
+    host_restricted: `架設 TomoriBot 的人只允許特定伺服器與使用者使用 Google Vertex AI，這裡不在其中。請選擇其他供應商。沒有儲存任何內容。`,
+    vertex_config_invalid: `Google Vertex AI 的設定格式必須為 \`project-id::location\`，例如 \`my-project::global\`。專案與位置只能使用字母、數字與連字號。沒有儲存任何內容。`,
     missing_default_model: `憑證已儲存，但這個供應商沒有可啟用的預設文字模型。`,
     write_failed: `無法儲存或啟用這個供應商。請再試一次。`,
     add_endpoint_modal_title: `新增自訂端點`,
@@ -180,6 +184,16 @@ export default {
     model_compat_label: `聊天完成相容性`,
     model_compat_description: `針對嚴格後端的訊息格式與協定調整。非必要時請保持關閉。`,
     model_image_supports_label: `圖片功能`,
+    model_image_request_format_label: `圖片請求格式`,
+    model_image_request_format_description: `符合這個圖片模型接受的API格式。`,
+    image_request_formats: {
+      images: `Images API`,
+      "chat-completions": `Chat Completions`,
+    },
+    image_request_format_descriptions: {
+      images: `將提示詞傳送到/images/generations。`,
+      "chat-completions": `將圖片請求作為聊天訊息傳送到/chat/completions。`,
+    },
     model_image_supports_description: `請只宣告這個模型與端點真正支援的圖片功能。`,
     model_image_supports: {
       txt2img: `文字生圖`,

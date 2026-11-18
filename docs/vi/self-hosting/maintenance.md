@@ -27,6 +27,30 @@ Lệnh `bun run backup` trên máy chủ cần `pg_dump`, và `bun run restore-b
 
 Đối với avatar cục bộ, hãy giữ lại các webhook do TomoriBot quản lý: việc xóa chúng sẽ khiến bot không thể chỉnh sửa các tin nhắn webhook cũ hơn.
 
+## Dọn dẹp API key không hoạt động
+
+Đặt `API_KEY_INACTIVITY_DAYS` thành một số nguyên dương và khởi động lại bot để bật tính năng dọn dẹp
+thông tin xác thực trong cơ sở dữ liệu. Để trống để tắt tính năng xóa. Ví dụ:
+
+```dotenv
+API_KEY_INACTIVITY_DAYS=90
+```
+
+Các khóa sẽ hết hạn sau từng đó ngày mà không có yêu cầu xác thực nào. Các phản hồi thất bại từ nhà cung cấp vẫn được tính
+là hoạt động. Các khóa chưa từng được sử dụng sẽ tính tuổi từ thời điểm thêm vào hoặc thay thế; các khóa hiện có nhận toàn bộ khoảng thời gian
+gia hạn khi tính năng theo dõi hoạt động được cài đặt lần đầu. Việc theo dõi vẫn tiếp tục khi tính năng xóa bị tắt, vì vậy việc bật
+chính sách sau đó có thể xóa ngay các khóa đã ngừng hoạt động từ trước. Quá trình dọn dẹp chạy khi khởi động và hằng giờ theo các đợt
+có giới hạn trên tiến trình chính.
+
+Chính sách này áp dụng cho các API key của máy chủ, cá nhân, khóa xoay vòng bổ sung và dịch vụ tùy chọn. Cài đặt model
+đã lưu vẫn được giữ nguyên. Một khóa xoay vòng bổ sung đủ điều kiện có thể tự động thay thế khóa chính đã hết hạn. Hãy nhập lại khóa đã bị xóa qua `/providers` hoặc `/personal providers` để khôi phục dịch vụ;
+các lựa chọn giọng nói cũng có thể cần phải được chọn lại. Thông tin xác thực của máy chủ lưu trữ, bao gồm cả Vertex ADC, vẫn nằm
+dưới quyền kiểm soát của người vận hành.
+
+Việc xóa khỏi cơ sở dữ liệu không thu hồi khóa tại nhà cung cấp của khóa đó hoặc xóa các bản sao lưu đã giữ lại. Hãy thu hồi các khóa
+bị xâm phạm thông qua bảng điều khiển của nhà cung cấp. Tài nguyên phía nhà cung cấp như giọng nói đã tạo cũng có thể yêu cầu
+xóa thủ công sau khi khóa đã lưu của chúng bị xóa sạch. Hãy cấu hình việc lưu trữ bản sao lưu một cách riêng biệt.
+
 ## Sao lưu cơ sở dữ liệu và khóa khôi phục
 <!-- anchor: database-backups-and-recovery-keys -->
 
@@ -36,7 +60,7 @@ Các bundle cơ sở dữ liệu chứa dữ liệu riêng tư và danh mục c�
 
 1. Dừng mọi instance của bot. Cấu hình cơ sở dữ liệu đích, Discord token và các khóa mã hóa gốc.
 2. Cài đặt `psql` và các extension cơ sở dữ liệu bắt buộc, bao gồm cả `pgvector`. Tài khoản cơ sở dữ liệu phải có quyền bật `pgcrypto`, hoặc quản trị viên phải bật extension này trước.
-3. Chạy `bun run restore-backup --latest` hoặc `bun run restore-backup --from backups/<bundle-directory>`. Kiểm tra đích và xác nhận các lời nhắc. Quá trình khôi phục sẽ kiểm tra các khóa trước khi thực thi các lệnh SQL mang tính phá hủy.
+3. Chạy `bun run restore-backup --latest` hoặc `bun run restore-backup --from "backups/<bundle-directory>"`. Kiểm tra đích và xác nhận các lời nhắc. Quá trình khôi phục sẽ kiểm tra các khóa trước khi thực thi các lệnh SQL mang tính phá hủy.
 4. Chạy `bun run audit-keys` và `bun run rotate-keys --dry-run` trước khi khởi động lại. Nếu thông tin xác thực cần migration, hãy chạy `bun run rotate-keys --bot-stopped` và audit lại. Nếu khôi phục thất bại, hãy giữ bot ở trạng thái dừng: các câu lệnh SQL trước đó có thể đã làm thay đổi cơ sở dữ liệu.
 
 Sao lưu riêng thư mục `data/` cục bộ, bao gồm avatar, mẫu giọng nói và `data/custom-expressions/`. Khôi phục các tệp về cùng đường dẫn. Đối với biểu cảm trên GCS hoặc S3, hãy sao lưu các đối tượng `custom-expressions/` và khôi phục các key của chúng về cùng bucket đã cấu hình. Các biểu cảm dạng liên kết phụ thuộc vào máy chủ bên ngoài của chúng.
@@ -81,7 +105,7 @@ Các máy chủ TTS cục bộ không còn xác thực yêu cầu bằng cài đ
 bun run backup
 bun run restore-backup --latest
 # Hoặc chọn một bundle:
-bun run restore-backup --from backups/<bundle-directory>
+bun run restore-backup --from "backups/<bundle-directory>"
 ```
 
 Các bundle được lưu trữ trong `backups/` hoặc `TOMORI_BACKUP_DIR`. Hãy làm theo các [bước khôi phục](#database-backups-and-recovery-keys) trước khi khôi phục. `bun run backup:personas` chỉ xuất các persona và bộ nhớ máy chủ cho `/persona import`; lệnh này không thể khôi phục cơ sở dữ liệu.

@@ -15,7 +15,7 @@ import { releaseTextQuotaForTrigger, textQuotaTriggerStates } from "@/utils/chat
 import { localizer } from "@/utils/text/localizer";
 import { normalizeCustomEmojisForLlm } from "@/utils/text/processors/mentionProcessor";
 import { MAX_EMPTY_RESPONSE_RETRIES } from "@/utils/discord/stream/constants";
-import { channelLocks, queuePersonaJobsAtFront, suppressNextSelfReply } from "@/utils/chat/channelQueue";
+import { channelLocks, queuePersonaJobsAtFront } from "@/utils/chat/channelQueue";
 import { getMatchLimit } from "@/utils/chat/personaQueue";
 import { getTriggerFirstMatchIndexInContent } from "@/utils/chat/triggerProcessor";
 import {
@@ -225,8 +225,7 @@ async function recordUsageStats(context: ChatTurnContext, result: GenerationTurn
     // segment's accumulatedText, which is appended only after Discord accepts a send, not
     // from personaResponses[].text: that string is the short-term-memory payload and
     // carries the `[Scene Metadata]` block drained out of `<details>`, so emoji the model
-    // wrote there would score despite never surfacing in chat. Per-stream state also
-    // recovers text delivered before a tool call, which the final response no longer holds.
+    // wrote there would score despite never surfacing in chat.
     const emojiCounts = new Map<string, number>();
     for (const stream of result.streamResults) {
       for (const match of (stream.accumulatedText ?? "").matchAll(RESOLVED_CUSTOM_EMOJI_RE)) {
@@ -482,11 +481,13 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
     injectedContextItems: retryInjectedContextItems,
     forcedMentions: incoming.forcedMentions,
     manualTriggerInvoker: incoming.manualTriggerInvoker,
+    systemTriggerIdentity: incoming.systemTriggerIdentity,
     manualStreamingContextOverrides: incoming.manualStreamingContextOverrides,
     sceneTurn: incoming.sceneTurn,
     naturalNudge: incoming.naturalNudge,
     conditioningInteraction: incoming.conditioningInteraction,
     borrowsTriggerMessage: incoming.borrowsTriggerMessage,
+    suppressSelfReply: incoming.suppressSelfReply,
     carriedExpressionDelivery: context.currentPersona.persona_id
       ? { personaId: context.currentPersona.persona_id, state: context.expressionDelivery }
       : undefined,
@@ -654,7 +655,6 @@ async function writeShortTermMemory(context: ChatTurnContext, result: Generation
         context.channelName,
         personaId,
         response?.personaLineageId ?? null,
-        context.channel.isThread() ? context.channel.parentId : null,
       );
       // Advance the cadence counter on the live scope row (server-shared in guild, user in DM).
       // This fires once per bot-participation cycle: not per raw inbound message.
@@ -752,7 +752,6 @@ function scheduleBoomerangFollowUp(context: ChatTurnContext): void {
       }
 
       const { tomoriChat } = await import("@/events/messageCreate/tomoriChat");
-      suppressNextSelfReply(sourceChannel.id);
       await tomoriChat({
         client: context.client,
         message: sourceLastMessage,
@@ -765,6 +764,9 @@ function scheduleBoomerangFollowUp(context: ChatTurnContext): void {
         isUserImpersonation: boomerang.isUserImpersonation === true,
         impersonatedUserId: boomerang.impersonatedUserId,
         textQuotaSource: "system",
+        manualTriggerInvoker: boomerang.manualTriggerInvoker,
+        borrowsTriggerMessage: boomerang.borrowsTriggerMessage,
+        suppressSelfReply: true,
         shouldSurfaceUserErrors: context.shouldSurfaceUserErrors,
         injectedContextItems: buildBoomerangContext(boomerang),
         manualStreamingContextOverrides: { disableCrossChannelMessage: true },

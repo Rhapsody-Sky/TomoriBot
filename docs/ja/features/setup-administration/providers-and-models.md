@@ -42,7 +42,9 @@ TomoriBotは、組み込みモデルをホストするのではなく、外部AI
 APIキーを他の人と決して共有しないでください。`/providers`の`エンドポイントを編集`アクションからカスタムエンドポイントのベアラー認証トークンを追加または置換します。
 :::
 
-Vertex AIは、保存されたシークレットではなく、アプリケーションのデフォルト認証情報 (ADC) を使用して認証します。ローカルホスティングの場合、ADCは`gcloud`から取得できます。ホスト型展開では、ワークロードIDまたはサービスアカウントを使用する必要があります。AI Studio APIキーだけでは完全なVertex AIを認証しません。選択したGoogleクラウドプロジェクトには課金とVertex AI APIが有効になっている必要があり、ホストIDにはVertexアクセスが必要です。セットアップガイドは、`/help`の`API Keys`ページのGoogle Vertex AIから入手できます。
+オペレーターは、未使用のAPIキーの自動削除を有効にすることができます。保存された設定からキーが失われた場合は、`/providers` または `/personal providers` の **編集** を使用して再度追加してください。保存済みのモデル設定は維持されます。保存されたキーを削除しても、プロバイダー側でキーが無効化されたり、バックアップ内のコピーが消去されたりすることはありません。
+
+Vertex AIは、保存されたシークレットではなく、アプリケーションのデフォルト認証情報 (ADC) を使用して認証します。ローカルホスティングの場合、ADCは`gcloud`から取得できます。ホスト型展開では、ワークロードIDまたはサービスアカウントを使用する必要があります。AI Studio APIキーだけでは完全なVertex AIを認証しません。選択したGoogleクラウドプロジェクトには課金とVertex AI APIが有効になっている必要があり、ホストIDにはVertexアクセスが必要です。TomoriBotのホスト管理者は、Vertex AIの利用を特定のサーバーやユーザーに制限できます。それ以外のサーバーやユーザーは、別のプロバイダーを選択するよう求められます。セットアップガイドは、`/help`の`API Keys`ページのGoogle Vertex AIから入手できます。
 
 Google GeminiとVertex AIのセットアップは認証済みのモデル一覧エンドポイントを通じて認証情報を検証し、Vertex AI ExpressはAPIキーを`countTokens`で検証するため、セットアップでテキストが生成されることはありません。
 
@@ -123,7 +125,7 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) とOpenCode Zen (`https://opencode
 
 - [セットアップ: ローカルLLM](/ja/self-hosting/local-endpoints/setup-local-llm/): Ollama、KoboldCPP、LM Studio、vLLM、LiteLLM。
 - [セットアップ: ComfyUI](/ja/self-hosting/local-endpoints/setup-comfyui/): ローカルの画像とビデオの生成。
-- [セットアップ: ChatMock](/ja/self-hosting/local-endpoints/setup-chatmock/): ChatGPTアカウントまたはCodex CLI。
+- [セットアップ: ChatMock](/ja/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/): ChatGPTアカウントまたはCodex CLI。
 
 ## サポートされているプロバイダー
 <!-- anchor: supported-providers -->
@@ -143,7 +145,7 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) とOpenCode Zen (`https://opencode
 | Z.ai | ✅ | ✅ | ✅ | - | 無料モデル。🟡 ToS = コーディングとエージェントのみの使用 |
 | Z.aiコーディング | ✅ | ✅ | - | - | 定期購入プラン |
 | Google Vertex AI | ✅ | ✅ | ✅ | ✅ | 「無料」Expressバージョンが含まれています |
-| Codex CLI (ChatMock経由) | ✅ | ✅ | ✅ | - | [セットアップ](/ja/self-hosting/local-endpoints/setup-chatmock/) |
+| Codex CLI (ChatMock経由) | ✅ | ✅ | ✅ | - | [セットアップ](/ja/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/) |
 
 ### 画像生成
 

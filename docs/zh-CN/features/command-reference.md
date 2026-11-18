@@ -248,9 +248,9 @@ Open the TomoriBot settings dashboard
 |---|---|
 | `/persona create` | 手动创建一个简单的人格预设集 |
 | `/persona default` | 应用一套人格预设集 |
-| `/persona export` | 把当前人格导出成可分享的 PNG 文件 |
+| `/persona export` | 将人格导出为 PNG 卡片、原始 JSON 或包含媒体的 ZIP 压缩包 |
 | `/persona generate` | 用 AI 生成人格（需要兼容的提供方） |
-| `/persona import` | 从 PNG、JSON 或 CHARX 文件导入人格 |
+| `/persona import` | 从 PNG、JSON、CHARX 或 TomoriBot ZIP 压缩包导入人格 |
 | `/persona remove` | 从服务器移除一个副人格 |
 
 ## `/personal`

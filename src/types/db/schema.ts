@@ -2,6 +2,7 @@ import { RESPONSE_REVIEW_ITEM_VALUES, DEFAULT_RESPONSE_REVIEW_ITEMS } from "@/co
 import { getDiscordTextLength } from "@/utils/text/discordTextLimits";
 import { StickerFormatType } from "discord.js";
 import { z } from "zod";
+import { generatedMediaSourceSchema, type GeneratedMediaSource } from "@/types/provider/generationModels";
 import { EmotionKey } from "@/types/misc/emotions";
 import { SUPPORTED_PARAM_VALUES, isSupportedParamValue, type SupportedParamValue } from "@/constants/supportedParams";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_VALUES } from "@/constants/thinkingLevels";
@@ -187,24 +188,28 @@ export type PersonaSpriteMessageRow = z.infer<typeof personaSpriteMessageSchema>
 const MINIMAL_NOTICE_REF_KINDS = ["server_memory", "personal_memory", "task"] as const;
 type MinimalNoticeRefKind = (typeof MINIMAL_NOTICE_REF_KINDS)[number];
 
-/** The row a Minimal tool notice confirmed, identified so context rebuilding can reload it live. */
-export interface MinimalNoticeRef {
-  kind: MinimalNoticeRefKind;
-  id: number;
-}
+export type MinimalNoticeRef =
+  | { kind: MinimalNoticeRefKind; id: number }
+  | { kind: "generation"; source: GeneratedMediaSource };
 
-/**
- * A `minimal_notice_refs` row joined to its live target. The content columns are null when the
- * referenced memory or task no longer exists.
- */
-export const resolvedMinimalNoticeRefSchema = z.object({
+const resolvedMinimalNoticeBaseSchema = z.object({
   message_disc_id: z.string().min(1),
-  ref_kind: z.enum(MINIMAL_NOTICE_REF_KINDS),
-  ref_id: z.number().int(),
   memory_content: z.string().nullable(),
   memory_tags: z.array(z.string()).nullable(),
   reminder_purpose: z.string().nullable(),
 });
+export const resolvedMinimalNoticeRefSchema = z.discriminatedUnion("ref_kind", [
+  resolvedMinimalNoticeBaseSchema.extend({
+    ref_kind: z.enum(MINIMAL_NOTICE_REF_KINDS),
+    ref_id: z.number().int(),
+    generation_source: z.null(),
+  }),
+  resolvedMinimalNoticeBaseSchema.extend({
+    ref_kind: z.literal("generation"),
+    ref_id: z.null(),
+    generation_source: generatedMediaSourceSchema,
+  }),
+]);
 export type ResolvedMinimalNoticeRefRow = z.infer<typeof resolvedMinimalNoticeRefSchema>;
 
 /**
@@ -780,6 +785,9 @@ export const personalFallbackSettingsSchema = userPersonalizationConfigsSchema.p
 export type PersonalFallbackSettings = z.infer<typeof personalFallbackSettingsSchema>;
 
 const serverModelConfigSchema = z.object({
+  credential_activity_epoch: z.uuid().optional(),
+  credential_created_at: z.date().optional(),
+  credential_last_attempt_at: z.date().nullable().optional(),
   server_id: z.number().int(),
   llm_id: z.number().int().nullable().optional(),
   embedding_model_id: z.number().int().nullable().optional(),
@@ -896,12 +904,11 @@ export type ServerChatConfigRow = z.infer<typeof serverChatConfigSchema>;
 const serverMemberPermissionsConfigSchema = z.object({
   server_id: z.number().int(),
   server_memteaching_enabled: z.boolean().default(false),
-  attribute_memteaching_enabled: z.boolean().default(false),
-  sampledialogue_memteaching_enabled: z.boolean().default(false),
   self_teaching_enabled: z.boolean().default(true),
   personal_memories_enabled: z.boolean().default(true),
   hide_impersonation_embeds: z.boolean().default(false),
   prompt_snapshot_enabled: z.boolean().default(false),
+  persona_export_enabled: z.boolean().default(false),
   created_at: z.date().optional(),
   updated_at: z.date().optional(),
 });
@@ -1551,6 +1558,9 @@ const coerceIntNumber = z.preprocess((value) => {
  * Runtime telemetry lives in api_key_rotation_runtime_state.
  */
 const apiKeyRotationConfigSchema = z.object({
+  credential_activity_epoch: z.uuid().optional(),
+  credential_created_at: z.date().optional(),
+  credential_last_attempt_at: z.date().nullable().optional(),
   rotation_key_id: z.number().optional(),
   server_id: z.number(),
   provider: z.string(),
@@ -1884,6 +1894,8 @@ export type GuildMcpFailureReason = NonNullable<GuildMcpServerRow["failure_reaso
  * One row per provider per server; UPSERT on save.
  */
 export const savedProviderConfigSchema = z.object({
+  credential_created_at: z.date().optional(),
+  credential_last_attempt_at: z.date().nullable().optional(),
   saved_config_id: z.number().optional(),
   server_id: z.number(),
   provider: z.string(),
@@ -1949,6 +1961,8 @@ export type PersonalProviderCapability = z.infer<typeof personalProviderCapabili
  * One row per provider per user; UPSERT on save.
  */
 export const userSavedProviderConfigSchema = z.object({
+  credential_created_at: z.date().optional(),
+  credential_last_attempt_at: z.date().nullable().optional(),
   user_saved_config_id: z.number().optional(),
   user_id: z.number(),
   provider: z.string(),

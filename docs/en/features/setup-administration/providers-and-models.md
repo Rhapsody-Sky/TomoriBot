@@ -40,11 +40,17 @@ Never share your API key with anyone else. Add or replace a custom endpoint's Be
 from its `Edit Endpoint` action in `/providers`.
 :::
 
+An operator can enable automatic removal of unused API keys. If a saved configuration loses its key,
+use **Edit** in `/providers` or `/personal providers` to add it again. Saved model settings remain.
+Removing a stored key does not revoke it at the provider or erase copies in backups.
+
 Vertex AI authenticates with Application Default Credentials (ADC) rather than a stored secret.
 For local hosting, ADC can come from `gcloud`; hosted deployments should use a workload identity
 or service account. An AI Studio API key alone does not authenticate full Vertex AI. The selected
 Google Cloud project must have billing and the Vertex AI API enabled, and the host identity needs
-Vertex access. The setup guide is available from Google Vertex AI on the `API Keys` page in `/help`.
+Vertex access. Whoever hosts TomoriBot can limit Vertex AI to certain servers and users; everyone else
+is asked to choose a different provider. The setup guide is available from Google Vertex AI on the
+`API Keys` page in `/help`.
 
 Brave Search is separate from your AI provider. Add its key in `/providers` to enable more search
 categories; see [Web search](/features/capabilities/tools-and-extensions/web-search/).
@@ -62,6 +68,9 @@ Personal settings follow them across servers; see
 New OpenRouter configurations use DeepSeek Flash Latest for chat and Gemini 3.1 Flash Lite for
 the vision fallback. Both use OpenRouter credits. Replacing a key preserves your vision selection,
 including `- No Model`.
+
+New NVIDIA NIM configurations use Nemotron 3.5 Lightning 30B for chat. It accepts text only;
+select a Vision model to read images.
 
 In `/config` > Models > Switch Models, you can assign models and endpoints across these capability slots:
 
@@ -99,9 +108,8 @@ Decision models answer structured questions, such as yes/no or a choice from a l
 from the chat model. [Natural Nudges](/features/chatting-personality/natural-nudges/#active-nudges)
 can use one to decide when a persona should join a conversation.
 
-Register an OpenRouter Decision model or a compatible custom endpoint in `/providers` or
-`/personal providers`. Select the server's model under `/config` > `Models` > `Switch Models`.
-Custom services must support System One or OpenAI Decisions compatibility. Register models from the
+Add a Google key, register an OpenRouter Decision model, or add a compatible custom endpoint in
+`/providers`, then select the server's model under `/config` > `Models` > `Switch Models`. Custom services must support System One or OpenAI Decisions compatibility. Register models from the
 service's documentation; a successful connection does not verify their capabilities.
 
 ## Custom Endpoints
@@ -117,7 +125,7 @@ endpoints are not supported.
 
 For setup instructions, see [Local LLM](/self-hosting/local-endpoints/setup-local-llm/),
 [ComfyUI](/self-hosting/local-endpoints/setup-comfyui/), and
-[ChatMock](/self-hosting/local-endpoints/setup-chatmock/).
+[ChatMock](/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/).
 
 ## Supported Providers
 <!-- anchor: supported-providers -->
@@ -138,7 +146,7 @@ cloud services. Not every feature is available on every provider.
 | Z.ai | ✅ | ✅ | ✅ | - | Free models; 🟡 ToS = coding and agent use only |
 | Z.ai Coding | ✅ | ✅ | - | - | Subscription plan |
 | Google Vertex AI | ✅ | ✅ | ✅ | ✅ | Includes 'free' Express version |
-| Codex CLI (via ChatMock) | ✅ | ✅ | ✅ | - | [Setup](/self-hosting/local-endpoints/setup-chatmock/) |
+| Codex CLI (via ChatMock) | ✅ | ✅ | ✅ | - | [Setup](/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/) |
 
 ### Image Generation
 

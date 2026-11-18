@@ -64,25 +64,30 @@ does not add speech delivery instructions.
 
 Tool execution coordinates through a single entry point: `ToolRegistry.executeTool()`.
 
-```
-Model tool call
-       ↓
-ToolRegistry.executeTool()
-       ↓
-Resolve opaque IDs (media_id, message_id) & aliases
-       ↓
-Dispatch:
-├─ Guild MCP Manager ──→ guildMcpManager.executeGuildMCPFunction()
-└─ Built-in Tool     ──→ tool.execute() (availability & context checked)
-       ↓
-Redact parameters & record ToolExecutionEvent
-       ↓
-Return ToolResult (success / error)
+```mermaid
+flowchart TD
+  call["Model tool call"] --> exec["ToolRegistry.executeTool()"]
+  exec --> resolve["Resolve opaque IDs (media_id, message_id) & aliases"]
+  resolve -->|"Guild MCP Manager"| mcp["guildMcpManager.executeGuildMCPFunction()"]
+  resolve -->|"Built-in Tool"| builtin["tool.execute()<br/>(availability & context checked)"]
+  mcp --> redact["Redact parameters & record ToolExecutionEvent"]
+  builtin --> redact
+  redact --> ret["Return ToolResult (success / error)"]
 ```
 
 Capability credential resolution captures the active model ID with its provider from one server
 settings read. Media, vision, and embedding callers use `getResolvedCapabilityModelId()` to keep that
 model paired with its credentials when their turn's cached settings predate a model change.
+
+Successful image and video generation tools return `data.provider` and `data.model` from the
+resolved generation route. Detailed media captions show the source; Minimal captions keep only
+their existing timing and reference details. Both modes store the provider and model in
+`minimal_notice_refs`, including plain attachment fallback deliveries, so history assembly can
+restore the source as persona text after a model switch or restart. These snapshots share the
+notice table's 30-day retention. History preserves visible caption text and restores the stored
+source only when the content and footer lack a source line in any authored locale.
+Custom endpoints report their configured model name when present;
+NovelAI inpainting reports the inpainting variant.
 
 Execution dispatch enforces the following rules:
 
@@ -127,7 +132,19 @@ Participant-aware tools resolve user and persona targets through `ParticipantTar
 
 For image analysis, `analyze_image` resolves attachments from the target Discord message. When that message is a text-only reply, it checks the directly referenced message. The tool enforces the `VISION_ANALYSIS_TIMEOUT_MS` deadline (default 60 seconds) across media downloads and vision provider inference.
 
-`cross_channel_message` excludes full-privacy authors from peek results and boomerang history before formatting their messages. Verified proxy messages use the sender account's privacy setting, matching ordinary conversation history. Both paths stop at the most recent refresh marker.
+`cross_channel_message` excludes full-privacy authors from peek results and boomerang history before formatting their messages. Verified proxy messages use the sender account's privacy setting, matching ordinary conversation history. Both paths stop at the most recent refresh marker. Report-back turns keep their instructions and outcome separate from the transcript, which the active provider fitter trims to the remaining input budget.
+
+`getChannelPrivacyReason` in `src/utils/discord/channelPrivacy.ts` supplies the same conservative
+audience check used by STM and thought logs. Cross-channel message dispatch and peeking, thread
+creation in another channel, and scheduled tasks targeting another channel reject private or
+unresolved targets regardless of `stm_privacy_bypass`. Same-channel thread creation and tasks remain
+available. Private channels can dispatch work outward, including context in the task instruction.
+Cross-channel message history requires both the bot and the requesting member to have
+`Read Message History`; the requesting member is resolved from the invocation user rather than a
+borrowed message's author.
+Borrowed system turns have no verified requester, so cross-channel dispatch, peeking, and thread
+creation in another channel reject them instead of authorizing against the anchor message's member.
+They can create a thread in their current channel using the bot's permissions.
 
 ## Persona user blocking
 

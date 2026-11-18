@@ -4,6 +4,7 @@ name: "CI: Quality Gates"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
   workflow_call:
 
@@ -44,8 +45,10 @@ jobs:
         with:
           bun-version: 1.4.0
 
-      - name: Install PostgreSQL client tools
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Verify PostgreSQL client tools
+        # The ubuntu-24.04 image ships PostgreSQL 16, and installing the client over the network
+        # blocked deploys whenever the Ubuntu archive was unreachable.
+        run: psql --version && pg_dump --version
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -141,4 +144,9 @@ jobs:
         # the database after the suite completes (or on failure).
 
       - name: Check model drift review
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name != github.repository ||
+          github.event.pull_request.head.ref != 'automation/model-drift' ||
+          !github.event.pull_request.draft
         run: bun run check-seed-catalogs

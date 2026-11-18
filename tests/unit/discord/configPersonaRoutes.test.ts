@@ -10,6 +10,9 @@ import { computePersonaNudgeFingerprint, computePersonaNudgeListFingerprint } fr
  * expected answer instead of exercising the guard.
  */
 import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { randomBytes } from "node:crypto";
+import sharp from "sharp";
+import { readSpriteArchive } from "@/utils/persona/spriteArchive";
 import { AttachmentBuilder, MessageFlags, type APIAttachment, type Client } from "discord.js";
 import type { PersonaSpriteRow, StmCategoryRow, TomoriState, TomoriPresetRow } from "@/types/db/schema";
 import type { ConditioningGroup } from "@/utils/db/repositories/ConditioningMemoryRepository";
@@ -23,7 +26,6 @@ import {
   personaRepository,
   personaSpriteRepository,
   serverMemoryRepository,
-  userRepository,
 } from "@/utils/db/repositories";
 import { shortTermMemoryRepository } from "@/utils/db/repositories/ShortTermMemoryRepository";
 import { execute as executeConditioningManage } from "@/commands/conditioning/manage";
@@ -123,19 +125,6 @@ function makePersona(overrides: PersonaFixtureOverrides = {}): TomoriState {
 
 const MAIN = makePersona({ persona_id: 55, persona_nickname: "Aphel", trigger_words: ["aphel", "hey aphel"] });
 const ALTER = makePersona({ persona_id: 56, persona_nickname: "Wren", is_alter: true });
-
-function makeTeachingPersona(
-  overrides: PersonaFixtureOverrides = {},
-  flags: { attribute?: boolean; dialogue?: boolean } = {},
-): TomoriState {
-  return makePersona({
-    ...overrides,
-    config: {
-      attribute_memteaching_enabled: flags.attribute ?? true,
-      sampledialogue_memteaching_enabled: flags.dialogue ?? true,
-    },
-  });
-}
 
 function makeTxtAttachment(text: string): APIAttachment {
   return {
@@ -1303,6 +1292,27 @@ describe("config route wire contract", () => {
 });
 
 describe("config route authorization", () => {
+  it("rejects every issued config control after the actor loses manager permission", async () => {
+    for (const [customId, route] of WIRE_CONTRACT_V2) {
+      const selectActions = ["page", "persona-select", "sprite-select", "attribute-select", "dialogue-select"];
+      const kind = route.action.endsWith("-submit")
+        ? "modal"
+        : selectActions.includes(route.action)
+          ? "select"
+          : "button";
+      const harness = makeHarness({ isManager: false });
+      const interaction = makeInteraction({ customId, kind, isManager: false, harness });
+      await dispatch(harness, interaction);
+      expect(harness.scopeLoads).toEqual([]);
+      expect(harness.modals).toEqual([]);
+      expect(harness.telemetry).toEqual([]);
+      expect(harness.edits).toEqual([]);
+      expect(harness.followUps).toEqual([]);
+      expect(JSON.stringify(harness.replies)).toContain(localizedCopy("en-US", "commands.config.panel.denied_detail"));
+      expect((harness.replies[0] as { flags: number }).flags & MessageFlags.Ephemeral).toBe(MessageFlags.Ephemeral);
+    }
+  });
+
   it("writes nothing when a guild member replays a manager-owned rename", async () => {
     const renameSpy = spyOn(personaRepository, "renamePersona");
     const harness = makeHarness({ isManager: false });
@@ -1421,21 +1431,18 @@ describe("config route authorization", () => {
     expect(harness.replies).toHaveLength(1);
   });
 
-  it("routes a denied SillyTavern modal open through the Config hosted fallback", async () => {
+  it("denies a member's SillyTavern modal before loading a fallback panel", async () => {
     const harness = makeHarness({ isManager: false });
     const interaction = makeInteraction({
       customId: buildConfigRouteId({ action: "st-presets-add-open", locale: "en-US" }),
       isManager: false,
       harness,
     });
-
     await dispatch(harness, interaction);
-
-    expect(interaction.deferred).toBe(true);
-    expect(harness.replies).toEqual([]);
+    expect(harness.scopeLoads).toEqual([]);
     expect(harness.modals).toEqual([]);
-    expect(harness.edits).toHaveLength(1);
-    expect(JSON.stringify(harness.edits[0])).toContain("config:v2:st-presets-select:en-US");
+    expect(harness.edits).toEqual([]);
+    expect(JSON.stringify(harness.replies)).toContain(localizedCopy("en-US", "commands.config.panel.denied_detail"));
   });
 });
 
@@ -1607,11 +1614,9 @@ describe("config route write behavior", () => {
         harness: denied,
       }),
     );
-    // Advanced is omitted for a member, so the submitted value is discarded rather than honoured.
-    expect(JSON.stringify(denied.edits.at(-1))).not.toContain("page_persona_advanced");
-    expect(JSON.stringify(denied.edits.at(-1))).toContain(
-      buildConfigRouteId({ action: "rename-open", locale: "en-US", personaId: 55 }),
-    );
+    expect(denied.scopeLoads).toEqual([]);
+    expect(denied.edits).toEqual([]);
+    expect(JSON.stringify(denied.replies)).toContain(localizedCopy("en-US", "commands.config.panel.denied_detail"));
   });
 
   it("keeps Persona page navigation and rendered controls on the selected alter", async () => {
@@ -1990,7 +1995,6 @@ describe("config Persona Memories routes", () => {
       55,
       // The route falls back to 0 only for a row without a lineage; a real persona row always has one.
       MAIN.persona_lineage_id,
-      undefined,
     );
     expect(acknowledged).toBe(true);
     summarySpy.mockRestore();
@@ -2413,8 +2417,8 @@ describe("config persona collections", () => {
   it("adds attributes from a .txt upload through the routed operation", async () => {
     let acknowledgedDuringWrite = false;
     let interaction: RouteInteraction;
-    const persona = makeTeachingPersona({ persona_id: 55, attribute_list: ["Existing"] });
-    const refreshed = makeTeachingPersona({ persona_id: 55, attribute_list: ["Existing", "Likes tea", "Reads"] });
+    const persona = makePersona({ persona_id: 55, attribute_list: ["Existing"] });
+    const refreshed = makePersona({ persona_id: 55, attribute_list: ["Existing", "Likes tea", "Reads"] });
     const addSpy = spyOn(personaRepository, "addAttributes").mockImplementation(async () => {
       acknowledgedDuringWrite = interaction.deferred;
       return true;
@@ -2424,8 +2428,7 @@ describe("config persona collections", () => {
       currentCount: 1,
       maxAllowed: 100,
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
-    const harness = makeHarness({ personas: [persona], refreshedPersonas: [refreshed], isManager: false });
+    const harness = makeHarness({ personas: [persona], refreshedPersonas: [refreshed], isManager: true });
     harness.dependencies.takeFileUpload = () => makeTxtAttachment("Likes tea\nReads");
     interaction = makeInteraction({
       customId: buildConfigRouteId({
@@ -2435,7 +2438,7 @@ describe("config persona collections", () => {
         nonce: "nonce1234567",
       }),
       kind: "modal",
-      isManager: false,
+      isManager: true,
       harness,
     });
 
@@ -2446,16 +2449,14 @@ describe("config persona collections", () => {
     expect(addSpy).toHaveBeenCalledWith(55, ["Likes tea", "Reads"], false);
     expect(harness.telemetry).toEqual(["server-config.workspace.persona-attribute.add"]);
     expect(JSON.stringify(harness.edits.at(-1))).toContain("Reads");
-    expect(blacklistSpy).toHaveBeenCalledWith("guild-1", "user-1");
     addSpy.mockRestore();
     limitSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("edits attributes with checkbox evidence while preserving absent evidence", async () => {
     let acknowledgedDuringWrite = false;
     let interaction: RouteInteraction;
-    const persona = makeTeachingPersona({
+    const persona = makePersona({
       persona_id: 55,
       attribute_list: ["Old"],
       persona_attributes: [{ persona_id: 55, attribute_order: 1, attribute_text: "Old", is_public: true }],
@@ -2464,9 +2465,8 @@ describe("config persona collections", () => {
       acknowledgedDuringWrite = interaction.deferred;
       return true;
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
 
-    const firstHarness = makeHarness({ personas: [persona], isManager: false });
+    const firstHarness = makeHarness({ personas: [persona], isManager: true });
     firstHarness.dependencies.takeCheckboxValues = () => undefined;
     interaction = makeInteraction({
       customId: buildConfigRouteId({
@@ -2478,7 +2478,7 @@ describe("config persona collections", () => {
         nonce: "nonce1234567",
       }),
       kind: "modal",
-      isManager: false,
+      isManager: true,
       harness: firstHarness,
       fields: { [buildConfigModalFieldId("attribute_part1", "nonce1234567")]: "New" },
     });
@@ -2486,7 +2486,7 @@ describe("config persona collections", () => {
     expect(acknowledgedDuringWrite).toBe(true);
     expect(editSpy).toHaveBeenNthCalledWith(1, 55, 1, "New", undefined);
 
-    const secondHarness = makeHarness({ personas: [persona], isManager: false });
+    const secondHarness = makeHarness({ personas: [persona], isManager: true });
     secondHarness.dependencies.takeCheckboxValues = () => [];
     interaction = makeInteraction({
       customId: buildConfigRouteId({
@@ -2498,23 +2498,20 @@ describe("config persona collections", () => {
         nonce: "nonce1234567",
       }),
       kind: "modal",
-      isManager: false,
+      isManager: true,
       harness: secondHarness,
       fields: { [buildConfigModalFieldId("attribute_part1", "nonce1234567")]: "Private" },
     });
     await dispatch(secondHarness, interaction);
     expect(editSpy).toHaveBeenNthCalledWith(2, 55, 1, "Private", false);
-    expect(blacklistSpy).toHaveBeenCalledTimes(2);
     editSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("returns a stale receipt without writing when an attribute fingerprint changed", async () => {
     const editSpy = spyOn(personaRepository, "editAttributeAt");
-    const removeSpy = spyOn(personaRepository, "removeAttributeAt");
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
-    const persona = makeTeachingPersona({ persona_id: 55, attribute_list: ["Current"] });
-    const harness = makeHarness({ personas: [persona], isManager: false });
+    const removeSpy = spyOn(personaRepository, "removeAttributeAt").mockResolvedValue(true);
+    const persona = makePersona({ persona_id: 55, attribute_list: ["Current"] });
+    const harness = makeHarness({ personas: [persona], isManager: true });
     await dispatch(
       harness,
       makeInteraction({
@@ -2527,7 +2524,7 @@ describe("config persona collections", () => {
           nonce: "nonce1234567",
         }),
         kind: "modal",
-        isManager: false,
+        isManager: true,
         harness,
         fields: { [buildConfigModalFieldId("attribute_part1", "nonce1234567")]: "New" },
       }),
@@ -2542,7 +2539,7 @@ describe("config persona collections", () => {
           index: 0,
           fp: computeAttributeFingerprint(55, 0, "Old", false),
         }),
-        isManager: false,
+        isManager: true,
         harness,
       }),
     );
@@ -2550,44 +2547,15 @@ describe("config persona collections", () => {
     expect(editSpy).not.toHaveBeenCalled();
     expect(removeSpy).not.toHaveBeenCalled();
     expect(harness.edits.filter((entry) => JSON.stringify(entry).includes("Panel Out Of Date"))).toHaveLength(2);
-    expect(blacklistSpy).toHaveBeenCalledTimes(2);
     editSpy.mockRestore();
     removeSpy.mockRestore();
-    blacklistSpy.mockRestore();
-  });
-
-  it("refuses to remove an attribute when the actor is blacklisted", async () => {
-    const persona = makeTeachingPersona({
-      persona_id: 55,
-      attribute_list: ["Only"],
-    });
-    const removeSpy = spyOn(personaRepository, "removeAttributeAt").mockResolvedValue(true);
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(true);
-    const harness = makeHarness({ personas: [persona], isManager: false });
-    const interaction = makeInteraction({
-      customId: buildConfigRouteId({
-        action: "attribute-remove",
-        locale: "en-US",
-        personaId: 55,
-        index: 0,
-        fp: computeAttributeFingerprint(55, 0, "Only", false),
-      }),
-      isManager: false,
-      harness,
-    });
-    await dispatch(harness, interaction);
-
-    expect(removeSpy).not.toHaveBeenCalled();
-    expect(blacklistSpy).toHaveBeenCalledWith("guild-1", "user-1");
-    removeSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("adds sample dialogues from a .txt upload and routes the last pair into view", async () => {
     let acknowledgedDuringWrite = false;
     let interaction: RouteInteraction;
-    const persona = makeTeachingPersona({ persona_id: 55 });
-    const refreshed = makeTeachingPersona({
+    const persona = makePersona({ persona_id: 55 });
+    const refreshed = makePersona({
       persona_id: 55,
       sample_dialogues_in: ["Hello"],
       sample_dialogues_out: ["Hi"],
@@ -2601,8 +2569,7 @@ describe("config persona collections", () => {
       currentCount: 0,
       maxAllowed: 100,
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
-    const harness = makeHarness({ personas: [persona], refreshedPersonas: [refreshed], isManager: false });
+    const harness = makeHarness({ personas: [persona], refreshedPersonas: [refreshed], isManager: true });
     harness.dependencies.takeFileUpload = () => makeTxtAttachment("{user}: Hello\n{bot}: Hi");
     interaction = makeInteraction({
       customId: buildConfigRouteId({
@@ -2612,7 +2579,7 @@ describe("config persona collections", () => {
         nonce: "nonce1234567",
       }),
       kind: "modal",
-      isManager: false,
+      isManager: true,
       harness,
     });
     await dispatch(harness, interaction);
@@ -2620,16 +2587,14 @@ describe("config persona collections", () => {
     expect(acknowledgedDuringWrite).toBe(true);
     expect(addSpy).toHaveBeenCalledWith(55, ["Hello"], ["Hi"]);
     expect(harness.telemetry).toEqual(["server-config.workspace.persona-dialogue.add"]);
-    expect(blacklistSpy).toHaveBeenCalledWith("guild-1", "user-1");
     addSpy.mockRestore();
     limitSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("edits and removes sample dialogues through fingerprinted routes", async () => {
     let acknowledgedDuringWrite = false;
     let interaction: RouteInteraction;
-    const persona = makeTeachingPersona({
+    const persona = makePersona({
       persona_id: 55,
       sample_dialogues_in: ["Old"],
       sample_dialogues_out: ["Reply"],
@@ -2642,8 +2607,7 @@ describe("config persona collections", () => {
       acknowledgedDuringWrite = interaction.deferred;
       return true;
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
-    const editHarness = makeHarness({ personas: [persona], isManager: false });
+    const editHarness = makeHarness({ personas: [persona], isManager: true });
     interaction = makeInteraction({
       customId: buildConfigRouteId({
         action: "dialogue-edit-submit",
@@ -2654,7 +2618,7 @@ describe("config persona collections", () => {
         nonce: "nonce1234567",
       }),
       kind: "modal",
-      isManager: false,
+      isManager: true,
       harness: editHarness,
       fields: {
         [buildConfigModalFieldId("user_input_part1", "nonce1234567")]: "New",
@@ -2665,9 +2629,8 @@ describe("config persona collections", () => {
 
     expect(acknowledgedDuringWrite).toBe(true);
     expect(editSpy).toHaveBeenCalledWith(55, 1, "New", "Response");
-    expect(blacklistSpy).toHaveBeenCalledTimes(1);
 
-    const removeHarness = makeHarness({ personas: [persona], isManager: false });
+    const removeHarness = makeHarness({ personas: [persona], isManager: true });
     interaction = makeInteraction({
       customId: buildConfigRouteId({
         action: "dialogue-remove",
@@ -2676,25 +2639,23 @@ describe("config persona collections", () => {
         index: 0,
         fp: computeDialogueFingerprint(55, 0, "Old", "Reply"),
       }),
-      isManager: false,
+      isManager: true,
       harness: removeHarness,
     });
     await dispatch(removeHarness, interaction);
 
     expect(removeSpy).toHaveBeenCalledWith(55, 1);
-    expect(blacklistSpy).toHaveBeenCalledTimes(2);
     expect(editHarness.telemetry).toEqual(["server-config.workspace.persona-dialogue.edit"]);
     expect(removeHarness.telemetry).toEqual(["server-config.workspace.persona-dialogue.remove"]);
     editSpy.mockRestore();
     removeSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("repairs mismatched dialogue pairs before an edit", async () => {
     let interaction: RouteInteraction;
     let acknowledgedDuringRepair = false;
     let acknowledgedDuringEdit = false;
-    const persona = makeTeachingPersona({
+    const persona = makePersona({
       persona_id: 55,
       sample_dialogues_in: ["First", "Orphaned input"],
       sample_dialogues_out: ["Reply"],
@@ -2709,8 +2670,7 @@ describe("config persona collections", () => {
       acknowledgedDuringEdit = interaction.deferred;
       return true;
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
-    const harness = makeHarness({ personas: [persona], isManager: false });
+    const harness = makeHarness({ personas: [persona], isManager: true });
     interaction = makeInteraction({
       customId: buildConfigRouteId({
         action: "dialogue-edit-submit",
@@ -2721,7 +2681,7 @@ describe("config persona collections", () => {
         nonce: "nonce1234567",
       }),
       kind: "modal",
-      isManager: false,
+      isManager: true,
       harness,
       fields: {
         [buildConfigModalFieldId("user_input_part1", "nonce1234567")]: "Updated",
@@ -2737,22 +2697,19 @@ describe("config persona collections", () => {
     expect(editSpy).toHaveBeenCalledWith(55, 1, "Updated", "Response");
     expect(persona.sample_dialogues_in).toEqual(repairedIn);
     expect(persona.sample_dialogues_out).toEqual(repairedOut);
-    expect(blacklistSpy).toHaveBeenCalledTimes(1);
     repairSpy.mockRestore();
     editSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("rejects stale dialogue edits and removals without writing", async () => {
     const editSpy = spyOn(personaRepository, "editSampleDialoguePairAt");
     const removeSpy = spyOn(personaRepository, "removeSampleDialoguePairAt");
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(false);
-    const persona = makeTeachingPersona({
+    const persona = makePersona({
       persona_id: 55,
       sample_dialogues_in: ["Current"],
       sample_dialogues_out: ["Reply"],
     });
-    const harness = makeHarness({ personas: [persona], isManager: false });
+    const harness = makeHarness({ personas: [persona], isManager: true });
     await dispatch(
       harness,
       makeInteraction({
@@ -2765,7 +2722,7 @@ describe("config persona collections", () => {
           nonce: "nonce1234567",
         }),
         kind: "modal",
-        isManager: false,
+        isManager: true,
         harness,
         fields: {
           [buildConfigModalFieldId("user_input_part1", "nonce1234567")]: "New",
@@ -2783,7 +2740,7 @@ describe("config persona collections", () => {
           index: 0,
           fp: computeDialogueFingerprint(55, 0, "Old", "Reply"),
         }),
-        isManager: false,
+        isManager: true,
         harness,
       }),
     );
@@ -2791,166 +2748,11 @@ describe("config persona collections", () => {
     expect(editSpy).not.toHaveBeenCalled();
     expect(removeSpy).not.toHaveBeenCalled();
     expect(harness.edits.filter((entry) => JSON.stringify(entry).includes("Panel Out Of Date"))).toHaveLength(2);
-    expect(blacklistSpy).toHaveBeenCalledTimes(2);
-    editSpy.mockRestore();
-    removeSpy.mockRestore();
-    blacklistSpy.mockRestore();
-  });
-
-  it("blocks a blacklisted member's dialogue add, edit, and remove without writing", async () => {
-    let interaction: RouteInteraction;
-    let acknowledgedDuringRemove = false;
-    const addSpy = spyOn(personaRepository, "addSampleDialoguePair").mockResolvedValue(true);
-    const editSpy = spyOn(personaRepository, "editSampleDialoguePairAt");
-    const removeSpy = spyOn(personaRepository, "removeSampleDialoguePairAt").mockImplementation(async () => {
-      acknowledgedDuringRemove = interaction.deferred;
-      return true;
-    });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(true);
-    const memberPersona = makeTeachingPersona({
-      persona_id: 55,
-      sample_dialogues_in: ["Old"],
-      sample_dialogues_out: ["Reply"],
-    });
-    const blacklistedHarness = makeHarness({ personas: [memberPersona], isManager: false });
-
-    await dispatch(
-      blacklistedHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "dialogue-add-submit",
-          locale: "en-US",
-          personaId: 55,
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: blacklistedHarness,
-        fields: {
-          [buildConfigModalFieldId("user_input", "nonce1234567")]: "New",
-          [buildConfigModalFieldId("bot_input", "nonce1234567")]: "Response",
-        },
-      }),
-    );
-    await dispatch(
-      blacklistedHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "dialogue-edit-submit",
-          locale: "en-US",
-          personaId: 55,
-          index: 0,
-          fp: computeDialogueFingerprint(55, 0, "Old", "Reply"),
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: blacklistedHarness,
-        fields: {
-          [buildConfigModalFieldId("user_input_part1", "nonce1234567")]: "New",
-          [buildConfigModalFieldId("bot_input_part1", "nonce1234567")]: "Response",
-        },
-      }),
-    );
-    expect(addSpy).not.toHaveBeenCalled();
-    expect(editSpy).not.toHaveBeenCalled();
-
-    interaction = makeInteraction({
-      customId: buildConfigRouteId({
-        action: "dialogue-remove",
-        locale: "en-US",
-        personaId: 55,
-        index: 0,
-        fp: computeDialogueFingerprint(55, 0, "Old", "Reply"),
-      }),
-      isManager: false,
-      harness: blacklistedHarness,
-    });
-    await dispatch(blacklistedHarness, interaction);
-    expect(acknowledgedDuringRemove).toBe(false);
-    expect(removeSpy).not.toHaveBeenCalled();
-    // The gate reads the blacklist once per gated write: the add, the edit, and the removal.
-    expect(blacklistSpy).toHaveBeenCalledTimes(3);
-    addSpy.mockRestore();
-    editSpy.mockRestore();
-    removeSpy.mockRestore();
-    blacklistSpy.mockRestore();
-  });
-
-  it("blocks dialogue writes while sampledialogue memteaching is disabled", async () => {
-    const addSpy = spyOn(personaRepository, "addSampleDialoguePair").mockResolvedValue(true);
-    const editSpy = spyOn(personaRepository, "editSampleDialoguePairAt");
-    const removeSpy = spyOn(personaRepository, "removeSampleDialoguePairAt");
-    const disabledPersona = makeTeachingPersona(
-      {
-        persona_id: 55,
-        sample_dialogues_in: ["Old"],
-        sample_dialogues_out: ["Reply"],
-      },
-      { dialogue: false },
-    );
-    const disabledHarness = makeHarness({ personas: [disabledPersona], isManager: false });
-    await dispatch(
-      disabledHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "dialogue-add-submit",
-          locale: "en-US",
-          personaId: 55,
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: disabledHarness,
-        fields: {
-          [buildConfigModalFieldId("user_input", "nonce1234567")]: "New",
-          [buildConfigModalFieldId("bot_input", "nonce1234567")]: "Response",
-        },
-      }),
-    );
-    await dispatch(
-      disabledHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "dialogue-edit-submit",
-          locale: "en-US",
-          personaId: 55,
-          index: 0,
-          fp: computeDialogueFingerprint(55, 0, "Old", "Reply"),
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: disabledHarness,
-        fields: {
-          [buildConfigModalFieldId("user_input_part1", "nonce1234567")]: "New",
-          [buildConfigModalFieldId("bot_input_part1", "nonce1234567")]: "Response",
-        },
-      }),
-    );
-    await dispatch(
-      disabledHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "dialogue-remove",
-          locale: "en-US",
-          personaId: 55,
-          index: 0,
-          fp: computeDialogueFingerprint(55, 0, "Old", "Reply"),
-        }),
-        isManager: false,
-        harness: disabledHarness,
-      }),
-    );
-    expect(addSpy).not.toHaveBeenCalled();
-    expect(editSpy).not.toHaveBeenCalled();
-    expect(removeSpy).not.toHaveBeenCalled();
-    addSpy.mockRestore();
     editSpy.mockRestore();
     removeSpy.mockRestore();
   });
 
-  it("lets a manager add a dialogue pair while the teaching gate is off", async () => {
+  it("lets a manager add a dialogue pair", async () => {
     // The denials above are only meaningful if the manager bypass still lands: a route layer that
     // refused every dialogue write would satisfy them on its own.
     const addSpy = spyOn(personaRepository, "addSampleDialoguePair").mockResolvedValue(true);
@@ -2959,8 +2761,7 @@ describe("config persona collections", () => {
       currentCount: 0,
       maxAllowed: 100,
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(true);
-    const managerPersona = makeTeachingPersona({ persona_id: 55 }, { dialogue: false });
+    const managerPersona = makePersona({ persona_id: 55 });
     const managerHarness = makeHarness({ personas: [managerPersona], isManager: true });
     await dispatch(
       managerHarness,
@@ -2983,10 +2784,8 @@ describe("config persona collections", () => {
     expect(addSpy).toHaveBeenCalledWith(55, ["New"], ["Response"]);
     expect(limitSpy).toHaveBeenCalledWith(55);
     // A manager passes the gate before the blacklist is read, so the read count stays at zero.
-    expect(blacklistSpy).not.toHaveBeenCalled();
     addSpy.mockRestore();
     limitSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
   it("opens add modals from the first selector option without deferring the select", async () => {
@@ -3051,118 +2850,7 @@ describe("config persona collections", () => {
     });
   });
 
-  it("blocks a blacklisted member's attribute add and edit without writing", async () => {
-    const addSpy = spyOn(personaRepository, "addAttributes").mockResolvedValue(true);
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(true);
-    const memberPersona = makeTeachingPersona({ persona_id: 55, attribute_list: ["Old"] });
-
-    const blacklistedAddHarness = makeHarness({ personas: [memberPersona], isManager: false });
-    await dispatch(
-      blacklistedAddHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "attribute-add-submit",
-          locale: "en-US",
-          personaId: 55,
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: blacklistedAddHarness,
-        fields: { [buildConfigModalFieldId("attribute", "nonce1234567")]: "New" },
-      }),
-    );
-    expect(addSpy).not.toHaveBeenCalled();
-
-    const blacklistedEditSpy = spyOn(personaRepository, "editAttributeAt");
-    await dispatch(
-      blacklistedAddHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "attribute-edit-submit",
-          locale: "en-US",
-          personaId: 55,
-          index: 0,
-          fp: computeAttributeFingerprint(55, 0, "Old", false),
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: blacklistedAddHarness,
-        fields: { [buildConfigModalFieldId("attribute_part1", "nonce1234567")]: "New" },
-      }),
-    );
-    expect(blacklistedEditSpy).not.toHaveBeenCalled();
-    // The gate reads the blacklist once per gated write, so the member's add and edit are both reads.
-    expect(blacklistSpy).toHaveBeenCalledTimes(2);
-    blacklistedEditSpy.mockRestore();
-    addSpy.mockRestore();
-    blacklistSpy.mockRestore();
-  });
-
-  it("blocks attribute writes while attribute memteaching is disabled", async () => {
-    const addSpy = spyOn(personaRepository, "addAttributes").mockResolvedValue(true);
-    const disabledPersona = makeTeachingPersona({ persona_id: 55, attribute_list: ["Old"] }, { attribute: false });
-    const disabledHarness = makeHarness({ personas: [disabledPersona], isManager: false });
-    await dispatch(
-      disabledHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "attribute-add-submit",
-          locale: "en-US",
-          personaId: 55,
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: disabledHarness,
-        fields: { [buildConfigModalFieldId("attribute", "nonce1234567")]: "New" },
-      }),
-    );
-    expect(addSpy).not.toHaveBeenCalled();
-
-    const disabledEditSpy = spyOn(personaRepository, "editAttributeAt");
-    await dispatch(
-      disabledHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "attribute-edit-submit",
-          locale: "en-US",
-          personaId: 55,
-          index: 0,
-          fp: computeAttributeFingerprint(55, 0, "Old", false),
-          nonce: "nonce1234567",
-        }),
-        kind: "modal",
-        isManager: false,
-        harness: disabledHarness,
-        fields: { [buildConfigModalFieldId("attribute_part1", "nonce1234567")]: "New" },
-      }),
-    );
-    expect(disabledEditSpy).not.toHaveBeenCalled();
-
-    const disabledRemoveSpy = spyOn(personaRepository, "removeAttributeAt");
-    await dispatch(
-      disabledHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({
-          action: "attribute-remove",
-          locale: "en-US",
-          personaId: 55,
-          index: 0,
-          fp: computeAttributeFingerprint(55, 0, "Old", false),
-        }),
-        isManager: false,
-        harness: disabledHarness,
-      }),
-    );
-    expect(disabledRemoveSpy).not.toHaveBeenCalled();
-    disabledRemoveSpy.mockRestore();
-    disabledEditSpy.mockRestore();
-    addSpy.mockRestore();
-  });
-
-  it("lets a manager add an attribute while attribute memteaching is disabled", async () => {
+  it("lets a manager add an attribute", async () => {
     // The manager bypass is the positive control for the denials above: without it, a route layer
     // that refused every attribute write would satisfy them on its own.
     const addSpy = spyOn(personaRepository, "addAttributes").mockResolvedValue(true);
@@ -3171,8 +2859,7 @@ describe("config persona collections", () => {
       currentCount: 0,
       maxAllowed: 100,
     });
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(true);
-    const managerPersona = makeTeachingPersona({ persona_id: 55 }, { attribute: false });
+    const managerPersona = makePersona({ persona_id: 55 });
     const managerHarness = makeHarness({ personas: [managerPersona], isManager: true });
     const managerInteraction = makeInteraction({
       customId: buildConfigRouteId({
@@ -3188,17 +2875,14 @@ describe("config persona collections", () => {
     });
     await dispatch(managerHarness, managerInteraction);
     expect(addSpy).toHaveBeenCalledWith(55, ["New"], false);
-    expect(blacklistSpy).not.toHaveBeenCalled();
     addSpy.mockRestore();
     limitSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 
-  it("denies the DM attribute removal and never reads the blacklist without a guild", async () => {
-    const blacklistSpy = spyOn(userRepository, "isBlacklisted").mockResolvedValue(true);
-    const dmPersona = makeTeachingPersona({ persona_id: 55, attribute_list: ["Old"] }, { attribute: false });
+  it("allows a DM owner to remove an attribute", async () => {
+    const dmPersona = makePersona({ persona_id: 55, attribute_list: ["Old"] });
     const dmHarness = makeHarness({ personas: [dmPersona], inGuild: false });
-    const dmRemoveSpy = spyOn(personaRepository, "removeAttributeAt");
+    const dmRemoveSpy = spyOn(personaRepository, "removeAttributeAt").mockResolvedValue(true);
     await dispatch(
       dmHarness,
       makeInteraction({
@@ -3213,11 +2897,8 @@ describe("config persona collections", () => {
         harness: dmHarness,
       }),
     );
-    expect(dmRemoveSpy).not.toHaveBeenCalled();
-    // A DM has no guild blacklist to read, so the gate must not reach for one.
-    expect(blacklistSpy).not.toHaveBeenCalled();
+    expect(dmRemoveSpy).toHaveBeenCalledWith(55, 1);
     dmRemoveSpy.mockRestore();
-    blacklistSpy.mockRestore();
   });
 });
 
@@ -4613,36 +4294,43 @@ describe("config Persona Sprites routes", () => {
     deleteSpy.mockRestore();
   });
 
-  it("keeps a member's Export working while every sprite mutation is denied", async () => {
-    // The denials above are only meaningful if the same read-only page still serves Export: a route
-    // layer that refused every sprite action for a member would satisfy them on its own.
-    let exported = false;
-    const exportHarness = makeHarness({
-      isManager: false,
-      personas: [MAIN],
-      spriteOperations: {
-        exportSprites: async () => {
-          exported = true;
-          return {
-            status: "success",
-            buffer: Buffer.from("zip"),
-            filename: "aphel-sprites.zip",
-            spriteCount: 2,
-            skippedCount: 0,
-          };
-        },
-      },
-    });
-    await dispatch(
-      exportHarness,
-      makeInteraction({
-        customId: buildConfigRouteId({ action: "sprite-export", locale: "en-US", personaId: 55 }),
-        isManager: false,
-        harness: exportHarness,
-      }),
-    );
-
-    expect(exported).toBe(true);
+  it("requires a manager for sprite exports regardless of the persona export flag", async () => {
+    for (const isManager of [false, true]) {
+      for (const enabled of [false, true]) {
+        let exported = false;
+        const harness = makeHarness({
+          isManager,
+          personas: [makePersona({ ...MAIN, config: { ...MAIN.config, persona_export_enabled: enabled } })],
+          spriteOperations: {
+            exportSprites: async () => {
+              exported = true;
+              return {
+                status: "success",
+                files: [{ buffer: Buffer.from("zip"), filename: "sprites.zip" }],
+                spriteCount: 2,
+                skippedCount: 0,
+              };
+            },
+          },
+        });
+        await dispatch(
+          harness,
+          makeInteraction({
+            customId: buildConfigRouteId({ action: "sprite-export", locale: "en-US", personaId: 55 }),
+            isManager,
+            harness,
+          }),
+        );
+        expect(exported).toBe(isManager);
+        if (!isManager) {
+          expect(harness.scopeLoads).toEqual([]);
+          expect(JSON.stringify(harness.replies)).toContain(
+            localizedCopy("en-US", "commands.config.panel.denied_detail"),
+          );
+          expect(harness.followUps).toEqual([]);
+        }
+      }
+    }
   });
 
   it("delivers the archive as a public follow-up rather than through the ephemeral panel", async () => {
@@ -4651,8 +4339,10 @@ describe("config Persona Sprites routes", () => {
       spriteOperations: {
         exportSprites: async () => ({
           status: "success",
-          buffer: Buffer.from("zip"),
-          filename: "aphel-sprites.zip",
+          files: [
+            { buffer: Buffer.from("zip-one"), filename: "aphel-sprites-1.zip" },
+            { buffer: Buffer.from("zip-two"), filename: "aphel-sprites-2.zip" },
+          ],
           spriteCount: 2,
           skippedCount: 0,
         }),
@@ -4669,10 +4359,11 @@ describe("config Persona Sprites routes", () => {
 
     // The panel root defers ephemerally, so an `editReply` carrying the archive would silently make
     // a public export private. The archive must arrive on its own message with no Ephemeral flag.
-    expect(harness.followUps).toHaveLength(1);
-    const followUp = harness.followUps[0] as { files?: unknown[]; flags?: number };
-    expect(followUp.files).toHaveLength(1);
-    expect(followUp.flags ?? 0).toBe(0);
+    expect(harness.followUps).toHaveLength(2);
+    for (const followUp of harness.followUps as Array<{ files?: unknown[]; flags?: number }>) {
+      expect(followUp.files).toHaveLength(1);
+      expect(followUp.flags ?? 0).toBe(0);
+    }
     // The panel still repaints in place beside it.
     expect(harness.edits.length).toBeGreaterThan(0);
     expect(harness.telemetry).toContain("server-config.workspace.persona-sprite.export");
@@ -4892,6 +4583,66 @@ describe("config Persona Sprites routes", () => {
     expect(harness.replies).toHaveLength(1);
   });
 
+  it("splits exports into independently importable archives within the interaction's upload limit", async () => {
+    const stored = ["happy", "sad", "surprised"].map((key, index) =>
+      makeSprite({ sprite_id: index + 1, sprite_key: key, sprite_name: key }),
+    );
+    const png = await sharp(randomBytes(32 * 32 * 3), { raw: { width: 32, height: 32, channels: 3 } })
+      .png()
+      .toBuffer();
+    const list = spyOn(personaSpriteRepository, "listForPersona").mockResolvedValue(stored);
+    const load = spyOn(avatarStorage, "loadStoredPersonaAvatarBuffer").mockResolvedValue(png);
+    try {
+      const harness = makeHarness({ personas: [MAIN] });
+      const interaction = makeInteraction({
+        customId: buildConfigRouteId({ action: "sprite-export", locale: "en-US", personaId: 55 }),
+        harness,
+      });
+      interaction.attachmentSizeLimit = 4096;
+      await dispatch(harness, interaction);
+
+      expect(harness.followUps.length).toBeGreaterThan(1);
+      const totalParts = harness.followUps.length;
+      const stems = new Set<string>();
+      const keys: string[] = [];
+      for (const [index, followUp] of (harness.followUps as Array<{ files: AttachmentBuilder[] }>).entries()) {
+        expect(followUp.files).toHaveLength(1);
+        const attachmentName = followUp.files[0].name ?? "";
+        const match = attachmentName.match(
+          new RegExp(`^(tomori-sprites-[\\w-]+-\\d{8}T\\d{6}Z)-part-${index + 1}-of-${totalParts}\\.zip$`),
+        );
+        expect(match).not.toBeNull();
+        if (match?.[1]) stems.add(match[1]);
+        const bytes = followUp.files[0].attachment;
+        expect(Buffer.isBuffer(bytes)).toBe(true);
+        if (!Buffer.isBuffer(bytes)) throw new Error("Expected archive bytes");
+        expect(bytes.length).toBeLessThanOrEqual(interaction.attachmentSizeLimit);
+        const parsed = await readSpriteArchive(bytes, { maxEntries: 50, maxFileBytes: 4096, maxTotalBytes: 12288 });
+        expect(parsed.ok).toBe(true);
+        if (parsed.ok) keys.push(...parsed.entries.map((entry) => entry.meta.sprite_key));
+      }
+      expect(keys.sort()).toEqual(stored.map((sprite) => sprite.sprite_key).sort());
+      expect(stems.size).toBe(1);
+
+      const refused = makeHarness({ personas: [MAIN] });
+      const smallInteraction = makeInteraction({
+        customId: buildConfigRouteId({ action: "sprite-export", locale: "en-US", personaId: 55 }),
+        harness: refused,
+      });
+      smallInteraction.attachmentSizeLimit = 200;
+      await dispatch(refused, smallInteraction);
+      expect(refused.followUps).toHaveLength(0);
+      expect(JSON.stringify(refused.edits)).toMatch(
+        localizedProse("en-US", "commands.config.panel.sprite_export_image_too_large_detail", {
+          sprite: stored[0].sprite_name,
+        }),
+      );
+    } finally {
+      list.mockRestore();
+      load.mockRestore();
+    }
+  });
+
   it("round-trips a persona's sprites out through Export and back in through Import", async () => {
     const stored: PersonaSpriteRow[] = [
       makeSprite({ sprite_key: "happy", sprite_name: "Happy", usage_instructions: "When cheerful", is_identity: true }),
@@ -4905,9 +4656,10 @@ describe("config Persona Sprites routes", () => {
     // behavior: a real re-encode would make the two sides incomparable.
     const pngSpy = spyOn(imageProcessor, "convertToPNG").mockImplementation(async (buffer: Buffer) => buffer);
 
-    const exported = await configSpriteOperations.exportSprites({ persona: MAIN });
+    const exported = await configSpriteOperations.exportSprites({ persona: MAIN, maxArchiveBytes: 10 * 1024 * 1024 });
     expect(exported.status).toBe("success");
     if (exported.status !== "success") return;
+    expect(exported.files[0]?.filename).toMatch(/^tomori-sprites-[\w-]+-\d{8}T\d{6}Z\.zip$/);
     expect(exported.spriteCount).toBe(2);
     expect(exported.skippedCount).toBe(0);
 
@@ -4930,7 +4682,7 @@ describe("config Persona Sprites routes", () => {
     });
     const downloadSpy = spyOn(safeDownloadModule, "safeDownload").mockResolvedValue({
       success: true,
-      buffer: exported.buffer,
+      buffer: exported.files[0].buffer,
     } as Awaited<ReturnType<typeof safeDownloadModule.safeDownload>>);
     // The target persona starts empty, so every archive entry lands as a new sprite.
     listSpy.mockResolvedValue([]);
@@ -4942,7 +4694,7 @@ describe("config Persona Sprites routes", () => {
       attachment: {
         id: "a1",
         filename: "aphel-sprites.zip",
-        size: exported.buffer.byteLength,
+        size: exported.files[0].buffer.byteLength,
         url: "https://cdn.example.invalid/aphel-sprites.zip",
         proxy_url: "https://cdn.example.invalid/aphel-sprites.zip",
         content_type: "application/zip",

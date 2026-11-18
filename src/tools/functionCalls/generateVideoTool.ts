@@ -24,10 +24,13 @@ import { localizer } from "../../utils/text/localizer";
 import { mediaDeliveryFailure, sendToolMediaPost } from "@/utils/discord/webhook/toolMediaDelivery";
 import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
 import { buildGeneratedVideoComponentsV2Payload } from "@/utils/discord/generatedVideoMessage";
+import { buildGeneratedMediaSourceLine, type GeneratedMediaSource } from "@/utils/discord/generatedMediaMetadata";
+import { recordMinimalNoticeRef } from "@/utils/discord/minimalNoticeBodies";
 import {
   buildReferencedMessageUrl,
   buildVideoToolNoticeDescription,
   sendToolProgressNotice,
+  isMinimalNotice,
 } from "@/utils/discord/toolProgressNotice";
 import { BaseTool, type ToolContext, type ToolResult, type ToolParameterSchema } from "../../types/tool/interfaces";
 import { releaseVideoQuota, reserveVideoQuota, type VideoQuotaClaim } from "../../utils/quota/videoQuotaManager";
@@ -194,14 +197,28 @@ export class GenerateVideoTool extends BaseTool {
     filename: string,
     elapsedMs: number,
     spoiler: boolean,
+    source: GeneratedMediaSource,
   ): Promise<import("discord.js").Message> {
-    const componentsPayload = buildGeneratedVideoComponentsV2Payload(filename, elapsedMs, context.locale, spoiler);
+    const config = context.tomoriState.config;
+    const visibleSource = isMinimalNotice(config, "video_generation") ? undefined : source;
+    const componentsPayload = buildGeneratedVideoComponentsV2Payload(
+      filename,
+      elapsedMs,
+      context.locale,
+      spoiler,
+      visibleSource,
+    );
     const files = () => [new AttachmentBuilder(videoData, { name: filename })];
-    return sendToolMediaPost(
+    const message = await sendToolMediaPost(
       context,
       () => ({ files: files(), ...componentsPayload, withComponents: true }),
-      () => ({ files: files() }),
+      () => ({
+        files: files(),
+        ...(visibleSource ? { content: buildGeneratedMediaSourceLine(context.locale, visibleSource) } : {}),
+      }),
     );
+    await recordMinimalNoticeRef(message.id, { kind: "generation", source });
+    return message;
   }
 
   /**
@@ -376,6 +393,10 @@ export class GenerateVideoTool extends BaseTool {
       const modelCodename = await this.getVideoModelCodename(videoModelId);
       const resolution = this.normalizeResolution(args.resolution, modelCodename);
       const displayModelName = creds.customEndpoint ? formatCustomModelDisplay(creds.customEndpoint) : modelCodename;
+      const generationSource: GeneratedMediaSource = {
+        provider: creds.provider,
+        model: creds.customEndpoint?.model_name?.trim() || modelCodename,
+      };
       log.info(`Using video model: ${modelCodename} for video generation`);
 
       const apiKey = creds.apiKey;
@@ -441,17 +462,41 @@ export class GenerateVideoTool extends BaseTool {
       const videoImplementation = resolveProviderFeatureImplementation(executionProvider, "videoGeneration");
 
       if (creds.customEndpoint) {
+        const endpoint = creds.customEndpoint;
         const handoff =
           creds.customEndpoint.api_style === "comfyui"
             ? await beginTextModelHandoffBeforeComfyUi({
                 tomoriState: context.tomoriState,
-                comfyUi: { endpointUrl: creds.customEndpoint.endpoint_url, apiKey },
+                comfyUi: { endpointUrl: creds.customEndpoint.endpoint_url, apiKey, usageContext },
               })
             : null;
         try {
-          const result = await generateCustomVideoViaEndpoint({
-            endpoint: creds.customEndpoint,
+          const result = await withProviderUsageContext(usageContext, () =>
+            generateCustomVideoViaEndpoint({
+              endpoint,
+              apiKey,
+              prompt,
+              aspectRatio,
+              durationSeconds,
+              resolution,
+              referenceImages,
+              generateAudio,
+              audioPrompt,
+              loop,
+              abortSignal: context.abortSignal,
+            }),
+          );
+          videoData = result.videoData;
+          videoFilename = result.filename ?? videoFilename;
+        } finally {
+          void handoff?.restore();
+        }
+      } else if (videoImplementation === "google") {
+        const { generateGoogleNativeVideo } = await import("@/providers/google/googleVideoGeneration");
+        const result = await withProviderUsageContext(usageContext, () =>
+          generateGoogleNativeVideo({
             apiKey,
+            model: modelCodename,
             prompt,
             aspectRatio,
             durationSeconds,
@@ -461,27 +506,8 @@ export class GenerateVideoTool extends BaseTool {
             audioPrompt,
             loop,
             abortSignal: context.abortSignal,
-          });
-          videoData = result.videoData;
-          videoFilename = result.filename ?? videoFilename;
-        } finally {
-          void handoff?.restore();
-        }
-      } else if (videoImplementation === "google") {
-        const { generateGoogleNativeVideo } = await import("@/providers/google/googleVideoGeneration");
-        const result = await generateGoogleNativeVideo({
-          apiKey,
-          model: modelCodename,
-          prompt,
-          aspectRatio,
-          durationSeconds,
-          resolution,
-          referenceImages,
-          generateAudio,
-          audioPrompt,
-          loop,
-          abortSignal: context.abortSignal,
-        });
+          }),
+        );
         videoData = result.videoData;
         videoFilename = result.filename ?? videoFilename;
       } else if (videoImplementation === "openrouter") {
@@ -510,19 +536,21 @@ export class GenerateVideoTool extends BaseTool {
         videoFilename = result.filename ?? videoFilename;
       } else if (videoImplementation === "zai") {
         const { generateZaiNativeVideo } = await import("@/providers/zai/zaiVideoGeneration");
-        const result = await generateZaiNativeVideo({
-          apiKey,
-          model: modelCodename,
-          prompt,
-          aspectRatio,
-          durationSeconds,
-          resolution,
-          referenceImages,
-          generateAudio,
-          audioPrompt,
-          loop,
-          abortSignal: context.abortSignal,
-        });
+        const result = await withProviderUsageContext(usageContext, () =>
+          generateZaiNativeVideo({
+            apiKey,
+            model: modelCodename,
+            prompt,
+            aspectRatio,
+            durationSeconds,
+            resolution,
+            referenceImages,
+            generateAudio,
+            audioPrompt,
+            loop,
+            abortSignal: context.abortSignal,
+          }),
+        );
         videoData = result.videoData;
         videoFilename = result.filename ?? videoFilename;
       } else {
@@ -567,7 +595,14 @@ export class GenerateVideoTool extends BaseTool {
       if (spoiler) {
         videoFilename = `SPOILER_${videoFilename}`;
       }
-      const sentMessage = await this.sendGeneratedVideo(context, videoData, videoFilename, elapsedMs, spoiler);
+      const sentMessage = await this.sendGeneratedVideo(
+        context,
+        videoData,
+        videoFilename,
+        elapsedMs,
+        spoiler,
+        generationSource,
+      );
 
       log.success("Successfully generated and sent video to Discord");
 
@@ -597,6 +632,7 @@ export class GenerateVideoTool extends BaseTool {
       return {
         success: true,
         message: successMessage,
+        data: generationSource,
         endTurn: context.streamContext?.endTurnAfterTools?.includes(this.name) ?? false,
       };
     } catch (error) {

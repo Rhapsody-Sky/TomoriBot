@@ -27,12 +27,15 @@ import { localizer } from "../../utils/text/localizer";
 import { resolveAvatarByIdentity, type ResolvedAvatarData } from "@/utils/discord/avatarResolver";
 import { buildGeneratedImageComponentsV2Payload } from "@/utils/discord/generatedImageMessage";
 import { prepareGeneratedImage } from "@/utils/image/generatedImageMetadata";
+import { buildGeneratedMediaSourceLine, type GeneratedMediaSource } from "@/utils/discord/generatedMediaMetadata";
+import { recordMinimalNoticeRef } from "@/utils/discord/minimalNoticeBodies";
 import { mediaDeliveryFailure, sendToolMediaPost } from "@/utils/discord/webhook/toolMediaDelivery";
 import { DiscordDeliveryError } from "@/utils/discord/webhook/deliveryOutcome";
 import {
   buildImageToolNoticeDescription,
   buildReferencedMessageUrl,
   sendToolProgressNotice,
+  isMinimalNotice,
 } from "@/utils/discord/toolProgressNotice";
 import {
   BaseTool,
@@ -811,9 +814,12 @@ export class GenerateImageTool extends BaseTool {
     attachment: AttachmentBuilder,
     attachmentFilename: string,
     elapsedMs: number,
+    source: GeneratedMediaSource,
     referencedIdentities: string[] = [],
     promptAttachment?: AttachmentBuilder,
   ): Promise<import("discord.js").Message> {
+    const config = context.tomoriState.config;
+    const visibleSource = isMinimalNotice(config, "image_generation") ? undefined : source;
     const componentsPayload = buildGeneratedImageComponentsV2Payload(
       attachmentFilename,
       elapsedMs,
@@ -821,6 +827,7 @@ export class GenerateImageTool extends BaseTool {
       referencedIdentities,
       Boolean(promptAttachment),
       attachment.spoiler,
+      visibleSource,
     );
     const files = () =>
       [attachment, ...(promptAttachment ? [promptAttachment] : [])].map(
@@ -830,11 +837,16 @@ export class GenerateImageTool extends BaseTool {
             description: file.description ?? undefined,
           }),
       );
-    return sendToolMediaPost(
+    const message = await sendToolMediaPost(
       context,
       () => ({ files: files(), ...componentsPayload, withComponents: true }),
-      () => ({ files: files() }),
+      () => ({
+        files: files(),
+        ...(visibleSource ? { content: buildGeneratedMediaSourceLine(context.locale, visibleSource) } : {}),
+      }),
     );
+    await recordMinimalNoticeRef(message.id, { kind: "generation", source });
+    return message;
   }
 
   /**
@@ -1039,6 +1051,10 @@ export class GenerateImageTool extends BaseTool {
         credentialSource: creds.source,
       };
       const displayModelName = creds.customEndpoint ? formatCustomModelDisplay(creds.customEndpoint) : modelCodename;
+      const generationSource: GeneratedMediaSource = {
+        provider: creds.provider,
+        model: creds.customEndpoint?.model_name?.trim() || modelCodename,
+      };
 
       log.info(`Using diffusion model: ${modelCodename} for image generation`);
 
@@ -1279,64 +1295,23 @@ export class GenerateImageTool extends BaseTool {
           : null;
 
       if (creds.customEndpoint) {
+        const endpoint = creds.customEndpoint;
         const handoff =
           creds.customEndpoint.api_style === "comfyui"
             ? await beginTextModelHandoffBeforeComfyUi({
                 tomoriState: context.tomoriState,
-                comfyUi: { endpointUrl: creds.customEndpoint.endpoint_url, apiKey },
+                comfyUi: { endpointUrl: creds.customEndpoint.endpoint_url, apiKey, usageContext },
               })
             : null;
         try {
-          const result = await generateCustomImageViaEndpoint({
-            endpoint: creds.customEndpoint,
-            apiKey,
-            prompt: effectivePrompt,
-            negativePrompt: appliedNegativePrompt,
-            aspectRatio,
-            referenceImages: providerReferenceImages.length > 0 ? providerReferenceImages : undefined,
-            inpaint,
-            maskPrompt,
-            maskThreshold,
-            maskGrow,
-            maskFeather,
-            cfg,
-            denoise,
-            inpaintMaskMode: maskMode,
-            inpaintPreset,
-            inpaintMode,
-            outpaint,
-            outpaintStrategy,
-            outpaintAmount,
-            outpaintOverlap,
-            outpaintZoomScale,
-            outpaintLeftPrompt,
-            outpaintRightPrompt,
-            outpaintTopPrompt,
-            outpaintBottomPrompt,
-            inpaintExtendDirection: extendDirection,
-            inpaintExtendPixels: extendPixels,
-            clothingMode,
-            clothingSegmentCategories,
-            abortSignal: context.abortSignal,
-          });
-          generatedImageData = result.imageData;
-          await this.sendDiagnosticImagesToThoughtLog(context, result.diagnosticImages, effectivePrompt);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          const tooLarge =
-            msg.toLowerCase().includes("request entity too large") ||
-            msg.includes("413") ||
-            msg.toLowerCase().includes("payload too large");
-          if (tooLarge && providerReferenceImages.length > 0) {
-            log.warn("Custom endpoint request was too large; retrying with tiny single-reference payload");
-            const tinyRef = await this.buildTinyReferenceImage(providerReferenceImages[0]);
-            const retryResult = await generateCustomImageViaEndpoint({
-              endpoint: creds.customEndpoint,
+          const result = await withProviderUsageContext(usageContext, () =>
+            generateCustomImageViaEndpoint({
+              endpoint,
               apiKey,
               prompt: effectivePrompt,
               negativePrompt: appliedNegativePrompt,
               aspectRatio,
-              referenceImages: [tinyRef],
+              referenceImages: providerReferenceImages.length > 0 ? providerReferenceImages : undefined,
               inpaint,
               maskPrompt,
               maskThreshold,
@@ -1361,7 +1336,53 @@ export class GenerateImageTool extends BaseTool {
               clothingMode,
               clothingSegmentCategories,
               abortSignal: context.abortSignal,
-            });
+            }),
+          );
+          generatedImageData = result.imageData;
+          await this.sendDiagnosticImagesToThoughtLog(context, result.diagnosticImages, effectivePrompt);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const tooLarge =
+            msg.toLowerCase().includes("request entity too large") ||
+            msg.includes("413") ||
+            msg.toLowerCase().includes("payload too large");
+          if (tooLarge && providerReferenceImages.length > 0) {
+            log.warn("Custom endpoint request was too large; retrying with tiny single-reference payload");
+            const tinyRef = await this.buildTinyReferenceImage(providerReferenceImages[0]);
+            const retryResult = await withProviderUsageContext(usageContext, () =>
+              generateCustomImageViaEndpoint({
+                endpoint,
+                apiKey,
+                prompt: effectivePrompt,
+                negativePrompt: appliedNegativePrompt,
+                aspectRatio,
+                referenceImages: [tinyRef],
+                inpaint,
+                maskPrompt,
+                maskThreshold,
+                maskGrow,
+                maskFeather,
+                cfg,
+                denoise,
+                inpaintMaskMode: maskMode,
+                inpaintPreset,
+                inpaintMode,
+                outpaint,
+                outpaintStrategy,
+                outpaintAmount,
+                outpaintOverlap,
+                outpaintZoomScale,
+                outpaintLeftPrompt,
+                outpaintRightPrompt,
+                outpaintTopPrompt,
+                outpaintBottomPrompt,
+                inpaintExtendDirection: extendDirection,
+                inpaintExtendPixels: extendPixels,
+                clothingMode,
+                clothingSegmentCategories,
+                abortSignal: context.abortSignal,
+              }),
+            );
             generatedImageData = retryResult.imageData;
             await this.sendDiagnosticImagesToThoughtLog(context, retryResult.diagnosticImages, effectivePrompt);
           } else {
@@ -1371,14 +1392,16 @@ export class GenerateImageTool extends BaseTool {
           void handoff?.restore();
         }
       } else if (nativeImageProvider) {
-        const result = await nativeImageProvider.generateNativeImage({
-          apiKey,
-          model: modelCodename,
-          prompt: effectivePrompt,
-          negativePrompt: appliedNegativePrompt,
-          aspectRatio,
-          ...(providerReferenceImages.length > 0 ? { referenceImages: providerReferenceImages } : {}),
-        });
+        const result = await withProviderUsageContext(usageContext, () =>
+          nativeImageProvider.generateNativeImage({
+            apiKey,
+            model: modelCodename,
+            prompt: effectivePrompt,
+            negativePrompt: appliedNegativePrompt,
+            aspectRatio,
+            ...(providerReferenceImages.length > 0 ? { referenceImages: providerReferenceImages } : {}),
+          }),
+        );
         generatedImageData = result.imageData;
       } else if (imageGenerationImplementation === "openrouter") {
         // Use OpenRouter API
@@ -1401,16 +1424,18 @@ export class GenerateImageTool extends BaseTool {
           model: modelCodename,
         });
 
-        const response = await chat.sendMessage({
-          message: buildGeminiImagePromptParts(effectivePrompt, providerReferenceImages),
-          config: {
-            responseModalities: ["IMAGE"],
-            imageConfig: {
-              aspectRatio: aspectRatio,
+        const response = await withProviderUsageContext(usageContext, () =>
+          chat.sendMessage({
+            message: buildGeminiImagePromptParts(effectivePrompt, providerReferenceImages),
+            config: {
+              responseModalities: ["IMAGE"],
+              imageConfig: {
+                aspectRatio: aspectRatio,
+              },
+              ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
             },
-            ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
-          },
-        });
+          }),
+        );
 
         const rejection = getProviderContentRejectionCode(response);
         if (rejection) throw Object.assign(new Error("Image request blocked by the provider"), { code: rejection });
@@ -1430,15 +1455,19 @@ export class GenerateImageTool extends BaseTool {
             " Reference images were ignored because the active provider's image endpoint is text-to-image only.";
         }
         const { generateZaiNativeImage } = await import("@/providers/zai/zaiImageGeneration");
-        const result = await generateZaiNativeImage({
-          apiKey,
-          model: modelCodename,
-          prompt: effectivePrompt,
-          negativePrompt: appliedNegativePrompt,
-          aspectRatio,
-          endpointUrl:
-            executionProvider === "zaicoding" ? ZAI_CODING_IMAGES_GENERATIONS_URL : ZAI_GENERAL_IMAGES_GENERATIONS_URL,
-        });
+        const result = await withProviderUsageContext(usageContext, () =>
+          generateZaiNativeImage({
+            apiKey,
+            model: modelCodename,
+            prompt: effectivePrompt,
+            negativePrompt: appliedNegativePrompt,
+            aspectRatio,
+            endpointUrl:
+              executionProvider === "zaicoding"
+                ? ZAI_CODING_IMAGES_GENERATIONS_URL
+                : ZAI_GENERAL_IMAGES_GENERATIONS_URL,
+          }),
+        );
         generatedImageData = result.imageData;
       } else if (imageGenerationImplementation === "nvidia") {
         // Use NVIDIA native image generation API
@@ -1448,14 +1477,16 @@ export class GenerateImageTool extends BaseTool {
             " Reference images were ignored because the active provider's image endpoint is text-to-image only.";
         }
         const { generateNvidiaNativeImage } = await import("@/providers/nvidia/nvidiaImageGeneration");
-        const result = await generateNvidiaNativeImage({
-          apiKey,
-          model: modelCodename,
-          prompt: effectivePrompt,
-          negativePrompt: appliedNegativePrompt,
-          aspectRatio,
-          referenceImages: providerReferenceImages.length > 0 ? providerReferenceImages : undefined,
-        });
+        const result = await withProviderUsageContext(usageContext, () =>
+          generateNvidiaNativeImage({
+            apiKey,
+            model: modelCodename,
+            prompt: effectivePrompt,
+            negativePrompt: appliedNegativePrompt,
+            aspectRatio,
+            referenceImages: providerReferenceImages.length > 0 ? providerReferenceImages : undefined,
+          }),
+        );
         generatedImageData = result.imageData;
       } else {
         return {
@@ -1493,6 +1524,7 @@ export class GenerateImageTool extends BaseTool {
         attachment,
         attachmentFilename,
         Date.now() - startedAtMs,
+        generationSource,
         referencedIdentityNames,
         preparedImage.promptAttachment,
       );
@@ -1532,6 +1564,7 @@ export class GenerateImageTool extends BaseTool {
       return {
         success: true,
         message: successMessage,
+        data: generationSource,
         // imageMetadata intentionally omitted to avoid 403 errors when OpenRouter tries to fetch Discord CDN URLs
         // End the LLM turn immediately when this tool is the target of a hidden agent turn
         endTurn: context.streamContext?.endTurnAfterTools?.includes(this.name) ?? false,

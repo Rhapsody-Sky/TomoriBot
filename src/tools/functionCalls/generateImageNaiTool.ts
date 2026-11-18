@@ -1,3 +1,5 @@
+import { storedCredentialUsageContext } from "@/utils/security/apiKeyRetention";
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
 import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
 /**
  * NovelAI Image Generation Tool
@@ -14,6 +16,8 @@ import { createProviderToolFailure } from "@/utils/provider/providerToolFailure"
 
 import { AttachmentBuilder } from "discord.js";
 import { prepareGeneratedImage } from "@/utils/image/generatedImageMetadata";
+import { buildGeneratedMediaSourceLine, type GeneratedMediaSource } from "@/utils/discord/generatedMediaMetadata";
+import { recordMinimalNoticeRef } from "@/utils/discord/minimalNoticeBodies";
 import { log, ColorCode } from "../../utils/misc/logger";
 import { localizer } from "../../utils/text/localizer";
 import { buildGeneratedImageComponentsV2Payload } from "@/utils/discord/generatedImageMessage";
@@ -23,6 +27,7 @@ import {
   buildImageToolNoticeDescription,
   buildReferencedMessageUrl,
   sendToolProgressNotice,
+  isMinimalNotice,
 } from "@/utils/discord/toolProgressNotice";
 import { BaseTool, type ToolContext, type ToolResult, type ToolParameterSchema } from "../../types/tool/interfaces";
 import type { TomoriState } from "@/types/db/schema";
@@ -289,8 +294,11 @@ export class GenerateImageNaiTool extends BaseTool {
     attachment: AttachmentBuilder,
     attachmentFilename: string,
     elapsedMs: number,
+    source: GeneratedMediaSource,
     promptAttachment?: AttachmentBuilder,
   ): Promise<import("discord.js").Message> {
+    const config = context.tomoriState.config;
+    const visibleSource = isMinimalNotice(config, "image_generation") ? undefined : source;
     const componentsPayload = buildGeneratedImageComponentsV2Payload(
       attachmentFilename,
       elapsedMs,
@@ -298,6 +306,7 @@ export class GenerateImageNaiTool extends BaseTool {
       [],
       Boolean(promptAttachment),
       attachment.spoiler,
+      visibleSource,
     );
     const files = () =>
       [attachment, ...(promptAttachment ? [promptAttachment] : [])].map(
@@ -307,11 +316,16 @@ export class GenerateImageNaiTool extends BaseTool {
             description: file.description ?? undefined,
           }),
       );
-    return sendToolMediaPost(
+    const message = await sendToolMediaPost(
       context,
       () => ({ files: files(), ...componentsPayload, withComponents: true }),
-      () => ({ files: files() }),
+      () => ({
+        files: files(),
+        ...(visibleSource ? { content: buildGeneratedMediaSourceLine(context.locale, visibleSource) } : {}),
+      }),
     );
+    await recordMinimalNoticeRef(message.id, { kind: "generation", source });
+    return message;
   }
 
   /**
@@ -387,10 +401,11 @@ export class GenerateImageNaiTool extends BaseTool {
   /**
    * @returns Decrypted Google API key, or null if unavailable
    */
-  private async resolveGoogleApiKey(context: ToolContext): Promise<string | null> {
+  private async resolveGoogleApiKey(context: ToolContext) {
     const savedGoogleConfig = await llmProviderRepo.loadSavedProviderConfig(context.tomoriState.server_id, "google");
     if (savedGoogleConfig?.api_key) {
-      return await decryptApiKey(savedGoogleConfig.api_key, savedGoogleConfig.key_version || 1);
+      const apiKey = await decryptApiKey(savedGoogleConfig.api_key, savedGoogleConfig.key_version || 1);
+      return { apiKey, usageContext: await storedCredentialUsageContext(savedGoogleConfig.api_key, apiKey) };
     }
 
     return null;
@@ -947,6 +962,10 @@ export class GenerateImageNaiTool extends BaseTool {
         };
       }
       const baseModelCodename = resolvedModel.codename;
+      const generationSource: GeneratedMediaSource = {
+        provider: "novelai",
+        model: isInpaintMode ? this.getInpaintingModelCodename(baseModelCodename) : baseModelCodename,
+      };
 
       log.info(
         `Using NAI diffusion model: ${baseModelCodename} (source: ${resolvedModel.source}) for ${isInpaintMode ? "inpainting" : "image generation"}`,
@@ -1024,7 +1043,9 @@ export class GenerateImageNaiTool extends BaseTool {
 
       // Resolve only the model-provided tags via suggest-tags API when enabled
       const resolvedModelTags = NAI_IMAGE_ENABLE_TAG_RESOLUTION
-        ? await this.normalizeTags(modelTags, baseModelCodename, apiKey)
+        ? await withProviderUsageContext(creds.usageContext, () =>
+            this.normalizeTags(modelTags, baseModelCodename, apiKey),
+          )
         : modelTags;
 
       if (!NAI_IMAGE_ENABLE_TAG_RESOLUTION) {
@@ -1139,12 +1160,14 @@ export class GenerateImageNaiTool extends BaseTool {
 
         log.info(`[NAI] Calling Gemini segmentation for target: "${editTarget}"`);
 
-        const segResult = await segmentImage(
-          sourceImage.data,
-          sourceImage.mimeType,
-          editTarget,
-          googleApiKey,
-          usesNaiStructuredPromptFormat(baseModelCodename),
+        const segResult = await withProviderUsageContext(googleApiKey.usageContext, () =>
+          segmentImage(
+            sourceImage.data,
+            sourceImage.mimeType,
+            editTarget,
+            googleApiKey.apiKey,
+            usesNaiStructuredPromptFormat(baseModelCodename),
+          ),
         );
 
         log.info(
@@ -1184,33 +1207,37 @@ export class GenerateImageNaiTool extends BaseTool {
           }
         }
 
-        const inpaintModel = this.getInpaintingModelCodename(baseModelCodename);
+        const inpaintModel = generationSource.model;
 
-        imageBuffer = await this.generateInpaintImage(
-          apiKey,
-          inpaintModel,
-          normalizedPrompt,
-          effectiveNegativePrompt,
-          sourceImage.data,
-          segResult.maskBase64,
-          segResult.imageWidth,
-          segResult.imageHeight,
-          effectiveImageParams,
-          context.abortSignal,
+        imageBuffer = await withProviderUsageContext(creds.usageContext, () =>
+          this.generateInpaintImage(
+            apiKey,
+            inpaintModel,
+            normalizedPrompt,
+            effectiveNegativePrompt,
+            sourceImage.data,
+            segResult.maskBase64,
+            segResult.imageWidth,
+            segResult.imageHeight,
+            effectiveImageParams,
+            context.abortSignal,
+          ),
         );
 
         log.success(`[NAI] Inpainting complete with model "${inpaintModel}"`);
       } else {
-        imageBuffer = await generateNovelAiImage({
-          apiKey,
-          model: baseModelCodename,
-          prompt: normalizedPrompt,
-          negativePrompt: effectiveNegativePrompt,
-          orientation,
-          imageParams: effectiveImageParams,
-          characterPayload,
-          abortSignal: context.abortSignal,
-        });
+        imageBuffer = await withProviderUsageContext(creds.usageContext, () =>
+          generateNovelAiImage({
+            apiKey,
+            model: baseModelCodename,
+            prompt: normalizedPrompt,
+            negativePrompt: effectiveNegativePrompt,
+            orientation,
+            imageParams: effectiveImageParams,
+            characterPayload,
+            abortSignal: context.abortSignal,
+          }),
+        );
       }
 
       // /kill stops awaiting this tool but cannot stop it (the inpaint path takes no signal), so
@@ -1236,6 +1263,7 @@ export class GenerateImageNaiTool extends BaseTool {
         attachment,
         attachmentFilename,
         Date.now() - startedAtMs,
+        generationSource,
         preparedImage.promptAttachment,
       );
 
@@ -1273,6 +1301,7 @@ export class GenerateImageNaiTool extends BaseTool {
       return {
         success: true,
         message: successMessage,
+        data: generationSource,
         // imageMetadata intentionally omitted, so Discord CDN URLs are protected
         // End the LLM turn immediately when this tool is the target of a hidden agent turn
         endTurn: context.streamContext?.endTurnAfterTools?.includes(this.name) ?? false,

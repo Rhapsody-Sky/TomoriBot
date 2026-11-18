@@ -2,7 +2,6 @@
 title: "Manejo de datos"
 sidebar:
   order: 4
-aiGenerated: true
 ---
 
 Exporta, respalda, importa o elimina tus ajustes, recuerdos y personas con los comandos de barra de Discord. Para conocer las condiciones del servicio y la privacidad, consulta `/legal terms-of-service` y `/legal privacy-policy`.
@@ -48,13 +47,33 @@ Las exportaciones de configuración incluyen estos ajustes sin claves de API ni 
 
 ## Exporta tus datos
 
-Los datos exportables se envían a sus mensajes directos como un archivo JSON:
+Las exportaciones de ajustes y memorias se envían a tus mensajes directos como un archivo JSON, para que tus mensajes directos conserven una copia que puedas restaurar más tarde. Si TomoriBot no puede enviarte un mensaje directo, el archivo se adjunta a una respuesta privada en su lugar; guárdalo antes de que la respuesta desaparezca.
 
 - `/export config`: valores de configuración del servidor (excluye claves y credenciales de API).
 - `/export personal config`: configuración de perfil personal (privacidad, etiquetas de apariencia, nombres).
 - `/export memories`: memorias del servidor, con alcance para la persona principal, una persona o todas las personas. Los límites de canales no se exportan, por lo que las memorias importadas se aplican en todos los canales hasta que vuelvas a elegir canales.
 - `/export personal memories`: recuerdos personales, de alcance global o por persona.
-- `/persona export`: definiciones completas de personas.
+
+`/persona export` está pensado para compartir, por lo que publica la definición de la persona, incluido
+su lorebook, en el canal en lugar de tus mensajes directos. Elige `Tarjeta de TomoriBot` o `JSON sin procesar`
+para conservar todos los ajustes de la persona. `PNG compatible con SillyTavern` incluye el avatar y los campos
+de personaje compatibles, excluyendo los ajustes específicos de TomoriBot y los límites de canal del lorebook.
+
+En servidores, `/persona export` requiere `Administrar servidor` a menos que un administrador habilite `Exportaciones de persona`
+en `/moderation` > `Acceso de miembros` > `Editar permisos`. Esto aplica a todos los formatos. Las denegaciones son
+privadas; las exportaciones exitosas siempre se publican públicamente. `Exportar Sprites` está disponible para los
+administradores del servidor desde `/config`. El ajuste del servidor no afecta a las exportaciones en mensajes directos.
+
+Elige `Paquete de TomoriBot` para obtener un ZIP con el avatar, sprites, referencia de personaje y ajustes de persona.
+Establece `include_voice:true` para incluir también el audio de referencia de voz asignado y su transcripción; estos
+se comparten públicamente con el ZIP. Se excluyen los ID de voz del proveedor y las credenciales. Importa el ZIP
+con `/persona import` para restaurar la persona y su multimedia empaquetada en una sola carga.
+
+Las exportaciones de paquetes optimizan las copias de las imágenes y pueden reducir su resolución para ajustarse al límite por imagen;
+los originales guardados permanecen sin cambios. Si un paquete supera el límite de tamaño de carga o importación, se rechaza
+sin omitir recursos. Si eso ocurre, excluye el audio de voz o usa una tarjeta PNG y `Exportar Sprites` por
+separado. Conserva el ZIP si la importación informa un fallo al restaurar la multimedia: es posible que los ajustes de la
+persona ya se hayan guardado, y si se importó un alter debes eliminarlo antes de reintentar.
 
 Los medios de expresión cargados se almacenan en el host del servidor y están fuera de estas exportaciones JSON. Los autohospedadores deben realizar copias de seguridad del almacenamiento de la base de datos y de los activos multimedia juntos; consulte [copias de seguridad de medios personalizados](/self-hosting/maintenance/#database-backups-and-recovery-keys).
 
@@ -73,7 +92,9 @@ Adjunte un archivo exportado para restaurarlo:
 Estas acciones eliminan o restablecen permanentemente los datos almacenados:
 
 - `/personal memories`: gestiona o elimina recuerdos personales.
-- `/memories`: administrar o eliminar memorias del servidor (requiere Administrar Servidor).
+- `/memories`: administra o elimina memorias del servidor, documentos y lorebooks. Los documentos y lorebooks
+  requieren `Administrar servidor`. Con la enseñanza de miembros habilitada, los miembros pueden ver, editar o eliminar sus
+  propias memorias del servidor. Cuando está desactivada, ver y administrar las memorias del servidor requiere `Administrar servidor`.
 - `/personal nuke`: elimina permanentemente todos los datos personales en los servidores.
 - `/nuke`: borra los datos del servidor, incluidas las expresiones personalizadas y las reglas de acceso de personas. Configura `preserve_personas: true` para conservar las personas y al mismo tiempo eliminar expresiones y medios personalizados.
 - `/reset config`: restaura la configuración del servidor a los valores predeterminados de la base de datos.

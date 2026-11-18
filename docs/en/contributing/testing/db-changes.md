@@ -48,15 +48,19 @@ is one `bun test` process.
 
 | Lane | Files | Batching |
 |---|---|---|
-| `unit` | `tests/unit/` without `mock.module()` | One batch |
+| `unit` | `tests/unit/` without `mock.module()` | Shared batches capped to the command-line limit |
 | `unit-isolated` | `tests/unit/` with `mock.module()` | One batch per file |
-| `db` | `tests/regression/` | One batch for files without `mock.module()`, one per file with it |
+| `db` | `tests/regression/` | Shared batches capped to the command-line limit for files without `mock.module()`, one per file with it |
 
 Bun applies `mock.module()` to the whole process and never undoes it, so two mocking files in one
 process break each other with errors like `X is not a function`. The runner detects `mock.module` in
 the source and isolates those files. Regression files share one database with fixed-id fixtures, so
 they stay in one lane; `setupTestDb()` initializes the schema once per process. Output is printed per
 lane (`unit`, `unit-isolated`, `db`) after all lanes finish.
+
+Before each suite, `setupTestDb()` replaces the application and fixture SQL pools so schema restores
+cannot leave stale prepared-statement metadata. Construct repositories with the shared `testSql`
+reference so they follow the current pool.
 
 Only the DB lane receives database connection settings. Unit lanes run without them, so an indirect
 error-log write cannot race a database restore or insert fixture references from another process.

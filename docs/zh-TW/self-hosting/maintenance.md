@@ -27,6 +27,21 @@ TomoriBot會在啟動時套用擱置的資料庫遷移。部分遷移可能會�
 
 若使用本機頭像，請保留TomoriBot管理的網路鉤子：刪除它們會導致bot無法編輯較舊的網路鉤子訊息。
 
+## 閒置 API 金鑰清理
+<!-- anchor: inactive-api-key-cleanup -->
+
+將 `API_KEY_INACTIVITY_DAYS` 設定為正整數並重新啟動 bot，即可啟用資料庫憑證清理。未設定則會停用刪除。例如：
+
+```dotenv
+API_KEY_INACTIVITY_DAYS=90
+```
+
+金鑰在經過該天數而沒有驗證請求後便會過期。失敗的供應商回應也計為活動。從未使用的金鑰自寫入或替換時起算時間；現有金鑰在首次安裝活動追蹤功能時會獲得完整的寬限期。在停用刪除的情況下追蹤仍會持續進行，因此日後啟用該政策可能會立即移除已休眠的金鑰。清理會在啟動時執行，並在主要處理程序上每小時分批定量執行。
+
+此政策涵蓋伺服器、個人、額外的輪替以及選用服務的 API 金鑰。已儲存的模型設定將會保留。符合資格的額外輪替金鑰可自動取代過期的主要金鑰。透過 `/providers` 或 `/personal providers` 重新輸入已移除的金鑰即可恢復服務；語音設定可能也需要重新選取。包含 Vertex ADC 在內的主機憑證仍受維運者控制。
+
+從資料庫中移除並不會向其供應商撤銷金鑰，也不會抹除保留的備份。受侵害的金鑰請透過供應商控制台撤銷。已建立的語音等供應商端資源在清除儲存的金鑰後，可能也需要手動移除。請另外設定備份保留週期。
+
 ## 資料庫備份與復原金鑰
 <!-- anchor: database-backups-and-recovery-keys -->
 
@@ -81,7 +96,7 @@ bun run update
 bun run backup
 bun run restore-backup --latest
 # 或選擇一個套件：
-bun run restore-backup --from backups/<bundle-directory>
+bun run restore-backup --from "backups/<bundle-directory>"
 ```
 
 套件儲存在`backups/`或`TOMORI_BACKUP_DIR`中。還原前請遵循[復原步驟](#database-backups-and-recovery-keys)。`bun run backup:personas`會為`/persona import`匯出人格與伺服器記憶；它無法還原資料庫。

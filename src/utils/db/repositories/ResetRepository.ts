@@ -99,18 +99,20 @@ export const SERVER_SINGLETON_RESET_TABLES: readonly SingletonResetClassificatio
       "other_model_codename",
       "other_model_capabilities",
       "other_model_capabilities_fetched_at",
+      "credential_created_at",
+      "credential_activity_epoch",
+      "credential_last_attempt_at",
     ],
   },
   {
     table: "server_member_permissions_configs",
     reset: [
       "server_memteaching_enabled",
-      "attribute_memteaching_enabled",
-      "sampledialogue_memteaching_enabled",
       "self_teaching_enabled",
       "personal_memories_enabled",
       "hide_impersonation_embeds",
       "prompt_snapshot_enabled",
+      "persona_export_enabled",
     ],
     preserved: [],
   },
@@ -403,12 +405,11 @@ class ResetRepository {
         INSERT INTO server_member_permissions_configs (server_id) VALUES (${serverId})
         ON CONFLICT (server_id) DO UPDATE SET
           server_memteaching_enabled = DEFAULT,
-          attribute_memteaching_enabled = DEFAULT,
-          sampledialogue_memteaching_enabled = DEFAULT,
           self_teaching_enabled = DEFAULT,
           personal_memories_enabled = DEFAULT,
           hide_impersonation_embeds = DEFAULT,
           prompt_snapshot_enabled = DEFAULT,
+          persona_export_enabled = DEFAULT,
           updated_at = NOW()
       `;
 

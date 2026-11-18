@@ -1,3 +1,4 @@
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
 import { handleDraftModalOpen, handleDraftRoutes } from "@/utils/discord/interactions/responseDraftingRoutes";
 import { naturalNudgePanelDependencies } from "@/modules/natural-nudges/discord/operations";
 import { sameNaturalNudgeInterests } from "@/modules/natural-nudges/db/types";
@@ -560,7 +561,7 @@ const defaultDependencies: ConfigRouteDependencies = {
     const target = (await resolveSpeechTargets(state.server_id)).clone;
     const key = target?.endpoint?.api_style === "elevenlabs" ? target.apiKey : null;
     if (!key) return view;
-    const result = await fetchElevenLabsVoiceCatalog(key);
+    const result = await withProviderUsageContext(target?.usageContext, () => fetchElevenLabsVoiceCatalog(key));
     if (!result.success || !result.voices?.length) return view;
     return {
       ...view,
@@ -707,7 +708,9 @@ const defaultDependencies: ConfigRouteDependencies = {
         maxThreshold: state?.config.autoch_threshold_max ?? state?.config.autoch_threshold ?? 0,
       },
       rules: {
-        privateChannels: availableTextChannels.filter((channel) => privateChannelIds.has(channel.id)),
+        privateChannels: availableTextChannels.filter(
+          (channel) => channel.privacyReason || privateChannelIds.has(channel.id),
+        ),
         roleplayChannels: availableTextChannels.filter((channel) => roleplayChannelIds.has(channel.id)),
         crossChannelBlocklist: availableBlocklistChannels.filter((channel) => blockedChannelIds.has(channel.id)),
       },
@@ -773,70 +776,6 @@ function personaLocation(route: ConfigPanelRoute): { personaId: number | null; e
   return { personaId: null };
 }
 
-type CollectionFamily = "attribute" | "dialogue";
-type CollectionOperation = "add" | "edit" | "remove";
-
-function collectionOperationForRoute(
-  route: ConfigPanelRoute,
-  selectedValue?: string | null,
-): { family: CollectionFamily; operation: CollectionOperation } | null {
-  switch (route.action) {
-    case "attribute-select":
-      return selectedValue === "add" ? { family: "attribute", operation: "add" } : null;
-    case "attribute-add-submit":
-      return { family: "attribute", operation: "add" };
-    case "attribute-edit-open":
-    case "attribute-edit-submit":
-      return { family: "attribute", operation: "edit" };
-    case "attribute-remove":
-      return { family: "attribute", operation: "remove" };
-    case "dialogue-select":
-      return selectedValue === "add" ? { family: "dialogue", operation: "add" } : null;
-    case "dialogue-add-submit":
-      return { family: "dialogue", operation: "add" };
-    case "dialogue-edit-open":
-    case "dialogue-edit-submit":
-      return { family: "dialogue", operation: "edit" };
-    case "dialogue-remove":
-      return { family: "dialogue", operation: "remove" };
-    default:
-      return null;
-  }
-}
-
-async function authorizeCollectionOperation(
-  interaction: GlobalRoutableInteraction,
-  scope: ConfigScope,
-  operation: { family: CollectionFamily; operation: CollectionOperation } | null,
-): Promise<boolean> {
-  if (!operation) return true;
-
-  // DM owners are not guild managers. Their workspace still obeys the same teaching flag as the
-  // legacy commands even though the static actor policy marks the DM owner as the workspace owner.
-  if (scope.guildId && scope.actor.isManager) return true;
-
-  const config = scope.personas[0]?.config;
-  const teachingEnabled =
-    operation.family === "attribute"
-      ? config?.attribute_memteaching_enabled === true
-      : config?.sampledialogue_memteaching_enabled === true;
-  if (!teachingEnabled) return false;
-
-  if (scope.guildId) {
-    try {
-      if (await userRepository.isBlacklisted(scope.serverDiscId, interaction.user.id)) return false;
-    } catch (error) {
-      await log.error("Failed to resolve persona collection blacklist state", error, {
-        errorType: "InteractionRouteError",
-        metadata: { serverDiscId: scope.serverDiscId, userDiscordId: interaction.user.id },
-      });
-      return false;
-    }
-  }
-
-  return true;
-}
-
 async function repairDialogueState(
   scope: ConfigScope,
   persona: TomoriState,
@@ -881,11 +820,6 @@ async function handleModalOpen(
   }
 
   const locale = route.locale;
-  if (!(await authorizeCollectionOperation(interaction, scope, collectionOperationForRoute(route)))) {
-    const denied = deniedReceipt(locale);
-    await replyPanelReceipt(interaction, denied);
-    return;
-  }
 
   const nonce = dependencies.createNonce();
 
@@ -1095,12 +1029,6 @@ async function handleCollectionAddSelection(
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {
     await replyPanelReceipt(interaction, missingScopeReceipt(route.locale, interaction, dependencies));
-    return;
-  }
-  const operation = collectionOperationForRoute(route, "add");
-  if (!(await authorizeCollectionOperation(interaction, scope, operation))) {
-    const denied = deniedReceipt(route.locale);
-    await replyPanelReceipt(interaction, denied);
     return;
   }
 
@@ -2110,8 +2038,6 @@ async function runPersonaWrite(
       if (!memoryView.channelId) return { receipt: staleReceipt(locale) };
       const channel = interaction.channel;
       const channelName = channel && "name" in channel && typeof channel.name === "string" ? channel.name : undefined;
-      const parentChannelId =
-        channel && "parentId" in channel && typeof channel.parentId === "string" ? channel.parentId : undefined;
 
       const isCategoryMode = !(
         memoryView.stmCategories.length === 1 && memoryView.stmCategories[0]?.label.toLowerCase() === "summary"
@@ -2131,7 +2057,6 @@ async function runPersonaWrite(
           serverDiscId: scope.guildId ?? "DM",
           serverName: interaction.guild?.name,
           channelName,
-          parentChannelId,
           personaId: persona.persona_id as number,
           personaLineageId: persona.persona_lineage_id ?? 0,
           mode: "categories",
@@ -2170,7 +2095,6 @@ async function runPersonaWrite(
         serverDiscId: scope.guildId ?? "DM",
         serverName: interaction.guild?.name,
         channelName,
-        parentChannelId,
         personaId: persona.persona_id as number,
         personaLineageId: persona.persona_lineage_id ?? 0,
         mode: "summary",
@@ -3392,7 +3316,14 @@ async function handleSpriteNavigation(
     }
 
     case "sprite-export": {
-      const result = await dependencies.spriteOperations.exportSprites({ persona });
+      if (scope.readStatus !== "fresh") {
+        await replyPanelReceipt(interaction, staleReceipt(locale));
+        return "handled";
+      }
+      const result = await dependencies.spriteOperations.exportSprites({
+        persona,
+        maxArchiveBytes: interaction.attachmentSizeLimit,
+      });
       if (result.status !== "success") {
         await repaintSprites({
           receipt: receipt(
@@ -3401,18 +3332,22 @@ async function handleSpriteNavigation(
             "commands.config.panel.sprite_export_failed_heading",
             result.status === "no-sprites"
               ? "commands.config.panel.sprite_export_none_detail"
-              : result.status === "all-images-failed"
-                ? "commands.config.panel.sprite_export_images_failed_detail"
-                : "rate_limit.error_memory_critical_description",
-            { persona: persona.persona_nickname },
+              : result.status === "image-too-large"
+                ? "commands.config.panel.sprite_export_image_too_large_detail"
+                : result.status === "all-images-failed"
+                  ? "commands.config.panel.sprite_export_images_failed_detail"
+                  : "rate_limit.error_memory_critical_description",
+            { persona: persona.persona_nickname, sprite: result.status === "image-too-large" ? result.spriteName : "" },
           ),
         });
         return "handled";
       }
 
-      await interaction.followUp({
-        files: [new AttachmentBuilder(result.buffer, { name: result.filename })],
-      });
+      for (const file of result.files) {
+        await interaction.followUp({
+          files: [new AttachmentBuilder(file.buffer, { name: file.filename })],
+        });
+      }
       if (scope.internalServerId) {
         dependencies.recordAction({
           action: "server-config.workspace.persona-sprite.export",
@@ -3454,6 +3389,10 @@ export function createConfigInteractionRoute(overrides: Partial<ConfigRouteDepen
       if (!route) throw new Error(`Malformed config panel route: ${interaction.customId}`);
 
       const actor = resolveConfigActor(interaction);
+      if (actor.workspaceKind === "guild" && !actor.isManager) {
+        await replyPanelReceipt(interaction, deniedReceipt(route.locale));
+        return;
+      }
       if (await handleConfigStPresetsRoute(_client, interaction, parsed, dependencies)) return;
 
       // Route dispatch runs against hand-rolled interaction doubles in four sibling suites that
@@ -3774,22 +3713,6 @@ export function createConfigInteractionRoute(overrides: Partial<ConfigRouteDepen
             await dependencies.openPersonalMemoryPanel(interaction, route.locale, selectedLineageId),
           );
         }
-        return;
-      }
-
-      if (
-        !(await authorizeCollectionOperation(interaction, scope, collectionOperationForRoute(route, submittedValue)))
-      ) {
-        await repaint(interaction, {
-          locale: route.locale,
-          scope,
-          category: "persona",
-          page: "general",
-          selectedPersonaId:
-            resolveSelectedPersona(scope.personas, personaLocation(route).personaId)?.persona_id ?? null,
-          receipt: deniedReceipt(route.locale),
-          dependencies,
-        });
         return;
       }
 
@@ -4150,7 +4073,13 @@ export async function executeConfigCommand(
   dependenciesOverride: Partial<ConfigRouteDependencies> = {},
 ): Promise<void> {
   const dependencies: ConfigRouteDependencies = { ...defaultDependencies, ...dependenciesOverride };
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (!interaction.deferred && !interaction.replied) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const actor = resolveConfigActor(interaction);
+  if (actor.workspaceKind === "guild" && !actor.isManager) {
+    await replyPanelReceipt(interaction, deniedReceipt(locale));
+    return;
+  }
 
   const scope = await dependencies.resolveScope(interaction, false);
   if (!scope) {

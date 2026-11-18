@@ -27,6 +27,30 @@ No host, `bun run backup` precisa de `pg_dump`, e `bun run restore-backup` preci
 
 Para avatares locais, mantenha os webhooks gerenciados do TomoriBot: excluí-los impede que o bot edite mensagens de webhook mais antigas.
 
+## Limpeza de chaves de API inativas
+
+Defina `API_KEY_INACTIVITY_DAYS` com um número inteiro positivo e reinicie o bot para ativar a limpeza
+de credenciais do banco de dados. Deixe a variável indefinida para desativar a exclusão. Por exemplo:
+
+```dotenv
+API_KEY_INACTIVITY_DAYS=90
+```
+
+As chaves expiram após essa quantidade de dias sem nenhuma requisição autenticada. Respostas de falha do provedor contam
+como atividade. Chaves nunca utilizadas envelhecem a partir da inserção ou substituição; chaves existentes recebem um período de carência completo
+quando o rastreamento de atividade é instalado pela primeira vez. O rastreamento continua com a exclusão desativada, então ativar a
+política mais tarde pode remover imediatamente chaves que já estejam inativas. A limpeza é executada na inicialização e a cada hora em lotes
+limitados no processo principal.
+
+A política abrange chaves de API do servidor, pessoais, de rotação adicional e de serviços opcionais. As configurações de modelos
+salvas permanecem. Uma chave de rotação adicional elegível pode substituir uma chave primária expirada automaticamente. Insira novamente uma chave removida por meio de `/providers` ou `/personal providers` para restaurar o serviço;
+as seleções de fala também podem precisar ser escolhidas novamente. Credenciais do host, incluindo Vertex ADC, permanecem
+sob o controle do operador.
+
+A remoção do banco de dados não revoga a chave no provedor nem apaga backups retidos. Revogue chaves
+comprometidas pelo console do provedor. Recursos do lado do provedor, como vozes criadas, também podem exigir
+remoção manual após a limpeza da chave armazenada. Configure a retenção de backup separadamente.
+
 ## Backups de banco de dados e chaves de recuperação
 <!-- anchor: database-backups-and-recovery-keys -->
 
@@ -81,7 +105,7 @@ Servidores locais de TTS não autenticam mais solicitações com as antigas conf
 bun run backup
 bun run restore-backup --latest
 # Ou escolha um pacote:
-bun run restore-backup --from backups/<diretorio-do-pacote>
+bun run restore-backup --from "backups/<diretorio-do-pacote>"
 ```
 
 Os pacotes são armazenados em `backups/` ou `TOMORI_BACKUP_DIR`. Siga as [etapas de recuperação](#database-backups-and-recovery-keys) antes de restaurar. `bun run backup:personas` exporta personas e memórias do servidor para `/persona import`; ele não pode restaurar um banco de dados.

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setSystemTime, spyOn } from "bun:test";
-import { Collection, type Client, type GuildTextBasedChannel, type Message } from "discord.js";
+import { ChannelType, Collection, type Client, type Message } from "discord.js";
 import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
 import {
   defaultServerNaturalNudgeConfig,
@@ -23,6 +23,7 @@ import {
   DAY_MS,
   IDLE_NUDGE_DAILY_PLANNER_CAPS,
   MAX_PLANNER_NUDGES,
+  NATURAL_NUDGE_FAILURE_COOLDOWN_MS,
   PLANNER_RECENT_TOPICS,
 } from "@/modules/natural-nudges/runtime/tuning";
 import * as leases from "@/utils/cluster/shardLeases";
@@ -32,6 +33,7 @@ import { whitelistRepository } from "@/utils/db/repositories/WhitelistRepository
 import { metricSampleRepository } from "@/utils/db/repositories/MetricSampleRepository";
 import { log } from "@/utils/misc/logger";
 import { createCustomIdleNudge, createPersona } from "../../helpers/fixtures";
+import { createGuildTextChannel } from "../../helpers/discordChannels";
 
 const SERVER_ID = 7;
 const PERSONA_ID = 5;
@@ -77,7 +79,10 @@ function fixture(category: NaturalNudgeCategory = "start_topic") {
     ]),
   );
   const channels = CHANNEL_IDS.map((id) => ({
-    channel: { id, name: "art-gallery", topic: "Artwork welcome." } as GuildTextBasedChannel,
+    channel: Object.assign(createGuildTextChannel(id, { guildId: "fixture-guild" }), {
+      name: "art-gallery",
+      topic: "Artwork welcome.",
+    }),
     quietSinceMs: null,
   }));
   const messages = [1, 2].map(
@@ -515,6 +520,51 @@ describe("idle nudge shortlist", () => {
     for (const candidate of attempt.candidates) expect(candidate.channelIndices).toEqual([0]);
   });
 
+  it("keeps channels with only individual member denials eligible for shared planning", async () => {
+    const { processor, channels, drawTarget, run } = fixture();
+    drawTarget.mockResolvedValue(null);
+    for (const entry of channels) {
+      Object.assign(
+        entry.channel,
+        createGuildTextChannel(entry.channel.id, { guildId: "fixture-guild", memberViewDenied: true }),
+      );
+    }
+    await processor.processDueIdleNudges();
+    expect(run).toHaveBeenCalled();
+    const [attempt] = run.mock.calls[0];
+    expect(attempt.plannerChannels.map((entry) => entry.channel.id)).toEqual(expect.arrayContaining(CHANNEL_IDS));
+  });
+
+  it.each([
+    "all-restricted",
+    "one-restricted",
+    "private-thread",
+    "unknown-parent",
+  ])("isolates automatic privacy in planner alternatives even with STM sharing allowed (%s)", async (restriction) => {
+    const { processor, channels, personas, drawTarget, run } = fixture();
+    personas[0].config.stm_privacy_bypass = true;
+    drawTarget.mockResolvedValue(null);
+    if (restriction === "all-restricted" || restriction === "one-restricted") {
+      for (const entry of restriction === "all-restricted" ? channels : channels.slice(0, 1)) {
+        Object.assign(
+          entry.channel,
+          createGuildTextChannel(entry.channel.id, { guildId: "fixture-guild", everyoneCanView: false }),
+        );
+      }
+    } else {
+      Object.assign(channels[0].channel, {
+        type: restriction === "private-thread" ? ChannelType.PrivateThread : ChannelType.PublicThread,
+        isThread: () => true,
+        parent: null,
+      });
+    }
+    await processor.processDueIdleNudges();
+    expect(run).toHaveBeenCalled();
+    const [attempt] = run.mock.calls[0];
+    expect(attempt.plannerChannels).toHaveLength(1);
+    for (const candidate of attempt.candidates) expect(candidate.channelIndices).toEqual([0]);
+  });
+
   it("limits every alternative to channels the target can view when target context is exposed", async () => {
     const { processor, target, run } = fixture("ping_user");
     target.channelIds = [CHANNEL_IDS[0]];
@@ -528,6 +578,30 @@ describe("idle nudge shortlist", () => {
 });
 
 describe("server nudge tuning", () => {
+  it("admits an idle attempt after the persisted failure cooldown expires without a successful reply", async () => {
+    const stoppedAt = new Date();
+    const { processor, run } = fixture();
+    const clear = spyOn(naturalNudgeRepository, "clearFailures").mockResolvedValue(undefined);
+    spies.push(
+      clear,
+      spyOn(naturalNudgeRepository, "loadRuntimeState").mockResolvedValue({
+        server_id: SERVER_ID,
+        stopped_at: stoppedAt,
+        idle_nudge_jitter: 1,
+        consecutive_failures: 3,
+      }),
+    );
+    setSystemTime(new Date(stoppedAt.getTime() + NATURAL_NUDGE_FAILURE_COOLDOWN_MS - 1));
+    await processor.processDueIdleNudges();
+    expect(run).not.toHaveBeenCalled();
+
+    setSystemTime(new Date(stoppedAt.getTime() + NATURAL_NUDGE_FAILURE_COOLDOWN_MS));
+    await processor.processDueIdleNudges();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(clear).not.toHaveBeenCalled();
+    await Bun.sleep(0);
+  });
+
   it("skips idle nudges when the gate snapshot has only active nudges enabled", async () => {
     const { processor, config, run } = fixture();
     config.idle_nudges_enabled = false;

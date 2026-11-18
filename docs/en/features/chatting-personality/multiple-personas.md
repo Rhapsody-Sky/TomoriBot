@@ -43,7 +43,9 @@ The **Main** persona is the bot's face in the server: the name and avatar in the
 
 ## Shaping Personality
 
-Fine-tune how a persona looks, talks, and behaves:
+Fine-tune how a persona looks, talks, and behaves through `/config`. In servers, this requires
+`Manage Server`, including viewing or editing attributes and sample dialogues. DM owners can
+configure their own persona.
 
 ### Attributes
 <!-- anchor: attributes -->
@@ -109,7 +111,7 @@ Manage sprites in `/config` > Persona > Sprites (requires Manage Server):
   and optionally write usage instructions describing when to display it.
 - **Edit**: update an existing sprite's label, image, or instructions.
 - **Delete**: remove sprites you no longer want.
-- **Export and import**: share or back up the persona's complete sprite pack as a file.
+- **Export and import**: share or back up the persona's complete sprite pack. Large packs export as several ZIP files; import each file to restore the full pack. If one sprite cannot fit, replace it with a smaller image before exporting.
 
 The `Save as Identity` toggle displays the message author as `Label (Persona)` in Discord,
 useful for characters with multiple forms.

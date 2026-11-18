@@ -20,6 +20,8 @@ import {
   PersonalProviderRequiredError,
   resolveCapabilityCredentials,
 } from "@/utils/provider/credentialResolver";
+import { redactProviderDetail, reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
 import { memoryGuard, reserveDocumentQuota } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
 
@@ -39,7 +41,7 @@ export interface DocumentChunkRow {
 }
 
 export type DocumentWriteResult =
-  | { status: "blacklisted" | "teaching-disabled" | "rag-disabled" | "memory-critical" }
+  | { status: "forbidden" | "rag-disabled" | "memory-critical" }
   | { status: "invalid-name" | "invalid-file" | "file-too-large" | "download-failed" }
   | { status: "empty-content" | "content-too-long" | "too-many-chunks" | "document-limit" | "chunk-limit" }
   | { status: "duplicate" | "quota-exceeded" | "credentials-missing" | "model-missing" | "not-found" }
@@ -84,7 +86,7 @@ export type VectorizeMemoryResult =
   | { status: "partial-failure"; documentId: number; documentName: string; chunkCount: number };
 
 export type DocumentRemoveResult =
-  | { status: "blacklisted" | "teaching-disabled" | "not-found" | "write-failed" }
+  | { status: "forbidden" | "not-found" | "write-failed" }
   | { status: "success"; documentName: string };
 
 export type ChunkEditResult =
@@ -97,6 +99,12 @@ export type ChunkRemoveResult =
   | { status: "forbidden" | "not-found" | "write-failed" }
   | { status: "success"; removedDocument: boolean };
 
+export type DocumentReembedResult =
+  | { status: "forbidden" | "rag-disabled" | "memory-critical" | "credentials-missing" | "model-missing" }
+  | { status: "nothing-to-reembed" | "reembed-failed" }
+  | { status: "provider-denied"; denied: ProviderRequestDeniedError }
+  | { status: "success"; documentCount: number };
+
 function validAttachment(attachment: APIAttachment): boolean {
   const filename = attachment.filename.toLowerCase();
   const extensionAllowed = [".txt", ".md", ".pdf"].some((extension) => filename.endsWith(extension));
@@ -104,7 +112,7 @@ function validAttachment(attachment: APIAttachment): boolean {
   return extensionAllowed || contentTypeAllowed;
 }
 
-async function resolveEmbedding(serverId: number, userId: number, configuredModelId: number | null) {
+async function resolveEmbedding(serverId: number, userId: number | null, configuredModelId: number | null) {
   try {
     const credentials = await resolveCapabilityCredentials(serverId, "embedding", { userId });
     const modelId = getResolvedCapabilityModelId(credentials, "embedding") ?? configuredModelId;
@@ -115,6 +123,9 @@ async function resolveEmbedding(serverId: number, userId: number, configuredMode
   } catch (error) {
     const denied = findProviderRequestDeniedError(error);
     if (denied) return { status: "provider-denied" as const, denied };
+    if (error instanceof CredentialUnavailableError && error.reason === "missing_model_id") {
+      return { status: "model-missing" as const };
+    }
     if (error instanceof PersonalProviderRequiredError || error instanceof CredentialUnavailableError) {
       return { status: "credentials-missing" as const };
     }
@@ -146,8 +157,7 @@ async function embedChunks(
 
 export const serverDocumentsOperations = {
   async add(input: AddDocumentInput): Promise<DocumentWriteResult> {
-    if (input.isBlacklisted && !input.canManage) return { status: "blacklisted" };
-    if (!input.memteachingEnabled && !input.canManage) return { status: "teaching-disabled" };
+    if (!input.canManage) return { status: "forbidden" };
     if (!isRagAvailable()) return { status: "rag-disabled" };
     if (memoryGuard.checkMemory().status === "critical") return { status: "memory-critical" };
 
@@ -225,8 +235,7 @@ export const serverDocumentsOperations = {
     memteachingEnabled: boolean;
     historyOnly: boolean;
   }): Promise<DocumentRemoveResult> {
-    if (input.isBlacklisted && !input.canManage) return { status: "blacklisted" };
-    if (!input.memteachingEnabled && !input.canManage) return { status: "teaching-disabled" };
+    if (!input.canManage) return { status: "forbidden" };
     const documents = input.historyOnly
       ? await serverMemoryRepository.loadHistoryDocuments(input.serverId, input.personaId)
       : await serverMemoryRepository.loadDocuments(input.serverId, input.personaId);
@@ -329,19 +338,78 @@ export const serverDocumentsOperations = {
   },
 
   async vectorize(input: VectorizeMemoryInput): Promise<VectorizeMemoryResult> {
-    if (input.isBlacklisted && !input.canManage) return { status: "blacklisted" };
-    if (!input.memteachingEnabled && !input.canManage) return { status: "teaching-disabled" };
+    if (!input.canManage) return { status: "forbidden" };
     if (!isRagAvailable()) return { status: "rag-disabled" };
     if (memoryGuard.checkMemory().status === "critical") return { status: "memory-critical" };
-    const ownerFilter = input.canManage ? undefined : input.userId;
-    const memories = await serverMemoryRepository.loadServerMemoriesScoped(
-      input.serverId,
-      input.personaLineageId,
-      ownerFilter,
-    );
+    const memories = await serverMemoryRepository.loadServerMemoriesScoped(input.serverId, input.personaLineageId);
     const target = memories.find((memory) => memory.server_memory_id === input.memoryId);
     if (!target) return { status: "not-found" };
     return vectorizeLoadedMemory(input, target);
+  },
+
+  async reembed(input: {
+    serverId: number;
+    workspaceId: string;
+    configuredEmbeddingModelId: number | null;
+    canManage: boolean;
+  }): Promise<DocumentReembedResult> {
+    if (!input.canManage) return { status: "forbidden" };
+    if (!isRagAvailable()) return { status: "rag-disabled" };
+    if (memoryGuard.checkMemory().status === "critical") return { status: "memory-critical" };
+
+    // Pass null so re-embedding uses server credentials rather than a manager's personal BYOK key.
+    const resolved = await resolveEmbedding(input.serverId, null, input.configuredEmbeddingModelId);
+    if (resolved.status !== "success") return resolved;
+
+    const documentCount = await serverMemoryRepository.countMismatchedEmbeddingDocuments(
+      input.serverId,
+      resolved.model.model_family,
+    );
+    if (documentCount === 0) return { status: "nothing-to-reembed" };
+
+    try {
+      await withProviderUsageContext(resolved.credentials.usageContext, async () =>
+        ragRepository.reembedServerDocuments({
+          serverId: input.serverId,
+          embeddingModel: resolved.model,
+          apiKey: resolved.credentials.apiKey,
+          onUsage: createProviderUsageRecorder(resolved.credentials.usageContext, resolved.model.codename),
+        }),
+      );
+      return { status: "success", documentCount };
+    } catch (error) {
+      const denied = findProviderRequestDeniedError(error, resolved.credentials.usageContext);
+      if (denied) return { status: "provider-denied", denied };
+
+      const rootError = error instanceof Error && error.cause !== undefined ? error.cause : error;
+      const toolFailure = createProviderToolFailure(rootError, {
+        locale: "en-US",
+        provider: resolved.model.provider,
+        credentialScope: resolved.credentials.source,
+      }).failure;
+      const detail = rootError instanceof Error ? rootError.message : String(rootError);
+      const code = toolFailure?.code ?? "unknown";
+      await reportProviderFailure({
+        summary: "Document re-embedding failed",
+        errorType: "DocumentReembedFailed",
+        error: rootError,
+        detail: redactProviderDetail(detail, resolved.credentials.apiKey),
+        expected:
+          resolved.credentials.source === "personal" ||
+          ["401", "402", "403", "429", "timeout", "authentication", "quota", "rate_limit", "content_blocked"].includes(
+            code,
+          ),
+        serverId: input.serverId,
+        dimensions: {
+          operation: "document_reembed",
+          provider: resolved.model.provider,
+          model: resolved.model.codename,
+          code,
+        },
+        redactValues: resolved.credentials.apiKey ? [resolved.credentials.apiKey] : [],
+      });
+      return { status: "reembed-failed" };
+    }
   },
 };
 

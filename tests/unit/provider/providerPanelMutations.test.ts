@@ -1,6 +1,7 @@
+import * as retention from "@/utils/db/repositories/ApiKeyRetentionRepository";
 import { createLlmRow, createPersona } from "../../helpers/fixtures";
 import * as dbClient from "@/utils/db/client";
-import { describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type {
   LlmRow,
   SavedProviderConfigUpsert,
@@ -92,7 +93,7 @@ describe("provider panel mutations", () => {
   it("validates, saves, and auto-activates a curated provider", async () => {
     const calls: string[] = [];
     const result = await addServerProvider(
-      { serverDiscId: "guild", state: state(), provider: "google", apiKey: "valid-api-key" },
+      { serverDiscId: "guild", actorDiscId: "actor", state: state(), provider: "google", apiKey: "valid-api-key" },
       dependencies(calls),
     );
 
@@ -109,7 +110,7 @@ describe("provider panel mutations", () => {
   it("registers both ElevenLabs capabilities and returns their stable panel entry", async () => {
     const calls: string[] = [];
     const result = await addServerProvider(
-      { serverDiscId: "guild", state: state(), provider: "elevenlabs", apiKey: "valid-api-key" },
+      { serverDiscId: "guild", actorDiscId: "actor", state: state(), provider: "elevenlabs", apiKey: "valid-api-key" },
       dependencies(calls),
     );
 
@@ -125,7 +126,7 @@ describe("provider panel mutations", () => {
   it("validates and stores Brave without creating a model", async () => {
     const calls: string[] = [];
     const result = await addServerProvider(
-      { serverDiscId: "guild", state: state(), provider: "brave", apiKey: "valid-api-key" },
+      { serverDiscId: "guild", actorDiscId: "actor", state: state(), provider: "brave", apiKey: "valid-api-key" },
       dependencies(calls),
     );
 
@@ -147,7 +148,13 @@ describe("provider panel mutations", () => {
     for (const { response, status } of cases) {
       const calls: string[] = [];
       const result = await addServerProvider(
-        { serverDiscId: "guild", state: state(), provider: "deepseek", apiKey: "sk-candidate-key" },
+        {
+          serverDiscId: "guild",
+          actorDiscId: "actor",
+          state: state(),
+          provider: "deepseek",
+          apiKey: "sk-candidate-key",
+        },
         {
           ...dependencies(calls),
           getProvider: async () =>
@@ -170,7 +177,7 @@ describe("provider panel mutations", () => {
   it("rejects short keys before any validation or write", async () => {
     const calls: string[] = [];
     const result = await addServerProvider(
-      { serverDiscId: "guild", state: state(), provider: "google", apiKey: "short" },
+      { serverDiscId: "guild", actorDiscId: "actor", state: state(), provider: "google", apiKey: "short" },
       dependencies(calls),
     );
 
@@ -555,6 +562,72 @@ describe("provider panel mutations", () => {
     for (const spy of spies) spy.mockRestore();
   });
 
+  it("saves the image request format per model and preserves it when an older modal omits the field", async () => {
+    const connection = {
+      connection_id: 73,
+      label: "juno",
+      capability: "image" as const,
+      api_style: "openai-compatible" as const,
+      endpoint_url: "https://engine.example.com/v1",
+      requires_auth: false,
+      server_id: 7,
+      user_id: null,
+    };
+    const storedEndpoint = {
+      ...connection,
+      custom_endpoint_id: 42,
+      model_ref_id: 900,
+      extra_config: { image_request_format: "chat-completions" },
+    };
+    const spies = [
+      spyOn(llmProviderRepo, "loadCustomEndpointConnectionById").mockResolvedValue(connection as never),
+      spyOn(llmProviderRepo, "loadCustomEndpointConnectionsForServerResult").mockResolvedValue({
+        connections: [connection],
+        endpoints: [storedEndpoint],
+      } as never),
+      spyOn(llmProviderRepo, "upsertCustomEndpointConnection").mockResolvedValue(73 as never),
+      spyOn(llmProviderRepo, "loadSavedProviderConfig").mockResolvedValue(null as never),
+      spyOn(llmProviderRepo, "loadCustomEndpointsByConnectionId").mockResolvedValue([storedEndpoint] as never),
+      spyOn(llmProviderRepo, "loadCustomEndpointsByIds").mockResolvedValue([storedEndpoint] as never),
+      spyOn(llmModelRepo, "updateSyntheticCustomCapabilityModelById").mockResolvedValue(undefined),
+      spyOn(llmModelRepo, "upsertSyntheticCustomDiffusionModel").mockResolvedValue(901 as never),
+    ];
+    const upsert = spyOn(llmProviderRepo, "upsertCustomEndpoint").mockResolvedValue(null as never);
+    try {
+      for (const [editingModelId, imageRequestFormat, expected] of [
+        [undefined, undefined, "images"],
+        [undefined, "chat-completions", "chat-completions"],
+        [900, undefined, "chat-completions"],
+        [900, "images", "images"],
+      ] as const) {
+        upsert.mockClear();
+        await saveProviderModel({
+          serverDiscId: "guild",
+          state: state(),
+          entryId: "endpoint:73",
+          capability: "image",
+          codeName: "arbitrary-image-model",
+          editingModelId,
+          imageRequestFormat,
+        });
+        expect(upsert.mock.calls[0]?.[0].extraConfig).toMatchObject({ image_request_format: expected });
+      }
+      upsert.mockClear();
+      const result = await saveProviderModel({
+        serverDiscId: "guild",
+        state: state(),
+        entryId: "endpoint:73",
+        capability: "image",
+        codeName: "arbitrary-image-model",
+        imageRequestFormat: "invalid",
+      });
+      expect(result.status).toBe("invalid-model");
+      expect(upsert).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of [...spies, upsert]) spy.mockRestore();
+    }
+  });
+
   it("persists the verbatim tool-calling opt-in on both the endpoint and its synthetic model", async () => {
     const connection = {
       connection_id: 73,
@@ -677,6 +750,29 @@ describe("provider panel mutations", () => {
       });
       expect(result.status).toBe("success");
       expect(calls).toEqual(["select:92", "remove:91"]);
+      expect(
+        await saveProviderModel({
+          serverDiscId: "guild",
+          scopeKind: "personal",
+          ownerId: 77,
+          state: selected,
+          entryId: "provider:openrouter",
+          capability: "decision",
+          codeName: "fixture/decider-v2",
+        }),
+      ).toEqual({ status: "unsupported-capability" });
+      expect(
+        await addCustomEndpointConnection({
+          serverDiscId: "guild",
+          scopeKind: "personal",
+          ownerId: 77,
+          state: selected,
+          label: "personal-decisions",
+          endpointUrl: "https://example.invalid/v1",
+          apiStyle: "system-one",
+          authToken: "",
+        }),
+      ).toEqual({ status: "invalid-style" });
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
@@ -944,3 +1040,9 @@ describe("provider panel mutations", () => {
     });
   });
 });
+
+let activityLookup: { mockRestore(): void };
+beforeEach(() => {
+  activityLookup = spyOn(retention, "loadCredentialActivityReferences").mockResolvedValue([]);
+});
+afterEach(() => activityLookup.mockRestore());

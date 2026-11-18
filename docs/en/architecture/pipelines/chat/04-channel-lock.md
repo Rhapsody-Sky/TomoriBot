@@ -12,23 +12,15 @@ when the lock releases.
 `runWithChannelLock()` in `src/utils/chat/channelQueue.ts` wraps turn planning and execution inside a
 per-channel mutex backed by the in-memory `channelLocks` map.
 
-```
-runWithChannelLock(admission, callback)
-  │
-  ├─► skipLock === true? ─────────────────► invoke callback(reuseOuterLock)
-  │
-  ├─► releaseStaleChannelLockIfExpired()
-  ├─► acquireChannelLockForTurn()         ──► sets isLocked, initializes AbortController
-  │
-  ▼
-try {
-  callback(lockedTurn, startTyping)       ──► startDiscordTypingKeepalive() (8s cadence)
-} finally {
-  releaseChannelLockAndReplayQueue()      ──► stops typing, aborts turn controller
-    │
-    ├─► stopContext present?              ──► setImmediate(handleStopResponse)
-    └─► messageQueue has items?           ──► setImmediate(processQueuedMessage)
-}
+```mermaid
+flowchart TD
+  entry["runWithChannelLock(admission, callback)"] -->|"skipLock === true"| reuse["invoke callback(reuseOuterLock)"]
+  entry -->|"skipLock !== true"| stale["releaseStaleChannelLockIfExpired()"]
+  stale --> acquire["acquireChannelLockForTurn()<br/>sets isLocked, initializes AbortController"]
+  acquire --> cb["callback(lockedTurn, startTyping)<br/>startDiscordTypingKeepalive() (8s cadence)"]
+  cb --> release["finally: releaseChannelLockAndReplayQueue()<br/>stops typing, aborts turn controller"]
+  release -->|"stopContext present"| stop["setImmediate(handleStopResponse)"]
+  release -->|"messageQueue has items"| replay["setImmediate(processQueuedMessage)"]
 ```
 
 The first turn starts typing alongside context building and waits for both before generation, so
@@ -65,6 +57,8 @@ Channel locks coordinate three forms of turn interruption:
    interrupt an active stream via `StreamOrchestrator.requestFollowUp()`, up to `MAX_FOLLOW_UP_INTERRUPTS` (3).
    If the active turn is executing a tool (`isInToolCallChain`), the message is enqueued as the latest follow-up
    without interrupting the stream, protecting tool completion.
+   Both paths preserve the active persona when replaying the follow-up. An incoming impersonation
+   target takes precedence over the active turn's impersonation identity; ordinary follow-ups retain it.
 2. **Natural stops**: `requestNaturalStopForLockedTurn()` captures the message and registers
    `StreamOrchestrator.requestStop()`. Active streaming halts gracefully and saves the stop context.
 3. **Hard cancellation via `/kill`**: `forceKillChannelStream()` in `src/commands/kill.ts` immediately aborts

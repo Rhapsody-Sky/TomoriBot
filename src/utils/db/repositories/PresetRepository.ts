@@ -28,6 +28,7 @@ import {
   type ImportResult,
   type ValidationResult,
   type PresetExportData,
+  type PresetImportMode,
 } from "@/types/preset/presetExport";
 import { PERSONA_NICKNAME_MAX_LENGTH } from "@/types/personaNaming";
 import { getDiscordTextLength } from "@/utils/text/discordTextLimits";
@@ -984,12 +985,17 @@ class PresetRepository {
         : attributeRows.length > 0
           ? attributeRows.map((row) => row.is_public)
           : exportedAttributes.map(() => false);
-      const exportedSampleDialoguesIn = pointerPreset
-        ? pointerPreset.preset_sample_dialogues_in
-        : ((presetData.sample_dialogues_in as string[] | undefined) ?? []);
+      const exportedSampleDialoguesIn = [
+        ...(pointerPreset
+          ? pointerPreset.preset_sample_dialogues_in
+          : ((presetData.sample_dialogues_in as string[] | undefined) ?? [])),
+      ];
       const exportedSampleDialoguesOut = pointerPreset
         ? pointerPreset.preset_sample_dialogues_out
         : ((presetData.sample_dialogues_out as string[] | undefined) ?? []);
+      while (exportedSampleDialoguesIn.length < exportedSampleDialoguesOut.length) {
+        exportedSampleDialoguesIn.push(UNPAIRED_SAMPLE_DIALOGUE_SENTINEL);
+      }
       const exportedPresetLineageId = pointerPreset
         ? normalizeLineageId(pointerPreset.preset_lineage_id)
         : normalizeLineageId(presetData.preset_lineage_id);
@@ -1042,8 +1048,8 @@ class PresetRepository {
         },
       };
 
-      const validated = presetExportSchema.safeParse(exportData);
-      if (!validated.success) {
+      const validated = this.validatePresetFile(exportData);
+      if (!validated.valid || !validated.data) {
         log.error(`Preset export validation failed for server ${serverDiscId}:`, validated.error);
         return { success: false, error: "commands.persona.export.error_validation_failed" };
       }
@@ -1052,7 +1058,7 @@ class PresetRepository {
         `Successfully exported preset for server ${serverDiscId}, persona ${presetData.persona_id}: ${presetData.persona_nickname}`,
       );
 
-      return { success: true, data: validated.data };
+      return { success: true, data: { ...exportData, data: validated.data } };
     } catch (error) {
       log.error(`Error exporting preset data for server ${serverDiscId}:`, error);
       return { success: false, error: "commands.persona.export.error_export_failed" };
@@ -1068,6 +1074,7 @@ class PresetRepository {
     serverDiscId: string,
     importData: PresetExportData,
     identityMode: "preserve" | "fork" = "preserve",
+    importMode: PresetImportMode = "card",
   ): Promise<ImportResult> {
     try {
       const importValidation = this.validatePresetData(importData);
@@ -1078,7 +1085,8 @@ class PresetRepository {
         };
       }
       const validatedImportData = importValidation.data;
-      const matchingOfficialPreset = await this.findMatchingOfficialPresetForImport(validatedImportData);
+      const matchingOfficialPreset =
+        importMode === "bundle" ? null : await this.findMatchingOfficialPresetForImport(validatedImportData);
 
       try {
         validatePersonaConfigFields(["trigger_words", "persona_prompt"]);
@@ -1438,6 +1446,68 @@ class PresetRepository {
    */
   convertSillyTavernMetadataToPresetData(metadata: SillyTavernCardMetadata): SillyTavernConversionResult {
     return this.convertSillyTavernJsonToPresetData(metadata.parsedJson);
+  }
+
+  convertPresetDataToSillyTavernCard(preset: PresetExportData) {
+    const convertMacros = (text: string): string =>
+      text.replace(/\{\{(user|bot|char)\}\}|(?<!\{)\{(user|bot|char)\}(?!\})/g, (_match, double, single) =>
+        (double ?? single) === "user" ? "{{user}}" : "{{char}}",
+      );
+
+    return {
+      spec: "chara_card_v2",
+      spec_version: "2.0",
+      data: {
+        name: preset.tomori_nickname,
+        description: preset.attribute_list.map(convertMacros).join("\n\n"),
+        personality: "",
+        scenario: "",
+        first_mes: "",
+        mes_example: preset.sample_dialogues_out
+          .map((output, index) => {
+            const input = preset.sample_dialogues_in[index];
+            const userTurn =
+              input && input !== UNPAIRED_SAMPLE_DIALOGUE_SENTINEL ? `{{user}}: ${convertMacros(input)}\n` : "";
+            return `<START>\n${userTurn}{{char}}: ${convertMacros(output)}`;
+          })
+          .join("\n\n"),
+        creator_notes: "",
+        system_prompt: convertMacros(preset.persona_prompt ?? ""),
+        post_history_instructions: "",
+        alternate_greetings: [],
+        tags: [],
+        creator: "",
+        character_version: "",
+        extensions: {},
+        ...(preset.lorebook_entries !== undefined
+          ? {
+              character_book: {
+                name: preset.tomori_nickname,
+                extensions: {},
+                entries: preset.lorebook_entries.map((entry, index) => ({
+                  id: index,
+                  keys: entry.keys,
+                  secondary_keys: entry.secondary_keys,
+                  content: convertMacros(entry.content),
+                  comment: entry.title,
+                  enabled: entry.enabled,
+                  insertion_order: entry.insertion_order,
+                  constant: entry.constant,
+                  selective: entry.secondary_keys.length > 0,
+                  position: entry.placement === 1 ? "after_char" : "before_char",
+                  extensions: {
+                    selectiveLogic: entry.selective_logic,
+                    probability: entry.trigger_chance,
+                    useProbability: true,
+                    scan_depth: entry.scan_depth,
+                    position: entry.placement,
+                  },
+                })),
+              },
+            }
+          : {}),
+      },
+    };
   }
 
   /**

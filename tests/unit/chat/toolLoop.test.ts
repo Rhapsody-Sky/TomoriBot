@@ -1,3 +1,4 @@
+import * as retention from "@/utils/db/repositories/ApiKeyRetentionRepository";
 import { stubAllShardOwnership } from "../../helpers/shardOwnership";
 stubAllShardOwnership();
 import { REST } from "discord.js";
@@ -44,7 +45,7 @@ import type { Sticker } from "discord.js";
 import type { LLMProvider, ProviderConfig, StreamResult } from "@/types/provider/interfaces";
 import type { StandardEmbedOptions } from "@/types/discord/embed";
 import type { StructuredContextItem } from "@/types/misc/context";
-import type { ChatTurnContext } from "@/utils/chat/types";
+import type { ChatTurnContext, ToolHistoryEntry } from "@/utils/chat/types";
 import type { ResponseReviewState } from "@/utils/chat/responseReview";
 import type { PendingStreamResponse } from "@/types/stream/pendingResponse";
 import type { TomoriState } from "@/types/db/schema";
@@ -78,6 +79,7 @@ let onStopCheck: (() => void) | null = null;
 // STRINGS other modules rely on at load time (e.g. contextEmbeds.ts calls
 // ColorCode.ERROR.replace("#", "")). Only `log` is silenced.
 const scopedMock = createScopedModuleMocker(mock, {
+  "@/utils/db/repositories/ApiKeyRetentionRepository": retention,
   "@/utils/discord/embedHelper": realEmbedHelper,
   "@/utils/discord/toolProgressNotice": realToolProgressNotice,
   "@/utils/discord/streamOrchestrator": realStreamOrchestrator,
@@ -87,6 +89,11 @@ const scopedMock = createScopedModuleMocker(mock, {
   "@/utils/chat/contextAnnotations": realContextAnnotations,
   "@/tools/toolRegistry": realToolRegistry,
 });
+
+scopedMock.module("@/utils/db/repositories/ApiKeyRetentionRepository", () => ({
+  ...retention,
+  loadCredentialActivityReferences: async () => [],
+}));
 
 stubLogMembers({
   error: () => undefined,
@@ -949,10 +956,11 @@ describe("runToolLoop — contract tests", () => {
 
   it("pre-tool text is preserved in the history entry passed to the follow-up provider call", async () => {
     const { runToolLoop } = await import("@/utils/chat/toolLoop");
-
+    const narration = "Yeah, let me remember that.";
+    const followUp = "Saved! Anything else?";
     const { provider, capturedHistories } = makeProvider([
-      makeFunctionCallResult("create_long_term_memory", { content: "likes cats" }, "Yeah, let me remember that."),
-      { status: "completed", accumulatedText: "Saved! Anything else?" },
+      makeFunctionCallResult("create_long_term_memory", { content: "likes cats" }, narration),
+      { status: "completed", accumulatedText: followUp },
     ]);
     toolExecuteQueue.push({ success: true, data: { saved: true } });
 
@@ -963,7 +971,7 @@ describe("runToolLoop — contract tests", () => {
     // must NOT behave as an end-turn tool.
     expect(result.status).toBe("completed");
     expect(capturedHistories).toHaveLength(2);
-    expect(result.personaResponses[0]?.text).toBe("Saved! Anything else?");
+    expect(result.personaResponses[0]?.text).toBe(`${narration}\n${followUp}`);
 
     // The follow-up call's history entry carries the already-sent text so the
     // model knows not to repeat it (the amnesia fix contract).
@@ -972,7 +980,7 @@ describe("runToolLoop — contract tests", () => {
       preToolCallTextParts?: Array<Record<string, unknown>>;
     }>;
     expect(secondHistory).toHaveLength(1);
-    expect(secondHistory[0]?.preToolCallTextParts).toEqual([{ type: "text", text: "Yeah, let me remember that." }]);
+    expect(secondHistory[0]?.preToolCallTextParts).toEqual([{ type: "text", text: narration }]);
   });
 
   it("removes pre-tool text from trailing model prefill after moving it into tool history", async () => {
@@ -996,7 +1004,7 @@ describe("runToolLoop — contract tests", () => {
   it("no pre-tool text: history entry omits preToolCallTextParts", async () => {
     const { runToolLoop } = await import("@/utils/chat/toolLoop");
 
-    const { provider, capturedHistories } = makeProvider([
+    const { provider, capturedHistories, capturedContexts } = makeProvider([
       makeFunctionCallResult("echo_tool", {}, "   "),
       { status: "completed", accumulatedText: "done" },
     ]);
@@ -1011,15 +1019,17 @@ describe("runToolLoop — contract tests", () => {
     }>;
     expect(secondHistory).toHaveLength(1);
     expect(secondHistory[0]?.preToolCallTextParts).toBeUndefined();
+    expect(capturedContexts[1]).toEqual(capturedContexts[0]);
   });
 
   it("multi-tool chain: each history entry carries only its own iteration's pre-tool text", async () => {
     const { runToolLoop } = await import("@/utils/chat/toolLoop");
-
+    const narration = ["First, let me check something.", "Now one more thing."];
+    const followUp = "All done!";
     const { provider, capturedHistories } = makeProvider([
-      makeFunctionCallResult("tool_one", {}, "First, let me check something."),
-      makeFunctionCallResult("tool_two", {}, "Now one more thing."),
-      { status: "completed", accumulatedText: "All done!" },
+      makeFunctionCallResult("tool_one", {}, narration[0]),
+      makeFunctionCallResult("tool_two", {}, narration[1]),
+      { status: "completed", accumulatedText: followUp },
     ]);
     toolExecuteQueue.push({ success: true, data: { ok: 1 } });
     toolExecuteQueue.push({ success: true, data: { ok: 2 } });
@@ -1037,8 +1047,28 @@ describe("runToolLoop — contract tests", () => {
       preToolCallTextParts?: Array<Record<string, unknown>>;
     }>;
     expect(thirdHistory).toHaveLength(2);
-    expect(thirdHistory[0]?.preToolCallTextParts).toEqual([{ type: "text", text: "First, let me check something." }]);
-    expect(thirdHistory[1]?.preToolCallTextParts).toEqual([{ type: "text", text: "Now one more thing." }]);
+    expect(thirdHistory[0]?.preToolCallTextParts).toEqual([{ type: "text", text: narration[0] }]);
+    expect(thirdHistory[1]?.preToolCallTextParts).toEqual([{ type: "text", text: narration[1] }]);
+    expect(result.personaResponses[0]?.text).toBe([...narration, followUp].join("\n"));
+  });
+
+  it.each([
+    "empty_response",
+    "stopped_by_user",
+    "follow_up_interrupt",
+  ] as const)("retains all delivered tool narration when the final stream returns %s", async (status) => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
+    const narration = ["First observation.", "Second observation."];
+    const { provider } = makeProvider([
+      makeFunctionCallResult("lookup", {}, narration[0]),
+      makeFunctionCallResult("lookup", { next: true }, narration[1]),
+      { status },
+    ]);
+
+    const result = await runToolLoop(makeParams(makeContext(), provider));
+
+    expect(result.status).toBe(status === "empty_response" ? "completed" : status);
+    expect(result.personaResponses[0]?.text).toBe(narration.join("\n"));
   });
 
   it("update_short_term_memory with pre-tool text still ends the turn without a follow-up call", async () => {
@@ -1890,6 +1920,42 @@ describe("runToolLoop — contract tests", () => {
     }
   });
 
+  it("reports unsupported inherited reviewers once as configuration warnings without calling the provider", async () => {
+    const errors = spyOn(log, "error").mockImplementation(async () => {});
+    const warnings = spyOn(log, "warn").mockImplementation(() => {});
+    const metrics = spyOn(log, "metric").mockImplementation(() => {});
+    try {
+      for (const category of ["unsupported_model", "unsupported_provider"] as const) {
+        errors.mockClear();
+        warnings.mockClear();
+        metrics.mockClear();
+        const context = makeReviewContext();
+        context.tomoriState.llm.supports_structoutput = category !== "unsupported_model";
+        context.responseReview.pending = [held("PRIVATE_DRAFT", []).pendingResponse];
+        const { provider } = makeProvider([]);
+        const call = mock(async () => ({ success: true, data: { status: "pass" } }));
+        if (category === "unsupported_model") Object.assign(provider, { callStructuredJSON: call });
+
+        expect(await reviewResponseCandidate(context, provider, makeProviderConfig())).toEqual({
+          status: "unavailable",
+        });
+        await reviewResponseCandidate(context, provider, makeProviderConfig());
+
+        expect(call).not.toHaveBeenCalled();
+        expect(errors).not.toHaveBeenCalled();
+        expect(metrics).toHaveBeenCalledWith("provider_failure", expect.objectContaining({ category }));
+        expect(warnings).toHaveBeenCalledTimes(1);
+        expect(warnings.mock.calls[0]?.[2]).toMatchObject({ metadata: { category } });
+        expect(warnings.mock.calls[0]?.[3]).toMatchObject({ retain: true });
+        expect(JSON.stringify(warnings.mock.calls)).not.toContain("PRIVATE_DRAFT");
+      }
+    } finally {
+      errors.mockRestore();
+      warnings.mockRestore();
+      metrics.mockRestore();
+    }
+  });
+
   it("logs operational reviewer failures once with safe metadata and treats refusal as an ordinary outcome", async () => {
     const errorSpy = spyOn(log, "error").mockImplementation(async () => {});
     const infoSpy = spyOn(log, "info").mockImplementation(() => {});
@@ -2618,24 +2684,55 @@ describe("runToolLoop — contract tests", () => {
     expect(items.at(-2)?.parts[0]?.text).toContain("lookup");
   });
 
-  it("folds a native prefill into the tool-call turn when the narration notice is added", async () => {
+  it.each([
+    false,
+    true,
+  ])("preserves tool history and prefill when adding the narration notice (drafting %s)", async (drafting) => {
     const { runToolLoop } = await import("@/utils/chat/toolLoop");
-    const context = makeReviewContext();
+    const context = drafting ? makeReviewContext() : makeContext();
     const prefill = "Mirri: Okay,";
     context.streamingContext.outputPrefill = prefill;
     context.contextItems.push({ role: "model", parts: [{ type: "text", text: prefill }] });
     const delivered: string[] = [];
+    const narration = "Handled that.";
+    const toolCall = drafting
+      ? { ...held(narration, delivered, "function_call"), data: { name: "lookup", args: { target: "fixture" } } }
+      : makeFunctionCallResult("lookup", { target: "fixture" }, narration);
     const { provider, capturedContexts, capturedHistories } = makeProvider([
-      makeFunctionCallResult("lookup", { target: "fixture" }, "Handled that."),
-      held("quiet", delivered),
+      toolCall,
+      drafting ? held("quiet", delivered) : { status: "completed", accumulatedText: "quiet" },
     ]);
     Object.assign(provider, { callStructuredJSON: async () => ({ success: true, data: { status: "pass" } }) });
 
     await runToolLoop(makeParams(context, provider));
 
-    expect(JSON.stringify(capturedContexts[1])).toContain("has not been sent yet");
-    const secondHistory = capturedHistories[1] as Array<{ preToolCallTextParts?: Array<{ text?: string }> }>;
-    expect(secondHistory[0]?.preToolCallTextParts?.[0]?.text).toBe(prefill);
+    const firstContext = capturedContexts[0] as StructuredContextItem[];
+    const secondContext = capturedContexts[1] as StructuredContextItem[];
+    expect(firstContext.at(-1)?.role).toBe("model");
+    expect(secondContext.slice(0, -1)).toEqual(firstContext.slice(0, -1));
+    expect(secondContext.at(-1)?.role).toBe("user");
+    expect(secondContext.at(-1)?.parts[0]?.type).toBe("text");
+    expect(context.contextItems).toEqual(firstContext);
+    const secondHistory = capturedHistories[1] as ToolHistoryEntry[];
+    expect(secondHistory[0]?.preToolCallTextParts).toEqual([
+      { type: "text", text: prefill },
+      { type: "text", text: narration },
+    ]);
+    const { buildOpenAICompatibleMessages } = await import(
+      "@/providers/openaiCompatible/openaiCompatibleMessageBuilder"
+    );
+    const messages = await buildOpenAICompatibleMessages({
+      adapterName: "DeepseekStreamAdapter",
+      contextItems: secondContext,
+      currentTurnModelParts: [],
+      functionInteractionHistory: secondHistory,
+      requiresReasoningContentReplay: true,
+    });
+    const notice = secondContext.at(-1)?.parts[0];
+    expect(messages.slice(-3).map((message) => message.role)).toEqual(["user", "assistant", "tool"]);
+    expect(messages.at(-3)?.content).toBe(notice?.type === "text" ? notice.text : undefined);
+    expect(messages.at(-2)).toMatchObject({ content: prefill + narration, reasoning_content: "" });
+    expect(messages.at(-1)?.content).toBe(JSON.stringify(secondHistory[0]?.functionResponse));
   });
 
   it("keeps a native prefill last when a revision instruction is added", async () => {

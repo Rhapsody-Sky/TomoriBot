@@ -1,6 +1,7 @@
 export default {
   tools: {
     media: {
+      generation_source_line: "Provedor: {provider} · Modelo: {model}",
       delivery_failed: "O Discord não entregou a mídia. Nenhuma entrega bem-sucedida foi registrada.",
       delivery_unconfirmed:
         "O Discord não confirmou se a mídia foi publicada. Encerre este turno e verifique o canal antes de gerar ou publicar novamente, pois outra tentativa pode criar uma duplicata.",
@@ -13,6 +14,10 @@ export default {
       delivery_failed: "Não foi possível postar o resultado dos dados. Nenhuma rolagem foi entregue.",
     },
     execution: {
+      channel_history_unavailable:
+        "Tanto o usuário solicitante quanto eu precisamos de permissão para ler o histórico de mensagens do canal de destino.",
+      private_channel_target:
+        "Ferramentas multicanal não podem ter como alvo canais privados ou canais cuja visibilidade não possa ser verificada. Peça para mim naquele canal em vez disso.",
       unavailable: `A ferramenta \`{tool}\` não está disponível nas configurações atuais, nas capacidades do modelo ou nas permissões do bot.`,
     },
     sprite_selection: {

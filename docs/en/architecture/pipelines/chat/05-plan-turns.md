@@ -11,23 +11,17 @@ persona(s) reply, validates access and quotas, and produces an ordered `ChatTurn
 `planChatTurns()` in `src/utils/chat/turnPlanner.ts` runs inside `runWithChannelLock()`. It receives
 `LockedChatTurn` and returns a `ChatTurnPlan`:
 
-```
-LockedChatTurn
-  │
-  ├─► loadOrRegisterTriggerUser()          ──► hydrates UserRow and locale
-  ├─► validateDirectChatTrigger()          ──► validates direct mention / trigger words
-  ├─► evaluateChatAccess()                 ──► checks whitelist, blacklist, and role rules
-  ├─► rejectOnMessageTriggerCooldown()     ──► enforces trigger cooldowns
-  ├─► updateAutochatCounter()              ──► advances autochat count when qualifying
-  │
-  ▼
-determineMatchingPersonas()
-  │
-  ├─► 0 matches?                           ──► returns turns: [] (silent skip, lock released)
-  ├─► 1 match?                             ──► returns turns: [ChatTurn]
-  └─► >1 matches?
-        ├─► first persona                  ──► turns: [ChatTurn] (runs now)
-        └─► extra personas                 ──► queueAdditionalPersonaTurns() (queued at front)
+```mermaid
+flowchart TD
+  turn["LockedChatTurn"] --> load["loadOrRegisterTriggerUser()<br/>hydrates UserRow and locale"]
+  load --> direct["validateDirectChatTrigger()<br/>validates direct mention / trigger words"]
+  direct --> access["evaluateChatAccess()<br/>checks whitelist, blacklist, and role rules"]
+  access --> autochat["updateAutochatCounter()<br/>advances count for queued turns that skipped pre-lock"]
+  autochat --> match["determineMatchingPersonas()"]
+  match -->|"0 matches"| zero["returns turns: []<br/>(silent skip, lock released)"]
+  match -->|"≥1 matches"| guards["resolveTextCredentialPolicy() & enforceTurnGuards()<br/>credentials, quota, rate limits, and trigger cooldowns"]
+  guards -->|"1 admitted"| one["returns turns: [ChatTurn]"]
+  guards -->|"&gt;1 admitted"| first["first persona → turns: [ChatTurn] (runs now)<br/>extra personas → queueAdditionalPersonaTurns() (queued at front)"]
 ```
 
 ### User hydration and trigger validation

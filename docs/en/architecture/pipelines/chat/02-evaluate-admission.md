@@ -13,27 +13,19 @@ for turn planning.
 It returns a discriminated `ChatAdmission`: runnable (`"run"`) or non-runnable (`"ignore"`, `"blocked"`,
 `"queued"`, or `"error"`).
 
-```
-ChatIncoming
-  │
-  ├─► Suppressed / bot / easter egg?       ──► ignore
-  ├─► Privacy-FULL / blacklisted / scope?  ──► blocked
-  ├─► Sendability checks failed?           ──► blocked
-  │
-  ▼
-Load early TomoriState & allPersonas
-  │
-  ├─► Audio attachment present?            ──► STT transcription & inline content mutation
-  │
-  ▼
-evaluateAdmissionQueueAndTriggerGate()
-  │
-  ├─► Channel locked?
-  │     ├─► Natural stop phrasing?         ──► requestNaturalStopForLockedTurn() → ignore
-  │     ├─► Eligible same-user follow-up?  ──► queueFollowUpForLockedTurn() → queued
-  │     └─► Eligible trigger & quota?      ──► enqueueBusyChannelMessage() → queued
-  │
-  └─► Channel free & trigger matches?      ──► RunnableChatAdmission { disposition: "run" }
+```mermaid
+flowchart TD
+  inc["ChatIncoming"] -->|"Suppressed / bot / easter egg?"| ign1["ignore"]
+  inc -->|"Privacy-FULL / blacklisted / scope?"| blk1["blocked"]
+  inc -->|"Sendability checks failed?"| blk2["blocked"]
+  inc --> load["Load early TomoriState & allPersonas"]
+  load -->|"Audio attachment present?"| stt["STT transcription & inline content mutation"]
+  stt --> gate["evaluateAdmissionQueueAndTriggerGate()"]
+  load --> gate
+  gate -->|"Channel locked: natural stop phrasing?"| stop["requestNaturalStopForLockedTurn() → ignore"]
+  gate -->|"Channel locked: eligible same-user follow-up?"| follow["queueFollowUpForLockedTurn() → queued"]
+  gate -->|"Channel locked: eligible trigger & quota?"| busy["enqueueBusyChannelMessage() → queued"]
+  gate -->|"Channel free & trigger matches"| run["RunnableChatAdmission { disposition: run }"]
 ```
 
 ### Channel scope and DM resolution
@@ -67,6 +59,11 @@ For opted-in users, admission creates a service-scoped expectation before checki
 
 A persona's webhook post is posted by the channel's shared managed webhook, so its author ID is never a person. An organic persona-to-persona reply is credited to the person who started the self-reply chain (`getSelfReplyChainOriginUser`); with no recorded originator, admission ignores the message as `persona_chain_without_origin`. A system turn (Natural Nudges, scheduled tasks) that anchors on any webhook post other than a Matrix relay is credited to the bot account instead, and `getTopUsers` leaves the bot off leaderboards. Neither path greets anyone with a reunion note.
 
+`/impersonate persona` resets the cascade budget and records the command invoker before posting,
+so a gateway echo can start a chain even after a restart or an idle period. The Discord message event
+processes the post once; trigger matching and the configured cascade limit still apply.
+The command's ephemeral acknowledgement does not affect attribution of the public persona post.
+
 ### Audio transcription
 
 When a message contains audio attachments and voice transcription is enabled,
@@ -89,8 +86,9 @@ is currently busy:
     via `queueFollowUpForLockedTurn()`, signals an interrupt to active streaming, and returns `"queued"`.
   - If the message matches a trigger and passes rate limits and cooldowns, it enqueues the message via
     `enqueueBusyChannelMessage()` for FIFO replay and returns `"queued"`.
-- **Channel is free**: verifies access rules and reply criteria. If admitted, the message returns
-  disposition `"run"` and proceeds to the channel lock.
+- **Channel is free**: verifies access rules, advances `updateAutochatCounter()` for qualifying messages in
+  configured counter channels, and evaluates reply criteria. If admitted, the message returns disposition
+  `"run"` and proceeds to the channel lock.
 
 ## Constraints and rationale
 

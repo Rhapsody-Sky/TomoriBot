@@ -61,7 +61,7 @@ configuration from `COALESCE(lex_text, content)`. A content change that retains 
 
 Migration 126 and `schema_rag.sql` install the same column and trigger; the migration skips
 databases without the optional RAG tables. Pending rows have null `lex_text` and remain
-searchable through raw content. After login, `06_backfillDocumentLexicalText.ts` schedules
+searchable through raw content. After login, `src/events/clientReady/05_postReadyMaintenance.ts` schedules
 50-row batches without blocking startup. It tokenizes before opening write transactions,
 locks each document name for validation, and writes only still-pending chunks whose content
 and document name match the snapshot. Skipped edits retry on the next batch; failures retry
@@ -124,23 +124,12 @@ deleting those messages restore that exact webhook independently of the primary 
 
 ### Multi-persona and server configuration
 
-```
-           ┌──────────────────────┐
-           │       servers        │
-           └──────────┬───────────┘
-                      │ 1:N
-                      ▼
-           ┌──────────────────────┐
-           │       personas       │
-           └──────────┬───────────┘
-                      │
-     ┌────────────────┼────────────────┐
-     │ 1:N            │ 1:N            │ 1:N
-     ▼                ▼                ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│persona_      │ │persona_      │ │persona_      │
-│attributes    │ │sprites       │ │configs       │
-└──────────────┘ └──────────────┘ └──────────────┘
+```mermaid
+flowchart TD
+  servers["servers"] -->|"1:N"| personas["personas"]
+  personas -->|"1:N"| attrs["persona_attributes"]
+  personas -->|"1:N"| sprites["persona_sprites"]
+  personas -->|"1:N"| configs["persona_configs"]
 ```
 
 - **`servers`**: represents a registered Discord guild or DM pseudo-server. Stores the guild snowflake (`server_disc_id`) and creation timestamps.
@@ -152,7 +141,7 @@ deleting those messages restore that exact webhook independently of the primary 
 - **Server configuration split**: server settings are partitioned into command-aligned tables:
   - `server_chat_configs`: message context fetch limits, model parameters, cascade limits, stop strings, logit biases, and context notes.
   - `server_model_configs`: active model foreign keys (`llm_id`, `embedding_model_id`, `diffusion_model_id`, `video_model_id`, `vision_llm_id`).
-  - `server_member_permissions_configs`: member feature toggles, self-teaching, and memory permissions.
+  - `server_member_permissions_configs`: member feature toggles, self-teaching, server memory permissions, prompt snapshot access, and persona export access (disabled for ordinary members by default).
   - `server_channel_scope_configs`: channel roleplay rules, blocklists, and thought-log routing.
   - `server_trigger_behavior_configs`: cooldown modes, durations, and trigger styles.
   - `server_auto_trigger_configs` and `server_auto_trigger_persona_overrides`: auto-trigger thresholds and per-channel persona routing.
@@ -217,7 +206,7 @@ matching credential revision, including after the persona is removed.
 - **`server_memories`**: shared server-wide long-term memories.
 - **`personal_memories`**: personal memories scoped by user ID and cross-server `persona_lineage_id`.
 - **`conditioning_history`**: behavioral reinforcement records from `/reward`, `/punish`, and `interact_with_target`, grouped by server, target persona lineage, conditioning type, action, and normalized reason. Each row has exactly one actor: `user_id` or `actor_persona_id`, with separate repeat counts per actor and cascading deletion when that actor is deleted. The tool's workspace capability, `conditioning_interactions_enabled`, defaults to true.
-- **`minimal_notice_refs`**: maps minimal memory and task notice message IDs to confirmed entity rows, allowing context rebuilders to restore full prompt bodies from live records.
+- **`minimal_notice_refs`**: maps minimal memory and task notice message IDs to confirmed entity rows, allowing context rebuilders to restore full prompt bodies from live records; generation deliveries store provider/model snapshots so later model switches do not change their attribution.
 - **`server_emojis` and `server_stickers`**: native Discord expression metadata synchronized on demand.
 - **`custom_expressions` and `custom_expression_personas`**: server-managed custom media registry. Supports unique UUID identities, delivery kinds, validated media limits (10 MiB ceiling), and persona membership scoping.
 
@@ -233,8 +222,18 @@ including link expressions. Existing rows remain editable when the limit is reac
 - **Decision primitives**: `decision_models.supported_primitives` lists the question types a model answers. Every Decision API style the bot calls accepts `predicate` and `choice`, so new rows default to both; the Active Nudge matcher needs `choice`.
 - **Token limits**: `context_window` and `max_output_tokens` record model ceilings. Runtime code queries them through `resolveModelLimits()`, where live provider responses take precedence.
 - **`custom_endpoint_connections`**: logical connection metadata scoped to either `server_id` or `user_id`, grouped by `(owner, label, capability)`.
-- **`custom_endpoints`**: model registrations under a connection, linking to synthetic catalog rows through `model_ref_id`.
+- **`custom_endpoints`**: model registrations under a connection, linking to synthetic catalog rows through `model_ref_id`. OpenAI-compatible image models store their request format in `extra_config.image_request_format`; rows without it use the Images API.
 - **`scoped_model_registrations`**: exclusive arc table mapping extra catalog rows under shared provider names to a specific `server_id` or `user_id`.
+
+Migration 140 moves active server selections and saved server/personal selections from NVIDIA's
+`nv-embed-v1` to `nvidia/nemotron-3.5-embed-1b`, which is already the seeded default. Apply it with
+the bot stopped and restart every worker afterward so configuration caches reload. The migration
+preserves stored vectors and their original family labels. Memory recall can fill vectors in the
+new family; existing documents remain unavailable to the new family's search until explicitly
+re-embedded through `RagRepository.reembedServerDocuments` (by re-picking the active embedding model
+in `/config` or choosing `Re-embed Documents` in `/memories`). SQL migration does not call providers.
+Rollback preserves the supported selections because it cannot distinguish migrated rows from
+later choices.
 
 ### Decision registration lifecycle
 
@@ -282,7 +281,7 @@ Natural Nudges stores events and derives its meters on read
   personas leave stale IDs that readers filter. Excluded from export; reset deletes them.
 - **`persona_natural_nudge_configs`**: talkativeness and interests per persona. Pointer personas
   without a row read `persona_presets.natural_nudge_interests` and `natural_nudge_talkativeness`.
-- **`server_natural_nudge_runtime_state`**: idle nudge jitter, the failure stop, and the indexed
+- **`server_natural_nudge_runtime_state`**: idle nudge jitter, the failure cooldown, and the indexed
   `last_direct_chat_at` timestamp that suspends both modes after 14 days without direct chat.
   Excluded from export; a missing timestamp keeps the server dormant. The dormancy migration seeds
   it once from recent channel activity only for existing servers that already pass the heat and
@@ -314,6 +313,11 @@ leaves a saved binding unavailable. Exports contain settings without credentials
 model/checker ownership before writing and drop the retired `response_decision_model_id` that older
 v2 exports carry. Configuration reset restores these defaults while
 preserving registrations and credentials.
+
+Provider credential generations and request-attempt ages are maintained separately from model/settings
+updates and encryption versions. Assembled server state reads credentials from `saved_provider_configs`;
+legacy mirrors remain available to encryption audits and retention cleanup. See
+[Security & Privacy](/architecture/subsystems/security/#inactive-database-api-keys) for the retention contract.
 
 ## Encryption at rest
 

@@ -3,6 +3,8 @@ export default {
     description: `添加、查看、编辑和移除提供方凭据、端点和模型目录。`,
     title: `服务器提供方`,
     personal_title: `个人提供方`,
+    credential_missing: "我没有此已保存配置的 API 密钥。请使用**编辑**重新添加。",
+    credential_retention: "此实例会在连续 {days} 天无通过验证的请求后移除保存的密钥。",
     selector_guidance: `用下面的下拉菜单**选择**或**添加**提供方或端点。`,
     select_placeholder: `选择提供方、端点或操作...`,
     select_add_provider: `+ 添加新提供方`,
@@ -92,6 +94,8 @@ export default {
     validation_failed: `提供方拒绝了这个 API 密钥，或无法验证它。没有保存任何内容。`,
     validation_no_balance:
       "提供方识别了这个API密钥，但账户没有余额，暂时无法回复消息。请在提供方网站充值，然后重新提交同一个密钥。没有保存任何内容。",
+    host_restricted: `部署 TomoriBot 的人只允许特定服务器和用户使用 Google Vertex AI，这里不在其中。请选择其他提供方。没有保存任何内容。`,
+    vertex_config_invalid: `Google Vertex AI 的设置格式必须是 \`project-id::location\`，例如 \`my-project::global\`。项目和位置只能使用字母、数字和连字符。没有保存任何内容。`,
     missing_default_model: `凭据已保存，但这个提供方没有可启用的默认文本模型。`,
     write_failed: `提供方无法保存或启用。请再试一次。`,
     add_endpoint_modal_title: `添加自定义端点`,
@@ -180,6 +184,16 @@ export default {
     model_compat_label: `聊天补全兼容性`,
     model_compat_description: `针对严格后端的消息结构与协议调整。非必要请保持关闭。`,
     model_image_supports_label: `图像能力`,
+    model_image_request_format_label: `图像请求格式`,
+    model_image_request_format_description: `请与这个图像模型接受的API格式一致。`,
+    image_request_formats: {
+      images: `图像API`,
+      "chat-completions": `聊天补全`,
+    },
+    image_request_format_descriptions: {
+      images: `将提示词发送至/images/generations。`,
+      "chat-completions": `将图像请求作为聊天消息发送至/chat/completions。`,
+    },
     model_image_supports_description: `只勾选这个模型和端点确实支持的图像功能。`,
     model_image_supports: {
       txt2img: `文生图`,
