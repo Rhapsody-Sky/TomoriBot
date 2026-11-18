@@ -2870,6 +2870,52 @@ describe("dashboard memory and naming authorization", () => {
     });
   });
 
+  it("restricts persona nudges to current managers, the selected guild and valid changes", async () => {
+    const { app, headers, session } = setup(true);
+    let liveManager = false;
+    spyOn(fakeClient.guilds.cache, "get").mockReturnValue({
+      members: {
+        fetch: async () => ({
+          permissions: new PermissionsBitField(liveManager ? PermissionFlagsBits.ManageGuild : 0n),
+        }),
+      },
+    } as unknown as Guild);
+    const read = spyOn(naturalNudgePanelDependencies, "loadPersonaConfig").mockResolvedValue({
+      persona_id: 9,
+      talkativeness: 2,
+      interests: [{ label: "Constellations", description: "Which ones are visible from town." }],
+      idle_nudges: [],
+      disabled_idle_nudge_ids: [],
+      has_override: true,
+      idle_nudges_override: false,
+      idle_nudges_inherited: false,
+    });
+    const write = spyOn(naturalNudgePanelDependencies.operations, "setTalkativeness").mockResolvedValue("success");
+    const path = "/settings/api/guilds/123456789012345678/personas/9/nudges";
+    const patch = (level: number, csrf = session.csrfToken) =>
+      app.request(path, {
+        method: "PATCH",
+        headers: { ...headers, "Content-Type": "application/json", "X-CSRF-Token": csrf },
+        body: JSON.stringify({ action: "talkativeness", level }),
+      });
+    expect((await app.request(path, { headers })).status).toBe(403);
+    expect((await patch(3)).status).toBe(403);
+    expect(read).not.toHaveBeenCalled();
+    liveManager = true;
+    expect((await app.request(path.replace("/9/", "/999/"), { headers })).status).toBe(404);
+    expect((await patch(3, "invalid")).status).toBe(403);
+    expect((await patch(5)).status).toBe(422);
+    expect(write).not.toHaveBeenCalled();
+    const response = await app.request(path, { headers });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      level: 2,
+      interests: [{ label: "Constellations", revision: expect.any(String) }],
+    });
+    expect((await patch(3)).status).toBe(200);
+    expect(write).toHaveBeenCalledWith(9, 3);
+  });
+
   it("allows only the member's personal fallback chain and requires CSRF and guild membership", async () => {
     const { app, headers, session } = setup();
     const refs = [{ type: "llm" as const, id: 12 }];

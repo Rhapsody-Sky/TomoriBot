@@ -1,4 +1,91 @@
 (() => {
+  const setHiddenValue = (input, next) => {
+    input.value = JSON.stringify(next);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+
+  function nudgeToolFields(e, inputField, t) {
+    const chips = (ids, labels, field) =>
+      ids
+        .map(
+          (id) =>
+            `<span class="chip">${e(labels[id])}${
+              field
+                ? `<button class="chip-x" type="button" value="${e(id)}" data-nudge-remove-option="${field}" aria-label="${e(t("remove_item", { name: labels[id] }))}">×</button>`
+                : ""
+            }</span>`,
+        )
+        .join("");
+
+    const field = (name, labels, initial, hint, choose) => `<div class="stack" data-nudge-tool-field="${name}">
+      ${inputField(
+        t(name),
+        `<select data-searchable data-nudge-tool="${name}"><option value="">${e(t(choose))}</option>
+        ${Object.entries(labels)
+          .map(([id, label]) => `<option value="${e(id)}">${e(label)}</option>`)
+          .join("")}</select>`,
+        t(hint),
+      )}
+      <div class="chips" data-nudge-tool-chips></div><input type="hidden" name="${name}" value="${e(JSON.stringify(initial))}"></div>`;
+
+    function update(panel, registry, limit) {
+      const needed = JSON.parse(panel.elements.prerequisites.value);
+      for (const wrapper of panel.querySelectorAll("[data-nudge-tool-field]")) {
+        const name = wrapper.dataset.nudgeToolField;
+        const chosen = JSON.parse(panel.elements.namedItem(name).value);
+        const list = wrapper.querySelector("[data-nudge-tool-chips]");
+        list.innerHTML = chips(chosen, name === "prerequisites" ? registry.requirements : registry.tools, name);
+        list.hidden = !chosen.length;
+        const select = wrapper.querySelector("select");
+        for (const option of select.options)
+          option.disabled =
+            chosen.includes(option.value) || (name === "recommended" && needed.includes(`tool:${option.value}`));
+        select.value = "";
+        select.disabled = chosen.length >= limit;
+      }
+      window.TomoriControls.enhance(panel);
+    }
+
+    function remove(button) {
+      const field = button.form.elements.namedItem(button.dataset.nudgeRemoveOption);
+      const picker = button.closest("[data-nudge-tool-field]").querySelector(".field button");
+      setHiddenValue(
+        field,
+        JSON.parse(field.value).filter((key) => key !== button.value),
+      );
+      picker?.focus();
+    }
+
+    function add(select, limit) {
+      if (!select.matches("[data-nudge-tool]") || !select.value) return;
+      const { form: panel, value } = select;
+      const field = panel.elements.namedItem(select.dataset.nudgeTool);
+      const chosen = JSON.parse(field.value);
+      if (chosen.length >= limit || chosen.includes(value)) return;
+      setHiddenValue(field, [...chosen, value]);
+      if (field.name !== "prerequisites" || !value.startsWith("tool:")) return;
+      const recommended = panel.elements.recommended;
+      const previous = JSON.parse(recommended.value);
+      if (previous.includes(value.slice(5)))
+        setHiddenValue(
+          recommended,
+          previous.filter((id) => id !== value.slice(5)),
+        );
+    }
+
+    return { chips, field, update, add, remove };
+  }
+
+  function readNudgeContent(panel) {
+    return {
+      title: panel.elements.title.value.trim(),
+      brief: panel.elements.brief.value.trim(),
+      agendaHint: panel.elements.agenda.value.trim(),
+      prerequisites: JSON.parse(panel.elements.prerequisites.value),
+      recommendedTools: JSON.parse(panel.elements.recommended.value),
+    };
+  }
+
   async function render(workspace, ctx) {
     const {
       api,
@@ -381,30 +468,7 @@
       }
     }
 
-    const chips = (ids, labels, field) =>
-      ids
-        .map(
-          (id) =>
-            `<span class="chip">${e(labels[id])}${
-              field
-                ? `<button class="chip-x" type="button" value="${e(id)}" data-nudge-remove-option="${field}" aria-label="${c("remove_item", { name: labels[id] })}">×</button>`
-                : ""
-            }</span>`,
-        )
-        .join("");
-
-    function toolField(field, labels, initial, name, hint, choose) {
-      return `<div class="stack" data-nudge-tool-field="${field}">
-        ${inputField(
-          t(name),
-          `<select data-searchable data-nudge-tool="${field}"><option value="">${c(choose)}</option>
-          ${Object.entries(labels)
-            .map(([id, label]) => `<option value="${e(id)}">${e(label)}</option>`)
-            .join("")}</select>`,
-          t(hint),
-        )}
-        <div class="chips" data-nudge-tool-chips></div><input type="hidden" name="${field}" value="${e(JSON.stringify(initial))}"></div>`;
-    }
+    const nudgeTools = nudgeToolFields(e, inputField, t);
 
     function editMarkup(record) {
       const title = record.key ? record.title : t("new");
@@ -415,7 +479,7 @@
           text ? `<div class="stack"><strong>${c(label)}</strong><p>${e(text)}</p></div>` : "";
         const identify = (label, ids, labels) =>
           ids.length
-            ? `<div class="stack"><strong>${c(label)}</strong><div class="chips">${chips(ids, labels)}</div></div>`
+            ? `<div class="stack"><strong>${c(label)}</strong><div class="chips">${nudgeTools.chips(ids, labels)}</div></div>`
             : "";
         return `<section class="card" data-nudge-entry-title>${head(title, hint)}<div class="stack">
           ${read("brief", record.brief)}${read("agenda", record.agenda)}
@@ -437,16 +501,12 @@
           ${inputField(t("brief"), `<textarea name="brief" rows="4" maxlength="1000" required>${e(record.brief)}</textarea>`, t(`${category}_brief`))}
           ${inputField(t("agenda"), `<textarea name="agenda" rows="2" maxlength="500">${e(record.agenda)}</textarea>`, t("agenda_hint"))}
           ${required ? `<p class="hint">${c("required_category", { name: required })}</p>` : ""}
-          ${toolField("prerequisites", requirements, record.prerequisites, "prerequisites", "prerequisites_hint", "add_prerequisite")}
-          ${toolField("recommended", studio.tools, record.recommended, "recommended", "recommended_hint", "add_tool")}
+          ${nudgeTools.field("prerequisites", requirements, record.prerequisites, "prerequisites_hint", "add_prerequisite")}
+          ${nudgeTools.field("recommended", studio.tools, record.recommended, "recommended_hint", "add_tool")}
         </div>${actions(ui("save"), remove)}</form>`;
     }
 
     const draftScope = (panel) => (panel.elements.scope ? JSON.parse(panel.elements.scope.value) : null);
-    const hiddenValue = (input, next) => {
-      input.value = JSON.stringify(next);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    };
 
     function renderAvailability(record) {
       const chooser =
@@ -493,23 +553,7 @@
       $('button[type="submit"]', panel).disabled = invalid;
     }
 
-    function updateTools(panel) {
-      const needed = JSON.parse(panel.elements.prerequisites.value);
-      for (const field of panel.querySelectorAll("[data-nudge-tool-field]")) {
-        const name = field.dataset.nudgeToolField;
-        const chosen = JSON.parse(panel.elements.namedItem(name).value);
-        const list = $("[data-nudge-tool-chips]", field);
-        list.innerHTML = chips(chosen, name === "prerequisites" ? studio.requirements : studio.tools, name);
-        list.hidden = !chosen.length;
-        const select = $("select", field);
-        for (const option of select.options)
-          option.disabled =
-            chosen.includes(option.value) || (name === "recommended" && needed.includes(`tool:${option.value}`));
-        select.value = "";
-        select.disabled = chosen.length >= 8;
-      }
-      window.TomoriControls.enhance(panel);
-    }
+    const updateTools = (panel) => nudgeTools.update(panel, studio, 8);
 
     function openEditor(record) {
       entry = record;
@@ -589,7 +633,7 @@
           if (!keys.delete(id)) keys.add(id);
           scope = keys.size === personaIds.length ? null : personaIds.filter((key) => keys.has(key));
         } else return;
-        hiddenValue(panel.elements.scope, scope);
+        setHiddenValue(panel.elements.scope, scope);
         update();
       });
       dialog.addEventListener("close", () => dialog.remove(), { once: true });
@@ -609,13 +653,7 @@
               category,
               action: entry.key ? "edit" : "add",
               ...(entry.key ? { key: entry.key, revision: entry.revision } : {}),
-              form: {
-                title: panel.elements.title.value.trim(),
-                brief: panel.elements.brief.value.trim(),
-                agendaHint: panel.elements.agenda.value.trim(),
-                prerequisites: JSON.parse(panel.elements.prerequisites.value),
-                recommendedTools: JSON.parse(panel.elements.recommended.value),
-              },
+              form: readNudgeContent(panel),
             };
       const { key } = await api(studioPath, { method: "PATCH", body: JSON.stringify(request) });
       completeFormSave(panel);
@@ -709,16 +747,7 @@
         input.dispatchEvent(new Event("input", { bubbles: true }));
       }
       if (button.hasAttribute("data-nudge-pick")) openPicker(button.form);
-      if (button.hasAttribute("data-nudge-remove-option")) {
-        const panel = button.form;
-        const field = panel.elements.namedItem(button.dataset.nudgeRemoveOption);
-        const picker = button.closest("[data-nudge-tool-field]").querySelector(".field button");
-        hiddenValue(
-          field,
-          JSON.parse(field.value).filter((key) => key !== button.value),
-        );
-        picker?.focus();
-      }
+      if (button.hasAttribute("data-nudge-remove-option")) nudgeTools.remove(button);
     });
 
     page.addEventListener("input", (event) => {
@@ -730,24 +759,7 @@
       else if (kind && kind !== "content") updateSettingsCard(input.form);
     });
 
-    page.addEventListener("change", (event) => {
-      const select = event.target;
-      if (!select.matches("[data-nudge-tool]") || !select.value) return;
-      const { form: panel, value } = select;
-      const field = panel.elements.namedItem(select.dataset.nudgeTool);
-      const chosen = JSON.parse(field.value);
-      if (chosen.length >= 8 || chosen.includes(value)) return;
-      hiddenValue(field, [...chosen, value]);
-      if (field.name === "prerequisites" && value.startsWith("tool:")) {
-        const recommended = panel.elements.recommended;
-        const previous = JSON.parse(recommended.value);
-        if (previous.includes(value.slice(5)))
-          hiddenValue(
-            recommended,
-            previous.filter((id) => id !== value.slice(5)),
-          );
-      }
-    });
+    page.addEventListener("change", (event) => nudgeTools.add(event.target, 8));
 
     page.addEventListener(
       "dashboard:restore",
@@ -804,5 +816,439 @@
     }
   }
 
-  window.TomoriNaturalNudges = { render };
+  async function renderPersona(root, ctx) {
+    const {
+      api,
+      ui,
+      escapeHtml: e,
+      navigationIcon: icon,
+      fieldLabel,
+      personaCardHead: head,
+      cardSaveActions: actions,
+      personaSticker,
+      initDraftForms,
+      enhanceDashboard,
+      withBusyForm,
+      completeFormSave,
+      showFormError,
+      confirmDraftDiscard,
+      confirmAction,
+      loadingBar,
+      toast,
+      guildId,
+      persona,
+    } = ctx;
+    const path = `/guilds/${guildId}/personas/${persona.personaId}/nudges`;
+    const $ = (selector, node = root) => node.querySelector(selector);
+    const name = persona.nickname;
+    let data;
+    let editing = null;
+    let working = false;
+    let retry;
+    const t = (key, vars = {}) =>
+      (data.copy[key] ?? "").replace(/\{(\w+)\}/g, (match, key) => (Object.hasOwn(vars, key) ? vars[key] : match));
+    const c = (key, vars) => e(t(key, vars));
+    const field = (label, body, hint) => `<label class="field">${fieldLabel(label, hint)}${body}</label>`;
+    const button = (text, attrs, glyph = "", variant = "") =>
+      `<button class="button small${variant ? ` ${variant}` : ""}" type="button" ${attrs}>${glyph ? icon(glyph) : ""}${e(text)}</button>`;
+    const empty = (key) =>
+      `<div class="empty-note"><span class="mark" aria-hidden="true">✦</span><strong>${c(key)}</strong></div>`;
+    const count = (count, limit) => t("persona_count", { count, limit });
+    const enhance = (node) => {
+      initDraftForms(node);
+      enhanceDashboard(node);
+    };
+    const nudgeTools = nudgeToolFields(e, field, t);
+    const draftKey = (suffix) => `persona-nudges/${persona.personaId}/${suffix}`;
+    const contentForm = () => $('[data-nudge-form="persona-content"]');
+    const summary = () => $("[data-persona-nudge-summary]");
+    const editor = () => $("[data-persona-nudge-editor]");
+
+    root.innerHTML = `<div data-persona-nudge-status>${loadingBar(ui("persona_nudge_tab"))}</div><div data-persona-nudge-body></div>`;
+    const status = $("[data-persona-nudge-status]");
+    const body = $("[data-persona-nudge-body]");
+
+    function showRetry(error, action) {
+      retry = action;
+      status.innerHTML = `<section class="card"><p class="notice error" role="alert">${e(error.message)}</p>
+        <div class="actions">${button(ui("persona_nudge_reload"), "data-persona-nudge-retry")}</div></section>`;
+    }
+
+    async function reload(afterLoad) {
+      try {
+        data = await api(path);
+      } catch (error) {
+        if (root.isConnected) showRetry(error, afterLoad);
+        return;
+      }
+      if (!root.isConnected) return;
+      retry = undefined;
+      status.replaceChildren();
+      afterLoad();
+    }
+
+    async function mutate(patch, message, afterLoad, panel, trigger) {
+      if (working || retry) return false;
+      working = true;
+      if (trigger) trigger.disabled = true;
+      const run = async () => {
+        const result = await api(path, { method: "PATCH", body: JSON.stringify(patch) });
+        if (!root.isConnected) return;
+        if (panel?.dataset.nudgeForm) completeFormSave(panel);
+        panel?.closest("dialog")?.close();
+        toast(t(message));
+        await reload(() => afterLoad(result));
+      };
+      try {
+        if (panel) await withBusyForm(panel, run);
+        else await run();
+        return true;
+      } catch (error) {
+        if (panel?.isConnected) showFormError(panel, error);
+        else if (root.isConnected) toast(error.message, "error");
+        return false;
+      } finally {
+        working = false;
+        if (trigger?.isConnected) trigger.disabled = data.interests.length >= data.limits.interests;
+      }
+    }
+
+    function row(record, kind, index) {
+      const idle = kind === "idle";
+      const label = idle ? record.title : record.label;
+      return `<article class="item"><div><p><strong>${e(label)}</strong></p>
+        <p class="hint">${e(idle ? record.brief : record.description)}</p>
+        ${
+          idle
+            ? `<div class="item-meta"><span class="chip">${e(data.categories[record.category])}</span>
+          <span class="badge ${record.enabled ? (record.blocker ? "warning " : "success ") : ""}dot">${c(record.enabled ? (record.blocker ? "blocked" : "enabled") : "off")}</span>
+          ${record.blocker ? `<span class="hint">${e(record.blocker)}</span>` : ""}</div>`
+            : ""
+        }</div>
+        <div class="item-actions">${button(ui("persona_edit"), `data-persona-nudge-edit="${kind}" value="${e(idle ? record.id : index)}" aria-label="${c("edit_name", { name: label })}"`)}</div></article>`;
+    }
+
+    function updateRows(kind) {
+      const interests = kind === "interest";
+      const items = interests ? data.interests : data.idle;
+      const limit = interests ? data.limits.interests : data.limits.idle;
+      const rows = $(`[data-persona-nudge-rows="${kind}"]`);
+      rows.innerHTML = items.length
+        ? items.map((item, index) => row(item, kind, index)).join("")
+        : empty(interests ? "persona_interest_empty" : "persona_idle_empty");
+      $(`[data-persona-nudge-count="${kind}"]`).textContent = count(items.length, limit);
+      $(`[data-persona-nudge-add="${kind}"]`).disabled = items.length >= limit;
+      if (interests) $("[data-persona-nudge-generate]").disabled = items.length >= limit;
+      else $("[data-persona-nudge-restore]").hidden = !data.restoreRevision;
+      enhanceDashboard(rows);
+    }
+
+    function levelEffect(panel) {
+      $("[data-persona-nudge-effect]").textContent = data.levels.find(
+        ({ id }) => id === Number(panel.elements.level.value),
+      ).effect;
+    }
+
+    function showSummary() {
+      body.innerHTML = `<div class="stage" data-persona-nudge-summary>
+        <form class="card" data-fx="track" data-nudge-form="persona-level" data-settings-key="${draftKey("level")}">
+          ${head(ui("persona_nudge_talkativeness"), t("persona_talk_hint", { name }))}
+          <div class="grid"><div class="stack">${field(
+            t("persona_level"),
+            `<select name="level">${data.levels
+              .map(
+                ({ id, label }) => `<option value="${id}"${data.level === id ? " selected" : ""}>${e(label)}</option>`,
+              )
+              .join("")}</select>`,
+          )}
+            <p class="hint" data-persona-nudge-effect role="status"></p></div></div>${actions(ui("save"))}
+        </form>
+        <section class="card" data-persona-nudge-interests>
+          <div class="card-head"><div><h3>${e(ui("persona_nudge_interests"))}<small data-persona-nudge-count="interest"></small></h3>
+            <p class="hint">${c("persona_interests_hint", { name })}</p></div>
+            <div class="actions">${button(t("persona_generate"), "data-persona-nudge-generate")}
+              ${button(t("persona_interest_add"), 'data-persona-nudge-add="interest" data-fx="spark" aria-haspopup="dialog"', "plus", "primary")}</div></div>
+          <div class="rows" data-persona-nudge-rows="interest"></div>
+        </section>
+        <section class="card" data-persona-nudge-idle>
+          <div class="card-head"><div><h3>${c("idle")}<small data-persona-nudge-count="idle"></small></h3>
+            <p class="hint">${c("persona_idle_hint", { name })}</p></div>
+            ${button(t("add"), 'data-persona-nudge-add="idle" data-fx="spark"', "plus", "primary")}</div>
+          <div class="rows" data-persona-nudge-rows="idle"></div>
+          <div class="actions">${button(t("persona_restore"), "data-persona-nudge-restore hidden")}</div>
+        </section>
+      </div>
+      <div class="stage" data-persona-nudge-editor hidden>
+        <div class="toolbar">${button(t("back"), "data-persona-nudge-back", "arrow-left")}</div>
+        <div class="split" data-persona-nudge-cards></div>
+      </div>
+      <dialog aria-labelledby="persona-nudge-interest-title" data-persona-nudge-interest-dialog></dialog>`;
+      updateRows("interest");
+      updateRows("idle");
+      enhance(body);
+      levelEffect($('[data-nudge-form="persona-level"]'));
+      window.TomoriFX.stagger(summary());
+    }
+
+    function interestDialog(index) {
+      const record = data.interests[index];
+      const dialog = $("[data-persona-nudge-interest-dialog]");
+      const listRevision = data.interestRevision;
+      dialog.innerHTML = `<form class="stack">
+        <header class="panel-header"><div class="heading"><h2 id="persona-nudge-interest-title">${c(record ? "persona_interest_edit" : "persona_interest_add")}</h2></div></header>
+        ${field(t("name"), `<input name="label" maxlength="${data.limits.interestLabel}" required value="${e(record?.label ?? "")}" autofocus>`)}
+        ${field(t("persona_interest_description"), `<textarea rows="3" name="description" maxlength="${data.limits.interestDescription}" required>${e(record?.description ?? "")}</textarea>`, t("persona_interest_hint"))}
+        <div class="actions" data-form-actions>${record ? button(t("persona_interest_remove_action"), "data-persona-nudge-remove-interest", "", "danger") : ""}
+          ${button(ui("lorebook_cancel"), "data-persona-nudge-dialog-close")}
+          <button class="button small primary" type="submit" data-fx="spark">${e(ui("save"))}</button></div></form>`;
+      const panel = $("form", dialog);
+      const finish = () => {
+        updateRows("interest");
+        (
+          $(`[data-persona-nudge-edit="interest"][value="${index}"]`) || $('[data-persona-nudge-add="interest"]')
+        ).focus();
+      };
+      panel.onsubmit = async (event) => {
+        event.preventDefault();
+        const interest = { label: panel.elements.label.value, description: panel.elements.description.value };
+        const patch = record
+          ? { action: "interest-edit", index, revision: record.revision, interest }
+          : { action: "interest-add", interest };
+        await mutate(patch, "persona_interest_saved", finish, panel);
+      };
+      $("[data-persona-nudge-dialog-close]", panel).onclick = () => dialog.close();
+      const remove = $("[data-persona-nudge-remove-interest]", panel);
+      if (remove)
+        remove.onclick = async () => {
+          if (
+            !(await confirmAction(t("persona_interest_remove"), record.label, t("persona_interest_remove_action"))) ||
+            !panel.isConnected ||
+            !dialog.open
+          )
+            return;
+          await mutate(
+            { action: "interest-remove", index, revision: listRevision },
+            "persona_interest_removed",
+            finish,
+            panel,
+          );
+        };
+      dialog.oncancel = (event) => {
+        if (working) event.preventDefault();
+      };
+      enhance(dialog);
+      dialog.showModal();
+    }
+
+    function updateCategory(panel) {
+      const category = editing?.category ?? panel.elements.category.value;
+      $("[data-persona-nudge-brief-hint]", panel).textContent = t(`${category}_brief`);
+      const implied = $("[data-persona-nudge-implied]", panel);
+      const impliedId = data.implied[category];
+      implied.hidden = !impliedId;
+      implied.textContent = impliedId ? t("required_category", { name: data.requirements[impliedId] }) : "";
+      const options = $('[data-nudge-tool="prerequisites"]', panel);
+      for (const option of options.options) option.hidden = Boolean(option.value && impliedId === option.value);
+      const prerequisites = panel.elements.prerequisites;
+      const selected = JSON.parse(prerequisites.value);
+      if (selected.includes(impliedId))
+        setHiddenValue(
+          prerequisites,
+          selected.filter((id) => id !== impliedId),
+        );
+      nudgeTools.update(panel, data, data.limits.options);
+    }
+
+    function openEditor(record) {
+      editing = record ?? null;
+      summary().hidden = true;
+      editor().hidden = false;
+      const title = record?.title ?? t("new");
+      const required = data.implied[record?.category ?? "start_topic"];
+      const requirements = record
+        ? Object.fromEntries(Object.entries(data.requirements).filter(([id]) => id !== required))
+        : data.requirements;
+      const remove = record
+        ? `<button class="button small danger hold-button" type="button" data-action-leading data-hold data-persona-nudge-delete
+        data-confirm-title="${c("delete_name", { name: title })}" data-confirm-description="${c("persona_delete_hint", { name })}"><span>${e(ui("control_hold_delete"))}</span></button>`
+        : "";
+      window.TomoriFX.swap(
+        $("[data-persona-nudge-cards]"),
+        `<form class="card" data-fx="track" data-nudge-form="persona-content" data-settings-key="${draftKey(record?.id ?? "new")}">
+        ${head(title, t("for_persona", { name }))}
+        <div class="stack">
+          ${field(t("name"), `<input name="title" maxlength="${data.limits.title}" value="${e(record?.title ?? "")}" required>`)}
+          ${
+            record
+              ? ""
+              : field(
+                  t("persona_category"),
+                  `<select name="category">${Object.entries(data.categories)
+                    .map(
+                      ([id, label]) =>
+                        `<option value="${id}"${id === "start_topic" ? " selected" : ""}>${e(label)}</option>`,
+                    )
+                    .join("")}</select>`,
+                )
+          }
+          ${field(t("brief"), `<textarea name="brief" rows="4" maxlength="${data.limits.brief}" required>${e(record?.brief ?? "")}</textarea>`)}
+          <p class="hint" data-persona-nudge-brief-hint></p>
+          ${field(t("agenda"), `<textarea name="agenda" rows="2" maxlength="${data.limits.agenda}">${e(record?.agenda ?? "")}</textarea>`, t("agenda_hint"))}
+          <p class="hint" data-persona-nudge-implied hidden></p>
+          ${nudgeTools.field("prerequisites", requirements, record?.prerequisites ?? [], "prerequisites_hint", "add_prerequisite")}
+          ${nudgeTools.field("recommended", data.tools, record?.recommended ?? [], "recommended_hint", "add_tool")}
+        </div>${actions(ui("save"), remove)}</form>
+        ${
+          record
+            ? `<form class="card" data-fx="track" data-nudge-form="persona-availability" data-settings-key="${draftKey(record.id + "/availability")}">
+          ${head(t("availability"))}<div class="stack">
+          <label class="toggle">${fieldLabel(t("enable"))}<input name="enabled" type="checkbox"${record.enabled ? " checked" : ""}></label>
+          <div class="stack"><strong>${c("persona_owner")}</strong><div class="item lead">${personaSticker(persona, "flat")}<span>${e(name)}</span></div></div>
+          </div>${actions(ui("save"))}</form>`
+            : ""
+        }`,
+      );
+      enhance(editor());
+      const panel = contentForm();
+      updateCategory(panel);
+      panel.elements.title.focus();
+    }
+
+    function closeEditor(id = editing?.id) {
+      editor().hidden = true;
+      $("[data-persona-nudge-cards]").replaceChildren();
+      editing = null;
+      summary().hidden = false;
+      ($(`[data-persona-nudge-edit="idle"][value="${id ?? ""}"]`) || $('[data-persona-nudge-add="idle"]')).focus();
+    }
+
+    root.addEventListener("click", async (event) => {
+      const target = event.target.closest("button");
+      if (!target || working) return;
+      if (target.hasAttribute("data-persona-nudge-retry")) {
+        working = true;
+        target.disabled = true;
+        try {
+          await reload(retry);
+        } finally {
+          working = false;
+        }
+        return;
+      }
+      if (retry) return;
+      const add = target.dataset.personaNudgeAdd;
+      const edit = target.dataset.personaNudgeEdit;
+      if (add === "interest" || edit === "interest") interestDialog(edit ? Number(target.value) : -1);
+      if (add === "idle" || edit === "idle") openEditor(data.idle.find(({ id }) => id === target.value));
+      if (target.hasAttribute("data-persona-nudge-back") && (await confirmDraftDiscard(editor()))) closeEditor();
+      if (target.hasAttribute("data-persona-nudge-generate"))
+        await mutate({ action: "interest-generate" }, "persona_generated", () => updateRows("interest"), null, target);
+      if (
+        target.hasAttribute("data-persona-nudge-restore") &&
+        (await confirmAction(t("persona_restore_title"), t("persona_restore_hint"), t("persona_restore_action"))) &&
+        root.isConnected
+      )
+        await mutate({ action: "idle-restore", revision: data.restoreRevision }, "persona_restored", () =>
+          updateRows("idle"),
+        );
+      if (target.hasAttribute("data-nudge-remove-option")) nudgeTools.remove(target);
+    });
+
+    function updateForm(panel) {
+      if (panel?.dataset.nudgeForm === "persona-level") levelEffect(panel);
+      else if (panel?.dataset.nudgeForm === "persona-content") updateCategory(panel);
+    }
+
+    root.addEventListener("input", (event) => {
+      if (event.target.matches('[name="level"], [name="category"], input[type="hidden"]'))
+        updateForm(event.target.form);
+    });
+    root.addEventListener("change", (event) => nudgeTools.add(event.target, data.limits.options));
+    root.addEventListener("dashboard:restore", (event) => updateForm(event.target), true);
+
+    root.addEventListener("submit", async (event) => {
+      const panel = event.target;
+      const kind = panel.dataset.nudgeForm;
+      if (!kind) return;
+      event.preventDefault();
+      if (!panel.hasAttribute("data-changed")) return;
+      if (kind === "persona-level") {
+        await mutate(
+          { action: "talkativeness", level: Number(panel.elements.level.value) },
+          "persona_talk_saved",
+          () => {
+            panel.elements.level.value = String(data.level);
+            levelEffect(panel);
+            completeFormSave(panel);
+          },
+          panel,
+        );
+      } else if (kind === "persona-availability") {
+        const id = editing.id;
+        await mutate(
+          { action: "idle-toggle", id, enabled: panel.elements.enabled.checked },
+          "availability_saved",
+          () => {
+            updateRows("idle");
+            const updated = data.idle.find((record) => record.id === id);
+            if (!updated) return closeEditor(id);
+            panel.elements.enabled.checked = updated.enabled;
+            completeFormSave(panel);
+          },
+          panel,
+        );
+      } else {
+        const form = readNudgeContent(panel);
+        const patch = editing
+          ? { action: "idle-edit", id: editing.id, revision: editing.revision, form }
+          : { action: "idle-add", category: panel.elements.category.value, form };
+        await mutate(
+          patch,
+          "saved",
+          (result) => {
+            updateRows("idle");
+            const id = result.id ?? patch.id;
+            const updated = data.idle.find((record) => record.id === id);
+            if (!updated) return closeEditor(id);
+            if (result.id) return openEditor(updated);
+            editing = updated;
+            panel.elements.title.value = updated.title;
+            panel.elements.brief.value = updated.brief;
+            panel.elements.agenda.value = updated.agenda;
+            panel.elements.prerequisites.value = JSON.stringify(updated.prerequisites);
+            panel.elements.recommended.value = JSON.stringify(updated.recommended);
+            $("h3", panel).textContent = updated.title;
+            $("[data-persona-nudge-delete]", panel).dataset.confirmTitle = t("delete_name", { name: updated.title });
+            updateCategory(panel);
+            completeFormSave(panel);
+          },
+          panel,
+        );
+      }
+    });
+
+    root.addEventListener("holdcomplete", async (event) => {
+      const target = event.target.closest("[data-persona-nudge-delete]");
+      if (!target) return;
+      if (working || !(await confirmDraftDiscard(editor())) || !target.isConnected) {
+        target.dispatchEvent(new Event("holdreset"));
+        return;
+      }
+      const { id, revision } = editing;
+      const deleted = await mutate(
+        { action: "idle-remove", id, revision },
+        "deleted",
+        () => {
+          updateRows("idle");
+          closeEditor(id);
+        },
+        target.form,
+      );
+      if (!deleted) target.dispatchEvent(new Event("holdreset"));
+    });
+
+    await reload(showSummary);
+  }
+
+  window.TomoriNaturalNudges = { render, renderPersona };
 })();

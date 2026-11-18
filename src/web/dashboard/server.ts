@@ -72,9 +72,11 @@ import {
   loadNaturalNudgeCopy,
   loadNaturalNudgeSettings,
   loadNaturalNudgeStudio,
+  loadPersonaNudges,
   parseNudgeCategory,
   updateNaturalNudgeSettings,
   updateNaturalNudgeStudio,
+  updatePersonaNudges,
 } from "./naturalNudgeService";
 import { listPersonalSpotlights, removePersonalSpotlight, savePersonalSpotlight } from "./spotlightService";
 import {
@@ -1472,6 +1474,10 @@ export function createDashboardApp(client: Client) {
           "persona_personal_memory",
           "persona_server_memory",
           "persona_conditioning_tab",
+          "persona_nudge_tab",
+          "persona_nudge_talkativeness",
+          "persona_nudge_interests",
+          "persona_nudge_reload",
           "persona_conditioning_title",
           "persona_conditioning_hint",
           "persona_conditioning_empty",
@@ -3269,6 +3275,15 @@ export function createDashboardApp(client: Client) {
   });
 
   const naturalNudgesPath = `${BASE_PATH}/api/guilds/:guildId/natural-nudges`;
+  app.on(["GET", "PATCH"], `${personaPath}/nudges`, async (context) => {
+    const result = await requireManagedPersona(context);
+    if (result instanceof Response) return result;
+    const { snapshot, personaId } = result;
+    if (context.req.method === "PATCH")
+      return context.json(await updatePersonaNudges(snapshot, personaId, await context.req.json().catch(() => null)));
+    return context.json(await loadPersonaNudges(snapshot, personaId));
+  });
+
   app.on(["GET", "PATCH"], naturalNudgesPath, async (context) => {
     const result = await requireServerBehaviorContext(context, true);
     if (result instanceof Response) return result;

@@ -117,15 +117,17 @@ Open **Natural Nudges** in the dashboard or `/config` > `Plugins` > `Natural Nud
 
 ## Persona settings
 
-Open `/config` > `Persona` > `Nudges` to set:
+Server managers can open `Personas` > `Character` > `Nudges` in the dashboard or
+`/config` > `Persona` > `Nudges` in Discord.
 
 - **Talkativeness:** how often the persona speaks up. `Silent` personas do not nudge.
 - **Interests:** up to 8 topics the persona likes, with descriptions and examples.
-- **Idle Nudges:** up to 20 idle nudges only this persona uses. 
-Persona cards (`/persona export`) includes all of the above
+- **Idle Nudges:** up to 20 conversation starters only this persona can use. Turn individual
+  nudges off under Availability.
 
-Official presets include these settings. `/persona generate` suggests interests for new personas;
-`Generate Interests` adds new ones through your current text model. Persona exports include all three.
+Official presets include these settings. `/persona generate` suggests interests for new personas.
+`Generate interests` uses the Idle Nudge Planner to add topics to an existing persona. Persona
+cards include talkativeness, interests, and idle nudge definitions.
 
 ## When Nudges Fire
 

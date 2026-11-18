@@ -1597,6 +1597,15 @@
                 hint: ui("persona_model_hint"),
               });
               break;
+            case "nudges":
+              page("personas", ui("persona_nudge_talkativeness"), { ...destination, path, name: "level" });
+              page("personas", ui("persona_nudge_interests"), {
+                ...destination,
+                path,
+                selector: "[data-persona-nudge-interests]",
+              });
+              page("personas", ui("nudge_idle"), { ...destination, path, selector: "[data-persona-nudge-idle]" });
+              break;
             case "images":
               addMarkup(renderPersonaAppearance(persona), destination, path);
               break;
@@ -4451,6 +4460,7 @@
       ];
       if (personaNamingHabits && !guild.isDirectMessage)
         character.push({ id: "conditioning", title: ui("persona_conditioning_tab") });
+      if (!guild.isDirectMessage) character.push({ id: "nudges", title: ui("persona_nudge_tab") });
       sections.push(
         {
           id: "character",
@@ -5329,6 +5339,9 @@
       case "identity":
         body = renderPersonaIdentity(persona);
         break;
+      case "nudges":
+        body = "<div data-persona-nudges></div>";
+        break;
       case "behaviour":
         body = renderPersonaBehaviour(persona);
         break;
@@ -5367,6 +5380,28 @@
       const refresh = () => loadPersonaConditioning(host, persona.personaId);
       host.querySelector("[data-conditioning-refresh]").onclick = refresh;
       void refresh();
+    } else if (panel === "nudges") {
+      void window.TomoriNaturalNudges.renderPersona(content.querySelector("[data-persona-nudges]"), {
+        api,
+        ui,
+        escapeHtml,
+        navigationIcon,
+        fieldLabel,
+        personaCardHead,
+        cardSaveActions,
+        personaSticker,
+        initDraftForms,
+        enhanceDashboard,
+        withBusyForm,
+        completeFormSave,
+        showFormError,
+        confirmDraftDiscard,
+        confirmAction,
+        loadingBar,
+        toast,
+        guildId: state.guildId,
+        persona,
+      });
     } else if (memoryPanel) {
       loadMemories();
     } else if (panel === "sprites") {

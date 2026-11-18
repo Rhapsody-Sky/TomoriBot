@@ -411,13 +411,14 @@ const naturalNudgeOperations = {
     personaId: number,
     category: NaturalNudgeCategory,
     form: IdleNudgeForm,
+    id?: string,
   ): Promise<NudgeWriteResult> {
     const current = await loadPersonaNudgeConfig(personaId);
     if (!current) return "stale";
     if (current.idle_nudges.length >= PERSONA_AUTHORED_IDLE_NUDGE_LIMIT) return "limit";
     const draft = parseIdleNudgeForm(category, form);
     if (!draft) return "invalid";
-    return naturalNudgeRepository.addPersonaIdleNudge(personaId, draft);
+    return naturalNudgeRepository.addPersonaIdleNudge(personaId, draft, id);
   },
 
   /** Edits the definition a fingerprint still matches, preserving its stable local ID and availability. */

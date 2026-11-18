@@ -1,20 +1,36 @@
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
 import {
   CATEGORY_IMPLIED_PREREQUISITES,
   computePersonaNudgeFingerprint,
+  computePersonaNudgeListFingerprint,
   CUSTOM_IDLE_NUDGE_AGENDA_HINT_MAX,
   CUSTOM_IDLE_NUDGE_BRIEF_MAX,
   CUSTOM_IDLE_NUDGE_LIMIT,
   CUSTOM_IDLE_NUDGE_LIST_MAX,
   CUSTOM_IDLE_NUDGE_TITLE_MAX,
   NATURAL_NUDGE_CATEGORIES,
+  NATURAL_NUDGE_INTEREST_DESCRIPTION_MAX,
+  NATURAL_NUDGE_INTEREST_LABEL_MAX,
+  NATURAL_NUDGE_INTEREST_LIMIT,
+  NATURAL_NUDGE_TALKATIVENESS_LEVELS,
   NUDGE_HEAT_OFFSET_MAX,
   NUDGE_PREREQUISITE_IDS,
   NUDGE_TOOL_NAMES,
+  PERSONA_AUTHORED_IDLE_NUDGE_LIMIT,
   customIdleNudgeKey,
+  naturalNudgeInterestSchema,
+  naturalNudgeTalkativenessSchema,
+  personaAuthoredIdleNudgeIdSchema,
+  personaAuthoredIdleNudgeKey,
 } from "@/modules/natural-nudges/db/types";
-import { naturalNudgePanelDependencies, patchConfig } from "@/modules/natural-nudges/discord/operations";
+import {
+  computeInterestFingerprint,
+  computeInterestListFingerprint,
+  naturalNudgePanelDependencies,
+  patchConfig,
+} from "@/modules/natural-nudges/discord/operations";
 import { nudgeFrequencyLabel } from "@/modules/natural-nudges/discord/panel";
 import {
   createCustomIdleNudge,
@@ -148,6 +164,33 @@ export function loadNaturalNudgeCopy() {
     "general.dashboard.interface_nudge_deleted",
     "general.dashboard.interface_nudge_delete_name",
     "general.dashboard.interface_nudge_delete_hint",
+    "general.dashboard.interface_nudge_persona_talk_hint",
+    "general.dashboard.interface_nudge_persona_level",
+    "general.dashboard.interface_nudge_persona_interests_hint",
+    "general.dashboard.interface_nudge_persona_interest_add",
+    "general.dashboard.interface_nudge_persona_interest_edit",
+    "general.dashboard.interface_nudge_persona_interest_hint",
+    "general.dashboard.interface_nudge_persona_interest_description",
+    "general.dashboard.interface_nudge_persona_interest_empty",
+    "general.dashboard.interface_nudge_persona_interest_remove",
+    "general.dashboard.interface_nudge_persona_interest_remove_action",
+    "general.dashboard.interface_nudge_persona_interest_saved",
+    "general.dashboard.interface_nudge_persona_interest_removed",
+    "general.dashboard.interface_nudge_persona_generate",
+    "general.dashboard.interface_nudge_persona_generated",
+    "general.dashboard.interface_nudge_persona_idle_hint",
+    "general.dashboard.interface_nudge_persona_idle_empty",
+    "general.dashboard.interface_nudge_persona_category",
+    "general.dashboard.interface_nudge_persona_owner",
+    "general.dashboard.interface_nudge_persona_delete_hint",
+    "general.dashboard.interface_nudge_persona_restore",
+    "general.dashboard.interface_nudge_persona_restore_title",
+    "general.dashboard.interface_nudge_persona_restore_hint",
+    "general.dashboard.interface_nudge_persona_restored",
+    "general.dashboard.interface_nudge_persona_restore_action",
+    "general.dashboard.interface_nudge_persona_talk_saved",
+    "general.dashboard.interface_nudge_persona_count",
+    "general.dashboard.interface_nudge_persona_generate_no_model",
     "general.dashboard.interface_nudge_error_invalid",
     "general.dashboard.interface_nudge_error_stale",
     "general.dashboard.interface_nudge_error_limit",
@@ -209,11 +252,13 @@ const chatState = (snapshot: DashboardGuildSnapshot) =>
   snapshot.rawPersonas.find((persona) => !persona.is_alter) ?? snapshot.rawPersonas[0] ?? null;
 
 function fail(result: string): never {
-  const status = result === "invalid" ? 422 : result === "limit" || result === "stale" ? 409 : 500;
+  const status = result === "invalid" ? 422 : ["limit", "stale", "no-model"].includes(result) ? 409 : 500;
   const keys: Record<string, string> = {
     invalid: "general.dashboard.interface_nudge_error_invalid",
     stale: "general.dashboard.interface_nudge_error_stale",
     limit: "general.dashboard.interface_nudge_error_limit",
+    "no-model": "general.dashboard.interface_nudge_persona_generate_no_model",
+    "generate-failed": "commands.config.natural_nudges.generate_failed_detail",
   };
   throw new DashboardServiceError(
     `natural_nudge_${result}`,
@@ -482,4 +527,143 @@ export async function updateNaturalNudgeStudio(snapshot: DashboardGuildSnapshot,
     );
   }
   return { key: patch.key };
+}
+
+const revisionSchema = z.string().regex(/^[A-Za-z0-9_-]{8}$/);
+const interestTarget = {
+  index: z
+    .number()
+    .int()
+    .min(0)
+    .max(NATURAL_NUDGE_INTEREST_LIMIT - 1),
+  revision: revisionSchema,
+};
+const personaNudgePatch = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("talkativeness"), level: naturalNudgeTalkativenessSchema }).strict(),
+  z.object({ action: z.literal("interest-add"), interest: naturalNudgeInterestSchema }).strict(),
+  z.object({ action: z.literal("interest-edit"), ...interestTarget, interest: naturalNudgeInterestSchema }).strict(),
+  z.object({ action: z.literal("interest-remove"), ...interestTarget }).strict(),
+  z.object({ action: z.literal("interest-generate") }).strict(),
+  z.object({ action: z.literal("idle-add"), category: categorySchema, form }).strict(),
+  z
+    .object({ action: z.literal("idle-edit"), id: personaAuthoredIdleNudgeIdSchema, revision: revisionSchema, form })
+    .strict(),
+  z.object({ action: z.literal("idle-toggle"), id: personaAuthoredIdleNudgeIdSchema, enabled: z.boolean() }).strict(),
+  z
+    .object({ action: z.literal("idle-remove"), id: personaAuthoredIdleNudgeIdSchema, revision: revisionSchema })
+    .strict(),
+  z.object({ action: z.literal("idle-restore"), revision: revisionSchema }).strict(),
+]);
+
+function requireNudgePersona(snapshot: DashboardGuildSnapshot, personaId: number) {
+  const persona = snapshot.rawPersonas.find((entry) => entry.persona_id === personaId);
+  if (!persona)
+    throw new DashboardServiceError("persona_not_found", 404, text("general.dashboard.naming_persona_missing"));
+  return persona;
+}
+
+export async function loadPersonaNudges(snapshot: DashboardGuildSnapshot, personaId: number) {
+  const persona = requireNudgePersona(snapshot, personaId);
+  const deps = naturalNudgePanelDependencies;
+  const config = await deps.loadPersonaConfig(personaId);
+  if (!config) fail("stale");
+  const { blockers } = await deps.loadPersonaNudges(persona, snapshot.rawPersonas, config);
+  return {
+    level: config.talkativeness,
+    levels: NATURAL_NUDGE_TALKATIVENESS_LEVELS.map((level) => ({
+      id: level,
+      label: text(`commands.config.natural_nudges.talkativeness_${level}`),
+      effect: text(`commands.config.natural_nudges.talkativeness_${level}_effect`),
+    })),
+    interests: config.interests.map((interest, index) => ({
+      ...interest,
+      revision: computeInterestFingerprint(personaId, index, interest),
+    })),
+    interestRevision: computeInterestListFingerprint(personaId, config.interests),
+    idle: config.idle_nudges.map((nudge) => {
+      const blocker = blockers.get(personaAuthoredIdleNudgeKey(personaId, nudge.id));
+      return {
+        id: nudge.id,
+        category: nudge.category,
+        title: nudge.title,
+        brief: nudge.brief,
+        agenda: nudge.agenda_hint ?? "",
+        prerequisites: nudge.prerequisites.filter((key) => key !== CATEGORY_IMPLIED_PREREQUISITES[nudge.category]),
+        recommended: nudge.recommended_tools,
+        enabled: !config.disabled_idle_nudge_ids.includes(nudge.id),
+        blocker: blocker ? nudgeBlockerLabel(locale, blocker) : null,
+        revision: computePersonaNudgeFingerprint(personaId, nudge),
+      };
+    }),
+    restoreRevision:
+      persona.is_pointer && config.idle_nudges_override
+        ? computePersonaNudgeListFingerprint(personaId, config.idle_nudges)
+        : null,
+    limits: {
+      interests: NATURAL_NUDGE_INTEREST_LIMIT,
+      interestLabel: NATURAL_NUDGE_INTEREST_LABEL_MAX,
+      interestDescription: NATURAL_NUDGE_INTEREST_DESCRIPTION_MAX,
+      idle: PERSONA_AUTHORED_IDLE_NUDGE_LIMIT,
+      title: CUSTOM_IDLE_NUDGE_TITLE_MAX,
+      brief: CUSTOM_IDLE_NUDGE_BRIEF_MAX,
+      agenda: CUSTOM_IDLE_NUDGE_AGENDA_HINT_MAX,
+      options: CUSTOM_IDLE_NUDGE_LIST_MAX,
+    },
+    categories: Object.fromEntries(
+      NATURAL_NUDGE_CATEGORIES.map((category) => [category, text(`commands.nudge-studio.category_${category}`)]),
+    ),
+    implied: CATEGORY_IMPLIED_PREREQUISITES,
+    requirements: Object.fromEntries(NUDGE_PREREQUISITE_IDS.map((key) => [key, prerequisiteLabel(locale, key)])),
+    tools: Object.fromEntries(NUDGE_TOOL_NAMES.map((key) => [key, nudgeToolLabel(locale, key)])),
+    copy: loadNaturalNudgeCopy(),
+  };
+}
+
+export async function updatePersonaNudges(snapshot: DashboardGuildSnapshot, personaId: number, input: unknown) {
+  const persona = requireNudgePersona(snapshot, personaId);
+  const parsed = personaNudgePatch.safeParse(input);
+  if (!parsed.success) fail("invalid");
+  const patch = parsed.data;
+  const deps = naturalNudgePanelDependencies;
+  const ops = deps.operations;
+  switch (patch.action) {
+    case "talkativeness":
+      checkWrite(await ops.setTalkativeness(personaId, patch.level));
+      break;
+    case "interest-add":
+      checkWrite(await ops.addInterest(personaId, patch.interest));
+      break;
+    case "interest-edit":
+      checkWrite(await ops.editInterest(personaId, patch.index, patch.revision, patch.interest));
+      break;
+    case "interest-remove": {
+      const config = await deps.loadPersonaConfig(personaId);
+      if (!config || computeInterestListFingerprint(personaId, config.interests) !== patch.revision) fail("stale");
+      if (!config.interests[patch.index]) fail("stale");
+      const kept = new Set(config.interests.flatMap((_, index) => (index === patch.index ? [] : [index])));
+      checkWrite(await ops.removeInterests(personaId, patch.revision, kept));
+      break;
+    }
+    case "interest-generate":
+      checkWrite(await ops.generateInterests(persona));
+      break;
+    case "idle-add": {
+      const id = randomBytes(12).toString("base64url");
+      checkWrite(await ops.addPersonaNudge(personaId, patch.category, patch.form, id));
+      return { id };
+    }
+    case "idle-edit":
+      checkWrite(await ops.editPersonaNudge(personaId, patch.id, patch.revision, patch.form));
+      break;
+    case "idle-toggle":
+      checkWrite(await ops.setPersonaNudgeAvailability(personaId, patch.id, patch.enabled));
+      break;
+    case "idle-remove":
+      checkWrite(await naturalNudgeRepository.removePersonaIdleNudge(personaId, patch.id, patch.revision));
+      break;
+    case "idle-restore":
+      checkWrite(await ops.restorePersonaNudgeList(personaId, patch.revision));
+      break;
+  }
+  return { ok: true };
 }
