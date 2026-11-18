@@ -219,13 +219,17 @@ class NaturalNudgeRepository {
     }
   }
 
-  async updateCustomIdleNudge(serverId: number, idleNudgeId: number, input: CustomIdleNudgeInput): Promise<boolean> {
+  async updateCustomIdleNudge(
+    serverId: number,
+    idleNudgeId: number,
+    input: Omit<CustomIdleNudgeInput, "enabled">,
+  ): Promise<boolean> {
     try {
       const rows = await sql`
         UPDATE server_natural_nudge_custom_idle_nudges SET
           category = ${input.category}, title = ${input.title}, brief = ${input.brief},
           agenda_hint = ${input.agenda_hint}, prerequisites = ${sql.array(input.prerequisites, "TEXT")},
-          recommended_tools = ${sql.array(input.recommended_tools, "TEXT")}, enabled = ${input.enabled}
+          recommended_tools = ${sql.array(input.recommended_tools, "TEXT")}
         WHERE server_id = ${serverId} AND custom_idle_nudge_id = ${idleNudgeId}
         RETURNING custom_idle_nudge_id
       `;
@@ -272,19 +276,22 @@ class NaturalNudgeRepository {
     availability: IdleNudgeAvailability,
   ): Promise<boolean> {
     try {
-      await sql.transaction(async (tx) => {
+      return await sql.transaction(async (tx) => {
         if (customIdleNudgeId === null) {
+          await tx`SELECT server_id FROM servers WHERE server_id = ${serverId} FOR UPDATE`;
           const disabled = new Set((await this.loadServerConfig(serverId, tx)).disabled_builtin_idle_nudges);
           if (availability.enabled) disabled.delete(idleNudgeKey);
           else disabled.add(idleNudgeKey);
           await this.saveServerConfigOrThrow(serverId, { disabled_builtin_idle_nudges: [...disabled] }, tx);
         } else {
-          await tx`
+          const updated = await tx`
             UPDATE server_natural_nudge_custom_idle_nudges SET enabled = ${availability.enabled}
             WHERE server_id = ${serverId} AND custom_idle_nudge_id = ${customIdleNudgeId}
+            RETURNING custom_idle_nudge_id
           `;
+          if (!updated.length) return false;
         }
-        if (availability.enabled && availability.scope) {
+        if (availability.scope?.length) {
           await tx`
             INSERT INTO server_natural_nudge_persona_scopes (server_id, idle_nudge_key, persona_ids)
             VALUES (${serverId}, ${idleNudgeKey}, ${[...availability.scope]}::jsonb)
@@ -296,8 +303,8 @@ class NaturalNudgeRepository {
             WHERE server_id = ${serverId} AND idle_nudge_key = ${idleNudgeKey}
           `;
         }
+        return true;
       });
-      return true;
     } catch (error) {
       await log.error("Natural Nudges: failed to save idle nudge availability", error, {
         metadata: { serverId, idleNudgeKey },

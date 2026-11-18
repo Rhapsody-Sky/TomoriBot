@@ -56,6 +56,10 @@ Open `/nudge-studio` (requires `Manage Server`) to browse each category. The col
 whether a nudge is on, missing a prerequisite, or off. Each row ends with its source: `Built-in`,
 `Server custom`, or `For <persona>`.
 
+In the dashboard, open **Natural Nudges → Studio**. The **Enable nudge** switch keeps your
+allowed personas when you turn a nudge off. In **Allowed personas**, selecting everyone also
+includes personas added later.
+
 `Toggle Availability` chooses which personas can use a nudge:
 
 - **All checked:** every persona can use it, including personas you add later.
@@ -97,7 +101,7 @@ in `/config` > `Persona` > `Nudges` (see [Persona settings](#persona-settings)).
 
 ## Settings
 
-Open `/config` > `Plugins` > `Natural Nudges` to change settings
+Open **Natural Nudges** in the dashboard or `/config` > `Plugins` > `Natural Nudges` in Discord
 (requires `Manage Server`):
 
 - **Modes:** turn idle and active nudges on or off separately.

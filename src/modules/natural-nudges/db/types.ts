@@ -339,7 +339,9 @@ export const personaScopeRowSchema = z.object({
 export type IdleNudgePersonaScopes = ReadonlyMap<string, readonly number[]>;
 
 /** A `null` scope opens the idle nudge to every persona, including ones created later. */
-export type IdleNudgeAvailability = { enabled: false } | { enabled: true; scope: readonly number[] | null };
+export type IdleNudgeAvailability =
+  | { enabled: false; scope?: readonly number[] | null }
+  | { enabled: true; scope: readonly number[] | null };
 
 export const runtimeStateSchema = z.object({
   server_id: z.number().int(),

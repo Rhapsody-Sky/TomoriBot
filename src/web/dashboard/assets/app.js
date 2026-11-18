@@ -410,7 +410,7 @@
   };
 
   const draftForms =
-    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], [data-spotlight-form], #stm-categories-form, form[data-provider-scope][data-fx=track]";
+    "[data-site-entry], [data-profile-section], [data-settings-sections], [data-drafting-selections], [data-channel-settings], [data-channel-allowlist], [data-persona-naming], [data-persona-habit-form], [data-persona-attg], [data-persona-voice], [data-lorebook-form], [data-moderation-quota], [data-spotlight-form], [data-nudge-form], #stm-categories-form, form[data-provider-scope][data-fx=track]";
   const localEditForms =
     "[data-persona-section], [data-persona-text-model], [data-persona-entry-form], #persona-channel-workspace form, #server-models-form, [data-advanced-models], #memory-compose-form, #memory-edit-form";
   const editForms = `${draftForms}, ${localEditForms}`;
@@ -840,6 +840,7 @@
               providerPanel: "connections",
             },
             ...(isDirectMessage ? [] : [{ view: "moderation", title: ui("moderation"), moderationTab: "roles" }]),
+            ...(isDirectMessage ? [] : [{ view: "natural-nudges", title: ui("nudge_title"), hint: ui("nudge_hint") }]),
           ],
         });
       }
@@ -1144,6 +1145,7 @@
     lorebook: "book-open",
     "personal-providers": "plug",
     "server-providers": "plug",
+    "natural-nudges": "bell",
     settings: "settings-2",
     "channel-settings": "radio",
     moderation: "users-round",
@@ -1246,6 +1248,7 @@
       "settings",
       "channel-settings",
       "server-providers",
+      "natural-nudges",
       "moderation",
       "personal-spotlights",
       "site-admin",
@@ -1331,6 +1334,37 @@
       case "moderation":
         renderModeration(workspace);
         break;
+      case "natural-nudges": {
+        const { guildId } = state;
+        void window.TomoriNaturalNudges.render(workspace, {
+          api,
+          ui,
+          escapeHtml,
+          navigationIcon,
+          fieldLabel,
+          personaCardHead,
+          cardSaveActions,
+          renderChannelSelector,
+          personas: state.overview.personas,
+          renderPersonaQuickStickers,
+          personaPickerTileContent,
+          personaPickerSearchText,
+          initDraftForms,
+          enhanceDashboard,
+          withBusyForm,
+          completeFormSave,
+          showFormError,
+          confirmDraftDiscard,
+          loadingBar,
+          toast,
+          guildId,
+          initialTab:
+            pendingSearchDestination?.view === "natural-nudges" ? pendingSearchDestination.nudgeTab : undefined,
+          afterRender: focusSearchDestination,
+          isCurrent: () => state.guildId === guildId && state.view === "natural-nudges",
+        });
+        break;
+      }
       default:
         renderOverview(workspace);
     }
@@ -1418,6 +1452,24 @@
       page("site-admin", copy.show_in_sidebar, { ...route, name: "showInSidebar" });
     }
     if (!state.overview) return entries;
+    if (state.overview.canManage && !state.overview.guild.isDirectMessage) {
+      for (const [tab, key] of [
+        ["settings", "channels"],
+        ["settings", "idle"],
+        ["settings", "active"],
+        ["models", "planner"],
+        ["models", "checker"],
+        ["advanced", "heat"],
+        ["advanced", "weights"],
+        ["studio", "studio"],
+      ]) {
+        page("natural-nudges", ui(`nudge_${key}`), {
+          path: ui("nudge_title"),
+          nudgeTab: tab,
+          selector: tab === "studio" ? "#nudge-studio" : `[data-nudge-form="${key}"]`,
+        });
+      }
+    }
     const statsPath = `${ui("overview_title")} / ${ui("stats_title")}`;
     page("overview", ui("stats_title"), {
       path: ui("overview_title"),
@@ -3732,6 +3784,7 @@
         return confirmAction(ui("discard_title"), ui("discard_detail"), ui("discard"));
     }
     if (state.view === "lorebooks") return confirmDraftDiscard(document.querySelector("#lorebook-workspace"));
+    if (state.view === "natural-nudges") return confirmDraftDiscard(document.querySelector("[data-nudge-workspace]"));
     if (state.view === "personal-spotlights")
       return confirmDraftDiscard(document.querySelector("#personal-spotlights"));
     if (state.view === "site-admin") {
@@ -5746,7 +5799,16 @@
     values = [],
     single = false,
     channels = state.overview.channels,
-    { preserveMissing = false, required = false, title = "", hint = "", includeExcluded = false, metadata } = {},
+    {
+      preserveMissing = false,
+      required = false,
+      title = "",
+      hint = "",
+      includeExcluded = false,
+      metadata,
+      hideBulk = false,
+      intro = "",
+    } = {},
   ) {
     const selected = new Set(values.filter((value) => value != null && value !== "").map(String));
     const allowed = state.overview.allowedChannelIds || [];
@@ -5776,7 +5838,7 @@
       )
       .join("");
     const collection =
-      ["settings", "channel-settings", "personal-spotlights"].includes(state.view) ||
+      ["settings", "channel-settings", "personal-spotlights", "natural-nudges"].includes(state.view) ||
       (state.view === "personas" && !single);
     if (collection) {
       const rows = [...groups.values()]
@@ -5796,7 +5858,9 @@
         ? required
           ? ""
           : `<label class="channel"><span class="hash" aria-hidden="true">#</span><span class="name"><strong>${escapeHtml(ui("channel_none"))}</strong></span><input type="radio" name="${escapeHtml(name)}" value=""${!values[0] ? " checked" : ""}></label>`
-        : `<div class="row"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
+        : hideBulk
+          ? ""
+          : `<div class="row"><button class="button small" type="button" data-channel-select="all">${escapeHtml(ui("channel_select_all"))}</button><button class="button small" type="button" data-channel-select="none">${escapeHtml(ui("channel_deselect_all"))}</button></div>`;
       const count = channelSelectionCount(
         channels.filter((channel) => selected.has(String(channel.id))).length,
         channels.length,
@@ -5809,7 +5873,7 @@
       const bulkUnderSearch = state.view === "channel-settings" && !single;
       return `<div data-channel-selector>
         <header class="card-head">${heading ? `<div><h3>${escapeHtml(heading)}${total}</h3>${hint ? `<p class="hint">${escapeHtml(hint)}</p>` : ""}</div>` : total}${bulkUnderSearch ? `<div class="stack">${filter}${controls}</div>` : filter}</header>
-        <div class="stack">${bulkUnderSearch ? "" : controls}${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div>
+        <div class="stack">${bulkUnderSearch ? "" : controls}${intro}${preserved}<div class="channels">${rows}</div><div data-channel-empty class="empty-note"${rows ? " hidden" : ""}><strong>${escapeHtml(ui("channel_empty"))}</strong></div></div>
       </div>`;
     }
     const rows =
@@ -8779,7 +8843,7 @@
       return;
     }
     const picker = event.target.closest?.(
-      "#persona-picker-dialog, #channel-personas-dialog, #spotlight-personas-dialog",
+      "#persona-picker-dialog, #channel-personas-dialog, #spotlight-personas-dialog, #nudge-personas-dialog",
     );
     if (picker && event.key === "/" && event.target.type !== "search") {
       event.preventDefault();
@@ -8788,7 +8852,7 @@
     }
     const group = event.target.closest?.(".quick, .dock, .segmented, .deck");
     const current = event.target.closest?.(
-      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-profile-tab], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], [data-site-tab][role=tab], [data-site-page][role=tab], .deck-card[aria-pressed]",
+      "[data-persona-select], [data-persona-panel], [data-design-choice], [data-history-timeframe], [data-profile-tab], [data-settings-group], [data-channel-tab][role=tab], [data-provider-panel][role=tab], [data-connection-select][role=tab], [data-moderation-tab][role=tab], [data-site-tab][role=tab], [data-site-page][role=tab], [data-nudge-tab][role=tab], [data-nudge-category][role=tab], .deck-card[aria-pressed]",
     );
     if (group?.contains(current) && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const items = [...group.querySelectorAll(":scope > button:not([hidden], [disabled], .more-pill)")];

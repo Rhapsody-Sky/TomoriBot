@@ -68,6 +68,14 @@ import {
   saveRandomTrigger,
   updateToolTriggers,
 } from "./serverBehaviorService";
+import {
+  loadNaturalNudgeCopy,
+  loadNaturalNudgeSettings,
+  loadNaturalNudgeStudio,
+  parseNudgeCategory,
+  updateNaturalNudgeSettings,
+  updateNaturalNudgeStudio,
+} from "./naturalNudgeService";
 import { listPersonalSpotlights, removePersonalSpotlight, savePersonalSpotlight } from "./spotlightService";
 import {
   removeServerLogitBias,
@@ -158,6 +166,10 @@ const dashboardAssets = {
   "app.css": { path: "src/web/dashboard/assets/app.css", contentType: "text/css; charset=utf-8" },
   "companion.css": { path: "src/web/dashboard/assets/companion.css", contentType: "text/css; charset=utf-8" },
   "app.js": { path: "src/web/dashboard/assets/app.js", contentType: "application/javascript; charset=utf-8" },
+  "natural-nudges.js": {
+    path: "src/web/dashboard/assets/natural-nudges.js",
+    contentType: "application/javascript; charset=utf-8",
+  },
   "persona-art-tomori.png": { path: "src/web/dashboard/assets/persona-art-tomori.png", contentType: "image/png" },
   "persona-art-nerine.png": { path: "src/web/dashboard/assets/persona-art-nerine.png", contentType: "image/png" },
   "persona-art-aphel.png": { path: "src/web/dashboard/assets/persona-art-aphel.png", contentType: "image/png" },
@@ -691,6 +703,7 @@ export function createDashboardApp(client: Client) {
         assetName === "design.js" ||
         assetName === "fx.js" ||
         assetName === "app.js" ||
+        assetName === "natural-nudges.js" ||
         assetName === "app.css" ||
         assetName === "companion.css" ||
         assetName === "navigation-icons.svg"
@@ -1801,6 +1814,16 @@ export function createDashboardApp(client: Client) {
           "personal_providers_hint",
           "personal_providers_byok_hint",
           "nav_server_settings",
+          "nudge_title",
+          "nudge_hint",
+          "nudge_channels",
+          "nudge_idle",
+          "nudge_active",
+          "nudge_planner",
+          "nudge_checker",
+          "nudge_heat",
+          "nudge_weights",
+          "nudge_studio",
           "nav_server_administration",
           "nav_server_providers",
           "server_providers_hint",
@@ -3243,6 +3266,39 @@ export function createDashboardApp(client: Client) {
         ? loadToolTriggers(result.snapshot)
         : await updateToolTriggers(result.snapshot, await context.req.json().catch(() => null));
     return context.json({ targets });
+  });
+
+  const naturalNudgesPath = `${BASE_PATH}/api/guilds/:guildId/natural-nudges`;
+  app.on(["GET", "PATCH"], naturalNudgesPath, async (context) => {
+    const result = await requireServerBehaviorContext(context, true);
+    if (result instanceof Response) return result;
+    context.header("Cache-Control", "private, no-store");
+    const ids = new Set(result.channels.map(({ id }) => id));
+    if (context.req.method === "PATCH") {
+      await updateNaturalNudgeSettings(result.snapshot, ids, await context.req.json().catch(() => null));
+      return context.json(await loadNaturalNudgeSettings(result.snapshot, ids));
+    }
+    const guild = client.guilds.cache.get(result.guild.id);
+    const channelChoices = result.channels.map((channel) => {
+      const source = guild?.channels.cache.get(channel.id);
+      return { ...channel, topic: source?.type === ChannelType.GuildText ? source.topic : null };
+    });
+    return context.json({
+      ...(await loadNaturalNudgeSettings(result.snapshot, ids)),
+      copy: loadNaturalNudgeCopy(),
+      channelChoices,
+    });
+  });
+
+  app.on(["GET", "PATCH"], `${naturalNudgesPath}/studio`, async (context) => {
+    const result = await requirePersonaManager(context, false);
+    if (result instanceof Response) return result;
+    context.header("Cache-Control", "private, no-store");
+    if (context.req.method === "PATCH")
+      return context.json(await updateNaturalNudgeStudio(result.snapshot, await context.req.json().catch(() => null)));
+    return context.json(
+      await loadNaturalNudgeStudio(result.snapshot, parseNudgeCategory(context.req.query("category"))),
+    );
   });
 
   const randomTriggerPath = `${BASE_PATH}/api/guilds/:guildId/settings/random-triggers`;

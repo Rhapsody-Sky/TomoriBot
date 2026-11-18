@@ -747,16 +747,21 @@ body[data-theme="dark"] [data-dashboard-entry="login"] [data-entry-logo] {
   width: var(--space-8);
 }
 
-:is([data-channel-personas], [data-spotlight-details]) .quick > [role="img"] {
+:is([data-channel-personas], [data-spotlight-details], [data-nudge-form="availability"]) .quick > [role="img"] {
   inline-size: calc(2 * var(--space-6));
 }
 
-:is([data-channel-personas], [data-spotlight-details]) .quick > [role="img"]:nth-child(even) .sticker {
+:is([data-channel-personas], [data-spotlight-details], [data-nudge-form="availability"])
+  .quick
+  > [role="img"]:nth-child(even)
+  .sticker {
   --tilt: 3deg;
 }
 
 @media (max-width: 800px) {
-  :is([data-channel-personas], [data-spotlight-details]) .quick > [role="img"]:nth-child(n + 4) {
+  :is([data-channel-personas], [data-spotlight-details], [data-nudge-form="availability"])
+    .quick
+    > [role="img"]:nth-child(n + 4) {
     display: none;
   }
 }

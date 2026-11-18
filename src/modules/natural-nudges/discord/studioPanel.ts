@@ -173,12 +173,16 @@ const TOOL_KEYS: Record<NudgeToolName, string> = {
 
 export const NUDGE_STUDIO_ADD_VALUE = "add";
 
-function prerequisiteLabel(locale: string, id: string): string {
+export function nudgeToolLabel(locale: string, tool: NudgeToolName): string {
+  return localizer(locale, TOOL_KEYS[tool]);
+}
+
+export function prerequisiteLabel(locale: string, id: string): string {
   const key = PREREQUISITE_KEYS[id];
   if (key) return localizer(locale, key);
   const tool = prerequisiteTool(id);
   return localizer(locale, "commands.nudge-studio.prerequisite_tool", {
-    tool: tool ? localizer(locale, TOOL_KEYS[tool]) : id,
+    tool: tool ? nudgeToolLabel(locale, tool) : id,
   });
 }
 
@@ -189,7 +193,7 @@ export function nudgeCategoryLabel(locale: string, category: NaturalNudgeCategor
 export function nudgeBlockerLabel(locale: string, blocker: IdleNudgeBlocker): string {
   if (blocker.kind === "tool")
     return localizer(locale, "commands.nudge-studio.blocker_tool", {
-      tool: localizer(locale, TOOL_KEYS[blocker.tool]),
+      tool: nudgeToolLabel(locale, blocker.tool),
     });
   return localizer(
     locale,
@@ -199,7 +203,7 @@ export function nudgeBlockerLabel(locale: string, blocker: IdleNudgeBlocker): st
   );
 }
 
-function studioEntryTitle(locale: string, entry: StudioEntry): string {
+export function studioEntryTitle(locale: string, entry: StudioEntry): string {
   return entry.definition.titleKey ? localizer(locale, entry.definition.titleKey) : (entry.definition.title ?? "");
 }
 
@@ -566,7 +570,7 @@ export function buildIdleNudgeFormModal(
           max_values: CUSTOM_IDLE_NUDGE_LIST_MAX,
           placeholder: placeholder("commands.nudge-studio.tools_placeholder", SELECT_PLACEHOLDER_MAX),
           options: NUDGE_TOOL_NAMES.map((tool) => ({
-            label: safeSelectOptionText(t(TOOL_KEYS[tool]), OPTION_TEXT_MAX),
+            label: safeSelectOptionText(nudgeToolLabel(locale, tool), OPTION_TEXT_MAX),
             value: tool,
             default: current?.recommended_tools.includes(tool) ?? false,
           })),

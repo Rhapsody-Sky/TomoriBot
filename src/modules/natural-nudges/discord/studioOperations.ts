@@ -290,6 +290,12 @@ function parseCustomForm(
   return parsed.success ? parsed.data : null;
 }
 
+export async function createCustomIdleNudge(serverId: number, category: NaturalNudgeCategory, form: IdleNudgeForm) {
+  const parsed = parseCustomForm(category, form, true);
+  if (!parsed) return "invalid";
+  return naturalNudgeRepository.insertCustomIdleNudge(serverId, parsed, CUSTOM_IDLE_NUDGE_LIMIT);
+}
+
 async function findCustom(
   serverId: number,
   category: NaturalNudgeCategory,
@@ -305,10 +311,8 @@ export const nudgeStudioOperations = {
     category: NaturalNudgeCategory,
     form: IdleNudgeForm,
   ): Promise<StudioWriteResult> {
-    const parsed = parseCustomForm(category, form, true);
-    if (!parsed) return "invalid";
-    const inserted = await naturalNudgeRepository.insertCustomIdleNudge(serverId, parsed, CUSTOM_IDLE_NUDGE_LIMIT);
-    return inserted === "limit" ? "limit" : inserted === "failed" ? "write-failed" : "success";
+    const inserted = await createCustomIdleNudge(serverId, category, form);
+    return typeof inserted === "number" ? "success" : inserted === "failed" ? "write-failed" : inserted;
   },
 
   async updateCustomIdleNudge(
@@ -319,7 +323,7 @@ export const nudgeStudioOperations = {
   ): Promise<StudioWriteResult> {
     const custom = await findCustom(serverId, category, id);
     if (!custom) return "stale";
-    const parsed = parseCustomForm(category, form, custom.enabled);
+    const parsed = parseIdleNudgeForm(category, form);
     if (!parsed) return "invalid";
     return (await naturalNudgeRepository.updateCustomIdleNudge(serverId, id, parsed)) ? "success" : "write-failed";
   },

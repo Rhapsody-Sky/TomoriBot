@@ -54,6 +54,7 @@ export function renderDashboardHtml(content?: string): string {
     <script src="/settings/assets/controls.js" defer></script>
     <script src="/settings/assets/fx.js" defer></script>
     ${content === undefined ? '<script src="/settings/assets/site.js" defer></script>' : ""}
+    ${content === undefined ? '<script src="/settings/assets/natural-nudges.js" defer></script>' : ""}
     ${content === undefined ? '<script src="/settings/assets/app.js?v=2" defer></script>' : ""}
   </body>
 </html>`;

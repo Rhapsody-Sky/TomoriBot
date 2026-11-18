@@ -1324,6 +1324,30 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Natural Nudges persistence: regression", (
     await save({ enabled: true, scope: null });
   });
 
+  it("keeps the configured persona scope when the dashboard disables a nudge", async () => {
+    const key = "ping_user.check_in";
+    const scope = [refs.personaId];
+    try {
+      expect(
+        await naturalNudgeRepository.saveIdleNudgeAvailability(refs.serverId, key, null, { enabled: false, scope }),
+      ).toBe(true);
+      expect((await naturalNudgeRepository.loadPersonaScopes(refs.serverId)).get(key)).toEqual(scope);
+      expect((await naturalNudgeRepository.loadServerConfig(refs.serverId)).disabled_builtin_idle_nudges).toContain(
+        key,
+      );
+
+      expect(
+        await naturalNudgeRepository.saveIdleNudgeAvailability(refs.serverId, key, null, { enabled: true, scope }),
+      ).toBe(true);
+      expect((await naturalNudgeRepository.loadPersonaScopes(refs.serverId)).get(key)).toEqual(scope);
+      expect((await naturalNudgeRepository.loadServerConfig(refs.serverId)).disabled_builtin_idle_nudges).not.toContain(
+        key,
+      );
+    } finally {
+      await naturalNudgeRepository.saveIdleNudgeAvailability(refs.serverId, key, null, { enabled: true, scope: null });
+    }
+  });
+
   it("clears a checker pinned to a retired model during seeding", async () => {
     const [llm] = await testSql`
       INSERT INTO llms (llm_provider, llm_codename, is_deprecated)

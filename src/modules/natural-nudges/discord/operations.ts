@@ -205,7 +205,7 @@ async function loadPersonaNudgeConfig(personaId: number): Promise<PersonaNatural
   return (await naturalNudgeRepository.loadPersonaConfigs([personaId])).get(personaId) ?? null;
 }
 
-async function patchConfig(
+export async function patchConfig(
   serverId: number,
   patch: Parameters<typeof naturalNudgeRepository.saveServerConfig>[1],
 ): Promise<NudgeWriteResult> {

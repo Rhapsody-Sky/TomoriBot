@@ -97,7 +97,7 @@ const FREQUENCY_LOCALE_KEYS: Record<IdleNudgeFrequencyLevel, string> = {
   3: "commands.config.natural_nudges.frequency_3",
 };
 
-function nudgeFrequencyLabel(locale: string, level: IdleNudgeFrequencyLevel): string {
+export function nudgeFrequencyLabel(locale: string, level: IdleNudgeFrequencyLevel): string {
   return localizer(locale, FREQUENCY_LOCALE_KEYS[level]);
 }
 

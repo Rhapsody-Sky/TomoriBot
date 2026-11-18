@@ -437,6 +437,9 @@ reads as open to everyone. Readers filter out deleted IDs instead. Deleting or i
 nudges drops their scopes (import assigns new IDs), the workspace export omits scopes because persona IDs
 do not port, and a server reset clears them.
 
+The dashboard writes the enable switch and the configured persona scope together. It retains a
+restricted scope while the idle nudge is disabled, so re-enabling uses the same personas.
+
 A persona-authored idle nudge has an owner instead of a scope. Its runtime key is
 `persona:<personaId>:<localId>` (`personaAuthoredIdleNudgeKey`), where `<personaId>` is the local
 persona instance and `<localId>` is unique only inside that persona's list, so two servers can hold
