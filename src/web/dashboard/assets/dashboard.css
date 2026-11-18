@@ -747,6 +747,10 @@ body[data-theme="dark"] [data-dashboard-entry="login"] [data-entry-logo] {
   width: var(--space-8);
 }
 
+[data-nudge-entry] .quick > [role="img"] {
+  inline-size: var(--space-8);
+}
+
 :is([data-channel-personas], [data-spotlight-details], [data-nudge-form="availability"]) .quick > [role="img"] {
   inline-size: calc(2 * var(--space-6));
 }

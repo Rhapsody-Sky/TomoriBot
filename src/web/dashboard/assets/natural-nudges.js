@@ -316,7 +316,7 @@
       record.owner !== null
         ? ""
         : record.scope?.length
-          ? `<div class="quickbar"><div class="quick" data-channel-persona-preview>${stickers(scopePreview(record.scope))}</div><span class="hint">${e(count(record.scope))}</span></div>`
+          ? `<div class="quickbar"><div class="quick">${stickers(scopePreview(record.scope), "flat")}</div><span class="hint">${e(count(record.scope))}</span></div>`
           : `<span class="chip">${c(record.scope === null ? "all_personas" : "no_personas")}</span>`;
 
     function filterCatalog() {

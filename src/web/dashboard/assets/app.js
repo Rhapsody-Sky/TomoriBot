@@ -4771,12 +4771,12 @@
     return `<span class="sticker${variant ? ` ${variant}` : ""}" aria-hidden="true">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" data-avatar-fallback="${escapeHtml(initial)}">` : escapeHtml(initial)}</span>`;
   }
 
-  function renderPersonaQuickStickers(personas) {
+  function renderPersonaQuickStickers(personas, variant = "") {
     return personas
       .slice(0, 4)
       .map((persona) => {
         const name = escapeHtml(persona.nickname);
-        return `<span role="img" aria-label="${name}" data-tooltip="${name}">${personaSticker(persona)}</span>`;
+        return `<span role="img" aria-label="${name}" data-tooltip="${name}">${personaSticker(persona, variant)}</span>`;
       })
       .join("");
   }
