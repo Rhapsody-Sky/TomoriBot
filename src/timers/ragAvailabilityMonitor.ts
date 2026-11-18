@@ -17,7 +17,7 @@ const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
  * settled the question either way: a definitive "pgvector absent" needs no polling, and
  * the probe is a database round-trip that would otherwise repeat forever.
  */
-export class RagAvailabilityMonitor {
+class RagAvailabilityMonitor {
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning = false;
   private readonly intervalMs: number;
@@ -74,19 +74,20 @@ export class RagAvailabilityMonitor {
 
 let monitorInstance: RagAvailabilityMonitor | null = null;
 
+/** @public Dynamically loaded by `src/init/timers.ts` on main and release. */
 export function initializeRagAvailabilityMonitor(intervalMs?: number): void {
   if (monitorInstance) {
     log.warn("RAG availability monitor already initialized");
     return;
   }
 
-  const resolved =
-    intervalMs ?? (Number.parseInt(process.env.RAG_AVAILABILITY_REPROBE_INTERVAL_MS || "", 10) || DEFAULT_INTERVAL_MS);
+  const resolved = intervalMs ?? DEFAULT_INTERVAL_MS;
 
   monitorInstance = new RagAvailabilityMonitor(Math.max(1000, resolved));
   monitorInstance.start();
 }
 
+/** @public Dynamically loaded by `src/init/timers.ts` on main and release. */
 export function stopRagAvailabilityMonitor(): void {
   if (monitorInstance) {
     monitorInstance.stop();

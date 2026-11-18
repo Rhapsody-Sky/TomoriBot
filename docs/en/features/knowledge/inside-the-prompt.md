@@ -5,76 +5,63 @@ sidebar:
 aiGenerated: false
 ---
 
-Every time you trigger TomoriBot, the following is assembled and sent to your configured text
-model as the main prompt/context, in this order:
+TomoriBot groups instructions and memories above the conversation, then places changing information
+near the latest messages. [NovelAI](/features/integrations/novelai/) uses a separate layout, and
+[SillyTavern presets](/features/integrations/sillytavern-support/) can rearrange the earlier blocks.
 
-| Block | Optional? | Commands | What it is |
-|---|---|---|---|
-| [**System prompt**](/features/chatting-personality/behavior-tweaking/#system-prompt) | | `/config system-prompt set` (also `preset`, `remove`) | Basic instructions at the topmost of context. |
+| Position | What TomoriBot receives | Where to manage it |
+|---|---|---|
+| System part | System, channel, and persona prompts; persona attributes; tool guidance; server information; persona-user restrictions; server memories; emojis, stickers, and sprites; Always On lorebook entries; conditioning. | `/config`, `/memories`, `/moderation`, `/expressions`, and `/conditioning` |
+| Above the conversation | Participant profiles, aliases, personal memories, reminders, and persona tasks; older same-channel short-term memory at its default position; text tool definitions when needed. | `/personal memories`, `/memories`, and `/config` |
+| Examples and conversation | Sample dialogues, followed by recent messages from this channel. | `/config` > Persona > Identity & Personality; Behavior > General Behavior |
+| Just above the latest four speaker turns | Fresh short-term memory or memory carrying other channels' content, keyword- or chance-activated lorebook entries, retrieved documents, participant presence, and the current time with the channel line. | `/memories` and `/config` |
+| Among recent messages | Context notes at your chosen depth, plus tool and time-awareness reminders. | `/config` > Behavior > General Behavior; Persona > Advanced; Channels > Channel Overrides |
 
-> **Default system prompt text** (used only while no server system prompt is set):
->
-> *"You are {bot}. {bot} makes sure to respond short and concisely by default. {bot} only makes lengthy responses if the situation warrants it.
->
-> {{if tool:create_long_term_memory}}{bot} proactively uses the available {memory_tool} whenever someone shares a detail or {bot} notices one in the conversation that is actually worth remembering, such as a preference, an interest, or an important fact, preferring to remember things even if it is minor as long as it's not a duplicate of what {bot} already knows. {{/if}}{{if tool:update_long_term_memory}}{bot} uses {memory_update_tool} instead when new information changes or adds onto something {bot} already remembers, rather than saving a duplicate.{{/if}}
->
-> {{if tool:review_capabilities}}When someone asks what {bot} can do or why something is unavailable, {bot} checks {capabilities_tool} before answering. {{/if}}{{if tool_family:url_fetch}}When more detail is needed, {bot} uses {url_fetch_tool} on `https://docs.tomoribot.app/llms.txt` for information.{{/if}}"*
+A speaker turn groups consecutive messages from one person or persona. Four speaker turns can contain
+many messages. In a short conversation, TomoriBot counts back into adjacent sample dialogues where
+available. Short-term memory can sit closer to the latest message if you configured a shallower depth.
+Empty optional blocks cost no tokens.
 
-| Block | Optional? | Command | What it is |
-|---|---|---|---|
-| **Channel prompt (append)** | *(Optional)* | `/server channel-prompt` | Varies per-channel, layered in right after the system prompt. The same command's *replace* mode takes over the system prompt slot above instead of adding a new one. |
-| **Persona prompt** | *(Optional)* | `/persona prompt set` (also `remove`) | A prompt written specifically for the active persona, separate from the system prompt.|
-| [**Persona attributes**](/features/chatting-personality/multiple-personas/#attributes) | | `/persona attribute add` (also `edit`, `remove`) | The active persona's personality traits and speech patterns. |
-| **Server info** | | *(none, from Discord)* | The server name, description, and the channel she's in, pulled from Discord itself. |
-| [**Persona-user blocks**](/features/capabilities/tools-and-extensions/#built-in-tools) | *(Optional)* | `/server user-blacklist remove` to review/clear; gated by `/capabilities manage userblocking` | Active mute/block restrictions this persona holds against specific users. |
-| [**Server memories**](/features/knowledge/memory/#personal-vs-server-memories) | | `/memory server add` (also `edit`, `remove`) | The long-term facts saved for this server. |
-| [**Server emojis**](/features/chatting-personality/behavior-tweaking/#capabilities-what-shes-allowed-to-do) | *(Optional)* | `/capabilities manage emojiusage` (toggle only), initialize with `/server expressions initialize` | The custom emojis present in the server.|
-| [**Server stickers**](/features/chatting-personality/behavior-tweaking/#capabilities-what-shes-allowed-to-do) | *(Optional)* | `/capabilities manage stickerusage` (toggle only), initialize with `/server expressions initialize` | The custom stickers present in the server. |
-| [**Persona sprites**](/features/chatting-personality/multiple-personas/#sprites-emotion-avatars) | *(Optional)* | `/persona sprites add` (also `edit`, `remove`) | Named expression sprites configured for the persona, if it has any. |
-| [**Conversation Participants**](/features/knowledge/memory/#personal-vs-server-memories) | *(Optional)* | `/memory personal add` (also `edit`, `remove`); gated by `/capabilities manage personalization` | The people in the conversation, their nicknames and mention handles, and the personal memories saved about each of them. Loaded when the person owns a message in context, or if their name/alias get mentioned. Also carries the current channel and local time as a footer, using `/server timezone`. |
-| [**Short-term memory**](/features/knowledge/memory/#short-term-memory-stm) | | `/persona stm edit` (also `view`); `/server stm manage` to clear entries; gated by `/capabilities manage shorttermmemory` | Contains summaries and recent messages of different channels |
-| [**Documents**](/features/knowledge/memory/#document-knowledge-base-rag) | *(Optional)* | `/memory document add` (also `remove`, `view`) | Relevant chunks pulled from the knowledge base using RAG. |
-| [**Conditioning**](/features/knowledge/memory/#conditioning) | *(Optional)* | `/conditioning reward <feed\|headpat\|hug\|kiss\|tickle>`, `/conditioning punish <bite\|bonk\|pinch\|spank\|squeeze>`, managed via `/conditioning manage` | Accumulated behavioral nudges for this persona in this server. |
-| [**Sample dialogues**](/features/chatting-personality/multiple-personas/#sample-dialogues) | *(Optional)* | `/persona sample-dialogue add` (also `edit`, `remove`) | Examples of how this persona talks, if any are configured. |
-| [**Recent messages**](/features/chatting-personality/behavior-tweaking/#generation-tuning) | | `/config message-fetch-limit` | The actual conversation, up to this many messages (default 80). Your `/config context-note set` and any reunion note are injected inline inside this block, at a configurable depth, rather than as a separate block of their own. |
+Recent messages grow within a range, then drop older messages in a batch. The batch is 30% of your
+message limit, rounded down to an even number. With the default limit of 80, the batch is 24: a full
+window keeps its starting message while new messages arrive, then advances by 24 when it would exceed
+80. A typical two-message exchange leaves 58 messages after that advance. Short conversations,
+refreshes, and the model's available space can leave fewer messages.
 
-Rows marked *(Optional)* contribute nothing (and cost no tokens) when there's nothing to say, e.g. no documents matched, or the server has no custom emojis.
+A context note placed earlier than the changing-information group moves through older history on
+every bot response and makes prompt caching less effective. Keeping it near the latest message
+avoids that extra cache disruption.
 
-Recent messages are the largest and most fragile part, it is a window that slides forward as people talk. Everything above them is rebuilt from saved settings and is stable.
+:::tip
+Some models use information near the beginning or end of a long prompt more reliably than information
+in the middle. For providers that use context notes, try placing an instruction near the latest message.
+The effect depends on the model and task. See [Lost in the Middle](https://aclanthology.org/2024.tacl-1.9/)
+and [Lost in the Haystack](https://arxiv.org/abs/2505.18148).
+:::
 
-`/tool prompt snapshot` dumps the exact bundle for a persona to a file. It is the ground
-truth for which memories are currently active, whether a document matched, and how much of
-the conversation actually fit.
+### Inspecting the prompt
 
-`/tool estimate cost` breaks the same bundle down by size, which is useful for working out
-what is eating your context before you raise any limits.
+- `/tool prompt snapshot` saves the assembled prompt to a file, including active memories, documents, and lorebooks.
+- `/context` shows a visual breakdown of context usage and estimated input cost.
+- `/tool estimate cost` breaks down the prompt by size and cost.
 
 ### Where are Tools defined?
 
-For every
-provider TomoriBot supports natively, tool schemas are sent through the provider's own `tools`
-field, so it depends upon the provider/configured inference engine.
+For providers with tool calling, TomoriBot sends tool definitions through the provider's supported
+interface.
 
 ### Why does TomoriBot forget?
 
-This ordering explains almost every "why doesn't she remember?" question:
-
 | What happened | Why |
 |---|---|
-| She forgot something from earlier today | It scrolled past the message limit. It was only ever in **Recent messages**, if Tomori does not save it as a long-term memory, then it will be forgotten once it reaches outside the message window. |
-| She forgot something in another channel | **Recent messages** is per-channel. Only **Server memories**, **Conversation Participants**, and **Short-term memory** cross channels. Short-term memory remedies this by loading in recent messages from different channels, but it does not dump everything. |
-| `/tool refresh` made her forget | Refresh cuts off **Recent messages** and clears this channel's **Short-term memory**, but shouldn't remove long-term memory. Delete the refresh embed to remove the cut-off. |
-| She forgot something after a restart | **Recent messages** never survives restarts |
+| She forgot something from earlier today | It scrolled past the message limit without being saved as a long-term memory. |
+| She forgot something in another channel | Recent messages are channel-specific. Server memories, participant memories, and short-term memory provide selected information from other channels. |
+| `/refresh` made her forget | Refresh cuts off Recent messages and clears this channel's Short-term memory, but shouldn't remove long-term memory. Delete the refresh embed to remove the cut-off. |
 
-If you want something to survive all of the above, it has to become a **long-term memory**. See [Memory](/features/knowledge/memory/#long-term-memory).
+If you want something to survive all of the above, it has to become a long-term memory. See [Memory](/features/knowledge/memory/long-term-memory/).
 
-## Tips and Tricks
-
-- `/config message-fetch-limit` widens the conversation window (20-100 messages). More
-  context, more tokens per reply.
-- `/config context-note set` injects a short reminder at a chosen depth. Because it sits low
-  in the bundle, close to the recent messages, she is more likely to act on it than on
-  something in the system prompt. This is the best place to nudge her into saving memories
-  more often.
-- `/memory personal add` and `/memory server add` write directly into **Server memories** and
-  **Conversation Participants**, which is one of the guaranteed ways to make knowledge permanent in TomoriBot's context.
+:::tip
+A larger message limit does not guarantee that more history reaches the model. When the prompt is
+too large for the model's context window, the oldest exchanges are dropped before sending;
+`/context` shows how much room is left.
+:::

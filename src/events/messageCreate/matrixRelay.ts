@@ -1,3 +1,4 @@
+import { verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
 /**
  * Matrix Relay Handler
  * Auto-discovered by eventHandler.ts via messageCreate folder scanning.
@@ -24,25 +25,18 @@ import {
   getLinkedMatrixRoom,
   sendToMatrixRoom,
   sendAttachmentToMatrixRoom,
-  MATRIX_MAX_ATTACHMENT_BYTES,
+  ensureRoomRelayable,
+  getMatrixSettings,
   getMatrixIdForDisplayName,
 } from "@/utils/bridges/matrix";
 import { log } from "@/utils/misc/logger";
 import type { TomoriState } from "@/types/db/schema";
 import { resolvePersonaAvatarPublicUrl } from "@/utils/storage/avatarStorage";
 import { normalizeRenderModifierName, resolveRenderModifierSourcePersona } from "@/utils/discord/renderModifierParser";
+import { safeDownload } from "@/utils/security/safeDownload";
 
-const DEFAULT_MATRIX_EMBED_CHUNK_MAX_CHARS = 3500;
-
-function getMatrixEmbedChunkMaxChars(): number {
-  const parsed = Number.parseInt(
-    process.env.MATRIX_EMBED_CHUNK_MAX_CHARS ?? `${DEFAULT_MATRIX_EMBED_CHUNK_MAX_CHARS}`,
-    10,
-  );
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MATRIX_EMBED_CHUNK_MAX_CHARS;
-}
-
-const MATRIX_EMBED_CHUNK_MAX_CHARS = getMatrixEmbedChunkMaxChars();
+const MATRIX_EMBED_CHUNK_MAX_CHARS = 3500;
+const BYTES_PER_MIB = 1024 * 1024;
 
 /**
  * Strip Discord inline markdown from a string for plain-text Matrix relay.
@@ -297,10 +291,12 @@ const handler = async (client: Client, message: Message): Promise<void> => {
   // Only relay messages that originate from TomoriBot itself
   //    (main persona bot account OR alter persona webhook messages)
   const allPersonas: TomoriState[] = await getCachedAllPersonas(message.guild.id);
+  await verifyMessageWebhook(message);
   if (!isSelfTriggerMessage(message, allPersonas)) return;
 
   const roomId = await getLinkedMatrixRoom(message.channelId);
   if (!roomId) return;
+  if (!(await ensureRoomRelayable(roomId, client))) return;
 
   // Identify which persona sent this message and retrieve its avatar URL.
   //    The persona's virtual Matrix user will be provisioned with this identity.
@@ -340,10 +336,9 @@ const handler = async (client: Client, message: Message): Promise<void> => {
 
   const personaName = persona?.persona_nickname ?? message.author.username;
 
-  // Relay the text content (skip if empty after trim)
-  //    Identity is conveyed by the virtual Matrix user, so no bold prefix needed.
-  //    @{name} placeholders are transformed to proper Matrix mention links so
-  //    Matrix clients highlight and notify the mentioned user (MSC3952).
+  // Identity is conveyed by the virtual Matrix user, so no bold prefix needed.
+  // @{name} placeholders are transformed to proper Matrix mention links so
+  // Matrix clients highlight and notify the mentioned user (MSC3952).
   const rawText = message.content.trim();
   if (rawText) {
     const { body, formattedBody, mentionedIds } = resolveDiscordTextForMatrix(rawText, message);
@@ -361,14 +356,11 @@ const handler = async (client: Client, message: Message): Promise<void> => {
     }
   }
 
-  // Relay each file attachment as a Matrix media event
-  //    Uses proxyURL for stability (Discord CDN proxy avoids expiry issues)
-  const mediaTimeoutMs = Number.parseInt(process.env.MATRIX_MEDIA_TIMEOUT_MS || "15000", 10);
+  // proxyURL avoids the expiry that signed CDN URLs hit.
+  const { maxAttachmentBytes, mediaTimeoutMs } = getMatrixSettings();
 
   for (const attachment of message.attachments.values()) {
-    // Skip attachments that exceed the configured size limit (shared constant
-    //    with matrixManager.ts so both sides enforce the same threshold)
-    if (attachment.size > MATRIX_MAX_ATTACHMENT_BYTES) {
+    if (attachment.size > maxAttachmentBytes) {
       log.warn(
         `Matrix relay: skipping oversized attachment "${attachment.name}" ` +
           `(${(attachment.size / (1024 * 1024)).toFixed(1)} MB) for room ${roomId}`,
@@ -377,22 +369,22 @@ const handler = async (client: Client, message: Message): Promise<void> => {
     }
 
     try {
-      // Fetch the file from Discord's proxy CDN (timeout prevents stalls)
-      const response = await fetch(attachment.proxyURL, {
-        signal: AbortSignal.timeout(mediaTimeoutMs),
+      const download = await safeDownload(attachment.proxyURL, {
+        maxSizeMB: maxAttachmentBytes / BYTES_PER_MIB,
+        timeoutMs: mediaTimeoutMs,
+        knownSize: attachment.size,
       });
-      if (!response.ok) {
-        log.warn(`Matrix relay: failed to fetch attachment "${attachment.name}" (${response.status})`);
+      if (!download.success || !download.buffer) {
+        log.warn(`Matrix relay: failed to fetch attachment "${attachment.name}" (${download.error ?? "unknown"})`);
         continue;
       }
 
-      const arrayBuffer = await response.arrayBuffer();
       const mimeType = attachment.contentType ?? "application/octet-stream";
       const filename = attachment.name ?? "attachment";
 
       await sendAttachmentToMatrixRoom(
         roomId,
-        arrayBuffer,
+        download.buffer,
         filename,
         mimeType,
         attachment.size,

@@ -2,100 +2,118 @@
 title: "Entry Point and Initialization Flow"
 sidebar:
   order: 4
+aiGenerated: true
 ---
 
-`src/index.ts` is a thin orchestrator. All initialization logic lives in `src/init/` modules.
+`src/index.ts` coordinates application startup by executing focused initialization modules in
+`src/init/` before connecting to Discord.
 
-## Files
+## Initialization files
 
-- `src/index.ts` — orchestrator (calls init modules in order)
-- `src/init/backup.ts` — non-production automatic data backup gate
-- `src/init/healthServer.ts` — health HTTP server
-- `src/init/secrets.ts` — secrets loading + key manager init
-- `src/init/discord.ts` — Discord client construction + error handlers
-- `src/init/database.ts` — DB init, cooldown cleanup, pg_cron setup
-- `src/init/loaders.ts` — tool registry, localizer, caches, event handler
-- `src/init/bridges.ts` — Matrix bridge (optional)
-- `src/init/timers.ts` — health tracker, scheduled work, memory monitor, cache metrics, quota cleanup
-- `src/types/config.ts` — `AppConfig` interface + `resolveEnvironment()`
+- `src/index.ts`: Startup coordinator. Resolves environment, executes initialization steps in order, and connects to Discord.
+- `src/init/backup.ts`: Non-production automatic data backup gate before database schema initialization.
+- `src/init/healthServer.ts`: Lightweight HTTP health server for production liveness and readiness probes, which also serves OAuth callbacks.
+- `src/init/secrets.ts`: Secret resolution and initialization of `keyManager` encryption helpers.
+- `src/init/heapSnapshot.ts`: Process-level diagnostic signal handler for on-demand V8 heap snapshots.
+- `src/init/media.ts`: Process-global concurrency and memory limits for Sharp and libvips image processing.
+- `src/init/discord.ts`: Discord client construction, intent probing, cache sweepers, and gateway error classification.
+- `src/init/database.ts`: Schema application, migration execution, catalog seeding, and cooldown cleanup.
+- `src/init/loaders.ts`: Modal interception, localization, tool registry, model caches, and event listener registration.
+- `src/init/bridges.ts`: Optional Matrix appservice bridge initialization.
+- `src/init/timers.ts`: Background periodic tasks, memory monitoring, catalog refreshers, and post-ready hooks.
+- `src/types/config.ts`: Configuration interfaces and environment resolution (`resolveEnvironment()`).
 
-## Startup Sequence
+The HTTP health server binds in production mode, and in any mode when `TOMORI_PUBLIC_BASE_URL` is
+set, because that variable means the instance receives OAuth callbacks. Container healthcheck
+configuration belongs to the deployment guides; gateway login errors are reported in process logs.
+Optional modules can call `registerHealthServerRoute()` during startup to register a method and path
+on the same server. Without `TOMORI_PUBLIC_BASE_URL` the base installation has no extra routes; with
+it, `GET /oauth/callback`, `GET /oauth/mcp/start`, and `POST /oauth/mcp/confirm` are registered,
+plus `GET /oauth/client.json` unless the base URL is a loopback origin. If the port cannot be bound
+while routes are registered, a warning lists them. Built-in health probes take precedence,
+and registered handlers receive the parsed request URL. Every registered route answers with
+`Content-Security-Policy: frame-ancestors 'none'`, so a sign-in page cannot be framed. Invalid URLs
+return 400, and failed handlers return 500 or close the response if headers have already been sent.
 
-1. Load `.env` (`dotenv`); resolve `AppEnvironment`.
-2. In non-production: run the automatic data backup gate before secrets, Discord, or database initialization. It creates a full `backupData.ts`-compatible bundle when the latest data backup was made by another bot version or is older than `TOMORI_AUTO_BACKUP_INTERVAL_HOURS` (default 24). Only automatic bundles count toward `TOMORI_AUTO_BACKUP_MAX` retention (default 5); manual `bun run backup` bundles are never pruned by this gate.
-3. In production: bind health HTTP server on `$PORT` (default 8080) — returns 503 until Discord ready.
-4. Load secrets via `getAppSecrets()`; populate `process.env` for downstream consumers; initialize `keyManager`.
-5. Construct Discord client with intents + sweepers; register process/client error handlers.
-6. Initialize database:
-   - run narrow pre-schema legacy rename bridges for known table renames that would otherwise conflict with fresh `schema.sql`
-     - The persona rename bridge (`runPreSchemaPersonaRenameBridge`) also self-heals **rollback artifacts**: running pre-rename code against an already-migrated database re-materializes legacy tables (`tomoris`, `tomori_presets`, `tomori_configs`) as empty shells via their old `CREATE TABLE IF NOT EXISTS` schema. When an empty legacy table coexists with its populated renamed counterpart, the bridge drops the empty shell (logged via `log.warn`) and continues. A **non-empty** legacy table coexisting with the renamed table is treated as an ambiguous data fork and still throws, requiring human inspection before boot. This runs on every startup (unlike run-once migrations), so the fix survives repeated rollback/merge cycles.
-   - run `src/db/schema.sql`
-   - run `src/db/schema_rag.sql` only when pgvector is detected
-     - Detection (`detectRagAvailability`) is probed once per initialization attempt rather than once above the retry loop, and only a probe that completed is cached. A probe that could not reach the server proves nothing about pgvector, so caching that as "absent" would gate every RAG command until the next restart: `isRagAvailable()` reads a process-lifetime flag with no invalidation path. Production hit exactly that, answering `/teach document` with "Document RAG Disabled" against a database carrying pgvector 0.8.2.
-     - While no probe has completed, `isRagAvailable()` returns `false`, which is the honest answer for an unknown state. `isRagAvailable()` stays synchronous and side-effect free because the context builder consults it on every chat turn; recovery is owned by `ragAvailabilityMonitor` (registered in `src/init/timers.ts`), which re-probes every `RAG_AVAILABILITY_REPROBE_INTERVAL_MS` (default 5 minutes) and stops on the first success. A startup probe that *completed* starts no timer, so a database genuinely without pgvector is never polled.
-     - The monitor's re-probe additionally requires `document_chunks` to exist, because the same failure that skipped detection also skipped `schema_rag.sql`, and flipping the flag on the extension alone would expose commands to missing tables. `getRagAvailabilityState()` exposes the `null` (undetermined) vs `false` (probed, absent) distinction that `isRagAvailable()` collapses.
-   - run `src/db/schema_stpreset.sql`
-   - run typed seed catalogs in order: models, personas, system prompts, NovelAI presets
-   - run pending numbered migrations from `src/db/migrations/` (fresh databases instead record every historical migration as applied via `markAllMigrationsApplied`, because `schema.sql` already embodies the final shape)
-     - Because `schema.sql` is applied *before* the migration runner, a legacy untracked production database (still carrying `tomori_configs`, never seen by the runner) reaches the historical "expand + backfill" migrations with the split tables already in their final post-migration shape. The data-mover backfills that copy out of the god table (`002`, `003`, `004`, `007`) therefore detect whether the destination still has the pre-`021` image-tag columns (`nai_style_tags`/`nai_tags`/`nai_char_tags`) or the post-`021` ones (`image_default_positive_tags`/`physical_appearance_tags`) and write the matching column set. Without this guard the backfill fails with `column "nai_style_tags" of relation "server_novelai_imagegen_configs" does not exist` (42703). Migration `021` reconciles the rename afterwards, so no tag data is lost.
-7. Cleanup expired cooldown rows at startup (`cleanupExpiredCooldowns`).
-8. Attempt optional `pg_cron` registration for hourly cooldown cleanup job.
-9. Initialize tool registry (`initializeTools`).
-10. Initialize localization (`initializeLocalizer`).
-11. Initialize model caches:
-    - LLM cache (`initializeLLMCache`)
-    - OpenRouter capability cache (`initializeOpenRouterCapabilityCache`)
-12. Preload preset avatar cache from DB presets.
-13. Initialize Matrix bridge (optional; non-fatal on failure).
-14. Attach all event listeners (`eventHandler(client)`).
-15. Register post-ready startup hooks (deferred until `clientReady`):
-    - health tracker init
-    - scheduled work coordinator init (reminders + random triggers)
-    - memory monitor init
-    - cache metrics logger init
-16. Initialize upload quota cleanup scheduler.
-17. `await client.login(DISCORD_TOKEN)` inside a try/catch — a `DisallowedIntents` rejection (privileged intent requested without approval) is logged as an actionable misconfiguration and exits, rather than leaving the process alive but disconnected.
+## Startup sequence
 
-## Error Criticality
+`startBot()` in `src/index.ts` is also the executable entry point.
 
-- Fatal (process exits):
-  - due automatic startup backup failure in non-production
-  - database init failure
-  - tool registry init failure
-  - Discord login failure (including `DisallowedIntents` for an unapproved privileged intent)
-- Non-fatal (warn and continue):
-  - cache warmup failures
-  - pg_cron setup failures
-  - matrix init failure
-  - cooldown cleanup failure
-  - scheduled work/memory monitor/quota cleanup init failures
+1. Load dotenv, resolve the environment, and validate the private-network policy. In production,
+   bind the HTTP health server before other initialization; it returns 503 until gateway readiness.
+2. Load secrets and initialize shard topology before importing cache consumers. Reject subset
+   processes with schema management enabled or a fully configured Matrix bridge. Topology comes
+   from configuration independently of the runtime environment.
+3. When schema management is enabled, run the non-production startup backup gate. Register optional
+   heap diagnostics and configure native media limits. Probe the presence intent and construct the
+   Discord client with the selected shards and early per-shard health tracking.
+4. Register interaction admission, bounded shutdown, and the readiness watchdog before database
+   initialization. Initialize the database: schema management applies schemas, catalogs, migrations,
+   and maintenance; gateway processes with it disabled verify connectivity and still purge expired
+   cooldowns, but skip schema application and pg_cron setup.
+   See `src/init/database.ts` for schema ordering and fresh-database behavior.
+5. Acquire all selected shard leases, then subscribe to cache invalidation and complete its initial
+   flush. All-owner mode bypasses both. Only then register OAuth routes, bind the callback server
+   outside production when configured, and restore owned presence history.
+6. Warm local loaders: localization, tools, model and capability caches, preset avatars, and event
+   listeners. Shared pricing writes require the live primary predicate. Initialize optional bridges
+   and await timer registration before login so ready handlers cannot be missed.
+7. Resolve the auto shard total through Discord when needed. Check the session-start budget before
+   login. Subsets use the shared PostgreSQL identify throttler; all-owner clients keep discord.js
+   throttling. Authenticate with `client.login()`.
 
-## Discord Client Configuration Notes
+[Sharding and process ownership](/architecture/subsystems/sharding/) owns topology validation,
+lease safety, background ownership, health semantics, and shutdown limits. The
+[cache subsystem](/architecture/subsystems/caching/) owns peer invalidation.
 
-- `GuildPresences` is a privileged intent resolved by `resolvePresenceIntentEnabled()` in `src/init/discord.ts`. Before the client is built, it probes `GET /applications/@me` and includes the intent only when Discord reports it as enabled (`ApplicationFlags.GatewayPresence` or `GatewayPresenceLimited`). This is self-resolving: the intent turns on automatically on the next restart once Discord approves it — no code or env change. If the probe fails (e.g. network error), it falls back to the legacy default: enabled outside production, disabled in production.
-- Consumers detect the intent at runtime via `client.options.intents.has(GatewayIntentBits.GuildPresences)` (see the participants context builder) and omit presence/status lines when it is absent, so toggling it needs no other code changes.
-- Sweeper configuration is enabled for message/user cache pressure control.
+## Failure recovery and lifecycle
 
-## clientReady Event Work
+Configuration, backup, database initialization, critical tool setup, and gateway login failures
+prevent successful startup. After shutdown registration, loader/login errors enter the shared
+cleanup path, including failures after lease acquisition. Earlier configuration failures exit
+without acquiring coordination resources. The database initializer retains its own fatal error
+handling before leases are acquired.
 
-`eventHandler` executes all handlers in `src/events/clientReady/` (sorted), including:
+Cache warming, optional bridge connection, and optional maintenance failures retain their local
+warning/error handling. A configured subset with Matrix is rejected before that bridge catch path.
+Transient gateway startup errors exit for supervisor restart with backoff. During runtime,
+discord.js reconnects individual shards; the early watchdog requests bounded shutdown if an
+expected shard stays not ready for five minutes.
 
-- command registration
-- MCP server registration
-- command registry initialization
-- status/presence setup
+SIGTERM and SIGINT stop new work, drain active turns, flush stats, close MCP and bridges, stop the
+cache listener and release leases, then destroy the Discord client. Client destruction follows the
+turn drain so active replies can still finish. Deployments need at least 40 seconds of stop grace.
 
-Additional `client.once("clientReady")` hooks in `index.ts` initialize health tracking, scheduled work, and memory monitoring.
+## Gateway presence intent detection
 
-## Production Health Endpoint
+Guild Presences is a privileged gateway intent. `resolvePresenceIntentEnabled()` probes the bot's
+application configuration via `GET /applications/@me` before client construction:
 
-`GET /health` returns:
+- When Discord reports the presence intent is approved, the client enables `GatewayIntentBits.GuildPresences`.
+- When Discord reports the intent is not approved, the client omits the flag. Context builders detect
+  missing presence permissions via `client.options.intents.has()` and omit user presence details without
+  crashing.
+- If the probe request fails due to a network error, startup falls back to safe defaults: enabled in
+  development, disabled in production.
 
-- `200` when healthy
-- `503` when unhealthy
+## clientReady event execution
 
-Health is computed from:
+Once the gateway connection is confirmed, `eventHandler` runs sorted handlers under `src/events/clientReady/`:
 
-- Discord ready state
-- websocket ping threshold
-- recent Discord event activity
+1. `01_registercommands.ts`: Registers application slash commands with the Discord REST API only on the live primary process.
+2. `02_guildMcpLifecycle.ts`: Outside production, pre-connects enabled MCP servers for owned guilds while ownership remains safe. Shared shutdown owns cleanup. No local MCP process starts.
+3. `03_initCommandRegistry.ts`: Builds fast-lookup routing maps for slash commands.
+4. `04_syncCommandCatalog.ts`: Synchronizes command metadata and descriptions with database tables only on the live primary process.
+5. `05_postReadyMaintenance.ts`: Resolves legacy channel scopes, starts the document lexical backfill in background batches, and merges queued webhook users into the bot account. Each task handles its own failures. Unmatched channel scopes stay pending and active in every channel until a name matches or an admin saves the item; `src/events/guildAvailable/` retries for a returning guild.
+6. `status.ts`: Configures the bot's user status and activity message.
+
+Deferred timers registered in `src/init/timers.ts` trigger on the same `clientReady` event.
+
+## Production health endpoint
+
+`src/init/healthServer.ts` serves `/health` and `/healthz` in production and when a configured
+public base URL requires a callback server. Both return per-owned-shard readiness and ping, the
+resolved total, connection failures, activity age, and event-loop diagnostics. A 200 requires every
+expected owned shard to be ready and within the ping limit; startup and missing shards return 503.
+The scalar ping is the maximum available shard ping. See
+[sharding](/architecture/subsystems/sharding/) for the verdict's limits and watchdog behavior.

@@ -1,18 +1,21 @@
+import type { MemoryRecallCollector } from "@/utils/text/context/memoryRecall";
 import type { Client } from "discord.js";
 import { getCurrentTimeWithOffset, formatUTCOffset, getTimeOfDayPhrase } from "@/utils/text/timezoneHelper";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import type { AssembledServerConfig, TomoriState, UserRow } from "@/types/db/schema";
 import type { MentionConverter } from "./templates";
-import type { PublicPersonaProfile } from "./types";
+import type { MessageProxyConversationUser, PublicPersonaProfile } from "./types";
 import { serializeParticipantKey, type ParticipantSeed } from "@/utils/text/participants/identity";
 import { hydrateParticipantProfiles } from "@/utils/text/participants/hydration";
 import { renderParticipantPrompt } from "@/utils/text/participants/renderer";
 import type { ParticipantProfileEnricherRegistry } from "@/utils/text/participants/profileEnrichers";
+import type { ParticipantRequestScope } from "@/utils/text/participants/preparation";
 
 export { formatPendingReminderForContext } from "@/utils/text/participants/hydration";
 
-export async function buildParticipantContextItem(params: {
+export async function buildParticipantContextItems(params: {
   client: Client;
+  memoryRecall?: MemoryRecallCollector;
   guildId: string;
   channelName: string;
   channelId: string;
@@ -28,6 +31,7 @@ export async function buildParticipantContextItem(params: {
   impersonatedIdentityName: string | null;
   matrixUsers?: ReadonlyMap<string, string>;
   syntheticUsers?: ReadonlyMap<string, { displayName: string; type: "persona" | "webhook" }>;
+  messageProxyUsers?: ReadonlyMap<string, MessageProxyConversationUser>;
   publicPersonaProfiles?: readonly PublicPersonaProfile[];
   preloadedReferencedUserRows?: ReadonlyMap<string, UserRow>;
   referencedUserIds?: ReadonlySet<string>;
@@ -36,7 +40,8 @@ export async function buildParticipantContextItem(params: {
   snapshot?: import("@/types/misc/context").RequestSnapshot;
   convertMentions: MentionConverter;
   profileEnricherRegistry?: ParticipantProfileEnricherRegistry;
-}): Promise<StructuredContextItem | null> {
+  requestScope?: ParticipantRequestScope;
+}): Promise<StructuredContextItem[]> {
   const typedKeys = new Set<string>();
   for (const seed of params.participantSeeds) {
     const serializedKey = serializeParticipantKey(seed.key);
@@ -46,10 +51,11 @@ export async function buildParticipantContextItem(params: {
     typedKeys.add(serializedKey);
   }
   if (params.participantSeeds.length === 0) {
-    return null;
+    return [];
   }
 
   const hydrated = await hydrateParticipantProfiles({
+    memoryRecall: params.memoryRecall,
     client: params.client,
     guildId: params.guildId,
     channelName: params.channelName,
@@ -70,6 +76,7 @@ export async function buildParticipantContextItem(params: {
     impersonatedIdentityName: params.impersonatedIdentityName,
     matrixUsers: params.matrixUsers,
     syntheticUsers: params.syntheticUsers,
+    messageProxyUsers: params.messageProxyUsers,
     publicPersonaProfiles: params.publicPersonaProfiles,
     preloadedReferencedUserRows: params.preloadedReferencedUserRows,
     referencedUserIds: params.referencedUserIds,
@@ -79,11 +86,13 @@ export async function buildParticipantContextItem(params: {
     convertMentions: params.convertMentions,
     botName: params.botName,
     profileEnricherRegistry: params.profileEnricherRegistry,
+    requestScope: params.requestScope,
   });
   const timezoneOffset = params.tomoriConfig.timezone_offset ?? 0;
   const rendered = renderParticipantPrompt({
     profiles: hydrated.profiles,
     personaTaskLines: hydrated.personaTaskLines,
+    messageProxyNamespaces: hydrated.messageProxyNamespaces,
     isUserImpersonation: params.isUserImpersonation,
     botName: params.botName,
     isDMChannel: params.isDMChannel,
@@ -94,7 +103,7 @@ export async function buildParticipantContextItem(params: {
     timeOfDayPhrase: getTimeOfDayPhrase(timezoneOffset),
   });
 
-  return {
+  const profileItem: StructuredContextItem = {
     role: "user",
     parts: [
       {
@@ -110,7 +119,70 @@ export async function buildParticipantContextItem(params: {
       },
     ],
     metadataTag: ContextItemTag.KNOWLEDGE_USERS_IN_CONVERSATION,
+    personalMemoryItems: await Promise.all(
+      hydrated.profiles.flatMap((profile) => {
+        const entries = profile.fields
+          .filter((field) => field.kind === "personal_memories" && field.visibility.visible)
+          .flatMap((field) => field.memoryEntries ?? []);
+        return entries.length === 0
+          ? []
+          : [
+              Promise.all(
+                entries.map(async (entry) => ({
+                  ...entry,
+                  text: await params.convertMentions(
+                    entry.text,
+                    params.client,
+                    params.guildId,
+                    params.triggererName,
+                    params.botName,
+                    params.tomoriConfig.personal_memories_enabled,
+                  ),
+                })),
+              ).then((memoryEntries) => ({
+                role: "system" as const,
+                metadataTag: ContextItemTag.KNOWLEDGE_USER_MEMORIES,
+                parts: [{ type: "text" as const, text: memoryEntries.map((entry) => entry.text).join("\n") }],
+                memoryEntries,
+              })),
+            ];
+      }),
+    ),
+    participantReviewEvidence: {
+      participants: hydrated.profiles.map((profile) => ({
+        name: profile.displayName,
+        fields: profile.fields.filter((field) => field.visibility.visible).flatMap((field) => [...field.lines]),
+      })),
+      channel: params.isDMChannel ? "DM" : params.channelName,
+      currentTime: getCurrentTimeWithOffset(timezoneOffset),
+      timezone: formatUTCOffset(timezoneOffset),
+    },
     conversationUsers: rendered.conversationUsers,
     participantTargetIndex: rendered.targetIndex,
   };
+  const items = [profileItem];
+  for (const [metadataTag, text] of [
+    [ContextItemTag.KNOWLEDGE_USER_STATUS, rendered.statusText ? `[System: ${rendered.statusText}\n]` : ""],
+    [ContextItemTag.KNOWLEDGE_CURRENT_CONTEXT, rendered.currentContextText],
+  ] as const) {
+    if (!text) continue;
+    items.push({
+      role: "user",
+      metadataTag,
+      parts: [
+        {
+          type: "text",
+          text: await params.convertMentions(
+            text,
+            params.client,
+            params.guildId,
+            params.triggererName,
+            params.botName,
+            params.tomoriConfig.personal_memories_enabled,
+          ),
+        },
+      ],
+    });
+  }
+  return items;
 }

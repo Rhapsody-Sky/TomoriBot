@@ -1,157 +1,177 @@
 ---
-title: "NovelAI Provider Limitations"
+title: "NovelAI provider limitations"
+aiGenerated: true
 ---
 
-This document catalogs every feature, tool, and context block that is deliberately disabled or reduced for the NovelAI provider compared to Google Gemini and OpenRouter. All exclusions fall into one of two root causes:
+NovelAI text models accept text prompts and return streamed text. They accept no image or video
+input and expose no function calling. NovelAI image generation uses a separate pipeline and remains
+available through commands and through tools called by another text provider.
 
-1. **Text-only model** — GLM 4.6 has no vision or image understanding capability.
-2. **Token budget** — NovelAI's API has a hard token cap that creates a practical quality threshold around ~2800 tokens of system prompt. Exceeding it degrades output quality noticeably.
+## Model templates and access
 
-See also: [`tool-calling.md`](/architecture/integrations/novelai/tool-calling/) for how prompt-based tool calling itself works.
+`modelProfiles.ts` owns each model's endpoint, renderer, tokenizer, sampling defaults, output policy,
+and subscription allowances. Unknown codenames fail profile lookup. GLM uses a chat template; Kayra
+and Erato use story prompts with ATTG. GLM puts personality and memories at the start of the first
+user turn. GLM uses an inline system message for activated lore; Kayra and Erato have no system block.
+Xialong uses NovelAI's recommended English
+system prompt verbatim, with ATTG as the first entry under `Relevant persistent information:` in
+the first user turn. Its stars default to 4; Erato emits stars only when configured, and Kayra
+omits them.
 
----
+Selecting Xialong checks the saved server or personal credential for an active Opus subscription
+before writing the selection. A registered provider with no key permits selection. Adding or
+replacing a key refreshes subscription facts and checks the saved model before storage. Server
+changes also check the active model and include rotation keys. A tier rejection
+during generation uses the same localized Opus notice. GLM remains the default and smartest model.
+Xialong's published sampling preset is available as `Default-Xialong`.
 
-## Built-in Tools Disabled
+Model switches use the default row for the serving model's preset target: `Carefree-Kayra`,
+`Erato-Shosetsu`, or `Default-Xialong`. GLM uses its profile defaults and clears the previous preset.
+Server selection updates both active configuration and the saved NovelAI provider row; personal
+selection updates the user's provider row. Applying a preset resets temperature, top-k, top-p, and
+min-p and enables those samplers. Later edits remain active until another model switch or preset
+application. Configured reply length is preserved. Key replacement on the same model preserves
+sampler edits.
 
-Some tools are disabled by provider-specific `isAvailableFor()` checks, while
-vision-dependent tools are removed by the registry's first-pass capability
-filter because NovelAI models have `sees_images = false`.
+Kayra, Erato, and Xialong derive their base samplers from the same typed catalog used to seed the database.
+Request preparation resolves a saved preset within the serving model's target and excludes
+incompatible preset parameters. Fallback attempts use matching model defaults for inherited
+samplers without writing them back to the primary configuration. Personal and cross-provider
+overlays carry the scope's own preset name, so a server's loaded preset cannot replace a personal
+selection. Prompt inspection uses the same preparation path.
 
-| Tool | File | Reason |
-|------|------|--------|
-| `select_sticker_for_response` | `src/tools/functionCalls/stickerTool.ts:144` | GLM 4.6 cannot reliably generate CJK/Japanese sticker names as tool arguments — token-level instability causes garbled output. |
-| `update_short_term_memory` | `src/tools/functionCalls/updateShortTermMemoryTool.ts:56` | Token budget too constrained; the tool definition and invocation overhead is not worth the benefit at GLM's prompt size. |
-| `fetch_url` | `src/tools/fetchUrl/fetchUrlTool.ts` | Token budget too constrained for fetched-page payloads; disabled until realistic URL-fetch prompt/tool history behavior is validated. |
-| `peek_profile_picture` | `src/tools/functionCalls/peekProfilePictureTool.ts` | Requires `requiredModelCapabilities = { sees_images: true }`; NovelAI models are text-only. |
-| `process_gif` | `src/tools/functionCalls/processGifTool.ts` | Requires `requiredModelCapabilities = { sees_images: true }`; NovelAI models are text-only. |
+## Prompt content and saved settings
 
----
+`promptFitting.ts` admits personality, sample dialogue, server and visible personal memories,
+short-term memory, lorebooks, and actual conversation text. Other tags and untagged instructions are excluded.
+The native context survives preset reassembly separately, so each actual NovelAI attempt can use it
+without imported preset instructions or depth injections. History carries its conversation text
+separately from generated timestamps, attachment hints, and tail directives. Explicit assistant
+prefills remain part of the request.
 
-## MCP Functions Blocked
+History simplification carries `completionContent` before adding reply references, reactions, and
+media instructions. Classified notices supply semantic text: gestures become actions, while scene
+descriptions and summaries lose their system wrapper. Administrative notices are omitted. Forwarded
+text and available transcripts remain prose. `completionSpeaker: false` marks narration that needs
+no author label. Same-author merging preserves this content separately; literal user quotations are
+never stripped by matching a system-looking prefix. Inspection uses the same notice projection.
 
-Even when MCP servers are running, the following function names are stripped from the tool list before it is passed to GLM. Controlled in `src/providers/novelai/novelaiToolAdapter.ts:301`.
+The `General Behavior` panel displays a localized notice while the workspace's text model is
+NovelAI. Saved system, persona, and channel prompts, context notes, humanizer rules, conditioning,
+and SillyTavern instructions remain stored but inactive. Personality and sample dialogue remain
+active. The user-facing [content table](/features/integrations/novelai/#context-and-settings)
+owns the complete list of settings and memory-trimming behavior. Thinking directives follow the
+active model profile; see [Thinking Level](/architecture/subsystems/thinking-level/#novelai).
 
-```
-iask-search
-monica-search
-```
+Each profile enables text polishing before rendering and counting. The NovelAI fitter applies it
+to user and persona history, both sides of sample dialogue, and admitted memories. Known persona
+names come from the active persona, history senders, and existing participant target metadata.
+Explicit prefills and continuation fragments remain exact. The user-facing
+[polishing rules](/features/integrations/novelai/#text-polishing-and-discord-delivery) own
+the formatting details and protected content.
 
-**Reason:** These are redundant with the unified `web_search` tool (which routes search through the Brave → SearXNG → DuckDuckGo → IAsk engine chain) and too token-expensive in their raw form for GLM's strict prompt budget. The `brave_*` MCP function names are no longer LLM-visible at all post-unification, so they don't need to be in this disable list anymore.
+Polishing is independent of the humanizer toggles. The shared Discord delivery pipeline still
+applies the configured humanizer. Later context is reconstructed from Discord messages, so lost
+punctuation cannot be recovered exactly; no original unhumanized transcript is stored. These
+formatting rules do not rewrite grammar. Other providers retain their existing prompt paths.
 
----
+Participant hydration supplies plain memory contents with internal identities and recency after the
+ordinary privacy, blacklist, lineage, channel, and corpus filters. NovelAI omits database IDs, tag
+prefixes, and added owner labels from long-term memory text. Names and placeholders are resolved
+before rendering; GLM separates entries with single line breaks. Other providers retain their
+combined participant block and tool-targeting IDs. Inline and deferred short-term memory remain
+eligible for NovelAI.
 
-## Context Blocks Excluded from System Prompt
+Short-term memory update nudges carry an empty `completionText` projection. Fitting honors that
+projection even when another provider built the context before a personal override or fallback.
+Actual memory contents remain eligible; instructions to call memory tools are excluded.
 
-Each provider's stream adapter defines which `ContextItemTag` blocks are included in the system instruction. NovelAI's list omits two tags that all other providers (Google, OpenRouter, Custom) include:
+The fitter renders the complete prompt, counts it locally, and removes extra sample exchanges,
+memories, then oldest history exchanges. It protects personality and ATTG, one sample exchange,
+two recent history exchanges, and the triggering message when its identity is supplied. Memory
+eligibility has no relevance score: older dated entries leave first, with source order breaking ties;
+undated entries and blocks use the same stable ordering. Memories and lore share one fifth of the window.
+An oversized protected floor fails with a localized error.
 
-| Tag | Other providers | NovelAI |
-|-----|----------------|---------|
-| `KNOWLEDGE_SERVER_EMOJIS` | ✅ Included | ❌ Excluded |
-| `KNOWLEDGE_SERVER_STICKERS` | ✅ Included | ❌ Excluded |
+Lorebook admission follows the role split in the [shared prompt layout](/architecture/pipelines/context-build/).
+Always On lore joins persistent information for GLM and Xialong, or `Server Notes` for Kayra and Erato.
+Activated lore uses the tail slot above the last four speaker turns, with samples supplying missing turns.
+GLM and Xialong combine adjacent activated entries into an inline system message; story profiles insert
+their prose among the conversation lines. Before and after tags retain their relative order within each
+group. Fitting reapplies the slot after removals. All profiles use identity-resolved entry contents
+without generated headings or titles, polish them, and trim them individually with `lorebook:<id>`
+identities in the fitting report. The shared lore activation character budget still applies first.
 
-**Source:** `src/providers/novelai/novelaiStreamAdapter.ts:107-109`
+## Allowances and tokenizer assets
 
-```typescript
-private static readonly SYSTEM_INSTRUCTION_TAGS_TOOLING: ContextItemTag[] = [
-    ContextItemTag.SYSTEM_FUNCTION_GUIDE,
-    // REMOVED: KNOWLEDGE_SERVER_EMOJIS, KNOWLEDGE_SERVER_STICKERS — GLM 4.6 is text-only
-    // and cannot use emojis/stickers. Omitting saves significant tokens toward the ~2800
-    // token quality threshold.
-];
-```
+Active subscription facts are cached for 24 hours by the actual request credential. Inactive results
+remain uncached so renewal can take effect on the next request. A failed lookup,
+inactive subscription, or unsupported tier fails preparation instead of granting a default allowance.
+The initial budgets use published base windows: GLM has 8,192 tokens on Tablet and 28,672 on Scroll
+and Opus; Kayra has 4,096 on Tablet and 8,192 on Scroll and Opus; Erato has 8,192 on Opus; Xialong has
+28,672 on Opus. Scroll behavior has not been measured. Rollover context is excluded from these budgets.
 
-**Practical effect:** The model is never told which custom server emojis or stickers exist, so it will not reference or attempt to use them. The `emojiUsageEnabled` config flag still flows through to the stream adapter (it controls output formatting), but without the knowledge block, the model has no emoji list to draw from.
+Required tokenizers come from pinned MIT definitions provisioned by `bun run setup:tokenizers`.
+The loader checks their hashes and caches definitions and load failures. Each fitting session owns
+its encoder because upstream's fragment cache has no eviction. Prompts exceeding one million UTF-16
+characters or containing more than 1,024 consecutive non-whitespace code points fail before encoding
+to bound the upstream encoder's cost. Missing or invalid assets require provisioning and a restart.
+The separate `glm_zai` encoder continues to serve logit bias unchanged.
 
----
+The configured output length wins over sampling-preset length. Native requests follow the API
+schema's 2,048-token output ceiling. Completion profiles have no known output ceiling and request
+the configured length within the remaining window. Default lengths are 1,024 for completion
+profiles and 150 for native profiles; actual generation maxima remain unmeasured. Fitting can
+reduce the output cap at the protected floor. Kayra reserves one extra native framing token.
+Native sentence completion reserves another 64 tokens because it can exceed the requested output
+length; this headroom still needs production validation.
 
-## Short-Term Memory Tool Instructions Suppressed
+## Stream termination and continuation
 
-Even though the `update_short_term_memory` tool is excluded from the tool list for NovelAI (see above), there is a second independent suppression point in context building.
+The provider-owned adapter keeps one Discord delivery session across at most two continuation
+requests. Unexpected EOF or read inactivity can continue a held fragment using the cumulative raw
+output as a prefill. Every request is fitted again and subtracts locally counted generated tokens
+from one total output budget, including thinking text. Complete sentences already delivered are not
+replayed. Requested-length endings do not start a fresh budget. Normal stops flush unpunctuated
+replies without a retry. Speaker stops and cancellation end the session.
 
-**Source:** `src/utils/text/contextBuilder.ts:519`
+An exhausted empty continuation becomes a localized provider error, so shared empty-response retry
+cannot multiply its bound. Thinking text remains separate from visible output. The trigger and retry
+bound still require conversational quality validation against real provider cutoffs.
 
-```typescript
-const isStmToolAvailable = tomoriState.llm.llm_provider !== "novelai";
-```
+All NovelAI profiles automatically stop at known foreign speaker labels. The serving persona's
+name, aliases, and render-modifier labels remain allowed; the shared speaker-stop toggle does not
+disable this provider rule. Speaker names come from dialogue and existing participant metadata.
+Configured exact stop strings still apply.
 
-When `isStmToolAvailable` is `false`:
-- The hint message `"[System: Use the update_short_term_memory tool...]"` is never injected after short-term memory summaries.
-- The nudge prompt that encourages the model to call the tool when a conversation goes stale is also suppressed.
+Standalone `---` and `***` lines also end the response. The local guard holds partial markers until
+the next character distinguishes a separator from emphasis, and recognizes a final separator at EOF.
+API separator stops include both surrounding newlines to preserve triple emphasis in prose.
 
-The short-term memory **data itself** (summaries and recent messages) is still included in context when available — only the tool-use instructions around it are removed.
+The prepared request carries newline-prefixed foreign-name stops. Completion profiles send literal
+strings, while native profiles encode token sequences; Erato includes punctuation-prefixed variants
+to account for tokenization at the boundary. Native requests cap the sequence list at 1,024.
+The local guard covers the full speaker list, including labels at the start of the response,
+bold/decorated labels, full-width colons, and labels split across chunks. It holds incomplete
+prefixes before delivery and ends the attempt without continuation when a foreign label completes.
+Its parser preserves code, headings, and inline name mentions. API stop strings are literal, so
+an exact foreign-name or separator stop inside generated code can still end generation upstream.
 
----
+## Prompt diagnostics
 
-## Provider Capability Flags
+[Prompt inspection](/architecture/subsystems/prompt-snapshot/) uses the same preparation function
+as generation. Text exports begin with the rendered prompt; JSON exports contain the profile's
+request parameters and fitting report. Both expose included, excluded, and trimmed identities,
+exact input count, window, and effective output cap. The context panel uses the exact total with
+approximate segment shares. Inspection reconstructs the resolved personal or server credential's
+current request without selecting a rotation key or exporting its identity. It does not capture
+an earlier request or subsequent continuation attempts.
 
-Declared in `src/providers/novelai/novelaiProvider.ts:129-141`:
+## Source pointers
 
-```typescript
-supportsImages: false,   // Text-only, no vision
-supportsVideos: false,   // Text-only, no vision
-supportsFunctionCalling: true, // Prompt-based only, GLM 4.6 models only
-```
-
-These flags gate image/video attachment processing earlier in the pipeline, so media is never forwarded to NovelAI even if a user sends it.
-
----
-
-## Reminder Tool: Auto-Fill Quirk
-
-**Source:** `src/tools/functionCalls/reminderTool.ts:255-266`
-
-When the reminder tool is called via NovelAI and `repetition_interval_hours` is missing from the model's response (a common GLM omission for simple "remind me in X" requests), the tool automatically defaults the value to `0` (one-time reminder) instead of rejecting the call.
-
-```typescript
-// NovelAI only — other providers require the model to set this explicitly
-if (context.provider === "novelai" && typeof repetitionIntervalHoursArg !== "number") {
-    repetitionIntervalHoursArg = 0;
-}
-```
-
-Other providers do **not** get this fallback — they must explicitly set the field so the model is "conscious" of whether the reminder is one-time or recurring.
-
----
-
-## Summary Table
-
-| Feature | Disabled for NovelAI? | Root Cause |
-|---------|----------------------|------------|
-| `select_sticker_for_response` tool | ✅ Yes | CJK name generation instability |
-| `update_short_term_memory` tool | ✅ Yes | Token budget |
-| `peek_profile_picture` tool | ✅ Yes | Text-only model |
-| `process_gif` tool | ✅ Yes | Text-only model |
-| Unified `fetch_url` tool | ✅ Yes | Token budget |
-| Raw MCP AI-search functions (`iask-search`, `monica-search`) | ✅ Yes | Token budget / redundant |
-| MCP alternative search engines | ✅ Yes | Token budget / redundant |
-| Unified `web_search` tool | ❌ Enabled | Replaces the previous 4-tool Brave surface with one categorized tool |
-| `KNOWLEDGE_SERVER_EMOJIS` context block | ✅ Yes | Text-only + token budget |
-| `KNOWLEDGE_SERVER_STICKERS` context block | ✅ Yes | Text-only + token budget |
-| STM tool hint injections | ✅ Yes | Token budget |
-| Image attachment processing | ✅ Yes | Text-only model |
-| Video attachment processing | ✅ Yes | Text-only model |
-| `repetition_interval_hours` required | ❌ Relaxed | GLM omits it frequently (auto-fills 0) |
-
----
-
-## Adding Future Exclusions
-
-When adding a new tool that depends on model capabilities, declare them directly on the tool:
-
-```typescript
-requiredModelCapabilities = {
-    sees_images: true,
-};
-```
-
-When adding a new tool that should be disabled for NovelAI for provider-specific reasons
-(token budget, GLM argument instability, etc.), override `isAvailableFor()` in the tool class:
-
-```typescript
-isAvailableFor(provider: string, _context: unknown): boolean {
-    if (provider === "novelai") return false; // text-only / token budget
-    return true;
-}
-```
-
-When excluding a context block from NovelAI's system prompt, remove its `ContextItemTag` from the relevant static array in `src/providers/novelai/novelaiStreamAdapter.ts` and leave a comment explaining why.
+- `src/providers/novelai/modelProfiles.ts` and `promptFitting.ts`: request policy and fitting.
+- `src/providers/novelai/promptRenderers.ts`: prompt templates and ATTG.
+- `src/providers/novelai/novelaiStreamAdapter.ts` and `novelaiService.ts`: delivery guards and transport termination.
+- `src/utils/provider/localTokenizerRegistry.ts` and `tokenizers/manifest.json`: required local assets.
+- `src/utils/text/context/participants.ts` and `dialogueHistory.ts`: provider-specific content projections.
+- `src/utils/text/promptInspection/assemble.ts`: shared inspection preparation.

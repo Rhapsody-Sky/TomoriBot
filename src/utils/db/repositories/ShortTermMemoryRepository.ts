@@ -13,8 +13,8 @@
  * (cadence, render mode, prompt overrides, category definitions). Per-channel
  * durable state is volatile and excluded from exports per design decision 8.
  */
-import { sql } from "@/utils/db/client";
-import type { ServerStmConfigRow, StmCategoryRow } from "@/types/db/schema";
+import { sql, withTransientDbRetry } from "@/utils/db/client";
+import type { ServerStmConfigRow, ShortTermMemoryRow, StmCategoryRow } from "@/types/db/schema";
 import { serverStmConfigSchema, stmCategorySchema } from "@/types/db/schema";
 import {
   storeShortTermMemory,
@@ -23,8 +23,11 @@ import {
   getShortTermMemoryForUserChannel,
   getShortTermMemoryForServerChannel,
   updateShortTermMemorySummary,
+  clearShortTermMemorySummary,
   updateShortTermMemoryCategories,
   incrementStmTurnCounter,
+  filterUnwarmedStmUsers,
+  warmUserStmRows,
   resetStmTurnCounter,
   invalidateShortTermMemory,
   clearShortTermMemoryForChannel,
@@ -37,7 +40,7 @@ import type { IRepository } from "./IRepository";
 
 /**
  * Exported shape for STM config (config only: per-channel state is excluded).
- * Consumed by the Phase 6 export pipeline and `/server config export`.
+ * Consumed by the Phase 6 export pipeline and `/export config`.
  */
 type ShortTermMemoryExportShape = {
   stm_config: {
@@ -135,6 +138,15 @@ class ShortTermMemoryRepository implements IRepository<ShortTermMemoryExportShap
   }
 
   /**
+   * Clears the summary for an STM entry and persists that empty state.
+   */
+  clearSummary(
+    ...args: Parameters<typeof clearShortTermMemorySummary>
+  ): ReturnType<typeof clearShortTermMemorySummary> {
+    return clearShortTermMemorySummary(...args);
+  }
+
+  /**
    * Increments the turn counter on the live scope row.
    */
   incrementTurnCounter(
@@ -187,13 +199,31 @@ class ShortTermMemoryRepository implements IRepository<ShortTermMemoryExportShap
    */
   async getStmConfig(serverId: number): Promise<ServerStmConfigRow | null> {
     try {
-      const [row] = await sql`SELECT * FROM server_stm_configs WHERE server_id = ${serverId}`;
+      const [row] = await withTransientDbRetry(
+        async () => await sql`SELECT * FROM server_stm_configs WHERE server_id = ${serverId}`,
+        "load short-term memory configuration",
+      );
       if (!row) return null;
       const parsed = serverStmConfigSchema.safeParse(row);
       return parsed.success ? parsed.data : null;
     } catch (error) {
       log.error(`[STMRepo] Failed to load server_stm_configs for server ${serverId}`, error);
       return null;
+    }
+  }
+
+  /** One query for many users, so ranking a server's members does not issue a query per member. */
+  async preWarmUsers(userDiscIds: readonly string[]): Promise<void> {
+    const cold = filterUnwarmedStmUsers(userDiscIds);
+    if (cold.length === 0) return;
+    try {
+      const rows = await sql<ShortTermMemoryRow[]>`
+        SELECT * FROM short_term_memories
+        WHERE scope_kind = 'user' AND user_disc_id = ANY(${sql.array(cold, "TEXT")})
+      `;
+      warmUserStmRows(cold, rows);
+    } catch (error) {
+      log.warn("[STMRepo] Batch user STM warm failed", error, { metadata: { userCount: cold.length } });
     }
   }
 
@@ -208,20 +238,24 @@ class ShortTermMemoryRepository implements IRepository<ShortTermMemoryExportShap
     try {
       const serverDiscId = scopeKind === "server" ? discId : null;
       const userDiscId = scopeKind === "user" ? discId : null;
-      const rows = await sql<{ persona_id: number }[]>`
-        SELECT persona_id
-        FROM short_term_memories
-        WHERE scope_kind = ${scopeKind}
-          AND COALESCE(server_disc_id, '') = COALESCE(${serverDiscId}, '')
-          AND COALESCE(user_disc_id, '')   = COALESCE(${userDiscId}, '')
-          AND channel_disc_id = ${channelId}
-          AND persona_id IS NOT NULL
-          AND persona_id > 0
-          AND (
-            (summary IS NOT NULL AND TRIM(summary) != '')
-            OR (categories IS NOT NULL AND categories != '{}'::jsonb)
-          )
-      `;
+      const rows = await withTransientDbRetry(
+        async () =>
+          await sql<{ persona_id: number }[]>`
+          SELECT persona_id
+          FROM short_term_memories
+          WHERE scope_kind = ${scopeKind}
+            AND COALESCE(server_disc_id, '') = COALESCE(${serverDiscId}, '')
+            AND COALESCE(user_disc_id, '')   = COALESCE(${userDiscId}, '')
+            AND channel_disc_id = ${channelId}
+            AND persona_id IS NOT NULL
+            AND persona_id > 0
+            AND (
+              (summary IS NOT NULL AND TRIM(summary) != '')
+              OR (categories IS NOT NULL AND categories != '{}'::jsonb)
+            )
+        `,
+        "list personas with short-term memory",
+      );
       return new Set(rows.map((r) => r.persona_id));
     } catch (error) {
       log.error("[STMRepo] Failed to resolve personaIdsWithStm", error);
@@ -237,11 +271,15 @@ class ShortTermMemoryRepository implements IRepository<ShortTermMemoryExportShap
    */
   async getStmCategories(serverId: number): Promise<StmCategoryRow[]> {
     try {
-      const rows = await sql`
-        SELECT * FROM stm_categories
-        WHERE server_id = ${serverId}
-        ORDER BY position ASC
-      `;
+      const rows = await withTransientDbRetry(
+        async () =>
+          await sql`
+          SELECT * FROM stm_categories
+          WHERE server_id = ${serverId}
+          ORDER BY position ASC
+        `,
+        "load short-term memory categories",
+      );
 
       const categories: StmCategoryRow[] = [];
       for (const row of rows) {
@@ -375,7 +413,10 @@ class ShortTermMemoryRepository implements IRepository<ShortTermMemoryExportShap
       const serverDiscId = String(ownerId);
 
       // Resolve internal server_id from Discord snowflake
-      const [serverRow] = await sql`SELECT server_id FROM servers WHERE server_disc_id = ${serverDiscId}`;
+      const [serverRow] = await withTransientDbRetry(
+        async () => await sql`SELECT server_id FROM servers WHERE server_disc_id = ${serverDiscId}`,
+        "resolve server for short-term memory export",
+      );
       if (!serverRow) return null;
       const serverId = serverRow.server_id as number;
 

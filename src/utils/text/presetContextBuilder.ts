@@ -1,3 +1,4 @@
+import { isPromptTailSlotItem, presetFlushTags } from "@/utils/text/context/promptLayout";
 /**
  * Preset-Driven Context Builder
  *
@@ -41,6 +42,10 @@ interface PresetMacroParams {
   sampleDialoguesOut: string[];
   /** Most recent user message for {{lastChatMessage}} */
   lastUserMessage: string;
+  model: string;
+  provider: string;
+  utcOffsetHours: number | null;
+  nowMs: number;
 }
 
 /**
@@ -50,6 +55,8 @@ interface MentionParams {
   client: Client;
   guildId: string;
   triggererName: string;
+  triggererFormattedName: string;
+  triggererAddressTerm: string;
   botName: string;
   personalMemoriesEnabled: boolean;
   toolPromptMacroResolver?: ToolPromptMacroResolver;
@@ -70,27 +77,17 @@ const MARKER_TO_TAGS: Record<string, ContextItemTag[]> = {
   dialogueExamples: [ContextItemTag.DIALOGUE_SAMPLE],
   chatHistory: [ContextItemTag.DIALOGUE_HISTORY],
 
-  worldInfoBefore: [ContextItemTag.KNOWLEDGE_SERVER_DOCUMENTS],
-  worldInfoAfter: [ContextItemTag.KNOWLEDGE_SERVER_DOCUMENTS],
+  worldInfoBefore: [ContextItemTag.KNOWLEDGE_LOREBOOK_BEFORE],
+  worldInfoAfter: [ContextItemTag.KNOWLEDGE_LOREBOOK_AFTER],
 };
 
 /**
  * TomoriBot-only blocks that have no ST marker equivalent.
  * These are always included and flushed at anchor points.
  */
-const TOMORI_ONLY_KNOWLEDGE_TAGS = new Set([
-  ContextItemTag.KNOWLEDGE_SERVER_INFO,
-  ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
-  ContextItemTag.KNOWLEDGE_SERVER_EMOJIS,
-  ContextItemTag.KNOWLEDGE_SERVER_STICKERS,
-  ContextItemTag.KNOWLEDGE_PERSONA_SPRITES,
-]);
+const TOMORI_ONLY_KNOWLEDGE_TAGS = presetFlushTags("knowledge");
 
-const TOMORI_ONLY_DIALOGUE_TAGS = new Set([
-  ContextItemTag.KNOWLEDGE_USERS_IN_CONVERSATION,
-  ContextItemTag.KNOWLEDGE_SHORT_TERM_MEMORY,
-  ContextItemTag.KNOWLEDGE_SERVER_CONDITIONING,
-]);
+const TOMORI_ONLY_DIALOGUE_TAGS = presetFlushTags("dialogue");
 
 /**
  * Markers that trigger flushing of TomoriBot-only knowledge blocks
@@ -132,9 +129,15 @@ function buildMacroContext(params: PresetMacroParams): MacroContext {
     charName: params.tomoriNickname,
     personality: params.tomoriAttributes.join("\n"),
     description: params.personaPrompt ?? "",
-    scenario: "", // No TomoriBot equivalent
+    scenario: "", // Card import folds scenario into attributes until a separate scenario field exists.
     mesExamples: mesExamples.join("\n"),
     lastChatMessage: params.lastUserMessage,
+    model: params.model,
+    provider: params.provider,
+    // Card version stays empty until a second card metadata field warrants shared storage.
+    charVersion: "",
+    utcOffsetHours: params.utcOffsetHours,
+    nowMs: params.nowMs,
   };
 }
 
@@ -218,6 +221,12 @@ async function appendTerminalSampleDialogueSpacerIfNeeded(
     mentionParams.triggererName,
     mentionParams.botName,
     mentionParams.personalMemoriesEnabled,
+    undefined,
+    "resolve",
+    {
+      userFormatted: mentionParams.triggererFormattedName,
+      userTerm: mentionParams.triggererAddressTerm,
+    },
   );
 
   contextItems.push({
@@ -306,6 +315,7 @@ export async function reassembleWithPreset(
     nudgeInjectionDepth?: number;
     memoryInjectionItems?: StructuredContextItem[];
     memoryInjectionDepth?: number;
+    memoryRecall?: import("@/utils/text/context/memoryRecall").MemoryRecallOutcome;
   },
   presetData: CachedPresetData,
   macroParams: PresetMacroParams,
@@ -319,13 +329,15 @@ export async function reassembleWithPreset(
   nudgeInjectionDepth?: number;
   memoryInjectionItems?: StructuredContextItem[];
   memoryInjectionDepth?: number;
+  memoryRecall?: import("@/utils/text/context/memoryRecall").MemoryRecallOutcome;
 }> {
   const { nodes } = presetData;
 
   const macroContext = buildMacroContext(macroParams);
   const { resolved, expandedContentMacros } = resolvePresetMacros(nodes, macroContext);
 
-  const buckets = groupByTag(nativeOutput.contextItems);
+  const tailSlotItems = nativeOutput.contextItems.filter(isPromptTailSlotItem);
+  const buckets = groupByTag(nativeOutput.contextItems.filter((item) => !isPromptTailSlotItem(item)));
 
   const systemNodes: ResolvedNode[] = [];
   const depthNodes: ResolvedNode[] = [];
@@ -368,8 +380,7 @@ export async function reassembleWithPreset(
   };
 
   /**
-   * Flush TomoriBot-only dialogue-adjacent blocks (users in conversation, STM).
-   * Called once before the first dialogue anchor marker.
+   * Constant lore without a world-info marker flushes before the first dialogue anchor.
    */
   const flushDialogueBlocks = () => {
     if (dialogueFlushed) return;
@@ -379,10 +390,9 @@ export async function reassembleWithPreset(
       contextItems.push(...pullBucket(buckets, tag));
     }
 
-    const ragItems = pullBucket(buckets, ContextItemTag.KNOWLEDGE_SERVER_DOCUMENTS);
-    if (ragItems.length > 0) {
-      contextItems.push(...ragItems);
-    }
+    const loreBeforeItems = pullBucket(buckets, ContextItemTag.KNOWLEDGE_LOREBOOK_BEFORE);
+    const loreAfterItems = pullBucket(buckets, ContextItemTag.KNOWLEDGE_LOREBOOK_AFTER);
+    contextItems.push(...loreBeforeItems, ...loreAfterItems);
   };
 
   for (const node of systemNodes) {
@@ -461,6 +471,12 @@ export async function reassembleWithPreset(
         mentionParams.triggererName, // Preset custom nodes should resolve {{user}} to the actual triggerer
         mentionParams.botName,
         mentionParams.personalMemoriesEnabled,
+        undefined,
+        "resolve",
+        {
+          userFormatted: mentionParams.triggererFormattedName,
+          userTerm: mentionParams.triggererAddressTerm,
+        },
       );
 
       contextItems.push({
@@ -482,9 +498,8 @@ export async function reassembleWithPreset(
     }
   }
 
-  // ── Step 6: Process depth-injection nodes ──
-  // These merge INTO existing dialogue history items rather than creating new messages.
-  // Same-depth injections are batched into a single [System: ...] block to reduce
+  // Depth-injection nodes merge INTO existing dialogue history items rather than creating new
+  // messages. Same-depth injections are batched into a single [System: ...] block to reduce
   // token waste and match SillyTavern's contiguous injection behavior.
   const resolvedInjections: Array<{
     depth: number;
@@ -505,6 +520,12 @@ export async function reassembleWithPreset(
       mentionParams.triggererName,
       mentionParams.botName,
       mentionParams.personalMemoriesEnabled,
+      undefined,
+      "resolve",
+      {
+        userFormatted: mentionParams.triggererFormattedName,
+        userTerm: mentionParams.triggererAddressTerm,
+      },
     );
 
     resolvedInjections.push({
@@ -519,6 +540,8 @@ export async function reassembleWithPreset(
   }
 
   await appendTerminalSampleDialogueSpacerIfNeeded(contextItems, mentionParams);
+
+  contextItems.push(...tailSlotItems);
 
   log.info(
     `[Preset Builder] Reassembled ${contextItems.length} context items using preset "${presetData.preset.preset_name}" ` +
@@ -537,5 +560,6 @@ export async function reassembleWithPreset(
     nudgeInjectionDepth: nativeOutput.nudgeInjectionDepth,
     memoryInjectionItems: nativeOutput.memoryInjectionItems,
     memoryInjectionDepth: nativeOutput.memoryInjectionDepth,
+    memoryRecall: nativeOutput.memoryRecall,
   };
 }

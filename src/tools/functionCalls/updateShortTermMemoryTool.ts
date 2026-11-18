@@ -64,18 +64,6 @@ export class UpdateShortTermMemoryTool extends BaseTool {
   parameters: ToolParameterSchema = SUMMARY_PARAMETERS;
 
   /**
-   * Check if this tool is available for a given provider.
-   * Disabled for NovelAI, so GLM 4.6's limited token budget (~2800 tokens) makes
-   * short-term memory updates impractical; the tool definition and STM prompts
-   * consume tokens better spent on core conversation context.
-   * @returns True if provider supports short-term memory updates
-   */
-  isAvailableFor(provider: string): boolean {
-    if (provider === "novelai") return false;
-    return true;
-  }
-
-  /**
    * Enhanced availability check that also considers per-turn disable flags.
    * Once STM has been updated once in a turn, the flag is set to prevent
    * the LLM from calling this tool again in the same turn.
@@ -266,7 +254,7 @@ export class UpdateShortTermMemoryTool extends BaseTool {
       }
 
       // Validate summary length (use configured max from env)
-      // Sanitize unknown {word} placeholders the LLM may have written (e.g. {bredrumb})
+      // Sanitize unknown {word} placeholders the LLM may have written (e.g. {zallya})
       const trimmedSummary = sanitizeUnknownTemplatePlaceholders(summary.trim());
 
       if (trimmedSummary.length > MAX_SUMMARY_LENGTH) {
@@ -279,13 +267,6 @@ export class UpdateShortTermMemoryTool extends BaseTool {
       const serverId = context.guildId || "DM";
       const serverName = "guild" in context.channel ? context.channel.guild?.name : undefined;
       const channelName = "name" in context.channel ? context.channel.name : undefined;
-      const parentChannelId =
-        "isThread" in context.channel &&
-        typeof context.channel.isThread === "function" &&
-        context.channel.isThread() &&
-        "parentId" in context.channel
-          ? (context.channel.parentId ?? null)
-          : null;
 
       const personaId = context.tomoriState?.persona_id ?? null;
       const personaLineageId = context.tomoriState?.persona_lineage_id ?? null;
@@ -311,7 +292,6 @@ export class UpdateShortTermMemoryTool extends BaseTool {
         channelName,
         personaId,
         personaLineageId,
-        parentChannelId,
       );
       const liveServerId = serverId !== "DM" ? serverId : null;
       const liveDmUserId = serverId === "DM" ? triggeringUserId : null;
@@ -402,13 +382,6 @@ export class UpdateShortTermMemoryTool extends BaseTool {
       const serverId = context.guildId || "DM";
       const serverName = "guild" in context.channel ? context.channel.guild?.name : undefined;
       const channelName = "name" in context.channel ? context.channel.name : undefined;
-      const parentChannelId =
-        "isThread" in context.channel &&
-        typeof context.channel.isThread === "function" &&
-        context.channel.isThread() &&
-        "parentId" in context.channel
-          ? (context.channel.parentId ?? null)
-          : null;
 
       const personaId = context.tomoriState?.persona_id ?? null;
       const personaLineageId = context.tomoriState?.persona_lineage_id ?? null;
@@ -426,7 +399,6 @@ export class UpdateShortTermMemoryTool extends BaseTool {
         channelName,
         personaId,
         personaLineageId,
-        parentChannelId,
       );
 
       // Reset cadence counter after successful refresh

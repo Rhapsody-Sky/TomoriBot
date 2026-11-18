@@ -1,11 +1,18 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
+import { getDiscordTextLength } from "@/utils/text/discordTextLimits";
+import { initializeLocalizer } from "@/utils/text/localizer";
 import {
   buildTextPreview,
   CONFIRMATION_PREVIEW_BUDGET,
   CV2_TEXT_PREVIEW_BUDGET,
+  FENCED_PREVIEW_MAX_CHARS,
+  renderFencedPreview,
   textPreviewFooterKey,
   textPreviewFooterVars,
 } from "@/utils/text/textPreview";
+import { localizedCopy } from "../../helpers/localeCases";
+
+beforeAll(initializeLocalizer);
 
 describe("buildTextPreview", () => {
   it("passes short text through untouched", () => {
@@ -81,7 +88,70 @@ describe("buildTextPreview", () => {
   it("marks confirmation previews that genuinely overflow", () => {
     const preview = buildTextPreview("y".repeat(4120), CONFIRMATION_PREVIEW_BUDGET);
     expect(preview.shownChars).toBe(CONFIRMATION_PREVIEW_BUDGET);
-    expect(textPreviewFooterVars(preview)).toEqual({ shown: "200", total: "4,120" });
+    expect(textPreviewFooterVars(preview, "en-US")).toEqual({ shown: "200", total: "4,120" });
+  });
+
+  it("never produces a lone surrogate when cutting astral-plane text", () => {
+    const input = "😀".repeat(10);
+    const preview = buildTextPreview(input, 5);
+    expect(preview.truncated).toBe(true);
+    expect(preview.shownChars).toBe(5);
+    expect(preview.totalChars).toBe(10);
+    expect([...preview.text].length).toBe(5);
+    expect(preview.text).toBe("😀".repeat(5));
+
+    for (let i = 0; i < preview.text.length; i++) {
+      const code = preview.text.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = preview.text.charCodeAt(i + 1);
+        expect(next >= 0xdc00 && next <= 0xdfff).toBe(true);
+        i++;
+      } else {
+        expect(code >= 0xdc00 && code <= 0xdfff).toBe(false);
+      }
+    }
+  });
+
+  it("measures totalChars and shownChars in codepoints rather than UTF-16 code units", () => {
+    // Astral-plane emoji require 2 UTF-16 code units per codepoint.
+    const emojiInput = "🎉🎈🚀🔥🌟";
+    expect(emojiInput.length).toBe(10);
+    expect([...emojiInput].length).toBe(5);
+
+    const emojiPreview = buildTextPreview(emojiInput, 3);
+    expect(emojiPreview.totalChars).toBe(5);
+    expect(emojiPreview.shownChars).toBe(3);
+    expect(emojiPreview.truncated).toBe(true);
+    expect(emojiPreview.text).toBe("🎉🎈🚀");
+    expect([...emojiPreview.text].length).toBe(3);
+
+    // Basic Multilingual Plane characters remain 1 UTF-16 unit and 1 codepoint each.
+    const bmpPreview = buildTextPreview("你好世界", 2);
+    expect(bmpPreview.totalChars).toBe(4);
+    expect(bmpPreview.shownChars).toBe(2);
+    expect(bmpPreview.truncated).toBe(true);
+    expect(bmpPreview.text).toBe("你好");
+  });
+
+  it("never appends an ellipsis suffix to truncated text", () => {
+    const previewAscii = buildTextPreview("abcdefghij", 4);
+    expect(previewAscii.text).toBe("abcd");
+    expect(previewAscii.text.endsWith("...")).toBe(false);
+
+    const previewEmoji = buildTextPreview("😀😁😂😃😄", 3);
+    expect(previewEmoji.text).toBe("😀😁😂");
+    expect(previewEmoji.text.endsWith("...")).toBe(false);
+
+    const previewLong = buildTextPreview("x".repeat(5000), 100);
+    expect(previewLong.text).toBe("x".repeat(100));
+    expect(previewLong.text.endsWith("...")).toBe(false);
+  });
+
+  it("converges across runs of five and eight backticks leaving no adjacent backticks", () => {
+    const input = "pre`````mid````````post";
+    const preview = buildTextPreview(input);
+    expect(preview.text).not.toContain("``");
+    expect(preview.text.replaceAll("​", "")).toBe(input);
   });
 });
 
@@ -93,6 +163,38 @@ describe("textPreviewFooter helpers", () => {
   it("returns the shared truncation footer with separated counts", () => {
     const preview = buildTextPreview("x".repeat(7412));
     expect(textPreviewFooterKey(preview)).toBe("general.text_preview.truncated_footer");
-    expect(textPreviewFooterVars(preview)).toEqual({ shown: "3,000", total: "7,412" });
+    expect(textPreviewFooterVars(preview, "en-US")).toEqual({ shown: "3,000", total: "7,412" });
+  });
+});
+
+describe("renderFencedPreview", () => {
+  const fenceBody = (rendered: string): string => rendered.slice("```markdown\n".length, -"\n```".length);
+
+  it("renders text that fits without a marker", () => {
+    expect(renderFencedPreview("en-US", "short prompt", { actionLabel: "Set Prompt" })).toBe(
+      "```markdown\nshort prompt\n```",
+    );
+  });
+
+  it("caps every caller at the shared ceiling and accounts for every hidden character", () => {
+    const source = `\`\`\`\n${"🙂".repeat(4000)}`;
+    const rendered = renderFencedPreview("en-US", source, { budget: 3000, actionLabel: "Set Prompt" });
+    expect(getDiscordTextLength(rendered)).toBeLessThanOrEqual(FENCED_PREVIEW_MAX_CHARS);
+    expect(rendered.endsWith("\n```")).toBe(true);
+    const body = fenceBody(rendered);
+    expect(body).not.toContain("``");
+    const markerMatch = body.match(/\n<!-- (.+) -->$/u);
+    const shown = getDiscordTextLength(body.slice(0, markerMatch?.index).replaceAll("​", ""));
+    const hidden = getDiscordTextLength(source) - shown;
+    expect(markerMatch?.[1]).toBe(
+      localizedCopy("en-US", "general.text_preview.hidden_marker_action", {
+        count: hidden.toLocaleString("en-US"),
+        action: "Set Prompt",
+      }),
+    );
+  });
+
+  it("returns nothing when the budget cannot hold the closing fence and marker", () => {
+    expect(renderFencedPreview("en-US", "x".repeat(1000), { budget: 20 })).toBe("");
   });
 });

@@ -8,10 +8,12 @@
 import { Storage } from "@google-cloud/storage";
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { sanitizeAttachmentFilenamePart } from "@/utils/discord/attachmentFilename";
 import { PERSONA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { extractCloudObjectKeyFromUrl } from "@/utils/storage/cloudObjectStorage";
 import { log } from "@/utils/misc/logger";
 
 /**
@@ -96,7 +98,7 @@ function buildAvatarObjectKey(config: AvatarStorageConfig, options: AvatarUpload
   const timestamp = Date.now();
   const serverSegment = options.serverDiscId ? `servers/${options.serverDiscId}` : "servers/unknown";
   if (options.assetKind === "sprite") {
-    return `${config.prefix}/${serverSegment}/personas/${options.personaId}/sprites/${timestamp}.png`;
+    return `${config.prefix}/${serverSegment}/personas/${options.personaId}/sprites/${randomUUID()}.png`;
   }
   return `${config.prefix}/${serverSegment}/personas/${options.personaId}/${timestamp}.png`;
 }
@@ -113,7 +115,7 @@ function buildLocalStoredPath(options: AvatarUploadOptions): string {
   if (options.assetKind === "sprite") {
     pathSegments.push("sprites");
   }
-  pathSegments.push(`${timestamp}.png`);
+  pathSegments.push(`${options.assetKind === "sprite" ? randomUUID() : timestamp}.png`);
 
   return path.posix.join(...pathSegments);
 }
@@ -145,36 +147,7 @@ function resolveLocalAvatarPath(storedPath: string): string | null {
 }
 
 function extractKeyFromAvatarUrl(config: AvatarStorageConfig, url: string): string | null {
-  try {
-    if (config.backend === "gcs") {
-      // GCS public URLs: https://storage.googleapis.com/BUCKET/PREFIX/...
-      // Strip the publicBaseUrl prefix to recover the object key.
-      const baseUrl = config.publicBaseUrl.replace(/\/+$/, "");
-      if (!url.startsWith(`${baseUrl}/`)) {
-        return null;
-      }
-      const key = url.slice(baseUrl.length + 1);
-      return key.startsWith(`${config.prefix}/`) ? key : null;
-    }
-
-    // S3: match on hostname (supports custom CDN domains, virtual-hosted style, and path-style)
-    const parsed = new URL(url);
-    const baseHost = new URL(config.publicBaseUrl).hostname;
-    const hostname = parsed.hostname;
-    const pathName = parsed.pathname.replace(/^\/+/, "");
-
-    if (hostname !== baseHost) {
-      const s3Host = `${config.bucket}.s3.${config.region}.amazonaws.com`;
-      const s3HostLegacy = `${config.bucket}.s3.amazonaws.com`;
-      if (hostname !== s3Host && hostname !== s3HostLegacy) {
-        return null;
-      }
-    }
-
-    return pathName.startsWith(`${config.prefix}/`) ? pathName : null;
-  } catch {
-    return null;
-  }
+  return extractCloudObjectKeyFromUrl(config, url);
 }
 
 function getNonProductionPublicBaseUrl(): string | null {
@@ -184,6 +157,37 @@ function getNonProductionPublicBaseUrl(): string | null {
 
   const baseUrl = process.env.AVATAR_PUBLIC_BASE_URL?.trim();
   return baseUrl && baseUrl.length > 0 ? baseUrl.replace(/\/+$/, "") : null;
+}
+
+/**
+ * Whether a URL lives in this deployment's avatar storage, so the path-only preset check cannot be
+ * satisfied by an imported URL on another host.
+ */
+export function isAvatarStorageUrl(url: string): boolean {
+  const config = getAvatarStorageConfig();
+  return config !== null && extractKeyFromAvatarUrl(config, url) !== null;
+}
+
+/**
+ * Loads shared preset art for a caller that skips per-owner checks, so the reference must really sit
+ * in this deployment's `presets/` storage: a remote URL on the avatar storage host, or a local path
+ * that still resolves under `data/avatars/presets/` after `..` segments.
+ */
+export async function loadSharedPresetAssetBuffer(reference: string): Promise<Buffer | null> {
+  const target = reference.trim();
+  if (!isSharedPresetAssetReference(target)) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(target)) {
+    return isAvatarStorageUrl(target) ? await loadStoredPersonaAvatarBuffer(target) : null;
+  }
+
+  const resolvedPath = path.resolve(process.cwd(), normalizeStoredPath(target));
+  const relativePath = path.relative(path.join(LOCAL_AVATAR_BASE_DIR, SHARED_PRESET_SEGMENT), resolvedPath);
+  if (relativePath === "" || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  return await loadStoredPersonaAvatarBuffer(target);
 }
 
 export function isLocalPersonaAvatarPath(reference?: string | null): boolean {
@@ -309,7 +313,10 @@ export async function uploadPersonaAvatarToStorage(options: AvatarUploadOptions)
       log.success(`[Avatar Storage] Uploaded ${assetLogLabel} to S3 (${publicUrl})`);
       return publicUrl;
     } catch (error) {
-      log.warn(`[Avatar Storage] Failed to upload ${assetLogLabel} to S3`, error);
+      await log.error(`[Avatar Storage] Failed to upload ${assetLogLabel} to S3`, error, {
+        errorType: "S3UploadError",
+        metadata: { bucket: config.bucket, key },
+      });
       return null;
     }
   }
@@ -357,16 +364,22 @@ export function buildPresetSpriteFilename(spriteKey: string, contentHash: string
   return `${safeKey}-${contentHash}.png`;
 }
 
-/** Build the storage-relative key/path for a shared preset sprite. */
-function buildPresetSpriteRelativeKey(options: {
+/**
+ * Build the storage-relative key/path for a shared preset sprite.
+ *
+ * The key carries no language segment: every locale variant of a preset declares the same
+ * `avatarPath` and the same sprite files, so all of them hash to identical bytes. Keying by language
+ * stored one copy per authored locale of an image that never varies. The per-language
+ * `preset_sprites` row stays, because `sprite_name` and `usage_instructions` genuinely are
+ * localized; only the image converges.
+ */
+export function buildPresetSpriteRelativeKey(options: {
   lineageId: number;
-  language: string;
   spriteKey: string;
   contentHash: string;
 }): string {
-  const safeLanguage = sanitizeAttachmentFilenamePart(options.language, { fallback: "lang", maxLength: 16 });
   const filename = buildPresetSpriteFilename(options.spriteKey, options.contentHash);
-  return `${SHARED_PRESET_SEGMENT}/${options.lineageId}/${safeLanguage}/sprites/${filename}`;
+  return `${SHARED_PRESET_SEGMENT}/${options.lineageId}/sprites/${filename}`;
 }
 
 /**
@@ -381,11 +394,25 @@ export function buildPresetAvatarFilename(contentHash: string): string {
   return `avatar-${contentHash}.png`;
 }
 
-/** Build the storage-relative key/path for a shared preset avatar. */
-function buildPresetAvatarRelativeKey(options: { lineageId: number; language: string; contentHash: string }): string {
-  const safeLanguage = sanitizeAttachmentFilenamePart(options.language, { fallback: "lang", maxLength: 16 });
+/**
+ * Build the storage-relative key/path for a shared preset character reference.
+ *
+ * Language-free and content-addressed like {@link buildPresetAvatarRelativeKey}, so changed art gets
+ * a new URL that pointer personas pick up on the next seed.
+ */
+export function buildPresetCharacterReferenceRelativeKey(options: { lineageId: number; contentHash: string }): string {
+  return `${SHARED_PRESET_SEGMENT}/${options.lineageId}/character-reference-${options.contentHash}.png`;
+}
+
+/**
+ * Build the storage-relative key/path for a shared preset avatar.
+ *
+ * Language-free for the same reason as {@link buildPresetSpriteRelativeKey}: the avatar art is
+ * identical across a preset's locale variants.
+ */
+export function buildPresetAvatarRelativeKey(options: { lineageId: number; contentHash: string }): string {
   const filename = buildPresetAvatarFilename(options.contentHash);
-  return `${SHARED_PRESET_SEGMENT}/${options.lineageId}/${safeLanguage}/${filename}`;
+  return `${SHARED_PRESET_SEGMENT}/${options.lineageId}/${filename}`;
 }
 
 /**
@@ -440,7 +467,10 @@ async function uploadSharedPresetObject(relativeKey: string, buffer: Buffer, log
       log.success(`[Avatar Storage] Uploaded ${logLabel} to S3 (${publicUrl})`);
       return publicUrl;
     } catch (error) {
-      log.warn(`[Avatar Storage] Failed to upload ${logLabel} to S3`, error);
+      await log.error(`[Avatar Storage] Failed to upload ${logLabel} to S3`, error, {
+        errorType: "S3UploadError",
+        metadata: { bucket: config.bucket, key },
+      });
       return null;
     }
   }
@@ -475,13 +505,12 @@ async function uploadSharedPresetObject(relativeKey: string, buffer: Buffer, log
  */
 export async function uploadPresetSpriteToStorage(options: {
   lineageId: number;
-  language: string;
   spriteKey: string;
   contentHash: string;
   buffer: Buffer;
 }): Promise<string | null> {
   const relativeKey = buildPresetSpriteRelativeKey(options);
-  const logLabel = `preset sprite (lineage ${options.lineageId}/${options.language}/${options.spriteKey})`;
+  const logLabel = `preset sprite (lineage ${options.lineageId}/${options.spriteKey})`;
   return await uploadSharedPresetObject(relativeKey, options.buffer, logLabel);
 }
 
@@ -497,12 +526,26 @@ export async function uploadPresetSpriteToStorage(options: {
  */
 export async function uploadPresetAvatarToStorage(options: {
   lineageId: number;
-  language: string;
   contentHash: string;
   buffer: Buffer;
 }): Promise<string | null> {
   const relativeKey = buildPresetAvatarRelativeKey(options);
-  const logLabel = `preset avatar (lineage ${options.lineageId}/${options.language})`;
+  const logLabel = `preset avatar (lineage ${options.lineageId})`;
+  return await uploadSharedPresetObject(relativeKey, options.buffer, logLabel);
+}
+
+/**
+ * Uploads a shared preset character reference image to the immutable `presets/` storage prefix.
+ *
+ * @returns The stored reference (URL or local path), or null on failure
+ */
+export async function uploadPresetCharacterReferenceToStorage(options: {
+  lineageId: number;
+  contentHash: string;
+  buffer: Buffer;
+}): Promise<string | null> {
+  const relativeKey = buildPresetCharacterReferenceRelativeKey(options);
+  const logLabel = `preset character reference (lineage ${options.lineageId})`;
   return await uploadSharedPresetObject(relativeKey, options.buffer, logLabel);
 }
 
@@ -525,13 +568,13 @@ export function isSharedPresetAssetReference(reference?: string | null): boolean
     return true;
   }
 
-  // URL form: match the preset layout segment regardless of host/prefix. Both
-  // shared asset kinds live under presets/{lineage}/{language}/: sprites in a
-  // `sprites/` subfolder, avatars as a top-level `avatar-{hash}.png` file.
+  // The optional middle segment keeps the retired per-language preset layout protected until every environment re-seeds.
   if (/^https?:\/\//i.test(trimmed)) {
     try {
       const pathName = new URL(trimmed).pathname.replace(/^\/+/, "");
-      return new RegExp(`(^|/)${SHARED_PRESET_SEGMENT}/[^/]+/[^/]+/(sprites/|avatar-)`).test(pathName);
+      return new RegExp(`(^|/)${SHARED_PRESET_SEGMENT}/[^/]+/([^/]+/)?(sprites/|avatar-|character-reference-)`).test(
+        pathName,
+      );
     } catch {
       return false;
     }
@@ -575,7 +618,10 @@ export async function deletePersonaAvatarFromStorage(reference: string): Promise
         log.info(`[Avatar Storage] Deleted avatar object ${key} from GCS`);
         return true;
       } catch (error) {
-        log.warn(`[Avatar Storage] Failed to delete avatar object ${key} from GCS`, error);
+        await log.error(`[Avatar Storage] Failed to delete avatar object ${key} from GCS`, error, {
+          errorType: "GcsDeleteError",
+          metadata: { bucket: config.bucket, key },
+        });
         return false;
       }
     }
@@ -591,7 +637,10 @@ export async function deletePersonaAvatarFromStorage(reference: string): Promise
       log.info(`[Avatar Storage] Deleted avatar object ${key} from S3`);
       return true;
     } catch (error) {
-      log.warn(`[Avatar Storage] Failed to delete avatar object ${key} from S3`, error);
+      await log.error(`[Avatar Storage] Failed to delete avatar object ${key} from S3`, error, {
+        errorType: "S3DeleteError",
+        metadata: { bucket: config.bucket, key },
+      });
       return false;
     }
   }

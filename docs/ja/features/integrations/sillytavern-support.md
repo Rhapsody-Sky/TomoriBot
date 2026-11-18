@@ -5,67 +5,82 @@ title: "SillyTavernサポート"
 # keep the plain title.
 head:
   - tag: title
-    content: "TomoriBot | DiscordでSillyTavernのカードを使用"
+    content: "TomoriBot | Use SillyTavern Character Cards in Discord"
 # Hand-written search snippet; overrides the auto-derived description from
 # routeData.ts middleware.
-description: "TomoriBotを使用して、SillyTavernのキャラクターカードとプリセットをDiscordにインポートします。"
+description: "TomoriBotを使用して、SillyTavernのキャラクターカードとプロンプトプリセットをDiscordにインポートします。既存のキャラクターをサーバーに持ち込みましょう。"
 sidebar:
   order: 2
+aiGenerated: true
 ---
 
-TomoriBotは、[SillyTavern](https://github.com/SillyTavern/SillyTavern)から、おそらくすでにお持ちの2つの要素をインポートできます。**プロンプトマネージャーのプリセット**（プロンプトの構成）と、**キャラクターカード**（キャラクター自体）です。これはSTユーザー向けのニッチな機能です。SillyTavernを使用したことがない場合は、このページをスキップして構いません。
+TomoriBotは、[SillyTavern](https://github.com/SillyTavern/SillyTavern)からアセット（プロンプト構造を制御するプロンプトマネージャーのプリセット、キャラクター定義であるキャラクターカード、埋め込みキャラクターブックまたはスタンドアロンのワールドインフォファイルであるロアブック）をインポートできます。SillyTavernを使用したことがない場合は、このページをスキップしても問題ありません。
 
 ## キャラクターカードのインポート
 
-`/persona import`を使用して、既存のSillyTavernのキャラクターをDiscordに直接持ち込むことができます。以下の形式に対応しています。
+`/persona import`を使用して、既存のSillyTavernキャラクターをDiscordに取り込みます。以下のものを受け入れます:
 
-- `chara`または`char`のメタデータが埋め込まれた**PNGカード**
-- **v2スタイルのJSON**カード（ルートレベルの`name`、`description`、`first_mes`など）
-- **v3 JSON**カード（`spec: "chara_card_v3"`とネストされた`data`オブジェクト）
+- `chara`または`char`メタデータが埋め込まれた **PNGカード**。
+- ルートレベルのプロパティを持つ **v2スタイルのJSON** カード (`name`、`description`、`first_mes`)。
+- **v3 JSON** カード (ネストされた`data`オブジェクトを含む`spec: "chara_card_v3"`)。
+- **`.charx`アーカイブ** (キャラクター カードV3パッケージ)。
 
-ファイルにTomoriBotのメタデータがない場合でも、有効なSTのv2/v3カードであれば、インポート時に自動的にSillyTavernの変換処理が実行されます。また、カードを`/persona generate`に渡して、新しいペルソナに変換することもできます。
+`.charx`ファイルは、`card.json`定義を含むZIPアーカイブです。TomoriBotは、`card.json`から文字テキストをインポートし、バンドルされたアセットファイル (アイコン、スプライト、オーディオ、ビデオ) をスキップします。`/config` > `ペルソナ` > アイデンティティとパーソナリティでアバターを設定し、`/config` > `ペルソナ` > スプライトでスプライトを追加できます。
 
-インポートされるデータは、保存される前に検証スキーマを通過します（デフォルトの上限：1文字列あたり5,000文字、属性200個、片側のサンプル会話100個、トリガーワード100個。セルフホスト環境では`PRESET_MAX_*`の環境変数で調整可能です）。正確な変換とフィールドのマッピングについては、[カードサポートのアーキテクチャ](/ja/architecture/integrations/sillytavern/card-support/)をご覧ください。
+アップロードされたファイルがTomoriBotメタデータのない有効なSillyTavernカードである場合、インポートによって自動的に変換されます。`/persona generate`にカードを渡して、キャラクターからインスピレーションを得た新しいペルソナを作成することもできます。
 
-## プロンプトのプリセット
+インポートは保存する前に検証されます (デフォルトの制限: テキストフィールドあたり5,000文字、属性200、片面あたり100のサンプルダイアログ、100のトリガー ワード)。フィールドマッピングと変換の仕組みについては、[カードサポートアーキテクチャ](/en/architecture/integrations/sillytavern/card-support/) を参照してください。
 
-SillyTavernのプロンプトマネージャーのプリセットは、プロンプトの**レイアウト**を制御します。`/st-preset import`でインポートし、`/st-preset toggle`で有効なノードを確認し、`/st-preset remove`で通常のレイアウトに戻します。
+:::tip
+カードのキャラクターブックはそのペルソナの[ロアブック](/features/knowledge/memory/lorebooks/)になります。無効化されていたエントリは無効のまま保持されます。カードを再インポートすると、自分で追加したエントリを含め、そのペルソナのロアブック全体が置き換えられます。
+:::
+
+## キャラクターカードのエクスポート
+
+ペルソナをSillyTavernに持ち込むには、`output_format` を `SillyTavern互換PNG` に設定して `/persona export` を使用します。カードにはアバター、性格、サンプル対話、ペルソナプロンプト、ペルソナのロアブックが含まれます。冒頭の挨拶は含まれないため、チャットを始める前にSillyTavern側で追加してください。
+
+トリガー、ナッジ、音声設定、ロアブックのチャンネル制限など、TomoriBot固有の設定は除外されます。TomoriBotのペルソナ設定を保持するには、`TomoriBotカード` または `生のJSON` を選択してください。`TomoriBotバンドル` にはスプライトやキャラクターリファレンスのメディアに加え、指定した場合は音声リファレンス音声も含まれます。このZIPはTomoriBot独自の形式であるため、SillyTavernにはSillyTavern互換PNGをご利用ください。
+
+## プロンプトプリセット
+<!-- anchor: prompt-presets -->
+
+SillyTavernプロンプトマネージャー プリセットは、モデルに送信されるプロンプトの順序とレイアウトを制御します。`/config` > `プラグイン` > SillyTavernプリセットを開いて、プリセットをインポートしたり、個々のノードを切り替えたり、アクティブなプリセットを切り替えたり、デフォルトのフォーマットを復元したりできます。
 
 ### プリセットが制御するもの
 
-- プロンプトの順序とマーカーの配置
-- カスタムプロンプトのノード
-- 履歴の後（post-history）や深さ指定の挿入（depth-injection）ノード
-- インポートされたノードの初期の有効・無効状態
+- 即時注文とマーカーの配置
+- カスタムプロンプトノード
+- ポストヒストリーおよび深度注入ノード
+- インポートされたノードの初期有効状態
 
-### プリセットが置き換えないもの
+### プリセットで置き換えられないもの
 
-プリセットは*レイアウト*を管理するものであり、すべてのテキストソースを管理するわけではありません。以下はプリセットと並行して存在します。
+プリセット構造によりレイアウトが促されます。それを埋めるテキストソースは置き換えられません。
 
-- ユーザーのシステムやペルソナのブロック：`/config system-prompt set`、`/persona prompt set`、`/persona attribute add`、`/persona sample-dialogue add`。
-- ライブチャットの履歴と検索されたドキュメントのコンテキスト。
-- TomoriBotの自動コンテキスト：サーバーメモリー、絵文字・スタンプのコンテキスト、会話中のユーザー、短期メモリー、条件付け、および同様のブロック。
+- システム命令とペルソナフィールド: `/config` > `動作` > `一般的な動作`、`/config` > `ペルソナ` > 詳細、および`/config` > `ペルソナ` > アイデンティティとパーソナリティ。
+- ライブチャット履歴と取得されたドキュメントコンテキスト。
+- 自動コンテキスト: サーバーの記憶、絵文字とスタンプのデータ、参加者リスト、短期記憶。
 
-### ネイティブのブロックのマッピング
+### ネイティブブロックのマッピング
 
-- `main` → 現在のシステムプロンプト（`/config system-prompt set`で設定されたもの、または組み込みのフォールバック）
-- `charDescription` → `/persona prompt set`
-- `charPersonality` → `/persona attribute add`
-- `dialogueExamples` → `/persona sample-dialogue add`
-- `chatHistory` → ライブチャンネルの履歴
-- `worldInfoBefore` / `worldInfoAfter` → 検索されたドキュメントのコンテキスト（STのlorebookではありません）
+ネイティブブロックは、TomoriBotプロンプトコンポーネントに直接マップされます。
 
-### システムプロンプトのルール
+- `main`: アクティブなシステムプロンプト (`/config` > `動作` > `一般的な動作`、またはデフォルトのフォールバック)
+- `charDescription`: `/config` > `ペルソナ` > アドバンスト
+- `charPersonality`: `/config` > `ペルソナ` > `アイデンティティと性格`
+- `dialogueExamples`: `/config` > `ペルソナ` > `アイデンティティと性格`
+- `chatHistory`: ライブチャンネルメッセージ履歴
+- `worldInfoBefore`および`worldInfoAfter`: 取得されたドキュメントコンテキスト (SillyTavernロアブックではありません)
 
-プリセットがアクティブな間は、組み込みのフォールバックのシステムプロンプトは削除されます。ただし、`/config system-prompt set`で独自のプロンプトを設定している場合は、引き続き送信されます。
+### システムプロンプトルール
+
+インポートされたプリセットがアクティブな場合、そのプリセットがシステムプロンプトを完全に制御します。TomoriBotの組み込みプロンプトおよび `/config` > `動作` > `一般的な動作` のカスタムプロンプトは送信されず、そこにあるシステムプロンプトのボタンはロックされます。カスタムプロンプトは保持され、`/config` > `プラグイン` > `SillyTavernプリセット` でプリセットをオフにすると再び適用されます。
 
 ### 互換性に関する注意事項
 
-プリセットが無視されているように見える場合のよくある原因は以下の通りです。
+- `prompt_order`で無効になったノードは、`/config` > `プラグイン` > SillyTavernプリセットで有効になるまで非アクティブのままになります。空のコメントのみのノードは送信されません。
+- マーカーの順序は厳格に適用されます。`chatHistory` を `dialogueExamples` の前に配置すると、チャット履歴が最初に配置されます。ワールドインフォマーカーは常時有効（Always On）のロアの位置を決めます。有効化されたロア、取得されたドキュメント、参加者の在席状況、および現在時刻は直近4発言ターンの近くに配置されます。最新または他チャンネルの短期記憶もそれらのメッセージの近くに配置され、設定されている場合はさらに近くに配置されます。
+- 履歴後の挿入は、スタンドアロンのメッセージとして送信されるのではなく、既存の会話履歴にマージされます。
+- 正規表現の後処理、プリセット定義のサンプリングパラメーター (温度、トップ-p)、および階層化されたプリセットはサポートされていません。従来のテキスト補完プリセットは、STのみのブロックが削除された状態でインポートされます。
 
-- インポート済 ≠ 送信：`prompt_order`で無効になっているノードは、`/st-preset toggle`で有効にするまでオフのままです。コメントのみや空のノードは送信されず、不明なマーカーはスキップされます。
-- 順序は文字通り適用されます。`chatHistory`を`dialogueExamples`の前に配置すると、ライブチャットが先に送信されます。
-- 履歴の後（post-history）や深さ指定の挿入（depth-injection）は、独立したメッセージになるのではなく、既存のチャット履歴のエントリーに統合されます。同じ深さの複数のノードはバッチ処理されます。
-- 正規表現による後処理、プリセット側のtemperature、top-p、モデルのオーバーライド、および階層化されたプリセットはサポートされていません。古いテキスト補完のプリセットは、ST専用のブロック（scenario、anchors、stop stringsなど）を破棄するベストエフォートなパスでインポートされます。
-
-Discord内での完全なリファレンスについては、`/help st-preset`を実行してください。インポートエンジンの内部については、[プリセットシステムのアーキテクチャ](/ja/architecture/integrations/sillytavern/preset-system/)をご覧ください。
+`/help`で、Discordガイドとして`プラグイン`を選択し、次に`SillyTavernプリセット`を選択します。内部プリセット処理については、[プリセットシステムアーキテクチャ](/en/architecture/integrations/sillytavern/preset-system/)を参照してください。

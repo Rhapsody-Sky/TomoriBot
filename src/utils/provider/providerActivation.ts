@@ -1,15 +1,62 @@
-import type {
-  PersonalProviderCapability,
-  SavedProviderConfigRow,
-  SavedProviderConfigUpsert,
-  TomoriState,
-} from "@/types/db/schema";
+import type { SavedProviderConfigRow, SavedProviderConfigUpsert, TomoriState } from "@/types/db/schema";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { configRepository, llmModelRepo, llmProviderRepo } from "@/utils/db/repositories";
 import { isCustomProvider } from "@/utils/provider/customProviderUtils";
 import { buildFallbackModelPersistence } from "@/utils/provider/fallbackModelIdentity";
-import { assignPersonalCapabilityToProvider, withPersonalTextPrimary } from "@/utils/provider/personalProviderHelpers";
+import { setPersonalTextPrimary } from "@/utils/provider/personalProviderHelpers";
 import { resolveLogitBiasEntriesForLlm } from "@/utils/provider/logitBiasResolver";
+import type { OpenRouterModelScope } from "@/utils/db/repositories/LlmModelRepository";
+import {
+  hasSpeechDesignSelection,
+  hasTranscriptionSelection,
+  setHostedSpeechSelection,
+  setHostedTranscriptionSelection,
+} from "@/utils/db/repositories/SpeechRepository";
+import { validateOpenRouterSpeechModel } from "@/utils/cache/openrouterSpeechModelCache";
+import { validateOpenRouterTranscriptionModel } from "@/utils/cache/openrouterTranscriptionModelCache";
+import { log } from "@/utils/misc/logger";
+import { getNovelAIProfile } from "@/providers/novelai/modelProfiles";
+
+/**
+ * Selects the provider's default model for each voice mode it seeds.
+ *
+ * OpenRouter's Design default only fills an empty Design slot, so adding or re-keying OpenRouter
+ * never replaces a Gemini or Vertex design the owner already chose.
+ */
+export async function activateProviderSpeechDefaults(scope: OpenRouterModelScope, provider: string): Promise<boolean> {
+  const models = await llmModelRepo.loadAvailableSpeechModels(provider, scope);
+  for (const mode of ["clone", "design"] as const) {
+    const model = models.find((entry) => entry.is_default && entry.voice_mode === mode);
+    if (!model) continue;
+    if (provider === "openrouter" && mode === "design" && (await hasSpeechDesignSelection(scope))) continue;
+    if (provider === "openrouter" && !(await validateOpenRouterSpeechModel(model.codename, mode))) return false;
+    if (!(await setHostedSpeechSelection(scope, model.speech_model_id, mode))) return false;
+  }
+  return true;
+}
+
+/**
+ * Fills an empty transcription slot with the provider's default model.
+ *
+ * An owner who already transcribes through any target keeps it, so adding or re-keying a provider
+ * never replaces a transcription choice.
+ */
+export async function activateProviderTranscriptionDefault(
+  scope: OpenRouterModelScope,
+  provider: string,
+): Promise<boolean> {
+  const model = (await llmModelRepo.loadAvailableTranscriptionModels(provider, scope)).find(
+    (entry) => entry.is_default,
+  );
+  if (!model || (await hasTranscriptionSelection(scope))) return true;
+  if (provider === "openrouter" && !(await validateOpenRouterTranscriptionModel(model.codename))) {
+    log.warn("Skipped the OpenRouter transcription default missing from the live catalogue", undefined, {
+      metadata: { scope, codename: model.codename },
+    });
+    return true;
+  }
+  return setHostedTranscriptionSelection(scope, model.transcription_model_id);
+}
 
 type ActivationStatus = "activated" | "missing_model" | "missing_provider" | "update_failed";
 
@@ -17,8 +64,6 @@ export interface ActivationResult {
   status: ActivationStatus;
   modelName?: string;
 }
-
-export type OpenRouterActivationCapability = "text" | "embedding" | "image" | "video";
 
 type ServerSavedProviderConfig = SavedProviderConfigRow | SavedProviderConfigUpsert;
 
@@ -40,6 +85,11 @@ export async function activateServerTextModelFromSavedConfig(params: {
 
   const promotedLlmId = selectedModel.llm_id;
   const normalizedProvider = params.savedConfig.provider.toLowerCase();
+  const resetNovelAI = normalizedProvider === "novelai" && params.tomoriState.llm.llm_id !== selectedModel.llm_id;
+  const preset = resetNovelAI ? await configRepository.resolveNaiPreset(selectedModel.llm_codename) : undefined;
+  if (resetNovelAI && getNovelAIProfile(selectedModel.llm_codename).samplingPresetTarget && !preset) {
+    return { status: "update_failed" };
+  }
   const customEndpoints = isCustomProvider(normalizedProvider)
     ? await llmProviderRepo.loadCustomEndpointsForServer(params.tomoriState.server_id)
     : [];
@@ -81,49 +131,22 @@ export async function activateServerTextModelFromSavedConfig(params: {
     }),
   ]);
 
+  if (updatedModel || updatedChat) invalidateTomoriStateCache(params.serverDiscId);
   if (!updatedModel || !updatedChat) {
     return { status: "update_failed" };
   }
-
-  invalidateTomoriStateCache(params.serverDiscId);
-  return { status: "activated", modelName: selectedModel.llm_codename };
-}
-
-export async function activateServerOpenRouterModelForCapability(params: {
-  serverId: number;
-  serverDiscId: string;
-  tomoriState: TomoriState;
-  capability: OpenRouterActivationCapability;
-  modelId: number;
-  modelName: string;
-}): Promise<ActivationResult> {
-  const openRouterConfig = await llmProviderRepo.loadSavedProviderConfig(params.serverId, "openrouter");
-  if (!openRouterConfig) {
-    return { status: "missing_provider" };
-  }
-
-  if (params.capability === "text") {
-    return await activateServerTextModelFromSavedConfig({
-      serverDiscId: params.serverDiscId,
-      tomoriState: params.tomoriState,
-      savedConfig: openRouterConfig,
-      llmId: params.modelId,
-    });
-  }
-
-  const updated =
-    params.capability === "embedding"
-      ? await configRepository.updateModelConfig(params.serverId, { embedding_model_id: params.modelId })
-      : params.capability === "image"
-        ? await configRepository.updateModelConfig(params.serverId, { diffusion_model_id: params.modelId })
-        : await configRepository.updateModelConfig(params.serverId, { video_model_id: params.modelId });
-
-  if (!updated) {
+  if (
+    resetNovelAI &&
+    !(await configRepository.applyNaiPreset(
+      params.tomoriState.server_id,
+      preset ?? null,
+      selectedModel,
+      params.serverDiscId,
+    ))
+  ) {
     return { status: "update_failed" };
   }
-
-  invalidateTomoriStateCache(params.serverDiscId);
-  return { status: "activated", modelName: params.modelName };
+  return { status: "activated", modelName: selectedModel.llm_codename };
 }
 
 export async function activatePersonalProviderTextModel(params: {
@@ -143,37 +166,7 @@ export async function activatePersonalProviderTextModel(params: {
   const customEndpoints = isCustomProvider(params.provider)
     ? await llmProviderRepo.loadCustomEndpointsForUser(params.userId)
     : [];
-  const updated = await assignPersonalCapabilityToProvider(params.userId, params.provider, "text", (row) =>
-    withPersonalTextPrimary(row, selectedModel.llm_id ?? null, customEndpoints),
-  );
+  const updated = await setPersonalTextPrimary(params.userId, params.provider, selectedModel.llm_id, customEndpoints);
 
   return updated ? { status: "activated", modelName: selectedModel.llm_codename } : { status: "update_failed" };
-}
-
-export async function activatePersonalOpenRouterModelForCapability(params: {
-  userId: number;
-  capability: OpenRouterActivationCapability;
-  modelId: number;
-  modelName: string;
-}): Promise<ActivationResult> {
-  const openRouterConfig = await llmProviderRepo.loadUserSavedProviderConfig(params.userId, "openrouter");
-  if (!openRouterConfig) {
-    return { status: "missing_provider" };
-  }
-
-  const capability = params.capability as PersonalProviderCapability;
-  const updated = await assignPersonalCapabilityToProvider(params.userId, "openrouter", capability, (row) => {
-    switch (params.capability) {
-      case "text":
-        return withPersonalTextPrimary(row, params.modelId);
-      case "embedding":
-        return { ...row, embedding_model_id: params.modelId };
-      case "image":
-        return { ...row, diffusion_model_id: params.modelId };
-      case "video":
-        return { ...row, video_model_id: params.modelId };
-    }
-  });
-
-  return updated ? { status: "activated", modelName: params.modelName } : { status: "update_failed" };
 }

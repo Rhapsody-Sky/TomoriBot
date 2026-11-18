@@ -1,9 +1,10 @@
+import { TIMEFRAME_LABEL_KEYS } from "@/utils/discord/statsDashboardCatalog";
 import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import type { UserRow } from "@/types/db/schema";
-import { getCachedTomoriState } from "@/utils/cache/tomoriStateCache";
 import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
+import { resolveStatsServerId } from "@/utils/stats/statsServerContext";
 import {
   buildPersonalTabs,
   DEFAULT_TIMEFRAME,
@@ -39,7 +40,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
         .setDescription(localizer("en-US", "commands.stats.personal.timeframe_description"))
         .setRequired(false)
         .addChoices(
-          ...TIMEFRAME_VALUES.map((value) => ({ name: localizer("en-US", `commands.choices.${value}`), value })),
+          ...TIMEFRAME_VALUES.map((value) => ({ name: localizer("en-US", TIMEFRAME_LABEL_KEYS[value]), value })),
         ),
     );
 
@@ -66,11 +67,11 @@ export async function execute(
   }
 
   try {
-    // Resolve the internal server id; stat reads key on it, not the snowflake.
-    const tomoriState = await getCachedTomoriState(guild.id);
-    const serverId = tomoriState?.server_id;
+    const serverId = await resolveStatsServerId(interaction, locale);
     const userId = userData.user_id;
-    if (!serverId || !userId) {
+    if (!serverId) return;
+
+    if (!userId) {
       await replyInfoEmbed(interaction, locale, {
         titleKey: "general.errors.tomori_not_setup_title",
         descriptionKey: "general.errors.tomori_not_setup_description",
@@ -83,7 +84,7 @@ export async function execute(
     const scope = interaction.options.getString("scope", true) as StatsScope;
     const from = resolveWindowFrom(timeframe);
     const scopeServerId = scope === "this_server" ? serverId : undefined;
-    const timeframeLabel = localizer(locale, `commands.choices.${timeframe}`);
+    const timeframeLabel = localizer(locale, TIMEFRAME_LABEL_KEYS[timeframe]);
     const scopeLabel = localizer(
       locale,
       scope === "this_server" ? "commands.choices.this_server" : "commands.choices.global",
@@ -104,7 +105,21 @@ export async function execute(
     });
 
     const iconUrl = interaction.user.displayAvatarURL({ extension: "png", size: 256 });
-    await renderStatsDashboard(interaction, interaction.user.id, locale, tabs, iconUrl);
+    await renderStatsDashboard(
+      interaction,
+      {
+        view: "personal",
+        locale,
+        ownerId: interaction.user.id,
+        serverId,
+        guildId: guild.id,
+        timeframe,
+        scope,
+        timezoneOffset: userData.timezone_offset ?? null,
+      },
+      tabs,
+      iconUrl,
+    );
   } catch (error) {
     await log.error(`Error executing /stats personal for user ${userData.user_disc_id}`, error as Error, {
       userId: userData.user_id,

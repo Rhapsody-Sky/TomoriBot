@@ -1,7 +1,8 @@
 import { type ToolStateForContext, getAvailableToolsWithMCP } from "@/tools/toolRegistry";
 import { getGuildMcpManager } from "@/utils/mcp/guildMcpManager";
+import { expandDeliberateToolAllowedNames } from "@/utils/tools/deliberateToolMode";
 import { log } from "@/utils/misc/logger";
-import type { AssembledServerConfig } from "@/types/db/schema";
+import type { AssembledServerConfig, TomoriState } from "@/types/db/schema";
 import { renderPromptConditionals, type PromptConditionPredicate } from "./promptConditionals";
 
 const PROMPT_CAPABILITY_NAMES = [
@@ -55,6 +56,7 @@ const STATIC_TOOL_PROMPT_MACROS: Record<string, string> = {
   "{manage_message_tool}": "manage_message",
   "{pin_tool}": "manage_message",
   "{message_interaction_tool}": "interact_with_recent_message",
+  "{conditioning_interaction_tool}": "interact_with_target",
   "{profile_picture_tool}": "peek_profile_picture",
   "{document_tool}": "read_file",
   "{message_metadata_tool}": "reveal_message_metadata",
@@ -64,9 +66,12 @@ const STATIC_TOOL_PROMPT_MACROS: Record<string, string> = {
   "{image_analysis_tool}": "analyze_image",
   "{image_generation_tool}": "generate_image",
   "{anime_image_generation_tool}": "generate_image_nai",
+  "{tag_search_tool}": "danbooru_search_tags",
+  "{booru_post_search_tool}": "danbooru_search_posts",
   "{voice_message_tool}": "generate_voice_message",
   "{block_user_tool}": "block_user",
   "{unblock_user_tool}": "unblock_user",
+  "{user_info_tool}": "update_user_info",
 };
 
 const DYNAMIC_TOOL_PROMPT_MACROS = {
@@ -118,21 +123,26 @@ const DYNAMIC_TOOL_PROMPT_MACROS = {
         availability.guildUrlFetcherToolNames,
         [/metadata/, /meta/, /head/, /headers/, /preview/, /info/],
         [/fetch/, /read/, /crawl/],
-      ) || pickFirstAvailable(availability.availableToolNames, ["url-metadata", "fetch_url", "fetch"]),
+      ) || pickFirstAvailable(availability.availableToolNames, ["fetch_url"]),
   },
 } as const;
 
 const STATIC_TOOL_PROMPT_MACRO_KEYS = Object.keys(STATIC_TOOL_PROMPT_MACROS);
 const DYNAMIC_TOOL_PROMPT_MACRO_KEYS = Object.keys(DYNAMIC_TOOL_PROMPT_MACROS);
-const ALL_TOOL_PROMPT_MACRO_KEYS = [...STATIC_TOOL_PROMPT_MACRO_KEYS, ...DYNAMIC_TOOL_PROMPT_MACRO_KEYS];
 
-function hasToolPromptMacros(text: string): boolean {
-  return ALL_TOOL_PROMPT_MACRO_KEYS.some((macro) => text.includes(macro));
-}
+// Names no tool, because a model shown a tool it cannot call tends to write the call out as chat text.
+export const UNAVAILABLE_TOOL_TEXT = "an unavailable tool";
 
-export function resolvePromptCapabilityValues(config: AssembledServerConfig): PromptCapabilityValues {
+/**
+ * @param hasTools - The active model's narrowed flag, which carries the Deliberate Tool Mode kill switch that
+ *   `tool_use_enabled` alone does not.
+ */
+export function resolvePromptCapabilityValues(
+  config: AssembledServerConfig,
+  hasTools: boolean,
+): PromptCapabilityValues {
   return {
-    tool_use: config.tool_use_enabled ?? true,
+    tool_use: hasTools && (config.tool_use_enabled ?? true),
     self_teaching: config.self_teaching_enabled,
     personal_memories: config.personal_memories_enabled,
     emoji_usage: config.emoji_usage_enabled,
@@ -207,23 +217,22 @@ export function createToolPromptMacroResolver(context?: ToolPromptMacroContext |
         warn: warnOnce,
       });
 
-      if (!hasToolPromptMacros(expanded)) {
-        return expanded;
-      }
-
-      for (const [macro, toolName] of Object.entries(STATIC_TOOL_PROMPT_MACROS)) {
-        if (expanded.includes(macro)) {
-          expanded = expanded.replaceAll(macro, formatResolvedToolName(toolName));
-        }
-      }
-
+      const presentStaticMacros = STATIC_TOOL_PROMPT_MACRO_KEYS.filter((macro) => expanded.includes(macro));
       const presentDynamicMacros = DYNAMIC_TOOL_PROMPT_MACRO_KEYS.filter((macro) => expanded.includes(macro));
-      if (presentDynamicMacros.length === 0) {
+      if (presentStaticMacros.length === 0 && presentDynamicMacros.length === 0) {
         return expanded;
       }
 
       availabilityPromise ??= loadToolPromptMacroAvailability(context);
       const availability = await availabilityPromise;
+
+      for (const macro of presentStaticMacros) {
+        const toolName = STATIC_TOOL_PROMPT_MACROS[macro];
+        expanded = expanded.replaceAll(
+          macro,
+          availability.availableToolNames.has(toolName) ? formatResolvedToolName(toolName) : UNAVAILABLE_TOOL_TEXT,
+        );
+      }
 
       for (const macro of presentDynamicMacros) {
         const definition = DYNAMIC_TOOL_PROMPT_MACROS[macro as keyof typeof DYNAMIC_TOOL_PROMPT_MACROS];
@@ -264,33 +273,40 @@ async function loadToolPromptMacroAvailability(
     return fallbackAvailability;
   }
 
-  const preloadedToolNames = context?.availableToolNames;
-  if (preloadedToolNames) {
-    const deliberateToolAllowedNames = context?.deliberateToolAllowedNames;
-    const availableToolNames = deliberateToolAllowedNames
-      ? new Set([...preloadedToolNames].filter((name) => deliberateToolAllowedNames.includes(name)))
-      : new Set(preloadedToolNames);
-    return {
-      availableToolNames,
-      guildWebSearchToolNames: [],
-      guildUrlFetcherToolNames: [],
-    };
-  }
-
   try {
-    const [{ builtInTools, mcpFunctionNames }, guildToolNames] = await Promise.all([
-      getAvailableToolsWithMCP(provider, stateForContext),
-      loadGuildToolFamilyNames(stateForContext.server_id),
-    ]);
-    // Names that are filtered globally in `availability.ts` but might still
-    // appear in MCP listings, so kept here as a defensive trim.
-    const providerHiddenGlobalFunctions = new Set([
-      "iask-search",
-      "monica-search",
-      "fetch",
-      "fetch-url",
-      "url-metadata",
-    ]);
+    const preloadedToolNames = context?.availableToolNames;
+    if (preloadedToolNames) {
+      const guildToolNames = await loadGuildToolFamilyNames(stateForContext.server_id).catch(() => ({
+        webSearch: [],
+        urlFetcher: [],
+      }));
+      const families = Object.fromEntries([
+        ...guildToolNames.webSearch.map((name) => [name, "web_search"]),
+        ...guildToolNames.urlFetcher.map((name) => [name, "url_fetcher"]),
+      ]);
+      const deliberateToolAllowedNames = expandDeliberateToolAllowedNames(
+        context?.deliberateToolAllowedNames,
+        families,
+      );
+      const availableToolNames = deliberateToolAllowedNames
+        ? new Set([...preloadedToolNames].filter((name) => deliberateToolAllowedNames.includes(name)))
+        : new Set(preloadedToolNames);
+      return {
+        availableToolNames,
+        guildWebSearchToolNames: guildToolNames.webSearch.filter((name) => availableToolNames.has(name)),
+        guildUrlFetcherToolNames: guildToolNames.urlFetcher.filter((name) => availableToolNames.has(name)),
+      };
+    }
+
+    const {
+      builtInTools,
+      mcpFunctionNames,
+      mcpToolFamilies = {},
+    } = await getAvailableToolsWithMCP(provider, stateForContext);
+    const guildToolNames = {
+      webSearch: mcpFunctionNames.filter((name) => mcpToolFamilies[name] === "web_search"),
+      urlFetcher: mcpFunctionNames.filter((name) => mcpToolFamilies[name] === "url_fetcher"),
+    };
     const availableToolNames = new Set<string>();
 
     for (const tool of builtInTools) {
@@ -298,13 +314,14 @@ async function loadToolPromptMacroAvailability(
     }
 
     for (const functionName of mcpFunctionNames) {
-      if (providerHiddenGlobalFunctions.has(functionName)) {
-        continue;
-      }
       availableToolNames.add(functionName);
     }
 
-    const deliberateToolAllowedNames = context?.deliberateToolAllowedNames;
+    const families = Object.fromEntries([
+      ...guildToolNames.webSearch.map((name) => [name, "web_search"]),
+      ...guildToolNames.urlFetcher.map((name) => [name, "url_fetcher"]),
+    ]);
+    const deliberateToolAllowedNames = expandDeliberateToolAllowedNames(context?.deliberateToolAllowedNames, families);
     const filteredAvailableToolNames = deliberateToolAllowedNames
       ? new Set([...availableToolNames].filter((name) => deliberateToolAllowedNames.includes(name)))
       : availableToolNames;
@@ -327,12 +344,11 @@ async function loadGuildToolFamilyNames(serverId: string): Promise<{ webSearch: 
   }
 
   const guildMcpManager = getGuildMcpManager();
-  const [webSearch, urlFetcher] = await Promise.all([
-    guildMcpManager.getGuildMCPFunctionNamesByServerType(parsedServerId, "web_search"),
-    guildMcpManager.getGuildMCPFunctionNamesByServerType(parsedServerId, "url_fetcher"),
-  ]);
-
-  return { webSearch, urlFetcher };
+  const { routes } = await guildMcpManager.getGuildMCPRouting(parsedServerId);
+  return {
+    webSearch: [...routes].filter(([, route]) => route.config.server_type === "web_search").map(([name]) => name),
+    urlFetcher: [...routes].filter(([, route]) => route.config.server_type === "url_fetcher").map(([name]) => name),
+  };
 }
 
 function resolveWebSearchToolName(availability: ToolPromptMacroAvailability): string | null {
@@ -384,15 +400,12 @@ function resolveGuildFamilyToolName(
 }
 
 function resolveUrlFetchToolName(availability: ToolPromptMacroAvailability): string | null {
-  const inferredUrlFetcherNames = [...availability.availableToolNames].filter(
-    (name) => name === "fetch" || /(?:url|web|http|fetch|crawl|page|visit)/i.test(name),
-  );
   return (
     resolveGuildFamilyToolName(
-      [...availability.guildUrlFetcherToolNames, ...inferredUrlFetcherNames],
+      availability.guildUrlFetcherToolNames,
       [/fetch/, /read/, /crawl/, /page/, /open/, /visit/, /url/],
       [/metadata/, /meta/, /head/],
-    ) || pickFirstAvailable(availability.availableToolNames, ["fetch_url", "fetch"])
+    ) || pickFirstAvailable(availability.availableToolNames, ["fetch_url"])
   );
 }
 
@@ -404,4 +417,46 @@ function pickFirstAvailable(availableToolNames: Set<string>, preferredToolNames:
   }
 
   return null;
+}
+
+/**
+ * A resolver scoped to one generation attempt's provider and config. Macros are provider-specific,
+ * so a fallback attempt must not reuse the primary model's resolver.
+ */
+export function createToolPromptMacroResolverForState(
+  tomoriState: TomoriState,
+  deliberateToolAllowedNames?: readonly string[],
+): ToolPromptMacroResolver {
+  return createToolPromptMacroResolver({
+    provider: tomoriState.llm.llm_provider,
+    deliberateToolAllowedNames,
+    capabilities: resolvePromptCapabilityValues(tomoriState.config, tomoriState.llm.has_tools),
+    stateForContext:
+      tomoriState.server_id && tomoriState.llm
+        ? {
+            server_id: tomoriState.server_id.toString(),
+            activePersonaHasElevenlabsVoice: false,
+            llm: tomoriState.llm,
+            diffusion_model_id: tomoriState.config.diffusion_model_id,
+            nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
+            video_model_id: tomoriState.config.video_model_id,
+            config: {
+              emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
+              sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
+              web_search_enabled: tomoriState.config.web_search_enabled,
+              self_teaching_enabled: tomoriState.config.self_teaching_enabled,
+              manage_message_enabled: tomoriState.config.manage_message_enabled,
+              imagegen_enabled: tomoriState.config.imagegen_enabled,
+              videogen_enabled: tomoriState.config.videogen_enabled,
+              voice_message_enabled: tomoriState.config.voice_message_enabled,
+              user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+              user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
+              thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+              conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+              dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+              danbooru_enabled: tomoriState.config.danbooru_enabled,
+            },
+          }
+        : undefined,
+  });
 }

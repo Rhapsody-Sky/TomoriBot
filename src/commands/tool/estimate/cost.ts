@@ -1,33 +1,50 @@
+import { applyPromptLayoutInserts } from "@/utils/text/context/promptLayout";
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
+import {
+  findProviderRequestDeniedError,
+  createProviderUsageRecorder,
+  type ProviderUsageContext,
+  getProviderRequestFailureCopy,
+} from "@/utils/provider/providerUsage";
+import { verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
 import { GoogleGenAI, type CountTokensParameters } from "@google/genai";
 import type { ChatInputCommandInteraction, Client, SlashCommandSubcommandBuilder } from "discord.js";
 import { MessageFlags } from "discord.js";
 import type { ErrorContext, TomoriState, UserRow } from "@/types/db/schema";
 import { PrivacyLevel } from "@/types/db/schema";
+import { statusNote } from "@/utils/discord/ui/statusTitle";
 import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
 import { replyInfoEmbed, replySummaryEmbed } from "@/utils/discord/ui/embeds";
+import { createStandardEmbed } from "@/utils/discord/embedHelper";
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { getAvailableToolsForContext } from "@/tools/toolRegistry";
 import { getCachedTomoriState, getCachedAllPersonas } from "@/utils/cache/tomoriStateCache";
-import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
-import { decryptApiKey } from "@/utils/security/crypto";
+import { resolveTextCredentialState } from "@/utils/provider/textModelSelection";
+import {
+  CredentialUnavailableError,
+  getCapabilityCredentialFailureCopy,
+  resolveCapabilityCredentials,
+} from "@/utils/provider/credentialResolver";
 import { buildContext } from "@/utils/text/contextBuilder";
 import { DEFAULT_SYSTEM_PROMPT } from "@/utils/text/context/templates";
 import { prepareParticipantContext } from "@/utils/text/participants/preparation";
 import { resolveMediaForModel } from "@/utils/text/context/mediaResolver";
 import { getCachedChannelPrompt } from "@/utils/cache/channelPromptCache";
 import { getEmojiPenaltyDirective } from "@/utils/text/emojiPenalty";
-import { truncateDialogueHistory } from "@/utils/text/contextTruncator";
-import {
-  getOpenRouterPricing,
-  getOpenRouterTokenLimits,
-  isOpenRouterCapabilityCacheReady,
-} from "@/utils/cache/openrouterCapabilityCache";
-import { getGeminiTokenLimits } from "@/utils/cache/geminiCapabilityCache";
+import { getOpenRouterPricing } from "@/utils/cache/openrouterCapabilityCache";
+import { formatUsdRate, resolveModelPricing } from "@/utils/provider/modelPricing";
+import { applyProviderContextTruncation } from "@/utils/provider/contextBudget";
 import { normalizeMessageFetchLimit } from "@/utils/discord/messageFetchLimit";
 import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
-import { charsToTokensJson, charsToTokensText, estimateContextItemsTokens } from "@/utils/text/tokenEstimate";
-import { getCachedPrivacyLevel } from "@/utils/cache/userCache";
+import {
+  charsToTokensJson,
+  charsToTokensText,
+  estimateContextItemsTokens,
+  normalizeProviderUsage,
+  type TokenUsage,
+} from "@/utils/text/tokenEstimate";
+import { getCachedBlacklistStatus, getCachedPrivacyLevel } from "@/utils/cache/userCache";
 import { GoogleProvider, type GoogleProviderConfig } from "@/providers/google/googleProvider";
 import { GoogleStreamAdapter } from "@/providers/google/googleStreamAdapter";
 import { VertexProvider, type VertexProviderConfig } from "@/providers/vertex/vertexProvider";
@@ -48,17 +65,21 @@ import {
 import { ProviderFactory } from "@/utils/provider/providerFactory";
 import {
   appendComponentMediaFromMessage,
+  appendStickersFromMessage,
   appendSupportedMediaFromMessage,
   extractEmojiImageAttachments,
 } from "@/utils/chat/contextMedia";
-import { normalizeRenderModifierName, resolveRenderModifierSourcePersona } from "@/utils/discord/renderModifierParser";
-import { resolveSpriteMessageDisplayName } from "@/utils/discord/spriteMessageLabel";
+import { normalizeRenderModifierName } from "@/utils/discord/renderModifierParser";
+import { resolveWebhookPersonaAuthor } from "@/utils/discord/webhookPersonaAuthor";
 import { llmSections } from "@/db/seed/catalog/models";
+import { readOpenRouterLimitError } from "@/providers/openrouter/openrouterLimit";
+import { buildOpenRouterAttributionHeaders } from "@/utils/provider/openrouterAttribution";
+import { fetchWithProviderRequest } from "@/utils/provider/providerRequestHook";
 
-// Char-per-token ratios and the primitive estimators (charsToTokensText/Json,
-// estimateContextItemsTokens) now live in @/utils/text/tokenEstimate so this command
-// and the post-turn stat recorder share one source of truth. The higher-level,
-// cost-specific helpers below still live here.
+// Char-per-token ratios and the primitive estimators live in @/utils/text/tokenEstimate
+// so this command and the post-turn stat recorder share one source of truth. The
+// higher-level, cost-specific helpers below stay here because only this command
+// needs them.
 
 /**
  * Rough per-message overhead for chat-format wrappers (role markers, separators, etc.).
@@ -81,15 +102,14 @@ const MENTION_PING_RULE_CHARS_EST = 300;
 const EMOJI_USAGE_RULES_CHARS_EST = 340;
 const STICKER_USAGE_RULES_CHARS_EST = 270; // header + footer, excluding per-sticker lines
 
-const EST_OUTPUT_SHORT = parseIntegerEnv(process.env.HELP_COST_EST_OUTPUT_SHORT, 80, 1);
-const EST_OUTPUT_TYPICAL = parseIntegerEnv(process.env.HELP_COST_EST_OUTPUT_TYPICAL, 220, 1);
-const EST_OUTPUT_LONG = parseIntegerEnv(process.env.HELP_COST_EST_OUTPUT_LONG, 500, 1);
+/** Assumed reply lengths the cost estimate reports side by side, in tokens. */
+const EST_OUTPUT_SHORT = 80;
+const EST_OUTPUT_TYPICAL = 220;
+const EST_OUTPUT_LONG = 500;
 
-// Per-model prices now live on the `llms` catalog rows (input_price_per_million /
-// output_price_per_million), resolved at runtime by resolveModelPricing(). The old
-// HELP_COST_*_PRICE_PER_MILLION env constants and the Anthropic codename-sniffing tier
-// guess have been removed: a first-party model with no catalog price now reports "pricing
-// unavailable" rather than billing against a coarse provider-wide fallback.
+// First-party pricing is read from the `llms` catalog columns, so a model with no
+// catalog price reports "pricing unavailable" instead of billing against a
+// provider-wide guess (see resolveModelPricing in @/utils/provider/modelPricing).
 
 const YOUTUBE_URL_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/i,
@@ -188,51 +208,6 @@ interface OpenRouterProbeUsage {
   total_tokens?: number;
 }
 
-type ContextTruncator = (contextSegments: StructuredContextItem[], tomoriState: TomoriState) => StructuredContextItem[];
-
-/**
- * Shared truncator for Gemini-family providers (Google AI Studio + Vertex AI).
- * Both resolve the same model codenames against the Gemini capability cache, so
- * Vertex reuses Google's limits to keep the parity context in lockstep.
- */
-const geminiFamilyContextTruncator: ContextTruncator = (contextSegments, tomoriState) => {
-  const tokenLimits = getGeminiTokenLimits(tomoriState.llm.llm_codename);
-  if (!tokenLimits || tokenLimits.contextLength <= 0 || !tokenLimits.maxCompletionTokens) {
-    return contextSegments;
-  }
-
-  const { truncated, totalDropped } = truncateDialogueHistory(
-    contextSegments,
-    tokenLimits.contextLength,
-    tokenLimits.maxCompletionTokens,
-  );
-  return totalDropped > 0 ? truncated : contextSegments;
-};
-
-const contextTruncators: Partial<Record<LiveProvider, ContextTruncator>> = {
-  openrouter: (contextSegments, tomoriState) => {
-    if (tomoriState.llm.llm_codename === "other-model" || !isOpenRouterCapabilityCacheReady()) {
-      return contextSegments;
-    }
-
-    const tokenLimits = getOpenRouterTokenLimits(tomoriState.llm.llm_codename);
-    const openrouterTruncationOutputCap = parseIntegerEnv(process.env.OPENROUTER_MAX_OUTPUT_TOKENS, 8192, 1);
-    if (!tokenLimits || tokenLimits.contextLength <= 0 || !tokenLimits.maxCompletionTokens) {
-      return contextSegments;
-    }
-
-    const truncationMaxCompletionTokens = Math.min(tokenLimits.maxCompletionTokens, openrouterTruncationOutputCap);
-    const { truncated, totalDropped } = truncateDialogueHistory(
-      contextSegments,
-      tokenLimits.contextLength,
-      truncationMaxCompletionTokens,
-    );
-    return totalDropped > 0 ? truncated : contextSegments;
-  },
-  google: geminiFamilyContextTruncator,
-  vertex: geminiFamilyContextTruncator,
-};
-
 interface OpenRouterProbeResponse {
   id?: string;
   usage?: OpenRouterProbeUsage;
@@ -249,13 +224,6 @@ interface DeepseekProbeUsage {
 
 interface DeepseekProbeResponse {
   usage?: DeepseekProbeUsage;
-}
-
-function parseIntegerEnv(value: string | undefined, fallback: number, minimum: number): number {
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) return fallback;
-  return Math.max(minimum, parsed);
 }
 
 /**
@@ -308,6 +276,7 @@ function estimateToolSchemaTokens(): number {
       },
       config: {
         // Defaults match DB defaults in schema.sql (true)
+        emoji_usage_enabled: true,
         sticker_usage_enabled: true,
         web_search_enabled: true,
         self_teaching_enabled: true,
@@ -316,7 +285,11 @@ function estimateToolSchemaTokens(): number {
         videogen_enabled: true,
         voice_message_enabled: true,
         user_blocking_enabled: true,
+        user_info_updates_enabled: true,
         thread_creation_enabled: true,
+        conditioning_interactions_enabled: false,
+        dice_rolling_enabled: true,
+        danbooru_enabled: true,
       },
     };
 
@@ -452,32 +425,6 @@ function calculateCost(
 }
 
 /**
- * Resolve per-million input/output pricing for the active model.
- *
- * Precedence (see docs/subsystems/database-schema.md):
- *  1. The model row's own `input_price_per_million` / `output_price_per_million` columns: the official,
- *     DB-backed source of truth, seeded from the typed catalog (src/db/seed/catalog/models.ts).
- *  2. The optional caller-supplied `fallback` (e.g. OpenRouter's live API pricing cache), used only when
- *     the row carries no price. First-party providers pass no fallback: a model with no catalog price
- *     resolves to `null`, and the caller surfaces "pricing unavailable" instead of guessing a rate.
- *
- * @param tomoriState - Active server/persona state; its `llm` row carries the price columns
- * @param fallback - Optional prices used only when the row's columns are null/undefined
- * @returns Resolved input/output price per million tokens, or `null` when no price can be determined
- */
-function resolveModelPricing(
-  tomoriState: TomoriState,
-  fallback?: { input: number; output: number },
-): { input: number; output: number } | null {
-  const dbInput = tomoriState.llm.input_price_per_million;
-  const dbOutput = tomoriState.llm.output_price_per_million;
-  if (typeof dbInput === "number" && typeof dbOutput === "number") {
-    return { input: dbInput, output: dbOutput };
-  }
-  return fallback ?? null;
-}
-
-/**
  * Illustrative example pricing for the legacy (no-server / no-key) estimate embed.
  *
  * Reads the Google default model's catalog price so the static example stays in lockstep with the
@@ -526,59 +473,6 @@ function buildCombinedTailDirectiveMessage(directives: string[]): StructuredCont
     parts: [{ type: "text", text: `[System: ${normalized.join("\n\n")}]` }],
     metadataTag: ContextItemTag.DIALOGUE_HISTORY,
   };
-}
-
-function insertBeforeLatestDialoguePair(
-  contextSegments: StructuredContextItem[],
-  injectedItem: StructuredContextItem,
-): void {
-  const dialogueIndexes: number[] = [];
-
-  for (let i = contextSegments.length - 1; i >= 0; i--) {
-    const item = contextSegments[i];
-    if (item.metadataTag === ContextItemTag.DIALOGUE_HISTORY && (item.role === "user" || item.role === "model")) {
-      dialogueIndexes.push(i);
-      if (dialogueIndexes.length === 2) break;
-    }
-  }
-
-  if (dialogueIndexes.length === 0) {
-    contextSegments.push(injectedItem);
-    return;
-  }
-
-  const insertAt = dialogueIndexes.length >= 2 ? dialogueIndexes[1] : dialogueIndexes[0];
-  contextSegments.splice(insertAt, 0, injectedItem);
-}
-
-// Local mirror of contextAnnotations.insertAtDialogueDepth so the cost estimate counts
-// the live STM nudge. depth=0 → tail; depth=N → before the Nth dialogue item from bottom.
-function insertAtDialogueDepth(
-  contextSegments: StructuredContextItem[],
-  nudge: StructuredContextItem,
-  depth: number,
-): void {
-  if (depth <= 0) {
-    contextSegments.push(nudge);
-    return;
-  }
-  let found = 0;
-  let lastFoundIndex = -1;
-  for (let i = contextSegments.length - 1; i >= 0; i--) {
-    if (contextSegments[i].metadataTag === ContextItemTag.DIALOGUE_HISTORY) {
-      found++;
-      lastFoundIndex = i;
-      if (found === depth) {
-        contextSegments.splice(i, 0, nudge);
-        return;
-      }
-    }
-  }
-  if (lastFoundIndex !== -1) {
-    contextSegments.splice(lastFoundIndex, 0, nudge);
-  } else {
-    contextSegments.push(nudge);
-  }
 }
 
 function buildGoogleInBandToolSchemasText(tools: unknown[]): string {
@@ -634,12 +528,6 @@ function parseOpenRouterNativePromptTokens(payload: unknown): number | undefined
   }
 
   return undefined;
-}
-
-function formatPricePerMillion(value: number): string {
-  if (value < 0.01) return `$${value.toFixed(6)}`;
-  if (value < 1) return `$${value.toFixed(3)}`;
-  return `$${value.toFixed(2)}`;
 }
 
 function resolveProvider(providerName: string): LiveProvider | null {
@@ -707,6 +595,13 @@ async function buildRuntimeParityContext(
       if (privacyLevel === PrivacyLevel.FULL) {
         continue;
       }
+      if (
+        interaction.guild &&
+        !message.author.bot &&
+        (await getCachedBlacklistStatus(serverDiscId, message.author.id))
+      ) {
+        continue;
+      }
     }
 
     let effectiveAuthorId = message.author.id;
@@ -720,27 +615,16 @@ async function buildRuntimeParityContext(
       personaName = authorName;
     } else if (message.webhookId) {
       const webhookName = message.author.username?.trim();
-      const renderModifierSource = webhookName
-        ? resolveRenderModifierSourcePersona(webhookName, personaByNickname)
-        : null;
-      const matchedPersona = webhookName
-        ? (renderModifierSource?.persona ?? personaByNickname.get(normalizeRenderModifierName(webhookName)))
-        : undefined;
+      const resolvedPersona =
+        webhookName && (await verifyMessageWebhook(message))
+          ? await resolveWebhookPersonaAuthor(message.id, webhookName, personaByNickname)
+          : null;
 
-      if (matchedPersona) {
-        // Mirror the real pipeline: recover the decorated "Name (sprite)" label
-        // for clean-named sprite messages from the persisted mapping.
-        const spriteDisplayName = renderModifierSource
-          ? null
-          : await resolveSpriteMessageDisplayName(
-              message.id,
-              matchedPersona.persona_id,
-              matchedPersona.persona_nickname,
-            );
-        authorName = renderModifierSource?.displayName ?? spriteDisplayName ?? matchedPersona.persona_nickname;
+      if (resolvedPersona) {
+        authorName = resolvedPersona.displayName;
         authorType = "persona";
-        personaName = matchedPersona.persona_nickname;
-        effectiveAuthorId = `persona:${matchedPersona.persona_id ?? matchedPersona.persona_nickname}`;
+        personaName = resolvedPersona.persona.persona_nickname;
+        effectiveAuthorId = `persona:${resolvedPersona.persona.persona_id ?? resolvedPersona.persona.persona_nickname}`;
       } else if (webhookName) {
         authorName = webhookName;
       }
@@ -758,18 +642,7 @@ async function buildRuntimeParityContext(
       componentMediaCounts.imageCount > 0 ||
       componentMediaCounts.videoCount > 0;
 
-    if (message.stickers.size > 0) {
-      for (const sticker of message.stickers.values()) {
-        const stickerUrl = `https://cdn.discordapp.com/stickers/${sticker.id}.png`;
-        imageAttachments.push({
-          url: stickerUrl,
-          proxyUrl: stickerUrl,
-          mimeType: "image/png",
-          filename: `${sticker.name}.png`,
-        });
-        hasLocalMedia = true;
-      }
-    }
+    if (appendStickersFromMessage(message, imageAttachments) > 0) hasLocalMedia = true;
 
     if (shouldExtractEmojiImages && message.content) {
       const emojiImages = extractEmojiImageAttachments(message.content);
@@ -802,9 +675,9 @@ async function buildRuntimeParityContext(
       hasLocalMedia && (imageAttachments.length > 0 || videoAttachments.length > 0) ? [message.id] : undefined;
 
     // Merge consecutive same-author messages, mirroring the real context path
-    // (buildSimplifiedHistory): collapse only when both sides are pure text if
-    // either side carries media, keep separate turns so per-message media IDs stay
-    // unambiguous.
+    // (buildSimplifiedHistory): collapsing here is only correct while both sides are
+    // pure text, because a merged turn would leave the two messages' media
+    // indistinguishable.
     const previousMessage = simplifiedMessages[simplifiedMessages.length - 1];
     const currentHasMedia =
       imageAttachments.length > 0 || videoAttachments.length > 0 || (mediaSourceMessageIds?.length ?? 0) > 0;
@@ -869,6 +742,7 @@ async function buildRuntimeParityContext(
     matrixUsers: new Map(),
   });
 
+  const triggererName = getTriggererName(interaction);
   const contextBuild = await buildContext({
     guildId: serverDiscId,
     serverName,
@@ -879,7 +753,9 @@ async function buildRuntimeParityContext(
     channelName,
     channelId: interaction.channelId,
     client,
-    triggererName: getTriggererName(interaction),
+    triggererName,
+    triggererFormattedName: triggererName,
+    triggererAddressTerm: "",
     tomoriNickname: tomoriState.persona_nickname ?? process.env.DEFAULT_BOTNAME ?? "Tomori",
     tomoriAttributes: tomoriState.attribute_list,
     tomoriConfig: tomoriState.config,
@@ -892,11 +768,11 @@ async function buildRuntimeParityContext(
   let contextSegments = contextBuild.contextItems;
 
   // Character-estimate fallback passes provider=null (no live counting) → skip truncation.
-  const contextTruncator = provider ? contextTruncators[provider] : undefined;
-  contextSegments = contextTruncator?.(contextSegments, tomoriState) ?? contextSegments;
+  if (provider) {
+    contextSegments = await applyProviderContextTruncation(contextSegments, tomoriState);
+  }
 
   const lowerPriorityTailDirectives = [...contextBuild.lowerPriorityTailDirectives];
-  const tailDirectives = [...contextBuild.tailDirectives];
   const emojiPenaltyDirective = getEmojiPenaltyDirective(
     contextSegments,
     tomoriState.persona_nickname ?? process.env.DEFAULT_BOTNAME ?? "Tomori",
@@ -906,38 +782,21 @@ async function buildRuntimeParityContext(
   }
 
   const lowerPriorityTailMessage = buildCombinedTailDirectiveMessage(lowerPriorityTailDirectives);
-  if (lowerPriorityTailMessage) {
-    insertBeforeLatestDialoguePair(contextSegments, lowerPriorityTailMessage);
-  }
-
-  // Mirror the live pipeline: count the deferred STM content block at its depth (only
-  // when content depth >= 0), placed before the nudge so token positioning matches.
-  if (
-    contextBuild.memoryInjectionItems &&
-    contextBuild.memoryInjectionItems.length > 0 &&
-    (contextBuild.memoryInjectionDepth ?? -1) >= 0
-  ) {
-    for (const memoryItem of contextBuild.memoryInjectionItems) {
-      insertAtDialogueDepth(contextSegments, memoryItem, contextBuild.memoryInjectionDepth ?? 0);
-    }
-  }
-
-  // Mirror the live pipeline: count the unified STM nudge at its configured depth.
-  if (contextBuild.nudgeItem) {
-    insertAtDialogueDepth(contextSegments, contextBuild.nudgeItem, contextBuild.nudgeInjectionDepth ?? 0);
-  }
-
-  const combinedTailMessage = buildCombinedTailDirectiveMessage(tailDirectives);
-  if (combinedTailMessage) {
-    contextSegments.push(combinedTailMessage);
-  }
-
-  if (contextBuild.uncensorDirective) {
-    const uncensorTailMessage = buildCombinedTailDirectiveMessage([contextBuild.uncensorDirective]);
-    if (uncensorTailMessage) {
-      contextSegments.push(uncensorTailMessage);
-    }
-  }
+  const combinedTailMessage = buildCombinedTailDirectiveMessage(contextBuild.tailDirectives);
+  const uncensorTailMessage = contextBuild.uncensorDirective
+    ? buildCombinedTailDirectiveMessage([contextBuild.uncensorDirective])
+    : null;
+  applyPromptLayoutInserts(contextSegments, [
+    { tag: "lower_priority_tail", items: lowerPriorityTailMessage ? [lowerPriorityTailMessage] : [] },
+    { tag: "stm_content", items: contextBuild.memoryInjectionItems ?? [], depth: contextBuild.memoryInjectionDepth },
+    {
+      tag: "stm_nudge",
+      items: contextBuild.nudgeItem ? [contextBuild.nudgeItem] : [],
+      depth: contextBuild.nudgeInjectionDepth,
+    },
+    { tag: "combined_tail", items: combinedTailMessage ? [combinedTailMessage] : [] },
+    { tag: "uncensor", items: uncensorTailMessage ? [uncensorTailMessage] : [] },
+  ]);
 
   const personaReplyCharLengths = simplifiedMessages
     .filter((m) => m.authorType === "persona" && m.content)
@@ -1104,6 +963,7 @@ async function fetchOpenRouterNativePromptTokens(
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
+        ...buildOpenRouterAttributionHeaders(),
       },
     });
 
@@ -1140,10 +1000,11 @@ function buildOpenRouterProbeRequest(
   return requestBody;
 }
 
-async function measureOpenRouterInputTokens(
+export async function measureOpenRouterInputTokens(
   tomoriState: TomoriState,
   apiKey: string,
   contextItems: StructuredContextItem[],
+  onUsage?: (usage: TokenUsage) => void,
 ): Promise<LiveCostMeasurement> {
   const provider = new OpenrouterProvider();
   const providerConfig = (await provider.createConfig(tomoriState, apiKey)) as OpenrouterProviderConfig;
@@ -1152,25 +1013,31 @@ async function measureOpenRouterInputTokens(
     contextItems,
     providerConfig.seesImages ?? true,
     providerConfig.seesVideos ?? false,
+    providerConfig.seesYoutube ?? false,
   );
   const requestBody = buildOpenRouterProbeRequest(providerConfig, messages);
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const response = await fetchWithProviderRequest("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       Accept: "application/json",
+      ...buildOpenRouterAttributionHeaders(),
     },
     body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenRouter probe failed (${response.status}): ${errorText.slice(0, 400)}`);
+    throw new Error(`OpenRouter probe failed (${response.status}): ${errorText.slice(0, 400)}`, {
+      cause: readOpenRouterLimitError(response.status, response.headers, errorText) ?? undefined,
+    });
   }
 
   const data = (await response.json()) as OpenRouterProbeResponse;
+  const reportedUsage = normalizeProviderUsage(data.usage);
+  if (reportedUsage) onUsage?.(reportedUsage);
   const usagePromptTokens = parseOpenRouterPromptTokens(data.usage);
   const nativePromptTokens = await fetchOpenRouterNativePromptTokens(data.id, apiKey);
   const measuredPromptTokens = nativePromptTokens ?? usagePromptTokens;
@@ -1183,9 +1050,10 @@ async function measureOpenRouterInputTokens(
     throw new Error("OpenRouter model pricing unavailable for other-model");
   }
 
-  // OpenRouter pricing is authoritative from the live API cache and auto-updates with OpenRouter's
-  // rates, so it wins here. The catalog row's price (Phase 5) is only a cache-miss safety net: if the
-  // live cache has no entry for this model, fall back to the seeded DB price before giving up.
+  // The live OpenRouter cache wins because it tracks OpenRouter's rate changes; the DB price
+  // is only the fallback, seeded from the catalog or mirrored from the live rates at startup
+  // by syncOpenrouterCatalogPricing. Do not invert this order: a stale catalog row would
+  // silently under- or over-report the cost users see.
   const livePricing = getOpenRouterPricing(providerConfig.model);
   const pricing = livePricing
     ? { input: livePricing.promptPricePerMillion, output: livePricing.completionPricePerMillion }
@@ -1225,14 +1093,11 @@ async function measureDeepseekInputTokens(
     messages,
     max_tokens: 1,
     stream: false,
+    temperature: providerConfig.temperature,
   };
 
   if (providerConfig.tools && providerConfig.tools.length > 0) {
     requestBody.tools = providerConfig.tools;
-  }
-
-  if (providerConfig.model !== "deepseek-reasoner") {
-    requestBody.temperature = providerConfig.temperature;
   }
 
   const response = await fetch(providerConfig.endpointUrl, {
@@ -1407,7 +1272,12 @@ async function measureAnthropicInputTokens(
 
 const liveTokenCounters: Record<
   LiveProvider,
-  (tomoriState: TomoriState, apiKey: string, contextItems: StructuredContextItem[]) => Promise<LiveCostMeasurement>
+  (
+    tomoriState: TomoriState,
+    apiKey: string,
+    contextItems: StructuredContextItem[],
+    onUsage?: (usage: TokenUsage) => void,
+  ) => Promise<LiveCostMeasurement>
 > = {
   google: measureGoogleInputTokens,
   vertex: measureVertexInputTokens,
@@ -1504,8 +1374,8 @@ async function sendLiveEstimateEmbed(
       descriptionVars: {
         provider: measurement.providerLabel,
         model: measurement.model,
-        inputPrice: formatPricePerMillion(measurement.inputPricePerMillion),
-        outputPrice: formatPricePerMillion(measurement.outputPricePerMillion),
+        inputPrice: formatUsdRate(measurement.inputPricePerMillion),
+        outputPrice: formatUsdRate(measurement.outputPricePerMillion),
       },
       color: ColorCode.INFO,
       fields,
@@ -1539,7 +1409,7 @@ async function sendLegacyEstimateEmbed(
       ? [
           {
             nameKey: "commands.tool.estimate.cost.fallback_notice_title",
-            value: localizer(locale, "commands.tool.estimate.cost.fallback_notice_value"),
+            value: statusNote("warning", localizer(locale, "commands.tool.estimate.cost.fallback_notice_value")),
             inline: false,
           },
         ]
@@ -1613,8 +1483,8 @@ async function sendLegacyEstimateEmbed(
       descriptionKey: "commands.tool.estimate.cost.embed_description",
       descriptionVars: {
         provider: exampleProvider,
-        inputPrice: formatPricePerMillion(inputPrice),
-        outputPrice: formatPricePerMillion(outputPrice),
+        inputPrice: formatUsdRate(inputPrice),
+        outputPrice: formatUsdRate(outputPrice),
       },
       color: ColorCode.INFO,
       fields,
@@ -1754,15 +1624,36 @@ export async function execute(
       return;
     }
 
-    // Overlay the invoking user's personal (BYOK) provider so the live estimate
-    // reflects the model/key that would actually run for them, keeping cost
-    // estimates in parity with runtime (see buildRuntimeParityContext).
-    const { tomoriState } = await applyPersonalProviderSelectionsToTomoriState(
-      baseTomoriState,
-      userData.user_id ?? null,
-    );
-    if (!tomoriState.config.api_key) {
-      await sendLegacyEstimateEmbed(interaction, locale, true);
+    let tomoriState = baseTomoriState;
+    let decryptedApiKey = "";
+    let usageContext: ProviderUsageContext | undefined;
+    try {
+      const credentials = await resolveCapabilityCredentials(baseTomoriState.server_id, "text", {
+        userId: userData.user_id,
+        textModel: baseTomoriState.llm,
+      });
+      ({ apiKey: decryptedApiKey, usageContext } = credentials);
+      tomoriState = await resolveTextCredentialState(baseTomoriState, credentials);
+    } catch (decryptError) {
+      if (
+        decryptError instanceof CredentialUnavailableError &&
+        decryptError.source === "server" &&
+        (decryptError.reason === "no_saved_config" || decryptError.reason === "placeholder_key")
+      ) {
+        await sendLegacyEstimateEmbed(interaction, locale, true);
+        return;
+      }
+      const failure = getCapabilityCredentialFailureCopy(decryptError, locale);
+      if (failure) {
+        await replyInfoEmbed(interaction, locale, { ...failure, color: ColorCode.ERROR });
+        return;
+      }
+      await log.error(
+        "/tool estimate cost failed to resolve credentials for live counting",
+        decryptError as Error,
+        errorContext,
+      );
+      await sendLiveEstimateUnavailableEmbed(interaction, locale, tomoriState.llm.llm_provider);
       return;
     }
 
@@ -1770,26 +1661,9 @@ export async function execute(
       await sendNoCostProviderEmbed(interaction, locale);
       return;
     }
-
     const provider = resolveProvider(tomoriState.llm.llm_provider);
     if (!provider) {
-      // Track A: the provider has no live token-counting API. Instead of reporting
-      // "unavailable", fall back to a character-based estimate over the real channel context.
       await sendCharacterEstimateFallbackEmbed(client, interaction, tomoriState, locale, errorContext);
-      return;
-    }
-
-    let decryptedApiKey = "";
-    try {
-      const keyVersion = tomoriState.config.key_version || 1;
-      decryptedApiKey = await decryptApiKey(tomoriState.config.api_key, keyVersion);
-    } catch (decryptError) {
-      await log.error(
-        "/tool estimate cost failed to decrypt API key for live counting",
-        decryptError as Error,
-        errorContext,
-      );
-      await sendLiveEstimateUnavailableEmbed(interaction, locale, tomoriState.llm.llm_provider);
       return;
     }
 
@@ -1817,9 +1691,24 @@ export async function execute(
     const sampleOutputTokens = resolveSampleOutputTokens(tomoriState, personaReplyCharLengths);
 
     try {
-      const measurement = await liveTokenCounters[provider](tomoriState, decryptedApiKey, contextItems);
+      const measurement = await withProviderUsageContext(usageContext, async () =>
+        liveTokenCounters[provider](
+          tomoriState,
+          decryptedApiKey,
+          contextItems,
+          createProviderUsageRecorder(usageContext, tomoriState.llm.llm_codename),
+        ),
+      );
       await sendLiveEstimateEmbed(interaction, locale, measurement, sampleOutputTokens);
     } catch (countError) {
+      const denied = findProviderRequestDeniedError(countError, usageContext);
+      if (denied) {
+        await replyInfoEmbed(interaction, locale, {
+          ...getProviderRequestFailureCopy(denied, locale),
+          color: ColorCode.ERROR,
+        });
+        return;
+      }
       await log.error(
         "/tool estimate cost live provider token counting failed; reporting live-count unavailability",
         countError as Error,
@@ -1837,18 +1726,19 @@ export async function execute(
   } catch (error) {
     await log.error("Error executing /tool estimate cost command", error as Error, errorContext);
 
-    const errorMessage = localizer(locale, "general.errors.unknown_error_description");
+    const errorOptions = {
+      titleKey: "general.errors.unknown_error_title",
+      descriptionKey: "general.errors.unknown_error_description",
+      color: ColorCode.ERROR,
+    };
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp({
-          content: errorMessage,
+          embeds: [createStandardEmbed(locale, errorOptions)],
           flags: MessageFlags.Ephemeral,
         });
       } else {
-        await interaction.reply({
-          content: errorMessage,
-          flags: MessageFlags.Ephemeral,
-        });
+        await replyInfoEmbed(interaction, locale, errorOptions);
       }
     } catch (replyError) {
       log.error("Failed to send error reply for /tool estimate cost", replyError, errorContext);

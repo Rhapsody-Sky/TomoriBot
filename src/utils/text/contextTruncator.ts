@@ -1,5 +1,11 @@
 import type { StructuredContextItem } from "@/types/misc/context";
 import { ContextItemTag } from "@/types/misc/context";
+import { DEFAULT_MESSAGE_FETCH_LIMIT, historyWindowStride } from "@/utils/discord/messageFetchLimit";
+import {
+  applyPromptLayoutInserts,
+  getCacheablePrefixBoundary,
+  getPromptLayoutInsert,
+} from "@/utils/text/context/promptLayout";
 
 /**
  * Estimates the input token count from a list of context items.
@@ -21,6 +27,14 @@ function estimateInputTokens(items: StructuredContextItem[]): number {
   return Math.floor(totalChars / 4);
 }
 
+/**
+ * The estimated input tokens history may fill before truncation starts. The 10% margin absorbs
+ * tokenizer estimation error, and `/context` draws its free space against this same figure.
+ */
+export function computeSafeInputBudget(contextLength: number, maxCompletionTokens: number): number {
+  return Math.floor((contextLength - maxCompletionTokens) * 0.9);
+}
+
 type TruncationResult = {
   truncated: StructuredContextItem[];
   historyPairsDropped: number;
@@ -28,28 +42,16 @@ type TruncationResult = {
   totalDropped: number;
 };
 
-/**
- * Trims context items until the estimated token count fits within the safe input budget:
- *   safeInputBudget = floor((contextLength - maxCompletionTokens) * 0.9)
- *
- * Drop policy:
- * 1) Oldest DIALOGUE_HISTORY exchange pairs (oldest-first), but never remove the newest
- *    DIALOGUE_HISTORY user turn so the current user request remains visible to the model.
- * 2) DIALOGUE_SAMPLE items are protected and never truncated.
- *
- * @param contextItems - Full list of structured context items to truncate
- * @param contextLength - Total context window size (input + output tokens)
- * @param maxCompletionTokens - Maximum output tokens reserved for the model's reply
- * @returns TruncationResult containing the truncated list and drop counts
- */
+/** Drops oldest history exchanges in stride batches, preserving samples and the newest user request. */
 export function truncateDialogueHistory(
   contextItems: StructuredContextItem[],
   contextLength: number,
   maxCompletionTokens: number,
+  reservedTailItems: StructuredContextItem[] = [],
+  messageFetchLimit = DEFAULT_MESSAGE_FETCH_LIMIT,
 ): TruncationResult {
-  // Calculate the safe input budget: reserve maxCompletionTokens for output,
-  //    then apply a 10% margin to absorb tokenizer estimation error
-  const safeInputBudget = Math.floor((contextLength - maxCompletionTokens) * 0.9);
+  const safeInputBudget =
+    computeSafeInputBudget(contextLength, maxCompletionTokens) - estimateInputTokens(reservedTailItems);
 
   const items = [...contextItems];
   let historyPairsDropped = 0;
@@ -57,7 +59,11 @@ export function truncateDialogueHistory(
 
   const findNewestDialogueUserIndex = (): number => {
     for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i].metadataTag === ContextItemTag.DIALOGUE_HISTORY && items[i].role === "user") {
+      if (
+        items[i].metadataTag === ContextItemTag.DIALOGUE_HISTORY &&
+        items[i].role === "user" &&
+        !getPromptLayoutInsert(items[i])
+      ) {
         return i;
       }
     }
@@ -72,7 +78,8 @@ export function truncateDialogueHistory(
       if (
         i !== newestDialogueUserIdx &&
         items[i].metadataTag === ContextItemTag.DIALOGUE_HISTORY &&
-        items[i].role === "user"
+        items[i].role === "user" &&
+        !getPromptLayoutInsert(items[i])
       ) {
         oldestDroppableUserIdx = i;
         break;
@@ -95,7 +102,10 @@ export function truncateDialogueHistory(
     }
 
     if (followingModelIdx !== -1) {
-      items.splice(oldestDroppableUserIdx, followingModelIdx - oldestDroppableUserIdx + 1);
+      const retained = items
+        .slice(oldestDroppableUserIdx, followingModelIdx + 1)
+        .filter((item) => getPromptLayoutInsert(item) !== undefined);
+      items.splice(oldestDroppableUserIdx, followingModelIdx - oldestDroppableUserIdx + 1, ...retained);
     } else {
       items.splice(oldestDroppableUserIdx, 1);
     }
@@ -103,13 +113,37 @@ export function truncateDialogueHistory(
     return true;
   };
 
-  // Iteratively drop context until within budget (or no droppable content remains)
+  // Drop a full stride so later exchanges can grow without moving the retained start.
+  const exchangesPerStride = historyWindowStride(messageFetchLimit) / 2;
   while (estimateInputTokens(items) > safeInputBudget) {
-    if (dropOldestDroppableHistoryExchange()) {
-      continue;
+    let dropped = 0;
+    while (dropped < exchangesPerStride && dropOldestDroppableHistoryExchange()) {
+      dropped++;
     }
-    break;
+    if (dropped === 0) break;
   }
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    if (!item.boomerangTranscript) continue;
+    const otherChars = items.reduce(
+      (sum, entry, entryIndex) =>
+        sum +
+        (entryIndex === index
+          ? 0
+          : entry.parts.reduce((count, part) => count + (part.type === "text" ? part.text.length : 0), 0)),
+      0,
+    );
+    const availableChars = Math.max(0, safeInputBudget * 4 - otherChars);
+    const text = item.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+    if (text.length > availableChars) {
+      items[index] = {
+        ...item,
+        parts: [{ type: "text", text: availableChars > 0 ? text.slice(-availableChars) : "" }],
+      };
+    }
+  }
+  if (historyPairsDropped > 0 && (getCacheablePrefixBoundary(contextItems) || contextItems.some(getPromptLayoutInsert)))
+    applyPromptLayoutInserts(items, []);
 
   return {
     truncated: items,

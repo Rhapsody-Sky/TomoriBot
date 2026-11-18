@@ -1,21 +1,15 @@
+import { isPromptSystemItem } from "@/utils/text/context/promptLayout";
+import { mapWithConcurrency } from "@/utils/async/bounded";
 import type { FunctionCall, FunctionResponseImageMetadata } from "@/types/provider/interfaces";
-import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
+import type { StructuredContextItem } from "@/types/misc/context";
 import {
   relocateAssistantMediaContextItems,
   relocateAssistantMediaToUserTurns,
 } from "@/providers/utils/strictChatCompat";
+import { inlineToolResponseImage } from "@/providers/utils/toolImageContent";
+import { resolveToolCallId } from "@/providers/utils/toolCallIds";
 import { log } from "@/utils/misc/logger";
 import { fetchAndOptimizeImage } from "@/utils/image/imageProcessor";
-
-const SYSTEM_INSTRUCTION_TAGS: ContextItemTag[] = [
-  ContextItemTag.SYSTEM_HUMANIZER_RULES,
-  ContextItemTag.SYSTEM_PERSONA_PROMPT,
-  ContextItemTag.SYSTEM_PERSONALITY,
-  ContextItemTag.KNOWLEDGE_SERVER_INFO,
-  ContextItemTag.KNOWLEDGE_SERVER_EMOJIS,
-  ContextItemTag.KNOWLEDGE_SERVER_STICKERS,
-  ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
-];
 
 interface BuildOpenAICompatibleMessagesOptions {
   adapterName: string;
@@ -57,10 +51,7 @@ export async function buildOpenAICompatibleMessages(
       .map((part) => part.text)
       .join("\n");
 
-    if (
-      item.role === "system" ||
-      (item.role === "user" && item.metadataTag && SYSTEM_INSTRUCTION_TAGS.includes(item.metadataTag))
-    ) {
+    if (isPromptSystemItem(item)) {
       if (itemTextContent) {
         systemInstructionParts.push(itemTextContent);
       }
@@ -72,15 +63,14 @@ export async function buildOpenAICompatibleMessages(
     }
 
     const role = item.role === "user" ? "user" : "assistant";
-    const contentParts: Array<Record<string, unknown>> = [];
-
-    for (const part of item.parts) {
+    const partsByInput = await mapWithConcurrency(item.parts, 4, async (part) => {
+      const contentParts: Array<Record<string, unknown>> = [];
       if (part.type === "text") {
         contentParts.push({
           type: "text",
           text: part.text,
         });
-        continue;
+        return contentParts;
       }
 
       if (part.type === "video") {
@@ -90,11 +80,11 @@ export async function buildOpenAICompatibleMessages(
           type: "text",
           text: "[System: A video is attached to this message that this model cannot process.]",
         });
-        continue;
+        return contentParts;
       }
 
       if (part.type !== "image") {
-        continue;
+        return contentParts;
       }
       if (!options.seesImages) {
         // Image part present but model cannot process it, so add a text placeholder
@@ -104,7 +94,7 @@ export async function buildOpenAICompatibleMessages(
           type: "text",
           text: "[System: An image is attached to this message that this model cannot process.]",
         });
-        continue;
+        return contentParts;
       }
 
       const imagePart = await convertImagePartToOpenAIContentPart(part);
@@ -113,7 +103,9 @@ export async function buildOpenAICompatibleMessages(
         // relocated to a synthetic user turn by relocateAssistantMediaToUserTurns after the loop.
         contentParts.push(imagePart);
       }
-    }
+      return contentParts;
+    });
+    const contentParts = partsByInput.flat();
 
     if (role === "assistant") {
       // Emit the assistant turn with its parts intact. relocateAssistantMediaToUserTurns (run after
@@ -177,8 +169,9 @@ export async function buildOpenAICompatibleMessages(
   }
 
   if (options.functionInteractionHistory && options.functionInteractionHistory.length > 0) {
-    for (const interaction of options.functionInteractionHistory) {
-      const toolCallId = `call_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    const usedToolCallIds = new Set<string>();
+    for (const [index, interaction] of options.functionInteractionHistory.entries()) {
+      const toolCallId = resolveToolCallId(interaction.functionCall.id, index, "call", usedToolCallIds);
       const preToolCallContent = (interaction.preToolCallTextParts ?? [])
         .map((part) => part.text)
         .filter((text): text is string => typeof text === "string" && text.length > 0)
@@ -232,12 +225,7 @@ export async function buildOpenAICompatibleMessages(
         interaction.imageMetadata.imageUrls.length > 0
       ) {
         for (const image of interaction.imageMetadata.imageUrls) {
-          responseParts.push({
-            type: "image_url",
-            image_url: {
-              url: image.originalUrl || image.url,
-            },
-          });
+          responseParts.push(await inlineToolResponseImage(image, options.adapterName));
         }
       }
 
@@ -267,8 +255,30 @@ export async function buildOpenAICompatibleMessages(
     }
   }
 
+  if (options.requiresReasoningContentReplay) {
+    stampCurrentTurnReasoningContent(messages);
+  }
+
   log.info(`${options.adapterName}: Assembled ${messages.length} messages`);
   return messages;
+}
+
+/**
+ * DeepSeek's thinking-mode backend treats every assistant message after the last user message as
+ * part of the current turn and 400s when one omits `reasoning_content`, whether or not it carries
+ * `tool_calls` or `prefix: true`. A trailing plain-text assistant turn (a continuation buffered in
+ * `currentTurnModelParts`, or a history that ends on Tomori's own message) has no captured
+ * reasoning, so the empty string is the only value available. Earlier turns are left alone
+ * because the backend ignores their reasoning.
+ */
+function stampCurrentTurnReasoningContent(messages: Array<Record<string, unknown>>): void {
+  const lastUserIndex = messages.findLastIndex((message) => message.role === "user");
+  for (let i = lastUserIndex + 1; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role === "assistant" && message.reasoning_content === undefined) {
+      message.reasoning_content = "";
+    }
+  }
 }
 
 export function logSanitizedOpenAICompatibleRequest(
@@ -359,18 +369,18 @@ async function convertImagePartToOpenAIContentPart(
     if (fallback && fallback !== part.uri) {
       try {
         const optimized = await fetchAndOptimizeImage(fallback, part.mimeType);
-        log.info(`OpenAICompatible: Image loaded via fallback CDN URL ${fallback}`);
+        log.info(`OpenAICompatible: Image loaded via fallback CDN`);
         return {
           type: "image_url",
           image_url: { url: `data:${optimized.mimeType};base64,${optimized.data}` },
         };
       } catch (fallbackErr) {
-        log.warn(`OpenAICompatible: Image processing error (proxy + CDN both failed) ${part.uri}`, {
+        log.warn(`OpenAICompatible: Image processing error (proxy + CDN both failed)`, {
           error: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
         });
       }
     } else {
-      log.warn(`Failed to fetch image: ${part.uri}`, {
+      log.warn(`Failed to fetch image`, {
         error: error instanceof Error ? error.message : String(error),
       });
     }

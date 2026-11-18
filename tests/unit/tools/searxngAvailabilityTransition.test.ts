@@ -1,30 +1,33 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { isSearxngAvailable } from "@/tools/restAPIs/searxng/searxngService";
 import { log } from "@/utils/misc/logger";
+import { useEnvSandbox } from "../../helpers/env";
 
 const BASE_URL_ENV = "SEARXNG_BASE_URL";
-const originalBaseUrl = process.env[BASE_URL_ENV];
 const originalFetch = globalThis.fetch;
 
 /** Records every `log.error`, which is the only level the production JSONL sink keeps. */
 const errorTypes: string[] = [];
 
 let healthy = true;
+let errorSpy: ReturnType<typeof spyOn<typeof log, "error">>;
+
+useEnvSandbox([BASE_URL_ENV]);
 
 beforeAll(() => {
   process.env[BASE_URL_ENV] = "http://searxng:8080/";
 
-  spyOn(log, "error").mockImplementation(async (_msg, _err, context) => {
+  errorSpy = spyOn(log, "error").mockImplementation(async (_msg, _err, context) => {
     errorTypes.push((context?.errorType as string) ?? "");
   });
   // Only /healthz is probed here, so the stub can ignore the request entirely.
-  globalThis.fetch = (async () => new Response(null, { status: healthy ? 200 : 503 })) as typeof fetch;
+  globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+    new Response(null, { status: healthy ? 200 : 503 })) as typeof fetch;
 });
 
 afterAll(() => {
+  errorSpy.mockRestore();
   globalThis.fetch = originalFetch;
-  if (originalBaseUrl === undefined) delete process.env[BASE_URL_ENV];
-  else process.env[BASE_URL_ENV] = originalBaseUrl;
 });
 
 /**
@@ -52,14 +55,12 @@ describe("SearXNG availability transition logging", () => {
     expect(errorTypes).toEqual(["SearxngUnavailable", "SearxngRecovered"]);
   });
 
-  it("stays silent when no sidecar is configured", async () => {
+  it("stays silent when no SearXNG server is configured", async () => {
     const before = errorTypes.length;
     delete process.env[BASE_URL_ENV];
 
     expect(await isSearxngAvailable(true)).toBe(false);
     // An unset base URL means SearXNG was never enabled, which is not an outage.
     expect(errorTypes.length).toBe(before);
-
-    process.env[BASE_URL_ENV] = "http://searxng:8080/";
   });
 });

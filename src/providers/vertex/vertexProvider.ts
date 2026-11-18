@@ -1,3 +1,5 @@
+import { pickHumanizerSettings } from "@/constants/humanizer";
+import { getProviderContentRejectionCode } from "@/utils/provider/providerErrorClassification";
 /**
  * Vertex AI provider implementation
  *
@@ -13,6 +15,7 @@
  * - Chat streaming + tool calling (via VertexStreamAdapter)
  */
 
+import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import type { ZodType } from "zod";
 import type { GoogleGenAI, HarmBlockThreshold, HarmCategory } from "@google/genai";
 import type {
@@ -26,6 +29,7 @@ import type {
 } from "discord.js";
 import { StreamOrchestrator } from "../../utils/discord/streamOrchestrator";
 import { buildStreamContext } from "@/utils/provider/streamContext";
+import { buildGeminiImagePromptParts } from "@/providers/utils/geminiImageParts";
 import { VertexStreamAdapter, type VertexStreamConfig } from "./vertexStreamAdapter";
 import type { ProviderError, StreamContext } from "../../types/stream/interfaces";
 import { DISCORD_STREAMING_CONSTANTS } from "../../types/stream/types";
@@ -62,7 +66,14 @@ import type {
   SupportsStructuredOutput,
 } from "../../types/provider/featureInterfaces";
 import { getVertexToolAdapter } from "./vertexToolAdapter";
-import { parseVertexCompositeKey, createVertexClient } from "./vertexClient";
+import {
+  checkVertexTextModel,
+  createVertexClient,
+  isVertexOwnerAllowed,
+  parseVertexCompositeKey,
+  VERTEX_OWNER_NOT_ALLOWED_CODE,
+} from "./vertexClient";
+import { reportModelLookupFailure } from "@/utils/provider/modelCatalogLookup";
 import { getCachedDefaultLLM, isLLMCacheReady } from "../../utils/cache/llmCache";
 import { llmModelRepo } from "@/utils/db/repositories";
 import { vertexProviderInfo } from "./providerInfo";
@@ -70,8 +81,11 @@ import { callGoogleStructuredJSON } from "../google/googleStructuredOutput";
 import { generateConversationSummaryGoogle, generateRoleplaySummaryGoogle } from "../google/compactGenerator";
 import { generatePresetFromPrompt } from "../google/presetGenerator";
 import { validateGoogleModelsEndpoint } from "../google/googleCredentialValidation";
-import { getActiveTemperature, isParamDisabled } from "@/utils/provider/samplingControl";
+import { isOperatorActionableProviderError } from "@/utils/provider/providerErrorClassification";
+import { reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { getActiveTemperature, isParamDisabled, omitGeminiSampling } from "@/utils/provider/samplingControl";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
 /**
  * Gets the default Vertex model with a robust fallback chain:
@@ -156,6 +170,17 @@ export class VertexProvider
     return vertexProviderInfo;
   }
 
+  async checkTextModel(compositeKey: string, codename: string): Promise<boolean | null> {
+    let client: GoogleGenAI;
+    try {
+      client = createVertexClient(parseVertexCompositeKey(compositeKey));
+    } catch (error) {
+      await reportModelLookupFailure("vertex", error, compositeKey);
+      return null;
+    }
+    return await checkVertexTextModel("vertex", client, codename, compositeKey);
+  }
+
   /**
    * Build a Vertex GoogleGenAI client from the composite key.
    */
@@ -164,7 +189,23 @@ export class VertexProvider
     return createVertexClient(config);
   }
 
-  async validateApiKey(compositeKey: string): Promise<ApiKeyValidationResult> {
+  async validateApiKey(compositeKey: string, ownerDiscordId?: string): Promise<ApiKeyValidationResult> {
+    // Refuse before building a client: the setup probe itself calls Google with the host identity.
+    if (!isVertexOwnerAllowed(ownerDiscordId)) {
+      log.warn("Vertex configuration refused for an owner outside VERTEX_ALLOWED_OWNERS", {
+        metadata: { ownerDiscordId: ownerDiscordId ?? null },
+      });
+      return {
+        valid: false,
+        error: {
+          type: "api_error",
+          code: VERTEX_OWNER_NOT_ALLOWED_CODE,
+          message: "This host does not allow Vertex AI for this owner.",
+          retryable: false,
+        },
+      };
+    }
+
     let genAI: GoogleGenAI;
     try {
       genAI = this.buildClient(compositeKey);
@@ -190,10 +231,17 @@ export class VertexProvider
       const adapter = new VertexStreamAdapter();
       const providerError = adapter.handleProviderError(error);
 
-      await log.error("Vertex AI configuration validation failed", error, {
+      await reportProviderFailure({
+        summary: "Vertex AI configuration validation failed",
         errorType: "APIKeyValidationError",
-        metadata: {
+        error,
+        expected: !isOperatorActionableProviderError(providerError),
+        dimensions: {
+          operation: "key-validation",
           provider: "vertex",
+          providerErrorCode: providerError.code ?? "unknown",
+        },
+        metadata: {
           errorCode: providerError.code,
           errorType: providerError.type,
         },
@@ -262,6 +310,7 @@ export class VertexProvider
 
   async generatePreset(request: ProviderPresetGenerationRequest): Promise<PresetGenerationResult> {
     const client = this.buildClient(request.apiKey);
+    const defaultSearchModelName = request.params.useWebSearch ? await this.getDefaultModel() : undefined;
     return await generatePresetFromPrompt(
       request.apiKey,
       {
@@ -270,6 +319,7 @@ export class VertexProvider
       },
       request.locale,
       client,
+      defaultSearchModelName,
     );
   }
 
@@ -291,13 +341,7 @@ export class VertexProvider
       model: request.model,
     });
 
-    // Build parts: reference images (as inlineData) followed by the text prompt.
-    // SendMessageParameters.message is PartListUnion: inline images must be
-    // passed as inlineData parts, not via a non-existent "media" field.
-    const messageParts: Array<{ inlineData: { mimeType: string; data: string } } | string> = [
-      ...(request.referenceImages ?? []).map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } })),
-      request.prompt,
-    ];
+    const messageParts = buildGeminiImagePromptParts(request.prompt, request.referenceImages ?? []);
 
     const response = await chat.sendMessage({
       message: messageParts,
@@ -308,6 +352,8 @@ export class VertexProvider
         },
       },
     });
+    const rejection = getProviderContentRejectionCode(response);
+    if (rejection) throw Object.assign(new Error("Image request blocked by the provider"), { code: rejection });
     if (response?.candidates && response.candidates.length > 0 && response.candidates[0]?.content?.parts) {
       for (const part of response.candidates[0].content.parts) {
         if (part.inlineData?.data) {
@@ -327,6 +373,9 @@ export class VertexProvider
     streamingContext?: StreamingContext,
   ): Promise<Array<Record<string, unknown>>> {
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -335,7 +384,11 @@ export class VertexProvider
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -348,6 +401,7 @@ export class VertexProvider
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -356,13 +410,18 @@ export class VertexProvider
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("vertex", toolStateForContext);
 
@@ -379,6 +438,7 @@ export class VertexProvider
         providerLabel: "Vertex provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -406,8 +466,7 @@ export class VertexProvider
   }
 
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<VertexProviderConfig> {
-    const maxOutputTokens =
-      tomoriState.config.llm_max_output_tokens ?? Number.parseInt(process.env.GOOGLE_MAX_OUTPUT_TOKENS || "8192", 10);
+    const maxOutputTokens = await resolveRequestMaxOutputTokens(tomoriState);
     const disabledParams = tomoriState.config.llm_disabled_params ?? [];
     const temperature = getActiveTemperature(tomoriState.config);
     const topKDisabled = isParamDisabled(disabledParams, "topK");
@@ -437,7 +496,7 @@ export class VertexProvider
           threshold: "BLOCK_NONE",
         },
       ],
-      generationConfig: {
+      generationConfig: omitGeminiSampling(tomoriState.llm.llm_codename, {
         ...(temperature !== undefined && {
           temperature,
         }),
@@ -451,11 +510,11 @@ export class VertexProvider
           }),
         maxOutputTokens,
         stopSequences: [],
-      },
+      }),
     };
 
     // Only attach tools for models that support function calling
-    if (tomoriState.llm.has_tools) {
+    if (resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
       config.tools = await this.getTools(tomoriState);
     }
 
@@ -517,7 +576,7 @@ export class VertexProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         safetySettings: safetySettings.map((setting) => ({
           category: setting.category as HarmCategory,
@@ -537,11 +596,11 @@ export class VertexProvider
         log.info(`VertexProvider: Applied thinking config for model ${config.model}`);
       }
 
-      if (streamingContext && tomoriState.llm.has_tools) {
+      if (streamingContext && resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("VertexProvider: Reloading tools with streaming context for context-aware availability");
         const contextAwareTools = await this.getTools(tomoriState, streamingContext);
         streamConfig.tools = contextAwareTools;
-      } else if (streamingContext && !tomoriState.llm.has_tools) {
+      } else if (streamingContext && !resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("VertexProvider: Skipping context-aware tool reload - model doesn't support tools");
       }
 

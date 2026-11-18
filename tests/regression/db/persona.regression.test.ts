@@ -4,16 +4,20 @@
  * Covers: loadTomoriState, loadAllPersonasForServer, loadPersonaConfigRow,
  * updateTomori.
  *
- * Requires: a local Postgres connection (see docs/guides/testing-db-changes.md)
+ * Requires: a local Postgres connection (see docs/en/contributing/testing/db-changes.md)
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { forkPointerForAvatarChange } from "@/commands/persona/avatar";
-import { personaRepository } from "@/utils/db/repositories";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { forkPointerForAvatarChange } from "@/utils/persona/pointerFork";
+import type { TomoriPresetRow } from "@/types/db/schema";
+import { configPersonaOperations } from "@/utils/discord/interactions/configPersonaOperations";
+import { presetRepository, personaSpriteRepository, personaRepository } from "@/utils/db/repositories";
 import { splitSqlStatements } from "@/utils/db/sqlSplitter";
 import { FIXTURE_IDS, cleanupFixtures, insertFixtures, type FixtureRefs } from "./setup/fixtures";
 import { DB_TESTS_AVAILABLE, setupTestDb, testSql } from "./setup/testDb";
+import { personaSpriteMessageRepository } from "@/utils/db/repositories/PersonaSpriteMessageRepository";
+import { log } from "@/utils/misc/logger";
 
 async function executeMigrationFile(fileName: string): Promise<void> {
   const sqlText = await readFile(join(import.meta.dir, "..", "..", "..", "src", "db", "migrations", fileName), "utf-8");
@@ -32,6 +36,119 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
 
   afterAll(async () => {
     await cleanupFixtures(testSql);
+  });
+
+  it("replaces bundle sprites and reference atomically and rolls them back when a staged voice disappears", async () => {
+    const alter = await personaRepository.createAlterPersona({
+      serverId: refs.serverId,
+      nickname: "_rt_bundle",
+      attributes: [],
+      sampleDialoguesIn: [],
+      sampleDialoguesOut: [],
+    });
+    if (!alter?.persona_id) throw new Error("Expected bundle target persona");
+    const personaId = alter.persona_id;
+    let sampleId: number | null = null;
+    try {
+      await personaRepository.setVoiceConfig(personaId, {
+        speech_voice_sample_id: null,
+        speech_voice_id: null,
+        speech_voice_name: null,
+        speech_voice_design_prompt: "Warm and quiet",
+        voice_source_priority: "clone",
+      });
+      await personaRepository.setCharRef(personaId, "old-reference.png");
+      await personaSpriteRepository.upsertSprite({
+        personaId,
+        spriteName: "old",
+        spriteKey: "old",
+        avatarUrl: "old.png",
+        usageInstructions: "",
+        isIdentity: false,
+      });
+      const input = {
+        personaId,
+        serverDiscId: FIXTURE_IDS.serverDiscId,
+        charRefUrl: "new-reference.png",
+        sprites: [
+          {
+            sprite_name: "happy",
+            sprite_key: "happy",
+            avatar_url: "new.png",
+            usage_instructions: "When pleased",
+            is_identity: true,
+          },
+        ],
+        voice: { sampleId: 999999999, name: "Mirri" },
+      };
+      expect(await personaRepository.replaceBundleAssets(input)).toBe(false);
+      expect((await personaSpriteRepository.listForPersona(personaId)).map((sprite) => sprite.sprite_key)).toEqual([
+        "old",
+      ]);
+      const [unchanged] =
+        await testSql`SELECT char_ref_url FROM persona_imagegen_configs WHERE persona_id = ${personaId}`;
+      expect(unchanged.char_ref_url).toBe("old-reference.png");
+      const [sample] =
+        await testSql`INSERT INTO voice_samples (server_id, name, file_path, duration_ms) VALUES (${refs.serverId}, '_rt_bundle_voice', 'voice.wav', 1000) RETURNING sample_id`;
+      sampleId = sample.sample_id as number;
+      expect(await personaRepository.replaceBundleAssets({ ...input, voice: { sampleId, name: "Mirri" } })).toBe(true);
+      const [voice] =
+        await testSql`SELECT speech_voice_sample_id, voice_source_priority, speech_voice_design_prompt FROM persona_voice_configs WHERE persona_id = ${personaId}`;
+      expect(voice.speech_voice_sample_id).toBe(sampleId);
+      expect(voice.voice_source_priority).toBe("clone");
+      expect(voice.speech_voice_design_prompt).not.toBeNull();
+      expect((await personaSpriteRepository.listForPersona(personaId)).map((sprite) => sprite.sprite_key)).toEqual([
+        "happy",
+      ]);
+      const [changed] =
+        await testSql`SELECT char_ref_url FROM persona_imagegen_configs WHERE persona_id = ${personaId}`;
+      expect(changed.char_ref_url).toBe("new-reference.png");
+      expect(
+        await personaRepository.replaceBundleAssets({ ...input, serverDiscId: "_rt_another_workspace", voice: null }),
+      ).toBe(false);
+    } finally {
+      await personaRepository.removePersona(personaId);
+      if (sampleId) await testSql`DELETE FROM voice_samples WHERE sample_id = ${sampleId}`;
+    }
+  });
+
+  it("warns when a persona disappears before its sprite receipt and retains other write failures", async () => {
+    const alter = await personaRepository.createAlterPersona({
+      serverId: refs.serverId,
+      nickname: "_rt_receipt",
+      attributes: [],
+      sampleDialoguesIn: [],
+      sampleDialoguesOut: [],
+    });
+    if (!alter?.persona_id) throw new Error("Expected an alter persona");
+    const input = {
+      messageDiscId: "_rt_sprite_receipt",
+      personaId: alter.persona_id,
+      spriteName: "Happy",
+      channelDiscId: "_rt_receipt_channel",
+    };
+    const errors = spyOn(log, "error").mockResolvedValue(undefined);
+    const warnings = spyOn(log, "warn").mockImplementation(() => {});
+    const metrics = spyOn(log, "metric").mockImplementation(() => {});
+    try {
+      expect(await personaSpriteMessageRepository.record(input)).toBe(true);
+      expect(
+        await personaSpriteMessageRepository.record({ ...input, messageDiscId: "_rt_invalid_receipt", spriteName: "" }),
+      ).toBe(false);
+      expect(errors).toHaveBeenCalledTimes(1);
+      errors.mockClear();
+      await testSql`DELETE FROM personas WHERE persona_id = ${alter.persona_id}`;
+      expect(await personaSpriteMessageRepository.record(input)).toBe(false);
+      expect(errors).not.toHaveBeenCalled();
+      expect(warnings).toHaveBeenCalledTimes(1);
+      expect(metrics).toHaveBeenCalledWith("persona_sprite_message_skipped", { reason: "persona_deleted" });
+      expect(await personaSpriteMessageRepository.getByMessageIds([input.messageDiscId])).toEqual(new Map());
+    } finally {
+      errors.mockRestore();
+      warnings.mockRestore();
+      metrics.mockRestore();
+      await testSql`DELETE FROM personas WHERE persona_id = ${alter.persona_id}`;
+    }
   });
 
   it("loadTomoriState returns null for unknown server", async () => {
@@ -60,10 +177,11 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         speech_voice_sample_id: null,
         speech_voice_id: "_rt_voice_from_setter",
         speech_voice_name: "_rt_voice_name_from_setter",
+        voice_source_priority: "design",
         speech_voice_design_prompt: "_rt_voice_prompt_from_setter",
       });
       await personaRepository.setPhysicalAppearanceTags(refs.personaId, ["_rt_tag_from_setter"]);
-      await personaRepository.setNaiCharRef(refs.personaId, "_rt_ref_from_setter");
+      await personaRepository.setCharRef(refs.personaId, "_rt_ref_from_setter");
       await personaRepository.setNaiAttg(refs.personaId, {
         nai_attg_author: "_rt_author_from_setter",
         nai_attg_title: "_rt_title_from_setter",
@@ -87,7 +205,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       `;
       await testSql`
         UPDATE persona_imagegen_configs
-        SET physical_appearance_tags = ARRAY['_rt_tag_from_split']::TEXT[], nai_char_ref_url = '_rt_ref_from_split'
+        SET physical_appearance_tags = ARRAY['_rt_tag_from_split']::TEXT[], char_ref_url = '_rt_ref_from_split'
         WHERE persona_id = ${refs.personaId}
       `;
       await testSql`
@@ -108,7 +226,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       expect(state?.speech_voice_name).toBe("_rt_voice_name_from_split");
       expect(state?.speech_voice_design_prompt).toBe("_rt_voice_prompt_from_split");
       expect(state?.physical_appearance_tags).toEqual(["_rt_tag_from_split"]);
-      expect(state?.nai_char_ref_url).toBe("_rt_ref_from_split");
+      expect(state?.char_ref_url).toBe("_rt_ref_from_split");
       expect(state?.nai_attg_author).toBe("_rt_author_from_split");
       expect(state?.nai_attg_title).toBe("_rt_title_from_split");
       expect(state?.nai_attg_tags).toBe("_rt_tags_from_split");
@@ -144,7 +262,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     expect(state?.speech_voice_name).toBeNull();
     expect(state?.speech_voice_design_prompt).toBeNull();
     expect(state?.physical_appearance_tags).toEqual([]);
-    expect(state?.nai_char_ref_url).toBeNull();
+    expect(state?.char_ref_url).toBeNull();
     expect(state?.nai_attg_author).toBeNull();
     expect(state?.nai_attg_stars).toBeNull();
   });
@@ -161,7 +279,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         sampleDialoguesIn: ["_rt_seed_in"],
         sampleDialoguesOut: ["_rt_seed_out"],
         physicalAppearanceTags: ["_rt_seed_tag"],
-        naiCharRefUrl: "_rt_seed_ref",
+        charRefUrl: "_rt_seed_ref",
         naiAttgAuthor: "_rt_seed_author",
         naiAttgTitle: "_rt_seed_title",
         naiAttgTags: "_rt_seed_tags",
@@ -171,13 +289,13 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       alterPersonaId = alter?.persona_id ?? null;
       expect(alterPersonaId).not.toBeNull();
 
-      const [imagegenRow] = await testSql<Array<{ physical_appearance_tags: string[]; nai_char_ref_url: string }>>`
-        SELECT physical_appearance_tags, nai_char_ref_url
+      const [imagegenRow] = await testSql<Array<{ physical_appearance_tags: string[]; char_ref_url: string }>>`
+        SELECT physical_appearance_tags, char_ref_url
         FROM persona_imagegen_configs
         WHERE persona_id = ${alterPersonaId}
       `;
       expect(imagegenRow.physical_appearance_tags).toEqual(["_rt_seed_tag"]);
-      expect(imagegenRow.nai_char_ref_url).toBe("_rt_seed_ref");
+      expect(imagegenRow.char_ref_url).toBe("_rt_seed_ref");
 
       const [textgenRow] = await testSql<Array<{ nai_attg_author: string; nai_attg_stars: number }>>`
         SELECT nai_attg_author, nai_attg_stars
@@ -190,7 +308,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       const personas = await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId);
       const loadedAlter = personas.find((persona) => persona.persona_id === alterPersonaId);
       expect(loadedAlter?.physical_appearance_tags).toEqual(["_rt_seed_tag"]);
-      expect(loadedAlter?.nai_char_ref_url).toBe("_rt_seed_ref");
+      expect(loadedAlter?.char_ref_url).toBe("_rt_seed_ref");
       expect(loadedAlter?.nai_attg_author).toBe("_rt_seed_author");
       expect(loadedAlter?.nai_attg_stars).toBe(4);
     } finally {
@@ -206,6 +324,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     let missingSplitPersonaId: number | null = null;
 
     try {
+      await executeMigrationFile("125_rename_character_reference_columns.down.sql");
       await executeMigrationFile("046_drop_persona_mirror_columns.down.sql");
 
       const [missingSplitPersona] = await testSql<Array<{ persona_id: number }>>`
@@ -334,6 +453,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         await testSql`DELETE FROM personas WHERE persona_id = ${missingSplitPersonaId}`;
       }
       await executeMigrationFile("046_drop_persona_mirror_columns.sql");
+      await executeMigrationFile("125_rename_character_reference_columns.sql");
       await testSql`DELETE FROM persona_context_note_configs WHERE persona_id = ${refs.personaId}`;
       await testSql`DELETE FROM persona_voice_configs WHERE persona_id = ${refs.personaId}`;
       await testSql`DELETE FROM persona_imagegen_configs WHERE persona_id = ${refs.personaId}`;
@@ -349,10 +469,11 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         speech_voice_sample_id: null,
         speech_voice_id: "_rt_046_voice",
         speech_voice_name: "_rt_046_voice_name",
+        voice_source_priority: "design",
         speech_voice_design_prompt: "_rt_046_prompt",
       });
       await personaRepository.setPhysicalAppearanceTags(refs.personaId, ["_rt_046_tag"]);
-      await personaRepository.setNaiCharRef(refs.personaId, "_rt_046_ref");
+      await personaRepository.setCharRef(refs.personaId, "_rt_046_ref");
       await personaRepository.setNaiAttg(refs.personaId, {
         nai_attg_author: "_rt_046_author",
         nai_attg_title: "_rt_046_title",
@@ -361,6 +482,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         nai_attg_stars: 5,
       });
 
+      await executeMigrationFile("125_rename_character_reference_columns.down.sql");
       await executeMigrationFile("046_drop_persona_mirror_columns.down.sql");
 
       const [row] = await testSql<
@@ -398,6 +520,7 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
       expect(row.nai_attg_stars).toBe(5);
     } finally {
       await executeMigrationFile("046_drop_persona_mirror_columns.sql");
+      await executeMigrationFile("125_rename_character_reference_columns.sql");
       await testSql`DELETE FROM persona_context_note_configs WHERE persona_id = ${refs.personaId}`;
       await testSql`DELETE FROM persona_voice_configs WHERE persona_id = ${refs.personaId}`;
       await testSql`DELETE FROM persona_imagegen_configs WHERE persona_id = ${refs.personaId}`;
@@ -412,10 +535,11 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
         speech_voice_sample_id: null,
         speech_voice_id: "_rt_export_voice",
         speech_voice_name: "_rt_export_voice_name",
+        voice_source_priority: "design",
         speech_voice_design_prompt: "_rt_export_prompt",
       });
       await personaRepository.setPhysicalAppearanceTags(refs.personaId, ["_rt_export_tag"]);
-      await personaRepository.setNaiCharRef(refs.personaId, "_rt_export_ref");
+      await personaRepository.setCharRef(refs.personaId, "_rt_export_ref");
       await personaRepository.setNaiAttg(refs.personaId, {
         nai_attg_author: "_rt_export_author",
         nai_attg_title: "_rt_export_title",
@@ -518,7 +642,9 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
 
     try {
       const swapped = await personaRepository.swapPersona(refs.personaId, alterPersonaId);
-      expect(swapped).toBe(true);
+      expect(swapped).toBe("swapped");
+      // Replaying the same swap is the double-click shape: expected, so it must not read as a failure.
+      expect(await personaRepository.swapPersona(refs.personaId, alterPersonaId)).toBe("roles-changed");
 
       const personas = await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId);
       const promotedAlter = personas.find((persona) => persona.persona_id === alterPersonaId);
@@ -806,6 +932,77 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     }
   });
 
+  it("preset character references resolve live, freeze on fork, and clear on avatar change or re-point", async () => {
+    const presetLineageId = 900_003;
+    const presetName = "_rt_char_ref_pointer_preset";
+    const alterName = `_rt_char_ref_pointer_alter_${Date.now()}`;
+    const presetRef = (version: string) => `data/avatars/presets/${presetLineageId}/character-reference-${version}.png`;
+    let alterPersonaId: number | null = null;
+
+    const loadCharRef = async () => {
+      const personas = await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId);
+      return personas.find((item) => item.persona_id === alterPersonaId)?.char_ref_url ?? null;
+    };
+    const setPresetRef = (version: string) => testSql`
+      UPDATE persona_presets SET preset_char_ref_shared_url = ${presetRef(version)}
+      WHERE persona_preset_name = ${presetName}
+    `;
+
+    try {
+      const [preset] = await testSql<TomoriPresetRow[]>`
+        INSERT INTO persona_presets (
+          persona_preset_name, persona_preset_desc, preset_lineage_id, preset_language, preset_char_ref_shared_url
+        )
+        VALUES (${presetName}, '_rt_char_ref_prompt', ${presetLineageId}, 'en-US', ${presetRef("v1")})
+        ON CONFLICT (persona_preset_name) DO UPDATE SET
+          preset_lineage_id = EXCLUDED.preset_lineage_id,
+          preset_char_ref_shared_url = EXCLUDED.preset_char_ref_shared_url
+        RETURNING *
+      `;
+      const alter = await personaRepository.createPresetPointerAlterPersona({
+        serverId: refs.serverId,
+        nickname: alterName,
+        preset,
+        personaLineageId: presetLineageId,
+      });
+      alterPersonaId = alter?.persona_id ?? null;
+      if (alterPersonaId === null) throw new Error("Expected pointer alter persona to exist.");
+      expect(await loadCharRef()).toBe(presetRef("v1"));
+
+      await setPresetRef("v2");
+      expect(await loadCharRef()).toBe(presetRef("v2"));
+
+      expect(await personaRepository.materializeIfPointer(alterPersonaId)).toBe(true);
+      await setPresetRef("v3");
+      expect(await loadCharRef()).toBe(presetRef("v2"));
+
+      expect(await personaRepository.clearPresetCharRef(alterPersonaId)).toBe(true);
+      expect(await loadCharRef()).toBeNull();
+
+      const ownRef = `data/charreferences/personas/${alterPersonaId}/own.png`;
+      expect(await personaRepository.setCharRef(alterPersonaId, ownRef)).toBe(true);
+      expect(await personaRepository.clearPresetCharRef(alterPersonaId)).toBe(false);
+      expect(await loadCharRef()).toBe(ownRef);
+
+      const [currentPreset] = await testSql<TomoriPresetRow[]>`
+        SELECT * FROM persona_presets WHERE persona_preset_name = ${presetName}
+      `;
+      await personaRepository.applyPresetPointerToPersona({
+        personaId: alterPersonaId,
+        nickname: alterName,
+        preset: currentPreset,
+      });
+      expect(await loadCharRef()).toBe(presetRef("v3"));
+    } finally {
+      if (alterPersonaId !== null) {
+        await testSql`DELETE FROM personas WHERE persona_id = ${alterPersonaId}`;
+      } else {
+        await testSql`DELETE FROM personas WHERE server_id = ${refs.serverId} AND persona_nickname = ${alterName}`;
+      }
+      await testSql`DELETE FROM persona_presets WHERE persona_preset_name = ${presetName}`;
+    }
+  });
+
   it("loadPersonaConfigRow returns the fixture persona_config row", async () => {
     const config = await personaRepository.loadPersonaConfig(refs.personaId);
     expect(config).not.toBeNull();
@@ -850,5 +1047,109 @@ describe.skipIf(!DB_TESTS_AVAILABLE)("Persona — regression", () => {
     const personas = await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId);
     const main = personas.find((p) => p.persona_id === refs.personaId);
     expect(main?.persona_nickname).toBe("_rt_persona_renamed");
+  });
+  it("resyncs main and alter presets without moving lineage, memories, or identity settings", async () => {
+    const presetLineageId = 900_105;
+    const [preset] = await testSql<TomoriPresetRow[]>`
+      INSERT INTO persona_presets (
+        persona_preset_name, persona_preset_desc, preset_lineage_id, preset_attribute_list,
+        preset_attribute_public_flags, preset_sample_dialogues_in, preset_sample_dialogues_out,
+        preset_language, preset_trigger_words
+      ) VALUES (
+        '_rt_resync_preset', '_rt_preset_prompt', ${presetLineageId}, ARRAY['_rt_preset_attribute']::TEXT[],
+        ARRAY[true]::BOOLEAN[], ARRAY['_rt_input']::TEXT[], ARRAY['_rt_output']::TEXT[],
+        'en-US', ARRAY['_rt_preset_trigger']::TEXT[]
+      ) RETURNING *
+    `;
+    const alter = await personaRepository.createAlterPersona({
+      serverId: refs.serverId,
+      nickname: "_rt_resync_alter",
+      attributes: [],
+      sampleDialoguesIn: [],
+      sampleDialoguesOut: [],
+    });
+    if (!alter?.persona_id) throw new Error("Could not create the resync alter fixture");
+    try {
+      for (const personaId of [refs.personaId, alter.persona_id]) {
+        const [before] = await testSql`SELECT persona_lineage_id FROM personas WHERE persona_id = ${personaId}`;
+        const lineageId = Number(before.persona_lineage_id);
+        expect(lineageId).not.toBe(presetLineageId);
+        await personaRepository.applyPresetPointerToPersona({
+          personaId,
+          nickname: `_rt_resync_${personaId}`,
+          preset,
+          personaLineageId: lineageId,
+        });
+        await personaRepository.addAttributes(personaId, ["_rt_local_attribute"], false);
+        await personaRepository.removeTrigger(personaId, [`_rt_local_${personaId}`, `_rt_second_${personaId}`]);
+        const naming = { prefixes: { neutral: "Dear" }, suffixes: {}, addressTerms: { neutral: "friend" } };
+        await personaRepository.updateNamingConfig(personaId, naming);
+        await personaRepository.setContextNote(personaId, "_rt_keep_note", 4);
+        await personaSpriteRepository.upsertSprite({
+          personaId,
+          spriteName: "Extra",
+          spriteKey: "extra",
+          avatarUrl: "data/avatars/presets/900105/sprites/extra-hash.png",
+          usageInstructions: "",
+          isIdentity: false,
+        });
+        await testSql`UPDATE personas SET applied_avatar_hash = 'old-hash' WHERE persona_id = ${personaId}`;
+        const [memory] = await testSql`
+          INSERT INTO server_memories (server_id, persona_id, persona_lineage_id, user_id, content)
+          VALUES (${refs.serverId}, ${personaId}, ${lineageId}, ${refs.userId}, '_rt_keep_memory') RETURNING *
+        `;
+        const persona = (await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId)).find(
+          (item) => item.persona_id === personaId,
+        );
+        if (!persona) throw new Error("Missing persona in resync fixture");
+        const result = await configPersonaOperations.resyncToPreset({
+          persona,
+          preset,
+          serverDiscId: FIXTURE_IDS.serverDiscId,
+          guildIdentity: null,
+        });
+        expect(result.status).toBe("success");
+        const [stored] = await testSql`SELECT * FROM personas WHERE persona_id = ${personaId}`;
+        expect(Number(stored.persona_lineage_id)).toBe(lineageId);
+        expect(stored.is_pointer).toBe(true);
+        expect(stored.applied_avatar_hash).toBeNull();
+        const sprites = await testSql`SELECT * FROM persona_sprites WHERE persona_id = ${personaId}`;
+        expect(sprites).toHaveLength(0);
+        const [keptMemory] =
+          await testSql`SELECT * FROM server_memories WHERE server_memory_id = ${memory.server_memory_id}`;
+        expect(keptMemory).toEqual(memory);
+        const resolved = (await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId)).find(
+          (item) => item.persona_id === personaId,
+        );
+        if (!resolved) throw new Error("Missing persona in resync fixture");
+        expect(resolved.attribute_list).toEqual(preset.preset_attribute_list);
+        expect(resolved.sample_dialogues_out).toEqual(preset.preset_sample_dialogues_out);
+        expect(resolved.trigger_words).toEqual(persona.trigger_words);
+        expect(resolved.naming_config).toEqual(naming);
+        expect(resolved.context_note).toBe("_rt_keep_note");
+        const exported = await presetRepository.exportPresetData(FIXTURE_IDS.serverDiscId, personaId);
+        expect(exported.success).toBe(true);
+        if (exported.success) {
+          expect(exported.data.data.trigger_words).toEqual(persona.trigger_words);
+          expect(exported.data.data.naming_config).toEqual(naming);
+        }
+        if (!resolved.is_alter) {
+          const main = await personaRepository.loadState(FIXTURE_IDS.serverDiscId);
+          expect(main?.trigger_words).toEqual(persona.trigger_words);
+          expect(main?.naming_config).toEqual(naming);
+        }
+        await personaRepository.addAttributes(personaId, ["_rt_fork_again"], false);
+        const forked = (await personaRepository.loadAllForServer(FIXTURE_IDS.serverDiscId)).find(
+          (item) => item.persona_id === personaId,
+        );
+        if (!forked) throw new Error("Missing persona in resync fixture");
+        expect(forked.is_pointer).toBe(false);
+        expect(forked.trigger_words).toEqual(persona.trigger_words);
+        expect(forked.naming_config).toEqual(naming);
+      }
+    } finally {
+      if (alter?.persona_id) await testSql`DELETE FROM personas WHERE persona_id = ${alter.persona_id}`;
+      await testSql`DELETE FROM persona_presets WHERE preset_lineage_id = ${presetLineageId}`;
+    }
   });
 });

@@ -1,27 +1,41 @@
+import { persistMemoryRecall } from "@/utils/text/context/memoryRecall";
+import { buildChatPersonaPostContext } from "@/utils/chat/responseEmitter";
 import { PrivacyLevel } from "@/types/db/schema";
+import { ContextItemTag } from "@/types/misc/context";
+import { recordLastReplyUsage } from "@/utils/cache/lastReplyUsageCache";
 import { incrementStmTurnCounter, storeShortTermMemory } from "@/utils/cache/shortTermMemoryCache";
+import { withProviderOptionCopy } from "@/utils/provider/providerOptionRegistry";
 import { sendStandardEmbed } from "@/utils/discord/embedHelper";
+import { resolveProviderErrorFooter } from "@/utils/discord/stream/errorUi";
 import { hasThoughtLogContent, sendAttributionOnlyEmbed, sendThoughtLogEmbed } from "@/utils/discord/thoughtLog";
-import { resolveManagedChannelWebhook, sendWebhookMessageWithIdentity } from "@/utils/discord/webhook/webhookCore";
-import { getChannelDeliveredWebhookIdentity } from "@/utils/discord/stream/channelDeliveryContinuity";
 import { ColorCode, log } from "@/utils/misc/logger";
+import { getLlmDisplayName } from "@/utils/provider/modelDisplay";
 import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
-import { incrementTextQuota } from "@/utils/quota/textQuotaManager";
+import { releaseTextQuotaForTrigger, textQuotaTriggerStates } from "@/utils/chat/textQuotaState";
 import { localizer } from "@/utils/text/localizer";
 import { normalizeCustomEmojisForLlm } from "@/utils/text/processors/mentionProcessor";
 import { MAX_EMPTY_RESPONSE_RETRIES } from "@/utils/discord/stream/constants";
-import { suppressNextSelfReply } from "@/utils/chat/channelQueue";
+import { channelLocks, queuePersonaJobsAtFront } from "@/utils/chat/channelQueue";
+import { getMatchLimit } from "@/utils/chat/personaQueue";
+import { getTriggerFirstMatchIndexInContent } from "@/utils/chat/triggerProcessor";
 import {
   buildSpeakerGuardRetryDirective,
   mergeInjectedContextItems,
   stripInjectedContextAnnotations,
 } from "@/utils/chat/contextAnnotations";
-import { getSelfReplyChainState, setLastRespondedPersona } from "@/utils/chat/selfReplyState";
-import { textQuotaTriggerStates } from "@/utils/chat/textQuotaState";
+import {
+  getSelfReplyChainState,
+  setLastRespondedPersona,
+  updateSelfReplyChainState,
+} from "@/utils/chat/selfReplyState";
 import { statRepository } from "@/utils/db/repositories";
+import { metricSampleRepository, type MetricFields } from "@/utils/db/repositories/MetricSampleRepository";
 import { charsToTokensText, estimateContextItemsTokens, sumTurnUsage } from "@/utils/text/tokenEstimate";
 import type { ChatIncoming, ChatTurnContext, GenerationTurnResult } from "@/utils/chat/types";
+import type { TurnUsageEntry } from "@/utils/chat/responseReview";
 import { recordReunionPresence } from "@/utils/chat/reunionPresence";
+import { invalidateInactiveNaturalNudgeGates } from "@/modules/natural-nudges/runtime/configCache";
+import { discordPresenceRetention } from "@/utils/cache/discordPresenceRetention";
 
 /**
  * Matches a fully-resolved Discord custom emoji tag (`<:name:id>` / `<a:name:id>`).
@@ -37,137 +51,104 @@ const EMPTY_RESPONSE_RETRY_DELAY_MS = 1000;
  * Runs side effects that must happen after a generation attempt finishes.
  */
 export async function runPostTurnEffects(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
+  if (context.memoryRecall) void persistMemoryRecall(context.memoryRecall);
   // Empty-response retries rebuild context recursively, so release or commit the
   // claim before that retry tries to acquire it again.
   await recordReunionPresence(context.reunionPresence, result);
-  await sendSelectedSticker(context, result);
+  if (!context.isDMChannel && (result.personaResponses.length > 0 || result.toolResponseDelivered === true)) {
+    discordPresenceRetention.retain(context.serverDiscId, context.userDiscId);
+  }
   await maybeScheduleEmptyResponseRetry(context, result);
-  await consumeTextQuota(context, result);
+  await settleTextQuota(context, result);
   updateSelfReplyBookkeeping(context, result);
+  queueNaturalNudgeReplies(context, result);
   await writeShortTermMemory(context, result);
   await emitThoughtLog(context, result);
   scheduleBoomerangFollowUp(context);
+  rememberLastReplyUsage(context, result);
   // Fire-and-forget so stat tracking never adds latency to the response path.
   void recordUsageStats(context, result);
 }
 
-async function sendSelectedSticker(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
-  const sticker = result.selectedSticker;
-  if (!sticker || result.status !== "completed") return;
-
-  let stickerSent = false;
-  // Post the sticker as whoever actually delivered the last message, so Discord groups the two
-  // instead of splitting the sticker off under a different author. Crucially this reuses the
-  // recorded username verbatim: which may be the decorated `Persona (sprite)` form picked by
-  // the group-break alternation. Re-resolving the persona's default identity here would produce
-  // a different name and force exactly the split we are avoiding.
-  //
-  // Not gated on `is_alter`: the main persona also delivers through a webhook whenever a sprite
-  // renders. A null identity means the last delivery was an ordinary bot message, so the sticker
-  // should be one too: which the bot path below handles.
-  const deliveredIdentity = getChannelDeliveredWebhookIdentity(context.channel.id);
-
-  if (deliveredIdentity) {
-    const threadId = context.channel.isThread() ? context.channel.id : undefined;
-    try {
-      const webhook = context.responseTarget?.webhook ?? (await resolveManagedChannelWebhook(context.channel));
-      if (webhook) {
-        await sendWebhookMessageWithIdentity(
-          webhook,
-          {
-            content: sticker.url,
-            ...(threadId ? { threadId } : {}),
-          },
-          deliveredIdentity,
-        );
-        stickerSent = true;
-        log.info(`Sent sticker URL for '${sticker.name}' via webhook as "${deliveredIdentity.username}".`);
-      }
-    } catch (error) {
-      log.warn("Failed to send sticker URL via webhook, falling back to bot sticker send", error);
-    }
-  }
-
-  if (stickerSent) {
-    recordStickerDelivery(context, sticker.name);
-    return;
-  }
-
-  try {
-    if (context.isFromQueue) {
-      await context.message.reply({ stickers: [sticker.id] });
-    } else {
-      if (!("send" in context.channel) || typeof context.channel.send !== "function") {
-        throw new Error(`Channel ${context.channel.id} does not support sticker sends.`);
-      }
-      await context.channel.send({ stickers: [sticker.id] });
-    }
-    log.info(`Sent selected sticker '${sticker.name}' after stream.`);
-    recordStickerDelivery(context, sticker.name);
-  } catch (error) {
-    log.error("Failed to send selected sticker after stream:", error, {
-      serverId: context.tomoriState.server_id,
-      errorType: "StickerSendError",
-      metadata: { stickerId: sticker.id },
-    });
-  }
+/**
+ * Keeps the first request's reported input tokens for `/context`. Later tool-loop requests also
+ * carry the tool results, so only the first one matches the prompt `/context` rebuilds.
+ */
+function rememberLastReplyUsage(context: ChatTurnContext, result: GenerationTurnResult): void {
+  if (result.personaResponses.length === 0 || context.isDMChannel) return;
+  const personaId = context.currentPersona.persona_id;
+  const inputTokens = result.streamResults.find((stream) => stream.usage)?.usage?.inputTokens ?? 0;
+  if (typeof personaId !== "number" || inputTokens <= 0) return;
+  recordLastReplyUsage(context.channel.id, personaId, {
+    inputTokens,
+    modelCodename: context.tomoriState.llm.llm_codename,
+  });
 }
 
-/**
- * Records `sticker_used` for a sticker Discord actually accepted, keyed by the canonical
- * resolved name (matching `server_stickers.sticker_name`, which getEmotionBreakdown joins on).
- *
- * Counting at tool-selection time instead would credit stickers the delivery path dropped:
- * a turn that never reached "completed", or a webhook send that failed and took the native
- * fallback down with it. DMs are skipped (stat_counters.server_id is a NOT NULL FK).
- */
-function recordStickerDelivery(context: ChatTurnContext, stickerName: string): void {
-  if (context.isDMChannel) return;
-  const serverId = context.tomoriState.server_id;
-  const userId = context.triggererUserId;
-  if (!serverId || !userId) return;
-
-  try {
-    statRepository.recordStat({
-      serverId,
-      userId,
-      lineageId: context.currentPersona.persona_lineage_id ?? context.tomoriState.persona_lineage_id ?? 0,
-      metric: "sticker_used",
-      metricKey: stickerName,
-    });
-  } catch (error) {
-    log.warn(`Failed to record sticker_used stat for '${stickerName}'`, error);
-  }
-}
-
-/**
- * Records per-turn usage stats at the single post-turn chokepoint:
- * message_sent, active_hour, model_used, tokens_in/tokens_out (estimated),
- * user_impersonation_triggered, emoji_used, sprite_shown, and sprite_emotion
- * (non-identity sprites only). Only counts turns that actually produced a persona
- * response. DMs are skipped (stat_counters.server_id is a NOT NULL FK).
- *
- * Expression metrics (emoji_used, sprite_shown, sprite_emotion) are delivery-gated:
- * they count only what Discord accepted, never what the model merely produced. Text
- * the output cleaner stripped, `<details>` scene metadata, and an abandoned attempt's
- * purged messages therefore score nothing. `sticker_used` follows the same rule from
- * its own delivery site (see recordStickerDelivery).
- *
- * Tokens prefer REAL provider usage when available: the orchestrator normalizes
- * each provider's reported usage onto `StreamResult.usage`, and these are summed
- * across the turn's stream segments (one per tool-loop request, each billed
- * separately). When no segment reports usage (e.g. NovelAI, or a provider that
- * omits it), tokens fall back to the CHARACTER-ESTIMATE ("Track A", shared with
- * `/tool estimate cost`): input from the built context, output from the response
- * text. The estimate over-counts dense languages (e.g. Japanese) and is rough;
- * real usage is billing-accurate. Either way the metric shape is identical
- * (`tokens_in`/`tokens_out` keyed by model id), so getEstimatedCost is unchanged.
- *
- * @param context - The completed turn's context (model + persona + server scope).
- * @param result  - The turn result; personaResponses carry the responding lineages.
- */
+/** Records turn usage in both metric sinks and guild counters, with dialogue counters gated on delivery. */
 async function recordUsageStats(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
-  // Only count turns that produced a real persona response, and not DMs.
+  const accountedUsage = sumTurnUsage(result.usageEntries ?? result.streamResults);
+  const turnUsage = accountedUsage ?? {
+    inputTokens: estimateContextItemsTokens(context.contextItems),
+    outputTokens: result.personaResponses.reduce(
+      (total, response) => total + charsToTokensText(response.text.length),
+      0,
+    ),
+  };
+  const fields: MetricFields = {
+    provider: context.tomoriState.llm.llm_provider,
+    model: context.tomoriState.llm.llm_codename,
+    source:
+      accountedUsage && !result.usageEntries?.some((entry) => entry.source === "estimated") ? "measured" : "estimated",
+    input_tokens: turnUsage.inputTokens,
+    cache_read_tokens: accountedUsage?.cacheReadTokens ?? "unknown",
+    cache_write_tokens: accountedUsage?.cacheWriteTokens ?? "unknown",
+    output_tokens: turnUsage.outputTokens,
+  };
+  if (accountedUsage?.costUsd !== undefined) fields.cost_usd = accountedUsage.costUsd;
+  log.metric("turn_usage", fields);
+  void metricSampleRepository.recordSample("turn_usage", fields);
+
+  // Actual spend survives cancellation and discarded drafts; dialogue metrics require delivery.
+  if (!context.isDMChannel && context.tomoriState.server_id && context.triggererUserId && result.usageEntries) {
+    const lineageId = context.currentPersona.persona_lineage_id ?? 0;
+    const serverId = context.tomoriState.server_id;
+    const userId = context.triggererUserId;
+    const recordEntry = (entry: TurnUsageEntry) => {
+      for (const [direction, delta] of [
+        ["in", entry.usage.inputTokens],
+        ["out", entry.usage.outputTokens],
+      ] as const) {
+        if (delta <= 0) continue;
+        statRepository.recordStat({
+          serverId,
+          userId,
+          lineageId,
+          metric: direction === "in" ? "tokens_in" : "tokens_out",
+          metricKey: entry.model,
+          delta,
+        });
+        if (entry.kind === "reviewer")
+          statRepository.recordStat({
+            serverId,
+            userId,
+            lineageId,
+            metric: direction === "in" ? "reviewer_tokens_in" : "reviewer_tokens_out",
+            metricKey: entry.model,
+            delta,
+          });
+      }
+      for (const [metric, delta] of [
+        ["cache_read_tokens", entry.usage.cacheReadTokens],
+        ["cache_write_tokens", entry.usage.cacheWriteTokens],
+      ] as const) {
+        if (delta === undefined || delta <= 0) continue;
+        statRepository.recordStat({ serverId, userId, lineageId, metric, metricKey: entry.model, delta });
+      }
+    };
+    for (const entry of result.usageEntries) recordEntry(entry);
+    if (context.responseReview?.usage === result.usageEntries) context.responseReview.usageRecorder = recordEntry;
+  }
   if (result.personaResponses.length === 0 || context.isDMChannel) return;
   const serverId = context.tomoriState.server_id;
   if (!serverId) return;
@@ -192,7 +173,28 @@ async function recordUsageStats(context: ChatTurnContext, result: GenerationTurn
       metric: "model_used",
       metricKey: modelCodename,
     });
-    statRepository.recordStat({ serverId, userId, lineageId: primaryLineage, metric: "active_hour", metricKey: hour });
+    // Generated nudges and persona reactions must not sustain their own heat or learned waking hours.
+    const incoming = context.turn.lockedTurn.admission.incoming;
+    const recordsEngagement = !incoming.naturalNudge && incoming.conditioningInteraction?.actorType !== "persona";
+    if (recordsEngagement) {
+      statRepository.recordStat({
+        serverId,
+        userId,
+        lineageId: primaryLineage,
+        metric: "active_hour",
+        metricKey: hour,
+      });
+    }
+    // Automatic Natural Nudges channels come from human-triggered turns, so a random trigger cannot
+    // keep its own channel eligible.
+    if (recordsEngagement && !incoming.borrowsTriggerMessage) {
+      statRepository.recordStat({
+        serverId,
+        userId,
+        metric: "channel_turn",
+        metricKey: context.channel.isThread() ? (context.channel.parentId ?? context.channel.id) : context.channel.id,
+      });
+    }
 
     // Per responding persona: one message exchanged (drives favorite-persona
     //    affinity), plus that persona's output-token volume: both persona-scoped,
@@ -206,19 +208,24 @@ async function recordUsageStats(context: ChatTurnContext, result: GenerationTurn
       //     only as the fallback when the provider reported no real usage (5).
       if (response.text) estimatedOutputTokens += charsToTokensText(response.text.length);
     }
-    for (const lineageId of lineages) {
-      statRepository.recordStat({ serverId, userId, lineageId, metric: "message_sent" });
+    if (recordsEngagement) {
+      for (const lineageId of lineages) {
+        statRepository.recordStat({
+          serverId,
+          userId,
+          lineageId,
+          metric: "message_sent",
+          metricKey: incoming.conditioningInteraction?.type,
+        });
+      }
     }
 
     // Custom-emoji uses that actually reached Discord, one increment per occurrence,
-    //    pre-aggregated per name so repeats collapse to one UPSERT. Counted off each
-    //    stream segment's accumulatedText (appended only after Discord accepts a send)
-    //    rather than personaResponses[].text, which is the short-term-memory payload:
-    //    that string carries the `[Scene Metadata]` block drained out of `<details>`,
-    //    so emoji the model wrote there would score despite never surfacing in chat.
-    //    Reading the segments also recovers text delivered before a tool call, since
-    //    stream state is fresh per streamOnce and only the last segment reaches the
-    //    response.
+    // pre-aggregated per name so repeats collapse to one UPSERT. Read from each stream
+    // segment's accumulatedText, which is appended only after Discord accepts a send, not
+    // from personaResponses[].text: that string is the short-term-memory payload and
+    // carries the `[Scene Metadata]` block drained out of `<details>`, so emoji the model
+    // wrote there would score despite never surfacing in chat.
     const emojiCounts = new Map<string, number>();
     for (const stream of result.streamResults) {
       for (const match of (stream.accumulatedText ?? "").matchAll(RESOLVED_CUSTOM_EMOJI_RE)) {
@@ -260,8 +267,12 @@ async function recordUsageStats(context: ChatTurnContext, result: GenerationTurn
     //    Cost is derived at read time from catalog pricing (getEstimatedCost), so
     //    input vs output rate applies exactly per direction either way.
     const realUsage = sumTurnUsage(result.streamResults);
-    const inputTokens = realUsage ? realUsage.inputTokens : estimateContextItemsTokens(context.contextItems);
-    const outputTokens = realUsage ? realUsage.outputTokens : estimatedOutputTokens;
+    const inputTokens = result.usageEntries
+      ? 0
+      : realUsage
+        ? realUsage.inputTokens
+        : estimateContextItemsTokens(context.contextItems);
+    const outputTokens = result.usageEntries ? 0 : realUsage ? realUsage.outputTokens : estimatedOutputTokens;
     if (realUsage) {
       log.info(`Stats: recording real provider usage (in=${inputTokens}, out=${outputTokens}) for ${modelCodename}`);
     }
@@ -284,6 +295,22 @@ async function recordUsageStats(context: ChatTurnContext, result: GenerationTurn
         metricKey: modelCodename,
         delta: outputTokens,
       });
+    }
+    if (!result.usageEntries && realUsage) {
+      for (const [metric, delta] of [
+        ["cache_read_tokens", realUsage.cacheReadTokens],
+        ["cache_write_tokens", realUsage.cacheWriteTokens],
+      ] as const) {
+        if (delta === undefined || delta <= 0) continue;
+        statRepository.recordStat({
+          serverId,
+          userId,
+          lineageId: primaryLineage,
+          metric,
+          metricKey: modelCodename,
+          delta,
+        });
+      }
     }
 
     // Sprite deliveries surfaced from the stream (one entry per delivered sprite
@@ -323,6 +350,10 @@ async function recordUsageStats(context: ChatTurnContext, result: GenerationTurn
         delta: count,
       });
     }
+    // An in-flight flush can predate this turn's stats, so the following snapshot must finish before eligibility refreshes.
+    if (incoming.isDirectChat && (await statRepository.flush()) && (await statRepository.flush())) {
+      invalidateInactiveNaturalNudgeGates(serverId);
+    }
   } catch (error) {
     log.warn("Failed to record usage stats for turn", error);
   }
@@ -354,6 +385,29 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
       return;
     }
 
+    const isPersonal = context.textCredentialSource === "personal";
+    const tipKeys = await withProviderOptionCopy(
+      [
+        "genai.tips.refresh_context",
+        ...(isPersonal
+          ? ["genai.tips.disable_personal_text_override", "genai.tips.switch_model_provider_personal"]
+          : ["genai.tips.switch_model_provider"]),
+      ],
+      {
+        surface: "recovery",
+        managedProvider: context.usageContext?.credentialProvider ?? null,
+        userDiscId: context.userDiscId,
+        serverId: context.tomoriState.server_id,
+        credentialScope:
+          context.usageContext?.credentialScope ??
+          (context.textCredentialSource === "personal"
+            ? "personal"
+            : context.textCredentialSource === "server"
+              ? "server"
+              : undefined),
+      },
+    );
+
     await sendStandardEmbed(
       context.channel as Parameters<typeof sendStandardEmbed>[0],
       context.locale,
@@ -361,13 +415,14 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
         titleKey: "genai.empty_response_title",
         descriptionKey: "genai.empty_response_description",
         color: ColorCode.WARN,
-        footerKey: "genai.generic_error_footer",
+        tipKeys,
+        ...resolveProviderErrorFooter({
+          providerName: context.tomoriState.llm.llm_provider,
+          textCredentialSource: context.textCredentialSource,
+          isDM: context.isDMChannel,
+        }),
       },
-      {
-        webhook: context.responseTarget?.webhook,
-        personaUsername: context.responseTarget?.personaUsername,
-        personaAvatarUrl: context.responseTarget?.personaAvatarUrl,
-      },
+      buildChatPersonaPostContext(context),
     ).catch((error) => log.warn("Failed to send empty response embed to channel", error));
     return;
   }
@@ -381,7 +436,10 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
     typeof streamResultData?.emptyResponseReason === "string" ? streamResultData.emptyResponseReason : undefined;
   const speakerGuardRetryDirective =
     emptyResponseReason === "speaker_guard"
-      ? buildSpeakerGuardRetryDirective(context.currentPersona.persona_nickname ?? context.tomoriState.persona_nickname)
+      ? buildSpeakerGuardRetryDirective(
+          context.currentPersona.persona_nickname ?? context.tomoriState.persona_nickname,
+          context.contextItems.some((item) => item.metadataTag === ContextItemTag.KNOWLEDGE_PERSONA_SPRITES),
+        )
       : null;
   const retryInjectedContextItems = mergeInjectedContextItems(
     incoming.injectedContextItems,
@@ -399,6 +457,7 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
     message: context.message,
     isFromQueue: context.isFromQueue,
     isManuallyTriggered: true,
+    isDirectChat: incoming.isDirectChat,
     forceReason: incoming.forceReason,
     reasoningQuery: incoming.reasoningQuery,
     llmOverrideCodename: incoming.llmOverrideCodename,
@@ -417,14 +476,21 @@ async function maybeScheduleEmptyResponseRetry(context: ChatTurnContext, result:
     textQuotaUserDiscId: incoming.textQuotaUserDiscId,
     manualSystemPrompt: incoming.manualSystemPrompt,
     manualPrefill: incoming.manualPrefill,
-    naiContinuationPrefill: lastStreamResult?.naiContinuationPrefill,
     emptyResponseFinishReason: streamResultData?.finishReason === "length" ? "length" : undefined,
     shouldSurfaceUserErrors: context.shouldSurfaceUserErrors,
     injectedContextItems: retryInjectedContextItems,
     forcedMentions: incoming.forcedMentions,
     manualTriggerInvoker: incoming.manualTriggerInvoker,
+    systemTriggerIdentity: incoming.systemTriggerIdentity,
     manualStreamingContextOverrides: incoming.manualStreamingContextOverrides,
     sceneTurn: incoming.sceneTurn,
+    naturalNudge: incoming.naturalNudge,
+    conditioningInteraction: incoming.conditioningInteraction,
+    borrowsTriggerMessage: incoming.borrowsTriggerMessage,
+    suppressSelfReply: incoming.suppressSelfReply,
+    carriedExpressionDelivery: context.currentPersona.persona_id
+      ? { personaId: context.currentPersona.persona_id, state: context.expressionDelivery }
+      : undefined,
     onGenerationResult: incoming.onGenerationResult,
     onQueueDiscard: incoming.onQueueDiscard,
   });
@@ -434,27 +500,41 @@ export function shouldRetryEmptyResponse(incoming: ChatIncoming, result: Generat
   return result.status === "empty_response" && incoming.retryCount < MAX_EMPTY_RESPONSE_RETRIES;
 }
 
-async function consumeTextQuota(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
+/** A tool can post the reply on its own, so a turn with no persona response may still have spoken. */
+export function isDeliveredTurnResult(result: GenerationTurnResult): boolean {
+  return result.status === "completed" && (result.personaResponses.length > 0 || result.toolResponseDelivered === true);
+}
+
+async function settleTextQuota(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
   if (
-    !context.shouldApplyTextQuota ||
-    !context.textQuotaState ||
-    context.textQuotaState.consumed ||
-    result.personaResponses.length === 0
+    context.shouldApplyTextQuota &&
+    context.textQuotaState &&
+    !context.textQuotaState.consumed &&
+    result.personaResponses.length > 0
   ) {
-    return;
+    context.textQuotaState.consumed = true;
+    context.textQuotaState.reservation = null;
+    context.textQuotaState.reservationReleased = false;
+    textQuotaTriggerStates.set(context.textQuotaTriggerKey, context.textQuotaState);
   }
 
-  await incrementTextQuota(context.textQuotaState.serverId, context.textQuotaState.userDiscId);
-  context.textQuotaState.consumed = true;
-  textQuotaTriggerStates.set(context.textQuotaTriggerKey, context.textQuotaState);
+  const isLastTurn = context.turn.personaIndex + 1 >= context.turn.totalPersonas;
+  // A queued persona job may still spend a unit reserved during planning, so a personal-route turn
+  // releases only as the last turn of a multi-persona plan, which queues no jobs.
+  if (isLastTurn && (context.shouldApplyTextQuota || context.turn.totalPersonas > 1)) {
+    await releaseTextQuotaForTrigger(context.textQuotaTriggerKey);
+  }
 }
 
 function updateSelfReplyBookkeeping(context: ChatTurnContext, result: GenerationTurnResult): void {
+  const incoming = context.turn.lockedTurn.admission.incoming;
+  if (isDeliveredTurnResult(result) && incoming.naturalNudge && !incoming.isPersonaJob && !incoming.sceneTurn) {
+    updateSelfReplyChainState(context.channel.id, false).triggerCount = 1;
+  }
   if (result.personaResponses.length > 0 && context.currentPersona.persona_id) {
     setLastRespondedPersona(context.channel.id, context.currentPersona.persona_id);
   }
 
-  const incoming = context.turn.lockedTurn.admission.incoming;
   if (
     result.personaResponses.length > 0 &&
     (!incoming.isManuallyTriggered || incoming.isPersonaJob) &&
@@ -472,8 +552,63 @@ function updateSelfReplyBookkeeping(context: ChatTurnContext, result: Generation
   }
 }
 
+function queueNaturalNudgeReplies(context: ChatTurnContext, result: GenerationTurnResult): void {
+  const incoming = context.turn.lockedTurn.admission.incoming;
+  if (!incoming.naturalNudge || incoming.sceneTurn || !isDeliveredTurnResult(result)) return;
+  const lockEntry = channelLocks.get(context.channel.id);
+  if (!lockEntry?.isLocked || lockEntry.nudgeInterrupted) return;
+
+  const content = result.streamResults.map((stream) => stream.accumulatedText ?? "").join("\n");
+  const personaJobs = context.allPersonas
+    .flatMap((persona) =>
+      persona.persona_id === undefined ||
+      persona.persona_id === context.currentPersona.persona_id ||
+      lockEntry.messageQueue.some(
+        (job) =>
+          job.naturalNudge &&
+          job.textQuotaTriggerKey === context.textQuotaTriggerKey &&
+          job.selectedPersonaId === persona.persona_id,
+      )
+        ? []
+        : [
+            {
+              personaName: persona.persona_nickname,
+              selectedPersonaId: persona.persona_id,
+              index: Math.min(
+                ...(persona.trigger_words ?? []).map((trigger) =>
+                  getTriggerFirstMatchIndexInContent(content, trigger, true),
+                ),
+              ),
+            },
+          ],
+    )
+    .filter((match) => Number.isFinite(match.index))
+    .sort((a, b) => a.index - b.index)
+    .slice(0, getMatchLimit(context.tomoriState))
+    .map(({ personaName, selectedPersonaId }) => ({ personaName, selectedPersonaId }));
+  if (personaJobs.length === 0) return;
+
+  queuePersonaJobsAtFront({
+    lockEntry,
+    message: context.message,
+    personaJobs,
+    triggeredPersonaIds: personaJobs.map((job) => job.selectedPersonaId),
+    textQuotaSource: "system",
+    textQuotaTriggerKey: context.textQuotaTriggerKey,
+    textQuotaUserDiscId: incoming.textQuotaUserDiscId ?? context.userDiscId,
+    shouldSurfaceUserErrors: false,
+    naturalNudge: { toolNames: [], targetUserDiscId: incoming.naturalNudge.targetUserDiscId },
+    borrowsTriggerMessage: true,
+    manualSystemPrompt:
+      "Answer the persona who addressed you in the latest conversation; the borrowed channel message is only an anchor, not a new request.",
+  });
+}
+
 async function writeShortTermMemory(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
+  // Generated nudges and persona reactions cannot establish a human relationship for Ping User.
   if (
+    context.turn.lockedTurn.admission.incoming.naturalNudge ||
+    context.turn.lockedTurn.admission.incoming.conditioningInteraction?.actorType === "persona" ||
     context.isStopResponse ||
     context.simplifiedMessages.length === 0 ||
     context.turn.requestSnapshot.triggererPrivacyLevel === PrivacyLevel.FULL ||
@@ -520,7 +655,6 @@ async function writeShortTermMemory(context: ChatTurnContext, result: Generation
         context.channelName,
         personaId,
         response?.personaLineageId ?? null,
-        context.channel.isThread() ? context.channel.parentId : null,
       );
       // Advance the cadence counter on the live scope row (server-shared in guild, user in DM).
       // This fires once per bot-participation cycle: not per raw inbound message.
@@ -539,17 +673,28 @@ async function writeShortTermMemory(context: ChatTurnContext, result: Generation
 async function emitThoughtLog(context: ChatTurnContext, result: GenerationTurnResult): Promise<void> {
   const thoughtLog = result.thoughtLog;
   const thoughtLogChannelId = context.tomoriState.config.thought_log_channel_disc_id;
-  if (!thoughtLogChannelId || context.isDMChannel || isThoughtLogPrivate(context)) {
+  if (!thoughtLogChannelId || context.isDMChannel) {
     return;
   }
 
-  const attributionLine =
-    context.textCredentialSource === "personal" && context.personalTextProvider
+  const personalProvider = context.textCredentialSource === "personal" ? context.personalTextProvider : undefined;
+  // context.tomoriState is the attempt that answered, so this names the model actually used and reads
+  // the randomizer flag of the route (server or personal) that drew it.
+  const { tomoriState } = context;
+  const attributionLines = [
+    personalProvider
       ? localizer(context.locale, "genai.thought_log.personal_attribution", {
           user_mention: `<@${context.userDiscId}>`,
-          provider: getProviderDisplayName(context.personalTextProvider),
+          provider: getProviderDisplayName(personalProvider),
         })
-      : undefined;
+      : undefined,
+    tomoriState.config.model_randomizer_enabled
+      ? localizer(context.locale, "genai.thought_log.randomizer_attribution", {
+          model: getLlmDisplayName(tomoriState.llm, tomoriState.config.custom_model_name),
+        })
+      : undefined,
+  ].filter((line): line is string => Boolean(line));
+  const attributionLine = attributionLines.length > 0 ? attributionLines.join("\n") : undefined;
 
   if (thoughtLog && hasThoughtLogContent(thoughtLog)) {
     thoughtLog.generationDurationMs = Date.now() - context.message.createdTimestamp;
@@ -573,15 +718,15 @@ async function emitThoughtLog(context: ChatTurnContext, result: GenerationTurnRe
       tomoriState: context.tomoriState,
       sourceChannel: context.channel as Parameters<typeof sendAttributionOnlyEmbed>[0]["sourceChannel"],
       thoughtLogChannelId,
+      title: localizer(
+        context.locale,
+        personalProvider
+          ? "genai.thought_log.personal_attribution_title"
+          : "genai.thought_log.randomizer_attribution_title",
+      ),
       attributionLine,
     });
   }
-}
-
-function isThoughtLogPrivate(context: ChatTurnContext): boolean {
-  const privateIds = context.tomoriState.config.private_channel_ids ?? [];
-  const parentId = context.channel.isThread() ? context.channel.parentId : null;
-  return privateIds.includes(context.channel.id) || (parentId !== null && privateIds.includes(parentId));
 }
 
 function scheduleBoomerangFollowUp(context: ChatTurnContext): void {
@@ -607,7 +752,6 @@ function scheduleBoomerangFollowUp(context: ChatTurnContext): void {
       }
 
       const { tomoriChat } = await import("@/events/messageCreate/tomoriChat");
-      suppressNextSelfReply(sourceChannel.id);
       await tomoriChat({
         client: context.client,
         message: sourceLastMessage,
@@ -620,6 +764,9 @@ function scheduleBoomerangFollowUp(context: ChatTurnContext): void {
         isUserImpersonation: boomerang.isUserImpersonation === true,
         impersonatedUserId: boomerang.impersonatedUserId,
         textQuotaSource: "system",
+        manualTriggerInvoker: boomerang.manualTriggerInvoker,
+        borrowsTriggerMessage: boomerang.borrowsTriggerMessage,
+        suppressSelfReply: true,
         shouldSurfaceUserErrors: context.shouldSurfaceUserErrors,
         injectedContextItems: buildBoomerangContext(boomerang),
         manualStreamingContextOverrides: { disableCrossChannelMessage: true },

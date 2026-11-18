@@ -1,6 +1,24 @@
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
+import {
+  addGenerationModelOption,
+  createGenerationModelAutocomplete,
+  resolveGenerationModelOption,
+  replyGenerationModelUnavailable,
+} from "@/utils/discord/autocomplete/generationModelAutocomplete";
+import { GenerationModelUnavailableError } from "@/utils/provider/generationModels";
+import {
+  findProviderRequestDeniedError,
+  reportProviderUsage,
+  getProviderRequestFailureCopy,
+} from "@/utils/provider/providerUsage";
+import { redactProviderDetail, reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { buildRestrictedErrorDetail } from "@/utils/discord/stream/errorUi";
+import { createProviderToolFailure } from "@/utils/provider/providerToolFailure";
+import { providerContentRejectionSchema } from "@/utils/provider/providerErrorClassification";
 /**
  * Image Generation Command
  * Allows users to generate AI images using the configured provider
+ * Supports manual prompting and automatic scene visualization
  * Supports text-to-image and image-to-image generation with up to 3 reference images
  * (Discord modal limit: 5 components total)
  */
@@ -12,6 +30,7 @@ import {
   AttachmentBuilder,
   type ChatInputCommandInteraction,
   type Client,
+  type ModalSubmitInteraction,
   type SlashCommandSubcommandBuilder,
   type APIAttachment,
 } from "discord.js";
@@ -21,8 +40,15 @@ import { localizer } from "../../utils/text/localizer";
 import { personaRepository, llmModelRepo, statRepository } from "@/utils/db/repositories";
 import { replyInfoEmbed, promptWithRawModal } from "../../utils/discord/interactionHelper";
 import type { UserRow } from "../../types/db/schema";
-import { checkImageQuota, incrementImageQuota } from "../../utils/quota/imageQuotaManager";
-import { resolveProviderFeatureImplementation } from "@/utils/provider/providerInfoRegistry";
+import {
+  checkImageQuota,
+  releaseImageQuota,
+  reserveImageQuota,
+  type QuotaCheckResult,
+} from "../../utils/quota/imageQuotaManager";
+import { QuotaUnavailableError } from "../../utils/quota/quotaErrors";
+import type { QuotaReservation } from "../../utils/db/repositories/QuotaRepository";
+import { getProviderDisplayName, resolveProviderFeatureImplementation } from "@/utils/provider/providerInfoRegistry";
 import { resolveNativeImageGenerationCapability } from "@/utils/provider/providerCapabilityResolver";
 import { ZAI_CODING_IMAGES_GENERATIONS_URL, ZAI_GENERAL_IMAGES_GENERATIONS_URL } from "@/providers/zai/zaiShared";
 import { generateCustomImageViaEndpoint } from "@/providers/custom/customEndpointDispatcher";
@@ -33,20 +59,48 @@ import {
   resolveCapabilityCredentials,
 } from "@/utils/provider/credentialResolver";
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
-import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
+import { formatCustomModelDisplay } from "@/utils/provider/customProviderUtils";
+import { generateOpenRouterImage } from "@/providers/openrouter/openrouterImageGeneration";
+import { buildGeminiImagePromptParts } from "@/providers/utils/geminiImageParts";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { executeAutoImageCommand } from "@/utils/image/autoImageCommand";
+import { prepareGeneratedImage } from "@/utils/image/generatedImageMetadata";
+import { buildImageGenerationInputAttachment } from "@/utils/image/imageGenerationInput";
+import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
+import { createStandardEmbed } from "@/utils/discord/embedHelper";
+import { withProviderOptionCopy } from "@/utils/provider/providerOptionRegistry";
 
 const MODAL_CUSTOM_ID = "generate_image_modal";
 const PROMPT_INPUT_ID = "prompt_input";
 const ASPECT_RATIO_SELECT_ID = "aspect_ratio_select";
 const REFERENCE_IMAGE_INPUT_IDS = ["image_upload_1", "image_upload_2", "image_upload_3"] as const;
 
-/**
- * Configure the subcommand
- */
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
-  subcommand.setName("image").setDescription(localizer("en-US", "commands.generate.image.description"));
+  addGenerationModelOption(
+    subcommand
+      .setName("image")
+      .setDescription(localizer("en-US", "commands.generate.image.description"))
+      .addStringOption((option) =>
+        option
+          .setName("mode")
+          .setDescription(localizer("en-US", "commands.generate.image.mode_description"))
+          .setRequired(true)
+          .addChoices(
+            { name: localizer("en-US", "commands.generate.image.mode_choice_manual"), value: "manual" },
+            { name: localizer("en-US", "commands.generate.image.mode_choice_auto"), value: "auto" },
+          ),
+      )
+      .addBooleanOption((option) =>
+        option
+          .setName("nsfw")
+          .setDescription(localizer("en-US", "commands.generate.image.nsfw_description"))
+          .setRequired(false),
+      ),
+    "commands.generate.image.model_description",
+  );
+
+export const autocomplete = createGenerationModelAutocomplete("image");
 
 /**
  * @param diffusionModelId - Database ID of the diffusion model
@@ -89,138 +143,108 @@ async function convertAttachmentToBase64(attachment: APIAttachment): Promise<{ m
   };
 }
 
-/**
- * Generate image using OpenRouter API
- * @param aspectRatio - Aspect ratio (e.g., "16:9")
- * @param referenceImages - Optional array of reference images for img2img
- * @returns Promise resolving to generated image data and mimeType
- */
-async function generateImageWithOpenRouter(
-  apiKey: string,
-  modelCodename: string,
-  prompt: string,
-  aspectRatio: string,
-  referenceImages?: Array<{ mimeType: string; data: string }>,
-): Promise<{ imageData: string | null; mimeType: string | null }> {
-  log.info(
-    `[OpenRouter] Sending image request to model "${modelCodename}" (aspect ratio: ${aspectRatio}, refs: ${referenceImages?.length ?? 0})`,
-  );
+async function replyImageQuotaExceeded(
+  target: ChatInputCommandInteraction | ModalSubmitInteraction,
+  locale: string,
+  quotaCheck: QuotaCheckResult,
+  tipKeys: string[],
+): Promise<void> {
+  const descriptionVars: Record<string, string> = {};
 
-  // Build content array with text prompt first (OpenRouter recommendation)
-  const contentParts: Array<{
-    type: string;
-    text?: string;
-    image_url?: { url: string };
-  }> = [{ type: "text", text: prompt }];
+  if (quotaCheck.resetTime) {
+    const now = new Date();
+    const hoursUntilReset = Math.ceil((quotaCheck.resetTime.getTime() - now.getTime()) / (1000 * 60 * 60));
 
-  if (referenceImages && referenceImages.length > 0) {
-    for (const img of referenceImages) {
-      contentParts.push({
-        type: "image_url",
-        image_url: {
-          url: `data:${img.mimeType};base64,${img.data}`,
-        },
+    if (hoursUntilReset < 24) {
+      descriptionVars.reset_info = localizer(locale, "commands.generate.image.quota_resets_in_hours", {
+        hours: hoursUntilReset.toString(),
+      });
+    } else {
+      descriptionVars.reset_info = localizer(locale, "commands.generate.image.quota_resets_in_days", {
+        days: Math.ceil(hoursUntilReset / 24).toString(),
       });
     }
-    log.info(`[OpenRouter] Added ${referenceImages.length} reference image(s) to content array`);
   }
 
-  const requestPayload = {
-    model: modelCodename,
-    messages: [
-      {
-        role: "user",
-        content: contentParts,
-      },
-    ],
-    modalities: ["image", "text"],
-    image_config: {
-      aspect_ratio: aspectRatio,
-    },
-  };
-
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestPayload),
+  await replyInfoEmbed(target, locale, {
+    titleKey: "commands.generate.image.quota_exceeded_title",
+    descriptionKey:
+      quotaCheck.reason === "user_quota_exceeded"
+        ? "commands.generate.image.user_quota_exceeded_description"
+        : quotaCheck.reason === "serverwide_quota_exceeded"
+          ? "commands.generate.image.serverwide_quota_exceeded_description"
+          : "commands.generate.image.quota_exceeded_description",
+    descriptionVars,
+    footerKey: "commands.generate.image.quota_exceeded_footer",
+    tipKeys,
+    color: ColorCode.ERROR,
+    flags: MessageFlags.Ephemeral,
   });
+}
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    const bodySnippet = errorText.slice(0, 500);
+async function replyImageQuotaUnavailable(
+  target: ChatInputCommandInteraction | ModalSubmitInteraction,
+  locale: string,
+): Promise<void> {
+  await replyInfoEmbed(target, locale, {
+    titleKey: "commands.generate.image.error_generation_failed_title",
+    descriptionKey: "commands.generate.image.quota_unavailable_description",
+    color: ColorCode.ERROR,
+    flags: MessageFlags.Ephemeral,
+  });
+}
 
-    let parsedMessage = "";
-    try {
-      const parsed = JSON.parse(errorText);
-      parsedMessage = (parsed?.error?.message as string | undefined) || (parsed?.message as string | undefined) || "";
-    } catch {}
+type ImageCredentials = Awaited<ReturnType<typeof resolveCapabilityCredentials>>;
 
-    const friendlyMessage = parsedMessage || bodySnippet || `${response.status} ${response.statusText}`.trim();
+type StandardImageRoute =
+  | { kind: "custom"; endpoint: NonNullable<ImageCredentials["customEndpoint"]> }
+  | { kind: "native"; provider: NonNullable<Awaited<ReturnType<typeof resolveNativeImageGenerationCapability>>> }
+  | { kind: "openrouter" | "google" | "zai" | "nvidia" };
 
-    throw new Error(`OpenRouter API request failed (${response.status} ${response.statusText}): ${friendlyMessage}`);
+/**
+ * Picks the transport that runs a standard image request, or null when the provider has none.
+ *
+ * The pre-modal refusal and the modal-submit dispatcher both switch on this one value, so a
+ * provider cannot pass the check and then reach a dispatcher branch that does not exist.
+ */
+async function resolveStandardImageRoute(creds: ImageCredentials): Promise<StandardImageRoute | null> {
+  if (creds.customEndpoint) {
+    return { kind: "custom", endpoint: creds.customEndpoint };
   }
-
-  const result = await response.json();
-
-  // Extract image from response.
-  // OpenRouter may return images either in `message.images` or embedded in `message.content` parts.
-  const message = result.choices?.[0]?.message;
-
-  let imageUrl: string | null = null;
-
-  if (message?.images?.[0]) {
-    const firstImage = message.images[0];
-    // OpenRouter may return either snake_case (image_url) or camelCase (imageUrl)
-    imageUrl = firstImage?.image_url?.url || firstImage?.imageUrl?.url || null;
-  } else if (Array.isArray(message?.content)) {
-    const firstImagePart = message.content.find(
-      (part: unknown) =>
-        typeof part === "object" && part !== null && "type" in part && (part as { type?: string }).type === "image_url",
-    ) as { image_url?: { url?: string } } | undefined;
-
-    imageUrl = firstImagePart?.image_url?.url || null;
-  }
-
-  if (imageUrl) {
-    // OpenRouter may return data URLs like "data:image/png;base64,..." OR a normal URL.
-    const dataUrlMatches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (dataUrlMatches) {
-      return {
-        imageData: dataUrlMatches[2],
-        mimeType: dataUrlMatches[1],
-      };
-    }
-
-    if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
-      const imageResponse = await safeDownload(imageUrl, {
-        maxSizeMB: MEDIA_LIMITS.MAX_MEDIA_SIZE_MB,
-        timeoutMs: 15_000,
-      });
-      if (imageResponse.success && imageResponse.buffer) {
-        const mimeType = imageResponse.contentType?.split(";")[0] || null;
-        return {
-          imageData: imageResponse.buffer.toString("base64"),
-          mimeType,
-        };
-      }
+  if (creds.provider === "vertex" || creds.provider === "vertexexpress") {
+    const provider = await resolveNativeImageGenerationCapability(creds.provider);
+    if (provider) {
+      return { kind: "native", provider };
     }
   }
-
-  return { imageData: null, mimeType: null };
+  const implementation = resolveProviderFeatureImplementation(creds.provider, "imageGeneration");
+  switch (implementation) {
+    case "openrouter":
+    case "google":
+    case "zai":
+    case "nvidia":
+      return { kind: implementation };
+    default:
+      return null;
+  }
 }
 
 /**
  * Execute the image generation command
  */
 export async function execute(
-  _client: Client,
+  client: Client,
   interaction: ChatInputCommandInteraction,
   userData: UserRow,
   locale: string,
 ): Promise<void> {
+  const mode = interaction.options.getString("mode", true);
+  const spoiler = interaction.options.getBoolean("nsfw") ?? false;
+  if (mode === "auto") {
+    await executeAutoImageCommand(client, interaction, userData, locale);
+    return;
+  }
+
   if (!interaction.channel) {
     await replyInfoEmbed(interaction, locale, {
       titleKey: "general.errors.channel_only_title",
@@ -244,7 +268,24 @@ export async function execute(
     return;
   }
 
+  const modelSelection = await resolveGenerationModelOption(
+    interaction,
+    baseTomoriState.server_id,
+    userData.user_id ?? null,
+    locale,
+    "image",
+  );
+  if (modelSelection === false) return;
   const { tomoriState } = await applyPersonalProviderSelectionsToTomoriState(baseTomoriState, userData.user_id ?? null);
+  const recoveryTips = async (tipKeys: string[], credentialSource: "server" | "personal") => {
+    return withProviderOptionCopy(tipKeys, {
+      surface: "recovery",
+      managedProvider: imageCreds?.usageContext?.credentialProvider ?? null,
+      userDiscId: interaction.user.id,
+      serverId: tomoriState.server_id,
+      credentialScope: credentialSource,
+    });
+  };
 
   if (!tomoriState.config.imagegen_enabled) {
     await replyInfoEmbed(interaction, locale, {
@@ -260,12 +301,37 @@ export async function execute(
   try {
     imageCreds = await resolveCapabilityCredentials(tomoriState.server_id, "image-standard", {
       userId: userData.user_id ?? null,
+      modelSelection,
     });
   } catch (error) {
+    if (error instanceof GenerationModelUnavailableError) {
+      await replyGenerationModelUnavailable(interaction, locale);
+      return;
+    }
+    const denied = findProviderRequestDeniedError(error);
+    if (denied) {
+      await replyInfoEmbed(interaction, locale, {
+        ...getProviderRequestFailureCopy(denied, locale),
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     if (error instanceof PersonalProviderRequiredError) {
+      log.warn(`[Generate Image] Personal provider required for image generation`, error, {
+        userId: userData.user_id,
+        serverId: tomoriState.server_id,
+        personaId: tomoriState.persona_id,
+        metadata: {
+          command: "generate image",
+        },
+      });
+      if (!interaction.replied && !interaction.deferred)
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       await replyInfoEmbed(interaction, locale, {
         titleKey: "general.errors.personal_provider_required_title",
         descriptionKey: "general.errors.personal_provider_required_description",
+        tipKeys: await recoveryTips([], "personal"),
         color: ColorCode.ERROR,
         flags: MessageFlags.Ephemeral,
       });
@@ -273,10 +339,27 @@ export async function execute(
     }
 
     if (error instanceof CredentialUnavailableError) {
+      log.warn(
+        `[Generate Image] Image credentials unavailable: source=${error.source}, reason=${error.reason}`,
+        error,
+        {
+          userId: userData.user_id,
+          serverId: tomoriState.server_id,
+          personaId: tomoriState.persona_id,
+          metadata: {
+            command: "generate image",
+            source: error.source,
+            reason: error.reason,
+          },
+        },
+      );
       if (error.source === "personal") {
+        if (!interaction.replied && !interaction.deferred)
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await replyInfoEmbed(interaction, locale, {
           titleKey: "general.errors.personal_provider_credentials_error_title",
           descriptionKey: "general.errors.personal_provider_credentials_error_description",
+          tipKeys: await recoveryTips([], "personal"),
           color: ColorCode.ERROR,
           flags: MessageFlags.Ephemeral,
         });
@@ -284,18 +367,34 @@ export async function execute(
       }
 
       if (error.reason === "missing_model_id") {
+        if (error.provider === "novelai" || tomoriState.llm.llm_provider.toLowerCase() === "novelai") {
+          await replyInfoEmbed(interaction, locale, {
+            titleKey: "commands.generate.image.novelai_redirect_title",
+            descriptionKey: "commands.generate.image.novelai_redirect_description",
+            color: ColorCode.INFO,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        if (!interaction.replied && !interaction.deferred)
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await replyInfoEmbed(interaction, locale, {
           titleKey: "commands.generate.image.no_diffusion_model_title",
           descriptionKey: "commands.generate.image.no_diffusion_model_description",
+          tipKeys: await recoveryTips([], "server"),
           color: ColorCode.ERROR,
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
 
+      if (!interaction.replied && !interaction.deferred)
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       await replyInfoEmbed(interaction, locale, {
         titleKey: "commands.generate.image.no_api_key_title",
         descriptionKey: "commands.generate.image.no_api_key_description",
+        tipKeys: await recoveryTips([], "server"),
         color: ColorCode.ERROR,
         flags: MessageFlags.Ephemeral,
       });
@@ -308,64 +407,88 @@ export async function execute(
   const diffusionModelId =
     getResolvedCapabilityModelId(imageCreds, "image-standard") ?? tomoriState.config.diffusion_model_id;
   if (!diffusionModelId) {
+    log.warn(`[Generate Image] No diffusion model configured for server ${tomoriState.server_id}`, undefined, {
+      userId: userData.user_id,
+      serverId: tomoriState.server_id,
+      personaId: tomoriState.persona_id,
+      metadata: {
+        command: "generate image",
+      },
+    });
+    if (!interaction.replied && !interaction.deferred) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     await replyInfoEmbed(interaction, locale, {
       titleKey: "commands.generate.image.no_diffusion_model_title",
       descriptionKey: "commands.generate.image.no_diffusion_model_description",
+      tipKeys: await recoveryTips([], imageCreds.source),
       color: ColorCode.ERROR,
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const apiKey = imageCreds.apiKey;
+  let apiKey = imageCreds.apiKey;
   const executionProvider = imageCreds.provider;
+
+  let imageRoute = await resolveStandardImageRoute(imageCreds);
+  if (!imageRoute) {
+    if (executionProvider === "novelai") {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.generate.image.novelai_redirect_title",
+        descriptionKey: "commands.generate.image.novelai_redirect_description",
+        color: ColorCode.INFO,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (!interaction.replied && !interaction.deferred) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await replyInfoEmbed(interaction, locale, {
+      titleKey: "commands.generate.image.unsupported_provider_title",
+      descriptionKey: "commands.generate.image.unsupported_provider_description",
+      descriptionVars: { provider: getProviderDisplayName(executionProvider) },
+      tipKeys: await recoveryTips([], imageCreds.source),
+      color: ColorCode.ERROR,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
 
   // Check image generation quota BEFORE showing modal (personal-provider users bypass quota)
   if (imageCreds.source === "server") {
-    const quotaCheck = await checkImageQuota(tomoriState.server_id, interaction.user.id);
+    let quotaCheck: QuotaCheckResult;
+    try {
+      quotaCheck = await checkImageQuota(tomoriState.server_id, interaction.user.id);
+    } catch (error) {
+      if (error instanceof QuotaUnavailableError) {
+        await replyImageQuotaUnavailable(interaction, locale);
+        return;
+      }
+      throw error;
+    }
 
     if (!quotaCheck.allowed) {
-      const errorTitleKey = "commands.generate.image.quota_exceeded_title";
-      let errorDescriptionKey = "commands.generate.image.quota_exceeded_description";
-      const descriptionVars: Record<string, string> = {};
-
-      if (quotaCheck.resetTime) {
-        const now = new Date();
-        const resetTime = quotaCheck.resetTime;
-        const hoursUntilReset = Math.ceil((resetTime.getTime() - now.getTime()) / (1000 * 60 * 60));
-
-        if (hoursUntilReset < 24) {
-          descriptionVars.reset_info = localizer(locale, "commands.generate.image.quota_resets_in_hours", {
-            hours: hoursUntilReset.toString(),
-          });
-        } else {
-          const daysUntilReset = Math.ceil(hoursUntilReset / 24);
-          descriptionVars.reset_info = localizer(locale, "commands.generate.image.quota_resets_in_days", {
-            days: daysUntilReset.toString(),
-          });
-        }
-      }
-
-      if (quotaCheck.reason === "user_quota_exceeded") {
-        errorDescriptionKey = "commands.generate.image.user_quota_exceeded_description";
-      } else if (quotaCheck.reason === "serverwide_quota_exceeded") {
-        errorDescriptionKey = "commands.generate.image.serverwide_quota_exceeded_description";
-      }
-
-      await replyInfoEmbed(interaction, locale, {
-        titleKey: errorTitleKey,
-        descriptionKey: errorDescriptionKey,
-        descriptionVars,
-        footerKey: "commands.generate.image.quota_exceeded_footer",
-        color: ColorCode.ERROR,
-        flags: MessageFlags.Ephemeral,
-      });
+      await replyImageQuotaExceeded(
+        interaction,
+        locale,
+        quotaCheck,
+        await recoveryTips(["genai.tips.use_personal_providers"], imageCreds.source),
+      );
       return;
     }
   }
 
   // Track modal submit interaction for error handling in catch block
-  let modalSubmitInteraction: import("discord.js").ModalSubmitInteraction | undefined;
+  let modalSubmitInteraction: ModalSubmitInteraction | undefined;
+  let quotaReservation: QuotaReservation | null = null;
+  let quotaConsumed = false;
+  let submittedInput: { prompt: string; aspectRatio: string; referenceFilenames: string[] } | undefined;
+  const recoveryOptions = () =>
+    submittedInput
+      ? {
+          footerKey: "commands.generate.image.recovery_file_footer",
+          files: [buildImageGenerationInputAttachment(locale, { kind: "standard", ...submittedInput })],
+        }
+      : {};
 
   try {
     const modalComponents = [
@@ -450,7 +573,33 @@ export async function execute(
       log.error("Modal result unexpectedly missing required values");
       return;
     }
+    submittedInput = {
+      prompt,
+      aspectRatio,
+      referenceFilenames: imageAttachments.map((attachment) => attachment.filename),
+    };
 
+    if (modelSelection) {
+      try {
+        imageCreds = await resolveCapabilityCredentials(tomoriState.server_id, "image-standard", {
+          userId: userData.user_id ?? null,
+          modelSelection,
+        });
+      } catch (error) {
+        const denied = findProviderRequestDeniedError(error);
+        if (!denied) throw error;
+        await replyInfoEmbed(modalSubmitInteraction, locale, {
+          ...getProviderRequestFailureCopy(denied, locale),
+          color: ColorCode.ERROR,
+          flags: MessageFlags.Ephemeral,
+          ...recoveryOptions(),
+        });
+        return;
+      }
+      apiKey = imageCreds.apiKey;
+      imageRoute = await resolveStandardImageRoute(imageCreds);
+      if (!imageRoute) throw new GenerationModelUnavailableError();
+    }
     const referenceImages: Array<{ mimeType: string; data: string }> = [];
     let referenceImageUrl: string | undefined;
 
@@ -465,13 +614,11 @@ export async function execute(
       } catch (error) {
         log.warn(`Failed to process attachment ${imageAttachment.id}:`, error as Error);
 
-        await modalSubmitInteraction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.generate.image.invalid_image_title"))
-              .setDescription(localizer(locale, "commands.generate.image.invalid_image_description"))
-              .setColor(ColorCode.ERROR),
-          ],
+        await replyInfoEmbed(modalSubmitInteraction, locale, {
+          titleKey: "commands.generate.image.invalid_image_title",
+          descriptionKey: "commands.generate.image.invalid_image_description",
+          color: ColorCode.ERROR,
+          ...recoveryOptions(),
         });
         return;
       }
@@ -483,154 +630,169 @@ export async function execute(
 
     const modelCodename = await getDiffusionModelCodename(diffusionModelId);
     const displayModelName = imageCreds.customEndpoint
-      ? formatCustomEndpointModelDisplay(imageCreds.customEndpoint)
+      ? formatCustomModelDisplay(imageCreds.customEndpoint)
       : modelCodename;
 
     log.info(
       `Generating image with ${executionProvider} via ${displayModelName}: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}" (aspect ratio: ${aspectRatio}, references: ${referenceImages.length})`,
     );
 
+    if (imageCreds.source === "server") {
+      const claim = await reserveImageQuota(tomoriState.server_id, interaction.user.id);
+      if (!claim.allowed) {
+        await replyImageQuotaExceeded(
+          modalSubmitInteraction,
+          locale,
+          claim,
+          await recoveryTips(["genai.tips.use_personal_providers"], "server"),
+        );
+        return;
+      }
+      quotaReservation = claim.reservation;
+    }
+
     const startTime = performance.now();
 
     let generatedImageData: string | null = null;
-    let generatedImageMimeType: string | null = null;
-    const imageGenerationImplementation = resolveProviderFeatureImplementation(executionProvider, "imageGeneration");
-    const nativeImageProvider =
-      executionProvider === "vertex" || executionProvider === "vertexexpress"
-        ? await resolveNativeImageGenerationCapability(executionProvider)
-        : null;
-
-    if (imageCreds.customEndpoint) {
-      const result = await generateCustomImageViaEndpoint({
-        endpoint: imageCreds.customEndpoint,
-        apiKey,
-        prompt,
-        aspectRatio,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      });
-      generatedImageData = result.imageData;
-      generatedImageMimeType = result.mimeType;
-    } else if (nativeImageProvider) {
-      const result = await nativeImageProvider.generateNativeImage({
-        apiKey,
-        model: modelCodename,
-        prompt,
-        aspectRatio,
-        ...(referenceImages.length > 0 ? { referenceImages } : {}),
-      });
-      generatedImageData = result.imageData;
-      generatedImageMimeType = result.mimeType;
-    } else if (imageGenerationImplementation === "openrouter") {
-      const result = await generateImageWithOpenRouter(
-        apiKey,
-        modelCodename,
-        prompt,
-        aspectRatio,
-        referenceImages.length > 0 ? referenceImages : undefined,
+    if (imageRoute.kind === "custom") {
+      const endpoint = imageRoute.endpoint;
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        generateCustomImageViaEndpoint({
+          endpoint,
+          apiKey,
+          prompt,
+          aspectRatio,
+          referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        }),
       );
       generatedImageData = result.imageData;
-      generatedImageMimeType = result.mimeType;
-    } else if (imageGenerationImplementation === "google") {
+    } else if (imageRoute.kind === "native") {
+      const provider = imageRoute.provider;
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        provider.generateNativeImage({
+          apiKey,
+          model: modelCodename,
+          prompt,
+          aspectRatio,
+          ...(referenceImages.length > 0 ? { referenceImages } : {}),
+        }),
+      );
+      generatedImageData = result.imageData;
+    } else if (imageRoute.kind === "openrouter") {
+      const result = await withProviderUsageContext(imageCreds.usageContext, async () =>
+        generateOpenRouterImage({
+          apiKey,
+          modelCodename,
+          prompt,
+          aspectRatio,
+          ...(referenceImages.length > 0 ? { referenceImages } : {}),
+        }),
+      );
+      reportProviderUsage(imageCreds.usageContext, { modelCodename, costUsd: result.costUsd });
+      generatedImageData = result.imageData;
+    } else if (imageRoute.kind === "google") {
       const ai = new GoogleGenAI({ apiKey });
       const chat = ai.chats.create({
         model: modelCodename,
       });
 
-      // Build parts: reference images (as inlineData) followed by the text prompt.
-      // SendMessageParameters.message is PartListUnion: inline images must be
-      // passed as inlineData parts, not via a non-existent "media" field.
-      const messageParts: Array<{ inlineData: { mimeType: string; data: string } } | string> = [
-        ...referenceImages.map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } })),
-        prompt,
-      ];
+      const messageParts = buildGeminiImagePromptParts(prompt, referenceImages);
 
-      const response = await chat.sendMessage({
-        message: messageParts,
-        config: {
-          responseModalities: ["IMAGE"],
-          imageConfig: {
-            aspectRatio: aspectRatio,
+      const response = await withProviderUsageContext(imageCreds.usageContext, () =>
+        chat.sendMessage({
+          message: messageParts,
+          config: {
+            responseModalities: ["IMAGE"],
+            imageConfig: {
+              aspectRatio: aspectRatio,
+            },
           },
-        },
-      });
+        }),
+      );
 
       if (response?.candidates && response.candidates.length > 0 && response.candidates[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData) {
             generatedImageData = part.inlineData.data ?? null;
-            generatedImageMimeType = part.inlineData.mimeType ?? null;
             break;
           }
         }
       }
-    } else if (imageGenerationImplementation === "zai") {
+    } else if (imageRoute.kind === "zai") {
       if (referenceImages.length > 0) {
-        await interaction.followUp({
-          content: localizer(locale, "commands.generate.image.zai_no_img2img_warning"),
+        await modalSubmitInteraction.followUp({
+          embeds: [
+            createStandardEmbed(locale, {
+              titleKey: "commands.generate.image.reference_images_ignored_title",
+              descriptionKey: "commands.generate.image.zai_no_img2img_warning",
+              color: ColorCode.WARN,
+            }),
+          ],
         });
       }
       const { generateZaiNativeImage } = await import("@/providers/zai/zaiImageGeneration");
-      const result = await generateZaiNativeImage({
-        apiKey,
-        model: modelCodename,
-        prompt,
-        aspectRatio,
-        endpointUrl:
-          executionProvider === "zaicoding" ? ZAI_CODING_IMAGES_GENERATIONS_URL : ZAI_GENERAL_IMAGES_GENERATIONS_URL,
-      });
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        generateZaiNativeImage({
+          apiKey,
+          model: modelCodename,
+          prompt,
+          aspectRatio,
+          endpointUrl:
+            executionProvider === "zaicoding" ? ZAI_CODING_IMAGES_GENERATIONS_URL : ZAI_GENERAL_IMAGES_GENERATIONS_URL,
+        }),
+      );
       generatedImageData = result.imageData;
-      generatedImageMimeType = result.mimeType;
-    } else if (imageGenerationImplementation === "nvidia") {
+    } else {
       if (referenceImages.length > 0) {
-        await interaction.followUp({
-          content: localizer(locale, "commands.generate.image.nvidia_no_img2img_warning"),
+        await modalSubmitInteraction.followUp({
+          embeds: [
+            createStandardEmbed(locale, {
+              titleKey: "commands.generate.image.reference_images_ignored_title",
+              descriptionKey: "commands.generate.image.nvidia_no_img2img_warning",
+              color: ColorCode.WARN,
+            }),
+          ],
         });
       }
       const { generateNvidiaNativeImage } = await import("@/providers/nvidia/nvidiaImageGeneration");
-      const result = await generateNvidiaNativeImage({
-        apiKey,
-        model: modelCodename,
-        prompt,
-        aspectRatio,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      });
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        generateNvidiaNativeImage({
+          apiKey,
+          model: modelCodename,
+          prompt,
+          aspectRatio,
+          referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        }),
+      );
       generatedImageData = result.imageData;
-      generatedImageMimeType = result.mimeType;
-    } else {
-      throw new Error(`Image generation is not implemented for provider ${executionProvider}`);
     }
 
     const endTime = performance.now();
     const generationTimeSeconds = ((endTime - startTime) / 1000).toFixed(1);
 
     if (!generatedImageData) {
-      await modalSubmitInteraction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.generate.image.error_generation_failed_title"))
-            .setDescription(
-              localizer(locale, "commands.generate.image.error_generation_failed_description", {
-                error: "No image data received from API",
-              }),
-            )
-            .setColor(ColorCode.ERROR),
-        ],
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey: "commands.generate.image.error_generation_failed_title",
+        descriptionKey: "commands.generate.image.error_generation_failed_description",
+        descriptionVars: { error: "No image data received from API" },
+        color: ColorCode.ERROR,
+        ...recoveryOptions(),
       });
       return;
     }
 
-    const imageBuffer = Buffer.from(generatedImageData, "base64");
+    const preparedImage = await prepareGeneratedImage(
+      Buffer.from(generatedImageData, "base64"),
+      prompt,
+      locale,
+      undefined,
+      modalSubmitInteraction.attachmentSizeLimit,
+    );
+    const filename = `generated_${Date.now()}.${preparedImage.extension}`;
+    const attachment = new AttachmentBuilder(preparedImage.buffer, { name: filename }).setSpoiler(spoiler);
 
-    const extension =
-      generatedImageMimeType === "image/jpeg" ? "jpg" : generatedImageMimeType === "image/webp" ? "webp" : "png"; // Default to PNG
-
-    const filename = `generated_${Date.now()}.${extension}`;
-    const attachment = new AttachmentBuilder(imageBuffer, { name: filename });
-
-    // Increment quota after successful generation (server providers only)
-    if (imageCreds.source === "server") {
-      await incrementImageQuota(tomoriState.server_id, interaction.user.id);
-    }
+    // Settled before delivery so a failed send still counts, matching the old increment point.
+    quotaConsumed = true;
     // Record canonical generation telemetry; quota tables enforce limits only.
     if (userData.user_id) {
       statRepository.recordStat({
@@ -646,15 +808,17 @@ export async function execute(
     }
 
     const successEmbed = new EmbedBuilder()
-      .setTitle(localizer(locale, "commands.generate.image.success_title"))
+      .setTitle(localizedStatusTitle(locale, "commands.generate.image.success_title", ColorCode.SUCCESS))
       .setColor(ColorCode.SUCCESS)
-      .setImage(`attachment://${filename}`)
+      .setFooter({
+        text: localizer(
+          locale,
+          preparedImage.promptAttachment
+            ? "commands.generate.image.prompt_attached_footer"
+            : "commands.generate.image.prompt_embedded_footer",
+        ),
+      })
       .addFields([
-        {
-          name: localizer(locale, "commands.generate.image.field_prompt"),
-          value: prompt.substring(0, 1024), // Discord limit
-          inline: false,
-        },
         {
           name: localizer(locale, "commands.generate.image.field_model"),
           value: displayModelName,
@@ -672,55 +836,130 @@ export async function execute(
         },
       ]);
 
-    if (referenceImageUrl) {
+    if (!spoiler) successEmbed.setImage(`attachment://${filename}`);
+
+    if (referenceImageUrl && !spoiler) {
       successEmbed.setThumbnail(referenceImageUrl);
     }
 
     await modalSubmitInteraction.editReply({
       embeds: [successEmbed],
-      files: [attachment],
+      files: preparedImage.promptAttachment ? [attachment, preparedImage.promptAttachment] : [attachment],
     });
 
     log.success(`Successfully generated and sent image (${generationTimeSeconds}s)`);
   } catch (error) {
+    if (error instanceof QuotaUnavailableError) {
+      await replyImageQuotaUnavailable(modalSubmitInteraction ?? interaction, locale);
+      return;
+    }
+    if (error instanceof GenerationModelUnavailableError) {
+      await replyGenerationModelUnavailable(modalSubmitInteraction ?? interaction, locale, recoveryOptions());
+      return;
+    }
+    const denied = findProviderRequestDeniedError(error, imageCreds?.usageContext);
+    if (denied) {
+      await replyInfoEmbed(modalSubmitInteraction ?? interaction, locale, {
+        ...getProviderRequestFailureCopy(denied, locale),
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+        ...recoveryOptions(),
+      });
+      return;
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const failure = createProviderToolFailure(error, {
+      locale,
+      provider: executionProvider,
+      credentialScope: imageCreds.source,
+    }).failure;
+    const failureCode = failure?.code;
 
-    log.error("Image generation failed:", error as Error);
+    const isBillingRefusal = /\b(?:billing|payment|quota|balance|credits?|402|PERMISSION_DENIED)\b/i.test(errorMessage);
+    const isSafetyRefusal =
+      providerContentRejectionSchema.safeParse(failureCode).success ||
+      /\b(?:safety|blocked|RECITATION)\b/i.test(errorMessage);
+    const isAuthenticationRefusal = ["401", "403", "authentication"].includes(failureCode ?? "");
+
+    await reportProviderFailure({
+      summary: "Image generation failed",
+      errorType: "ImageGenerationFailed",
+      error,
+      expected: isBillingRefusal || isSafetyRefusal || isAuthenticationRefusal,
+      serverId: tomoriState.server_id,
+      userId: userData.user_id ?? null,
+      dimensions: {
+        operation: "image-generation",
+        provider: executionProvider,
+        refusal: isBillingRefusal
+          ? "billing"
+          : isSafetyRefusal
+            ? "safety"
+            : isAuthenticationRefusal
+              ? "authentication"
+              : "none",
+      },
+      metadata: { credentialSource: imageCreds.source },
+    });
 
     // Use modalSubmitInteraction if available (error after modal), otherwise interaction (error during modal)
     const replyTarget = modalSubmitInteraction ?? interaction;
 
-    if (
-      errorMessage.includes("billing") ||
-      errorMessage.includes("payment") ||
-      errorMessage.includes("quota") ||
-      errorMessage.includes("PERMISSION_DENIED")
-    ) {
+    const isPersonalImage = imageCreds?.source === "personal";
+
+    if (isBillingRefusal) {
+      const tipKeys = await recoveryTips(
+        isPersonalImage
+          ? ["genai.tips.top_up_provider_balance", "genai.tips.disable_personal_text_override"]
+          : ["genai.tips.wait_and_retry"],
+        imageCreds.source,
+      );
       await replyInfoEmbed(replyTarget, locale, {
         titleKey: "commands.generate.image.error_billing_title",
         descriptionKey: "commands.generate.image.error_billing_description",
         color: ColorCode.ERROR,
         flags: MessageFlags.Ephemeral,
+        tipKeys,
+        ...recoveryOptions(),
       });
       return;
     }
 
-    if (errorMessage.includes("safety") || errorMessage.includes("blocked") || errorMessage.includes("RECITATION")) {
+    if (isSafetyRefusal) {
       await replyInfoEmbed(replyTarget, locale, {
         titleKey: "commands.generate.image.error_safety_title",
         descriptionKey: "commands.generate.image.error_safety_description",
         color: ColorCode.ERROR,
         flags: MessageFlags.Ephemeral,
+        tipKeys: await recoveryTips(["genai.tips.shorten_message"], imageCreds.source),
+        ...recoveryOptions(),
       });
       return;
     }
 
+    const tipKeys = await recoveryTips(
+      isPersonalImage
+        ? ["genai.tips.disable_personal_text_override", "genai.tips.switch_model_provider_personal"]
+        : ["genai.tips.wait_and_retry"],
+      imageCreds.source,
+    );
     await replyInfoEmbed(replyTarget, locale, {
       titleKey: "commands.generate.image.error_generation_failed_title",
       descriptionKey: "commands.generate.image.error_generation_failed_description",
-      descriptionVars: { error: errorMessage },
+      descriptionVars: { error: failure?.reason ?? "" },
       color: ColorCode.ERROR,
       flags: MessageFlags.Ephemeral,
+      tipKeys,
+      // The modal submit was deferred publicly, so this reply lands in the channel despite its flag.
+      restrictedDetail: buildRestrictedErrorDetail(redactProviderDetail(errorMessage, apiKey), {
+        textCredentialSource: imageCreds.source,
+        triggererDiscId: interaction.user.id,
+      }),
+      ...recoveryOptions(),
     });
+  } finally {
+    if (quotaReservation && !quotaConsumed) {
+      await releaseImageQuota(tomoriState.server_id, interaction.user.id, quotaReservation);
+    }
   }
 }

@@ -1,3 +1,10 @@
+import { z } from "zod";
+import {
+  broadcastInvalidation,
+  registerInvalidation,
+  invalidationKey,
+  invalidationDatabaseId,
+} from "@/utils/cache/invalidationBus";
 import type { PersonalSpotlightStatus } from "@/utils/db/repositories/UserRepository";
 import { userRepository } from "@/utils/db/repositories/UserRepository";
 
@@ -15,10 +22,9 @@ const serverHasSpotlights = new Map<number, { hasAny: boolean; expiresAt: number
 let cacheHits = 0;
 let cacheMisses = 0;
 
-const CACHE_TTL_MINUTES = Number.parseInt(process.env.PERSONAL_SPOTLIGHT_CACHE_TTL_MINUTES || "5", 10);
-const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-const MAX_ENTRIES = Number.parseInt(process.env.PERSONAL_SPOTLIGHT_CACHE_MAX_ENTRIES || "2000", 10);
+const MAX_ENTRIES = 2000;
 
 function getCacheKey(serverId: number, userId: number, channelDiscId: string): string {
   return `${serverId}:${userId}:${channelDiscId}`;
@@ -89,20 +95,19 @@ export function invalidatePersonalSpotlightCache(serverId: number, userId?: numb
   // The first spotlight created or the last removed flips the gate, so it drops with the entries.
   serverHasSpotlights.delete(serverId);
 
-  const prefixParts = [serverId.toString()];
-  if (userId !== undefined) {
-    prefixParts.push(userId.toString());
-  }
-  if (channelDiscId !== undefined) {
-    prefixParts.push(channelDiscId);
-  }
-  const prefix = `${prefixParts.join(":")}${channelDiscId !== undefined ? "" : ":"}`;
-
   for (const key of spotlightCache.keys()) {
-    if (key.startsWith(prefix)) {
+    const [server, user, channel] = key.split(":");
+    if (
+      server === String(serverId) &&
+      (userId === undefined || user === String(userId)) &&
+      (channelDiscId === undefined || channel === channelDiscId)
+    ) {
       spotlightCache.delete(key);
     }
   }
+  broadcastInvalidation("personalSpotlight", [
+    [String(serverId), userId === undefined ? null : String(userId), channelDiscId ?? null],
+  ]);
 }
 
 export function clearPersonalSpotlightCache(): void {
@@ -126,3 +131,10 @@ export function getPersonalSpotlightCacheStats(): {
     size: spotlightCache.size,
   };
 }
+
+registerInvalidation(
+  "personalSpotlight",
+  z.tuple([invalidationDatabaseId, invalidationDatabaseId.nullable(), invalidationKey.nullable()]),
+  ([server, user, channel]) => invalidatePersonalSpotlightCache(server, user ?? undefined, channel ?? undefined),
+  clearPersonalSpotlightCache,
+);

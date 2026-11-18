@@ -21,6 +21,8 @@
 import { sql } from "@/utils/db/client";
 import { normalizeStmCategories, type ShortTermMemoryRow } from "@/types/db/schema";
 import { log } from "@/utils/misc/logger";
+import { z } from "zod";
+import { broadcastInvalidation, invalidationKey, registerInvalidation } from "@/utils/cache/invalidationBus";
 
 /**
  * A single message in a short-term memory conversation
@@ -33,9 +35,6 @@ interface ShortTermMessage {
   speakerName?: string;
 }
 
-/**
- * A short-term memory entry for a specific channel
- */
 export interface ShortTermMemoryEntry {
   /** Array of conversation messages, capped by the configured per-channel limit */
   messages: ShortTermMessage[];
@@ -61,9 +60,6 @@ export interface ShortTermMemoryEntry {
   /** Discord channel ID */
   channelId: string;
 
-  /** Parent channel ID when channelId is a thread , so used for privacy/RP inheritance checks */
-  parentChannelId?: string | null;
-
   /** Optional channel name (for same-server channel mentions) */
   channelName?: string;
 
@@ -88,14 +84,10 @@ interface CacheStats {
   expirations: number;
 }
 
-const CRUDE_CONVERSATION_TTL_HOURS = Number.parseInt(process.env.SHORT_TERM_MEMORY_TTL_HOURS || "12", 10);
-export const STM_MAX_CATEGORIES = Number.parseInt(process.env.STM_MAX_CATEGORIES || "5", 10);
-const SUMMARY_TTL_HOURS = Number.parseInt(process.env.SHORT_TERM_MEMORY_SUMMARY_TTL_HOURS || "24", 10);
-const MAX_SUMMARY_LENGTH = Number.parseInt(process.env.SHORT_TERM_MEMORY_MAX_SUMMARY_LENGTH || "1500", 10);
-export const MAX_MESSAGES_PER_CHANNEL = Math.max(
-  1,
-  Number.parseInt(process.env.SHORT_TERM_MEMORY_MAX_MESSAGES_PER_CHANNEL || "10", 10) || 10,
-);
+const CRUDE_CONVERSATION_TTL_HOURS = 12;
+const SUMMARY_TTL_HOURS = 24;
+const MAX_SUMMARY_LENGTH = 1500;
+export const MAX_MESSAGES_PER_CHANNEL = 10;
 
 const CRUDE_CONVERSATION_TTL_MS = CRUDE_CONVERSATION_TTL_HOURS * 60 * 60 * 1000;
 const SUMMARY_TTL_MS = SUMMARY_TTL_HOURS * 60 * 60 * 1000;
@@ -400,7 +392,6 @@ function storeMemoryEntry(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   const existing = cache.get(key);
 
@@ -413,7 +404,6 @@ function storeMemoryEntry(
     serverId,
     serverName,
     channelId,
-    parentChannelId,
     channelName,
     personaId,
     personaLineageId,
@@ -654,6 +644,21 @@ export async function preWarmUserStmEntries(userDiscId: string): Promise<void> {
   await promise;
 }
 
+/** Users whose user-scoped rows have not been bulk-warmed into the cache yet. */
+export function filterUnwarmedStmUsers(userDiscIds: readonly string[]): string[] {
+  return [...new Set(userDiscIds)].filter((id) => id && !bulkWarmedUsers.has(id));
+}
+
+/** Warms every row read for `userDiscIds` and marks those users warm, including ones with no rows. */
+export function warmUserStmRows(userDiscIds: readonly string[], rows: readonly ShortTermMemoryRow[]): void {
+  for (const row of rows) {
+    if (row.user_disc_id) {
+      warmRowIntoCache(getUserCacheKey(row.user_disc_id, row.channel_disc_id, row.persona_id), row);
+    }
+  }
+  for (const id of userDiscIds) bulkWarmedUsers.add(id);
+}
+
 function updateSummaryForKey(
   key: string,
   summary: string,
@@ -663,7 +668,6 @@ function updateSummaryForKey(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   let existing = cache.get(key);
 
@@ -674,7 +678,6 @@ function updateSummaryForKey(
       serverId,
       serverName,
       channelId,
-      parentChannelId,
       channelName,
       personaId,
       personaLineageId,
@@ -699,7 +702,6 @@ function updateSummaryForKey(
  * @param channelName - Optional channel name for same-server channel mentions
  * @param personaId - Optional persona ID for persona-scoped memory
  * @param personaLineageId - Optional persona lineage ID for cross-server persona matching
- * @param parentChannelId - Parent channel ID when channelId is a thread (used for privacy inheritance)
  */
 export function storeShortTermMemory(
   userId: string,
@@ -715,7 +717,6 @@ export function storeShortTermMemory(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   try {
     if (!userId || !channelId || !serverId) {
@@ -737,7 +738,6 @@ export function storeShortTermMemory(
       channelName,
       personaId,
       personaLineageId,
-      parentChannelId,
     );
 
     if (serverId !== "DM") {
@@ -750,7 +750,6 @@ export function storeShortTermMemory(
         channelName,
         personaId,
         personaLineageId,
-        parentChannelId,
       );
     }
 
@@ -899,7 +898,6 @@ export function getShortTermMemoryForServerChannel(
  * @param channelName - Channel name (optional, for new entries)
  * @param personaId - Optional persona ID for persona-scoped memory
  * @param personaLineageId - Optional persona lineage ID for cross-server persona matching
- * @param parentChannelId - Parent channel ID when channelId is a thread (used for privacy inheritance)
  */
 export function updateShortTermMemorySummary(
   userId: string,
@@ -910,7 +908,6 @@ export function updateShortTermMemorySummary(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   try {
     if (!userId || !channelId || !summary) {
@@ -932,7 +929,6 @@ export function updateShortTermMemorySummary(
       channelName,
       personaId,
       personaLineageId,
-      parentChannelId,
     );
 
     if (serverId && serverId !== "DM") {
@@ -945,7 +941,6 @@ export function updateShortTermMemorySummary(
         channelName,
         personaId,
         personaLineageId,
-        parentChannelId,
       );
     }
 
@@ -1065,7 +1060,30 @@ export function clearShortTermMemorySummary(
 }
 
 /**
- * Clear all short-term memories for a specific channel (used by /tool refresh)
+ * Deletes the persisted rows a cache-clear just evicted.
+ *
+ * Eviction alone is not durable: hydrateEntryFromDb would resurrect the old row on the next cache
+ * miss, so the clear must also reach the DB. Fire-and-forget, because the clear is synchronous and
+ * a failed delete must not fail the caller.
+ *
+ * The caller also keeps its original failure message and named identifiers, so an operator can
+ * still identify the affected scope without decoding positional SQL parameters.
+ */
+interface StmDeleteInput {
+  whereClause: string;
+  params: Array<string | number | null>;
+  failureMessage: string;
+  metadata: Record<string, string | number | null | undefined>;
+}
+
+function deleteStmRowsInBackground({ whereClause, params, failureMessage, metadata }: StmDeleteInput): void {
+  void sql
+    .unsafe(`DELETE FROM short_term_memories WHERE ${whereClause}`, params)
+    .catch((err) => log.warn(`[shortTermMemoryCache] ${failureMessage}`, { error: err, ...metadata }));
+}
+
+/**
+ * Clear all short-term memories for a specific channel (used by /refresh)
  *
  * @param channelId - Discord channel ID
  */
@@ -1082,13 +1100,12 @@ export function clearShortTermMemoryForChannel(channelId: string): void {
 
     stats.invalidations += clearedCount;
 
-    // Eviction alone is not durable: hydrateEntryFromDb would resurrect the old
-    // row on the next cache miss, so the clear must also reach the DB.
-    void sql
-      .unsafe(`DELETE FROM short_term_memories WHERE channel_disc_id = $1`, [channelId])
-      .catch((err) =>
-        log.warn("[shortTermMemoryCache] Failed to delete STM from DB for channel", { error: err, channelId }),
-      );
+    deleteStmRowsInBackground({
+      whereClause: "channel_disc_id = $1",
+      params: [channelId],
+      failureMessage: "Failed to delete STM from DB for channel",
+      metadata: { channelId },
+    });
   } catch (error) {
     log.error(
       `[shortTermMemoryCache] Failed to clear short-term memories for channel - channelId=${channelId}`,
@@ -1125,20 +1142,15 @@ export function clearShortTermMemoryForServerChannel(
       stats.invalidations++;
     }
 
-    // Eviction alone is not durable: hydrateEntryFromDb would resurrect the old
-    // row on the next cache miss, so the clear must also reach the DB.
-    void sql
-      .unsafe(
-        `DELETE FROM short_term_memories
-       WHERE scope_kind = 'server'
+    deleteStmRowsInBackground({
+      whereClause: `scope_kind = 'server'
          AND server_disc_id = $1
          AND channel_disc_id = $2
          AND COALESCE(persona_id, 0) = COALESCE($3, 0)`,
-        [serverId, channelId, personaId ?? null],
-      )
-      .catch((err) =>
-        log.warn("[shortTermMemoryCache] Failed to delete server STM from DB", { error: err, serverId, channelId }),
-      );
+      params: [serverId, channelId, personaId ?? null],
+      failureMessage: "Failed to delete server STM from DB",
+      metadata: { serverId, channelId },
+    });
   } catch (error) {
     log.error(
       `[shortTermMemoryCache] Failed to clear server short-term memory entry - serverId=${serverId}, channelId=${channelId}, personaId=${personaId ?? "none"}`,
@@ -1152,28 +1164,20 @@ export function clearShortTermMemoryForServerChannel(
 }
 
 /**
- * Clear all user-scoped short-term memories for a user (used by /personal stm clear)
+ * Clear all user-scoped short-term memories for a user (used by /personal memories clear action)
  *
  * @param userId - Discord user ID
  */
 export function clearShortTermMemoryForUser(userId: string): void {
   try {
-    let clearedCount = 0;
+    evictUserShortTermMemory(userId);
 
-    for (const key of cache.keys()) {
-      if (key.startsWith(`${USER_CACHE_PREFIX}:${userId}:`)) {
-        cache.delete(key);
-        clearedCount++;
-      }
-    }
-
-    stats.invalidations += clearedCount;
-
-    // Eviction alone is not durable: hydrateEntryFromDb would resurrect the old
-    // row on the next cache miss, so the clear must also reach the DB.
-    void sql
-      .unsafe(`DELETE FROM short_term_memories WHERE scope_kind = 'user' AND user_disc_id = $1`, [userId])
-      .catch((err) => log.warn("[shortTermMemoryCache] Failed to delete user STM from DB", { error: err, userId }));
+    deleteStmRowsInBackground({
+      whereClause: "scope_kind = 'user' AND user_disc_id = $1",
+      params: [userId],
+      failureMessage: "Failed to delete user STM from DB",
+      metadata: { userId },
+    });
   } catch (error) {
     log.error(`[shortTermMemoryCache] Failed to clear short-term memories for user - userId=${userId}`, error, {
       errorType: "CACHE_CLEAR_ERROR",
@@ -1181,6 +1185,30 @@ export function clearShortTermMemoryForUser(userId: string): void {
     });
   }
 }
+
+function evictUserShortTermMemory(userId?: string): void {
+  const prefix = userId === undefined ? `${USER_CACHE_PREFIX}:` : `${USER_CACHE_PREFIX}:${userId}:`;
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) {
+      cache.delete(key);
+      stats.invalidations++;
+    }
+  }
+  if (userId === undefined) bulkWarmedUsers.clear();
+  else bulkWarmedUsers.delete(userId);
+}
+
+export function invalidateShortTermMemoryForUser(userId: string): void {
+  evictUserShortTermMemory(userId);
+  broadcastInvalidation("userStm", [[userId]]);
+}
+
+registerInvalidation(
+  "userStm",
+  z.tuple([invalidationKey]),
+  ([user]) => invalidateShortTermMemoryForUser(user),
+  () => evictUserShortTermMemory(),
+);
 
 /**
  * Remove expired entries from cache (cleanup job)
@@ -1254,7 +1282,6 @@ export function getShortTermMemoryCacheStats(): CacheStats & {
  * @param channelName - Optional channel name
  * @param personaId - Optional persona ID for persona-scoped memory
  * @param personaLineageId - Optional persona lineage ID
- * @param parentChannelId - Optional parent channel ID (thread privacy)
  */
 export async function updateShortTermMemoryCategories(
   userId: string,
@@ -1265,7 +1292,6 @@ export async function updateShortTermMemoryCategories(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): Promise<void> {
   try {
     if (!userId || !channelId) {
@@ -1285,7 +1311,6 @@ export async function updateShortTermMemoryCategories(
         serverId: serverId ?? "unknown",
         serverName,
         channelId,
-        parentChannelId,
         channelName,
         personaId,
         personaLineageId,
@@ -1305,7 +1330,6 @@ export async function updateShortTermMemoryCategories(
           serverId,
           serverName,
           channelId,
-          parentChannelId,
           channelName,
           personaId,
           personaLineageId,

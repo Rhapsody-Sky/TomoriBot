@@ -1,3 +1,4 @@
+import { DiscordAPIError } from "discord.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 
 // Static imports are hoisted and evaluated before any `mock.module` runs, so
@@ -12,13 +13,17 @@ import * as realMentionHelper from "@/utils/discord/mentionHelper";
 import * as realWebhookManager from "@/utils/discord/webhookManager";
 import * as realTomoriChat from "@/events/messageCreate/tomoriChat";
 import * as realLogger from "@/utils/misc/logger";
+import type { QueuedMessageDiscardHandler } from "@/utils/chat/types";
+import type { ReminderOccurrence } from "@/utils/text/processors/reminderRepetition";
 import { createScopedModuleMocker, overrideMembers } from "../../helpers/mockSurface";
 
-const getDueRemindersMock = mock(async () => []);
-const rescheduleReminderMock = mock(async (_reminderId: number, nextReminderTime: Date) => ({
-  reminder_id: _reminderId,
-  reminder_time: nextReminderTime,
-}));
+const getDueRemindersMock = mock<typeof realRepositories.serverScheduleRepository.getDueReminders>(async () => []);
+const rescheduleReminderMock = mock(
+  async (_reminderId: number, nextOccurrence: ReminderOccurrence, _failedOccurrenceCount?: number) => ({
+    reminder_id: _reminderId,
+    reminder_time: nextOccurrence.time,
+  }),
+);
 const scheduleReminderRetryMock = mock(
   async (_reminderId: number, nextAttemptAt: Date, deliveryRetryCount: number) => ({
     reminder_id: _reminderId,
@@ -27,8 +32,7 @@ const scheduleReminderRetryMock = mock(
   }),
 );
 const deleteReminderByIdMock = mock(async () => true);
-const tomoriChatMock = mock(async () => "run");
-const suppressNextSelfReplyMock = mock(() => {});
+const tomoriChatMock = mock<typeof realTomoriChat.tomoriChat>(async () => "run");
 const ensureDiscordUserMentionMock = mock(async () => {});
 
 // Every factory spreads the real surface first, then overrides only the exports
@@ -57,7 +61,6 @@ scopedMock.module("@/utils/db/repositories", () => ({
 scopedMock.module("@/events/messageCreate/tomoriChat", () => ({
   ...realTomoriChat,
   tomoriChat: tomoriChatMock,
-  suppressNextSelfReply: suppressNextSelfReplyMock,
 }));
 
 scopedMock.module("@/utils/discord/mentionHelper", () => ({
@@ -119,6 +122,7 @@ function makeReminder(overrides: Record<string, unknown> = {}) {
     reminder_time: new Date(Date.now() - 1_000),
     next_attempt_at: null,
     delivery_retry_count: 0,
+    failed_occurrence_count: 0,
     repetition_interval_hours: null,
     self_reminder: false,
     created_by_user_id: 1,
@@ -148,6 +152,8 @@ function makeClient() {
     },
   };
 
+  const dmUser = { send: mock(async (_payload?: unknown) => ({ id: "dm_001" })) };
+
   return {
     user: {
       id: "bot_001",
@@ -155,15 +161,19 @@ function makeClient() {
     channels: {
       fetch: mock(async () => channel),
     },
+    users: {
+      fetch: mock(async () => dmUser),
+    },
+    dmUser,
   };
 }
 
 describe("ReminderProcessor delivery acknowledgement", () => {
   beforeEach(() => {
     getDueRemindersMock.mockImplementation(async () => []);
-    rescheduleReminderMock.mockImplementation(async (_reminderId: number, nextReminderTime: Date) => ({
+    rescheduleReminderMock.mockImplementation(async (_reminderId: number, nextOccurrence: ReminderOccurrence) => ({
       reminder_id: _reminderId,
-      reminder_time: nextReminderTime,
+      reminder_time: nextOccurrence.time,
     }));
     scheduleReminderRetryMock.mockImplementation(
       async (_reminderId: number, nextAttemptAt: Date, deliveryRetryCount: number) => ({
@@ -174,7 +184,6 @@ describe("ReminderProcessor delivery acknowledgement", () => {
     );
     deleteReminderByIdMock.mockImplementation(async () => true);
     tomoriChatMock.mockImplementation(async () => "run");
-    suppressNextSelfReplyMock.mockClear();
     ensureDiscordUserMentionMock.mockClear();
   });
 
@@ -186,7 +195,7 @@ describe("ReminderProcessor delivery acknowledgement", () => {
     tomoriChatMock.mockClear();
   });
 
-  it("reschedules instead of deleting when /bot kill stops reminder generation", async () => {
+  it("reschedules instead of deleting when /kill stops reminder generation", async () => {
     const reminder = makeReminder();
     getDueRemindersMock.mockImplementation(async () => [reminder]);
     tomoriChatMock.mockImplementation(async (input) => {
@@ -228,9 +237,36 @@ describe("ReminderProcessor delivery acknowledgement", () => {
     expect(deleteReminderByIdMock).toHaveBeenCalledWith(reminder.reminder_id);
   });
 
+  it("settles delivered reminders during drain but never after owner epoch loss", async () => {
+    for (const lostOwner of [false, true]) {
+      const reminder = makeReminder({ repetition_interval_hours: lostOwner ? null : 24 });
+      const scheduler = new AbortController();
+      const owner = new AbortController();
+      getDueRemindersMock.mockImplementation(async () => [reminder]);
+      tomoriChatMock.mockImplementation(async (input) => {
+        scheduler.abort();
+        if (lostOwner) owner.abort();
+        await input.onGenerationResult?.({
+          status: "completed",
+          streamResults: [],
+          personaResponses: [{ personaName: "Tomori", text: "Reminder!", personaId: 1 }],
+        });
+        return "run";
+      });
+      await new ReminderProcessor(makeClient() as never).processDueReminders({
+        signal: scheduler.signal,
+        ownerSignal: owner.signal,
+        hasOwnership: () => true,
+      });
+      expect(rescheduleReminderMock).toHaveBeenCalledTimes(1);
+      expect(deleteReminderByIdMock).not.toHaveBeenCalled();
+      expect(ensureDiscordUserMentionMock).not.toHaveBeenCalled();
+    }
+  });
+
   it("keeps queued reminders leased and retries them when the queue is cleared", async () => {
     const reminder = makeReminder();
-    let onQueueDiscard: ((reason: "channel_queue_cleared") => Promise<void>) | undefined;
+    let onQueueDiscard: QueuedMessageDiscardHandler | undefined;
     getDueRemindersMock.mockImplementation(async () => [reminder]);
     tomoriChatMock.mockImplementation(async (input) => {
       onQueueDiscard = input.onQueueDiscard;
@@ -265,14 +301,24 @@ describe("ReminderProcessor delivery acknowledgement", () => {
       userDiscId: "human_001",
     });
   });
+
+  it("treats the latest channel message as a bystander anchor and credits the reminder's creator", async () => {
+    getDueRemindersMock.mockImplementation(async () => [makeReminder({ created_by_user_id: 7 })]);
+
+    await new ReminderProcessor(makeClient() as never).processDueReminders();
+
+    const input = tomoriChatMock.mock.calls[0]?.[0];
+    expect(input?.borrowsTriggerMessage).toBeTrue();
+    expect(input?.reminderData?.created_by_user_id).toBe(7);
+  });
 });
 
 describe("ReminderProcessor delivery retry cap", () => {
   beforeEach(() => {
     getDueRemindersMock.mockImplementation(async () => []);
-    rescheduleReminderMock.mockImplementation(async (_reminderId: number, nextReminderTime: Date) => ({
+    rescheduleReminderMock.mockImplementation(async (_reminderId: number, nextOccurrence: ReminderOccurrence) => ({
       reminder_id: _reminderId,
-      reminder_time: nextReminderTime,
+      reminder_time: nextOccurrence.time,
     }));
     scheduleReminderRetryMock.mockImplementation(
       async (_reminderId: number, nextAttemptAt: Date, deliveryRetryCount: number) => ({
@@ -282,7 +328,6 @@ describe("ReminderProcessor delivery retry cap", () => {
       }),
     );
     deleteReminderByIdMock.mockImplementation(async () => true);
-    suppressNextSelfReplyMock.mockClear();
     ensureDiscordUserMentionMock.mockClear();
   });
 
@@ -367,17 +412,19 @@ describe("ReminderProcessor delivery retry cap", () => {
     expect(scheduleReminderRetryMock).toHaveBeenCalledTimes(5);
     expect(rescheduleReminderMock).toHaveBeenCalledTimes(1);
     expect(deleteReminderByIdMock).not.toHaveBeenCalled();
-    const nextOccurrence = rescheduleReminderMock.mock.calls[0]?.[1];
-    expect(nextOccurrence.getTime()).toBeGreaterThan(Date.now());
-    expect((nextOccurrence.getTime() - canonicalTime.getTime()) % (60 * 60 * 1_000)).toBe(0);
+    const nextOccurrence = rescheduleReminderMock.mock.calls[0]?.[1].time;
+    expect(nextOccurrence?.getTime()).toBeGreaterThan(Date.now());
+    expect(((nextOccurrence?.getTime() ?? 0) - canonicalTime.getTime()) % (60 * 60 * 1_000)).toBe(0);
 
     const fallbackPayload = channel.send.mock.calls[0]?.[0] as
       | { embeds?: Array<{ toJSON(): { footer?: { text?: string } } }> }
       | undefined;
     const footerText = fallbackPayload?.embeds?.[0]?.toJSON().footer?.text;
     expect(
-      footerText === "reminders.triggered_footer_recurring_retained" || footerText?.includes("original cadence"),
+      footerText?.startsWith("reminders.triggered_footer_recurring_retained") ||
+        footerText?.includes("original cadence"),
     ).toBeTrue();
+    expect(footerText).not.toContain("[tomori:v1:");
   });
 
   it("does not mention a user when a self-task falls back", async () => {
@@ -418,5 +465,175 @@ describe("ReminderProcessor delivery retry cap", () => {
 
     // Six failures total: without the reset the cap would have fired on the last one.
     expect(deleteReminderByIdMock).not.toHaveBeenCalled();
+  });
+
+  it("skips retries once a recurring reminder has failed three occurrences in a row", async () => {
+    const reminder = makeReminder({ repetition_interval_hours: 24, failed_occurrence_count: 3 });
+    getDueRemindersMock.mockImplementation(async () => [reminder]);
+    alwaysFailDelivery();
+
+    const client = makeClient();
+    const channel = await client.channels.fetch();
+    await new ReminderProcessor(client as never).processDueReminders();
+
+    expect(scheduleReminderRetryMock).not.toHaveBeenCalled();
+    expect(channel.send).toHaveBeenCalledTimes(1);
+    expect(deleteReminderByIdMock).not.toHaveBeenCalled();
+    expect(rescheduleReminderMock.mock.calls[0]?.[2]).toBe(4);
+  });
+
+  it("removes a dead recurring reminder whose fallback cannot reach its channel and tells the recipient", async () => {
+    const reminder = makeReminder({ repetition_interval_hours: 24, failed_occurrence_count: 3 });
+    getDueRemindersMock.mockImplementation(async () => [reminder]);
+    alwaysFailDelivery();
+
+    const client = makeClient();
+    const channel = await client.channels.fetch();
+    channel.send.mockImplementation(async () => {
+      throw new Error("Missing Permissions");
+    });
+    await new ReminderProcessor(client as never).processDueReminders();
+
+    expect(deleteReminderByIdMock).toHaveBeenCalledWith(reminder.reminder_id);
+    expect(rescheduleReminderMock).not.toHaveBeenCalled();
+    expect(client.dmUser.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back on the first attempt when the provider refuses the key, but retries a transient failure", async () => {
+    for (const [providerError, retries] of [
+      [{ type: "api_error", code: "403", message: "PERMISSION_DENIED", retryable: false }, 0],
+      [{ type: "provider_overloaded", code: "503", message: "Service unavailable", retryable: true }, 1],
+    ] as const) {
+      scheduleReminderRetryMock.mockClear();
+      rescheduleReminderMock.mockClear();
+      const reminder = makeReminder({ repetition_interval_hours: 24 });
+      getDueRemindersMock.mockImplementation(async () => [reminder]);
+      tomoriChatMock.mockImplementation(async (input) => {
+        await input.onGenerationResult?.({
+          status: "error",
+          streamResults: [{ status: "error", data: providerError }],
+          personaResponses: [],
+        });
+        return "run";
+      });
+      const client = makeClient();
+      const channel = await client.channels.fetch();
+      await new ReminderProcessor(client as never).processDueReminders();
+
+      expect(scheduleReminderRetryMock).toHaveBeenCalledTimes(retries);
+      expect(channel.send).toHaveBeenCalledTimes(1 - retries);
+      expect(rescheduleReminderMock).toHaveBeenCalledTimes(1 - retries);
+    }
+  });
+
+  it("files an exhausted retry budget and a channel that denies the fallback as warnings, not incidents", async () => {
+    const [errorLog, , , warnLog] = logSpies;
+    const logged = (spy: typeof errorLog, prefix: string) =>
+      spy.mock.calls.filter(([message]) => String(message).startsWith(prefix)).length;
+    for (const [fallbackError, fallbackErrorLogs] of [
+      [new DiscordAPIError({ code: 50013, message: "Missing Permissions" }, 50013, 403, "POST", "/", {}), 0],
+      [new Error("socket hang up"), 1],
+    ] as const) {
+      errorLog.mockClear();
+      warnLog.mockClear();
+      const reminder = makeReminder({ repetition_interval_hours: 24, delivery_retry_count: 5 });
+      getDueRemindersMock.mockImplementation(async () => [reminder]);
+      alwaysFailDelivery();
+      const client = makeClient();
+      const channel = await client.channels.fetch();
+      channel.send.mockImplementation(async () => {
+        throw fallbackError;
+      });
+      await new ReminderProcessor(client as never).processDueReminders();
+
+      expect(logged(errorLog, "Reminder 42 exhausted")).toBe(0);
+      expect(logged(warnLog, "Reminder 42 exhausted")).toBe(1);
+      expect(logged(errorLog, "Failed to send fallback reminder")).toBe(fallbackErrorLogs);
+      expect(logged(warnLog, "Failed to send fallback reminder")).toBe(1 - fallbackErrorLogs);
+    }
+  });
+
+  it("does not DM the bot itself when removing a dead recurring self-task", async () => {
+    const reminder = makeReminder({ repetition_interval_hours: 24, failed_occurrence_count: 3, self_reminder: true });
+    getDueRemindersMock.mockImplementation(async () => [reminder]);
+    alwaysFailDelivery();
+
+    const client = makeClient();
+    const channel = await client.channels.fetch();
+    channel.send.mockImplementation(async () => {
+      throw new Error("Missing Permissions");
+    });
+    await new ReminderProcessor(client as never).processDueReminders();
+
+    expect(deleteReminderByIdMock).toHaveBeenCalledWith(reminder.reminder_id);
+    expect(client.users.fetch).not.toHaveBeenCalled();
+  });
+
+  it("counts a lost channel toward the streak instead of deleting a recurring reminder on its first failure", async () => {
+    const reminder = makeReminder({ repetition_interval_hours: 24 });
+    getDueRemindersMock.mockImplementation(async () => [reminder]);
+
+    const client = makeClient();
+    client.channels.fetch.mockImplementation(async () => {
+      throw new Error("Missing Access");
+    });
+    await new ReminderProcessor(client as never).processDueReminders();
+
+    expect(deleteReminderByIdMock).not.toHaveBeenCalled();
+    expect(rescheduleReminderMock.mock.calls[0]?.[2]).toBe(1);
+  });
+
+  it("keeps an hourly reminder with an unreachable channel until its failure streak spans a day", async () => {
+    const reminder = makeReminder({ repetition_interval_hours: 1, failed_occurrence_count: 3 });
+    getDueRemindersMock.mockImplementation(async () => [reminder]);
+    alwaysFailDelivery();
+
+    const client = makeClient();
+    const channel = await client.channels.fetch();
+    channel.send.mockImplementation(async () => {
+      throw new Error("Missing Permissions");
+    });
+    await new ReminderProcessor(client as never).processDueReminders();
+
+    expect(deleteReminderByIdMock).not.toHaveBeenCalled();
+    expect(rescheduleReminderMock.mock.calls[0]?.[2]).toBe(4);
+  });
+
+  it("clears the failure streak once an occurrence is delivered", async () => {
+    const reminder = makeReminder({ repetition_interval_hours: 24, failed_occurrence_count: 3 });
+    getDueRemindersMock.mockImplementation(async () => [reminder]);
+    alwaysSucceedDelivery();
+
+    await new ReminderProcessor(makeClient() as never).processDueReminders();
+
+    expect(rescheduleReminderMock.mock.calls[0]?.[2] ?? 0).toBe(0);
+    expect(reminder.failed_occurrence_count).toBe(0);
+  });
+
+  it("neutralizes backtick runs (3, 4, 5, 6, 8) in fallback description so no two adjacent backticks survive", async () => {
+    for (const runLen of [3, 4, 5, 6, 8]) {
+      const purpose = `prefix ${"`".repeat(runLen)} middle ${"`".repeat(runLen)} suffix`;
+      const reminder = makeReminder({ reminder_purpose: purpose });
+      getDueRemindersMock.mockImplementation(async () => [reminder]);
+      alwaysFailDelivery();
+
+      const client = makeClient();
+      const channel = await client.channels.fetch();
+      const processor = new ReminderProcessor(client as never);
+      for (let attempt = 0; attempt <= 5; attempt++) {
+        await processor.processDueReminders();
+      }
+
+      const fallbackPayload = channel.send.mock.calls[0]?.[0] as
+        | { embeds?: Array<{ toJSON(): { description?: string } }> }
+        | undefined;
+      const description = fallbackPayload?.embeds?.[0]?.toJSON().description ?? "";
+      const fenceStart = description.indexOf("```text\n");
+      const fenceEnd = description.lastIndexOf("\n```");
+      expect(fenceStart).toBeGreaterThanOrEqual(0);
+      expect(fenceEnd).toBeGreaterThan(fenceStart);
+      const innerContent = description.slice(fenceStart + "```text\n".length, fenceEnd);
+      expect(innerContent).not.toContain("``");
+    }
   });
 });

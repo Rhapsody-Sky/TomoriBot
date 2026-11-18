@@ -20,7 +20,7 @@ general:
 server:
   # Substituted from the SEARXNG_SECRET env var by entrypoint.sh.
   secret_key: "${SEARXNG_SECRET}"
-  # No rate limiter: only TomoriBot on the private network talks to this sidecar.
+  # No rate limiter: only TomoriBot on the private network talks to this container.
   limiter: false
   # No public UI; we only need the JSON API.
   public_instance: false
@@ -47,13 +47,14 @@ search:
     - json
 
 outgoing:
-  request_timeout: 5.0
-  max_request_timeout: 10.0
+  # Leave 1.5 seconds for queueing and response delivery inside the bot's five-second deadline.
+  request_timeout: 3.5
+  max_request_timeout: 3.5
   pool_connections: 100
   pool_maxsize: 20
   useragent_suffix: "TomoriBot"
 
-# Curated engine list — keep this lean to bound upstream rate-limit exposure.
+# Curated engine list â€” keep this lean to bound upstream rate-limit exposure.
 # Override per-engine via this section; rely on use_default_settings for the rest.
 engines:
   - name: google

@@ -1,11 +1,13 @@
-import { EmbedBuilder, type BaseGuildTextChannel, type Client } from "discord.js";
+import { EmbedBuilder, type BaseGuildTextChannel, type Channel, type Client } from "discord.js";
 import type { ThoughtLogPayload } from "@/types/provider/interfaces";
 import { getLlmDisplayName } from "@/utils/provider/modelDisplay";
+import { getProviderDisplayName } from "@/utils/provider/providerInfoRegistry";
 import { ColorCode, log } from "@/utils/misc/logger";
 import { localizer } from "@/utils/text/localizer";
 import type { StreamContext } from "@/types/stream/interfaces";
 import type { TomoriState } from "@/types/db/schema";
 import { getOrCreateWebhook } from "@/utils/discord/webhook/lifecycle";
+import { canMirrorToThoughtLog } from "@/utils/discord/thoughtLogAudience";
 import { resolvePersonaWebhookIdentity, type ResolvedWebhookIdentity } from "@/utils/discord/webhook/identity";
 import { sendWebhookMessagesWithIdentity } from "@/utils/discord/webhook/personaDispatch";
 
@@ -77,13 +79,14 @@ function buildThoughtLogEmbeds(args: {
   // can identify a backend that bled reasoning into content and pin/avoid it.
   const provider = thoughtLog.servingProvider
     ? localizer(locale, "genai.thought_log.provider_with_serving", {
-        provider: tomoriState.llm.llm_provider,
+        provider: getProviderDisplayName(tomoriState.llm.llm_provider),
         serving_provider: thoughtLog.servingProvider,
       })
-    : tomoriState.llm.llm_provider;
+    : getProviderDisplayName(tomoriState.llm.llm_provider);
   const model = getLlmDisplayName(tomoriState.llm, tomoriState.config.custom_model_name);
-  const hasThinkingContent = Boolean(
-    normalizeThoughtLogText(thoughtLog.summary) || normalizeThoughtLogText(thoughtLog.raw),
+  const reasoning = thoughtLog.iterations ?? [thoughtLog];
+  const hasThinkingContent = reasoning.some(
+    (iteration) => normalizeThoughtLogText(iteration.summary) || normalizeThoughtLogText(iteration.raw),
   );
   const generationTime = hasThinkingContent ? formatGenerationDuration(thoughtLog.generationDurationMs) : undefined;
   const footerText = generationTime
@@ -98,17 +101,18 @@ function buildThoughtLogEmbeds(args: {
       });
 
   const sections = [
-    {
-      label: localizer(locale, "genai.thought_log.summary_field"),
-      content: normalizeThoughtLogText(thoughtLog.summary),
-      /** Whether to wrap the content in a code block */
-      codeBlock: false,
-    },
-    {
-      label: localizer(locale, "genai.thought_log.raw_field"),
-      content: normalizeThoughtLogText(thoughtLog.raw),
-      codeBlock: false,
-    },
+    ...reasoning.flatMap((iteration, index) => [
+      {
+        label: `${localizer(locale, "genai.thought_log.summary_field")}${reasoning.length > 1 ? ` (${index + 1})` : ""}`,
+        content: normalizeThoughtLogText(iteration.summary),
+        codeBlock: false,
+      },
+      {
+        label: `${localizer(locale, "genai.thought_log.raw_field")}${reasoning.length > 1 ? ` (${index + 1})` : ""}`,
+        content: normalizeThoughtLogText(iteration.raw),
+        codeBlock: false,
+      },
+    ]),
     {
       label: localizer(locale, "genai.thought_log.fetched_content_field"),
       content: normalizeThoughtLogText(thoughtLog.fetchedContent),
@@ -189,6 +193,9 @@ export function hasThoughtLogContent(payload?: ThoughtLogPayload | null): boolea
   return Boolean(
     normalizeThoughtLogText(payload?.summary) ||
       normalizeThoughtLogText(payload?.raw) ||
+      payload?.iterations?.some(
+        (iteration) => normalizeThoughtLogText(iteration.summary) || normalizeThoughtLogText(iteration.raw),
+      ) ||
       normalizeThoughtLogText(payload?.fetchedContent),
   );
 }
@@ -236,10 +243,8 @@ async function resolveThoughtLogOwnerIdentity(
 }
 
 /**
- * Sends a standalone attribution embed to the thought-logs channel when a
- * personal provider was used but the model produced no reasoning/thinking
- * content (so no thought-log embed was emitted). This ensures server admins
- * can always see whose credentials were used, regardless of model type.
+ * Posts attribution alone when no thought-log embed was emitted, so admins still see whose
+ * credentials and which model answered.
  */
 export async function sendAttributionOnlyEmbed({
   client,
@@ -247,6 +252,7 @@ export async function sendAttributionOnlyEmbed({
   tomoriState,
   sourceChannel,
   thoughtLogChannelId,
+  title,
   attributionLine,
 }: {
   client: Client;
@@ -254,6 +260,7 @@ export async function sendAttributionOnlyEmbed({
   tomoriState: TomoriState;
   sourceChannel: StreamContext["channel"];
   thoughtLogChannelId: string;
+  title: string;
   attributionLine: string;
 }): Promise<void> {
   const thoughtLogChannel = await client.channels.fetch(thoughtLogChannelId).catch(() => null);
@@ -269,19 +276,24 @@ export async function sendAttributionOnlyEmbed({
     log.warn(`Thought log channel ${thoughtLogChannelId} is missing or unavailable. Skipping attribution-only post.`);
     return;
   }
+  if (
+    !canMirrorToThoughtLog(sourceChannel as Channel, thoughtLogChannel, tomoriState.config.private_channel_ids ?? [])
+  ) {
+    return;
+  }
 
   const descriptionLines = [
     localizer(locale, "genai.thought_log.description", { source_line: sourceChannel.toString() }),
     attributionLine.trim(),
   ].filter((line): line is string => Boolean(line.trim()));
   const footerText = localizer(locale, "genai.thought_log.footer", {
-    provider: tomoriState.llm.llm_provider,
+    provider: getProviderDisplayName(tomoriState.llm.llm_provider),
     model: getLlmDisplayName(tomoriState.llm, tomoriState.config.custom_model_name),
   });
 
   const embed = new EmbedBuilder()
     .setColor(ColorCode.INFO)
-    .setTitle(localizer(locale, "genai.thought_log.personal_attribution_title"))
+    .setTitle(title)
     .setDescription(descriptionLines.join("\n").slice(0, EMBED_DESCRIPTION_LIMIT))
     .setTimestamp()
     .setFooter({ text: footerText });
@@ -328,6 +340,11 @@ export async function sendThoughtLogEmbed({
     log.warn(`Thought log channel ${thoughtLogChannelId} is missing or unavailable. Skipping thought log post.`);
     return;
   }
+  if (
+    !canMirrorToThoughtLog(sourceChannel as Channel, thoughtLogChannel, tomoriState.config.private_channel_ids ?? [])
+  ) {
+    return;
+  }
 
   const embeds = buildThoughtLogEmbeds({
     locale,
@@ -351,7 +368,7 @@ export async function sendThoughtLogEmbed({
       const identity = await resolveThoughtLogOwnerIdentity(owner, thoughtLogChannel as BaseGuildTextChannel);
 
       if (webhookResult.webhook && identity?.username) {
-        await sendWebhookMessagesWithIdentity(webhookResult.webhook, payloads, identity, thoughtLogChannel.id);
+        await sendWebhookMessagesWithIdentity(webhookResult.webhook, payloads, identity);
       } else {
         for (const payload of payloads) {
           await thoughtLogChannel.send(payload);

@@ -33,6 +33,7 @@ export type PersonaWorkflowViolationKind =
   | "low-level-picker-reference"
   | "preserved-selected-interaction"
   | "empty-picker-on-select"
+  | "self-acknowledging-on-selected"
   | "competing-persona-helper";
 
 /** One forbidden persona-picker pattern found in source. */
@@ -190,6 +191,33 @@ function collectImportedAliases(sourceFile: ts.SourceFile, importedName: string)
   return aliases;
 }
 
+/**
+ * Calls that acknowledge an interaction outright, as opposed to the in-place update and
+ * defer-update the workflow performs on the anchor message. A selection callback that makes one
+ * of these claims an interaction the anchor already owns, and Discord answers it as a failure.
+ */
+const SELF_ACKNOWLEDGEMENT_CALLS = new Set(["deferReply", "reply"]);
+
+/** The callback whose body must not acknowledge, named as the workflow's options declare it. */
+const WORKFLOW_ON_SELECTED = "onSelected";
+
+/**
+ * Every function expression or declaration a property initializer can present as a callback.
+ * Returns more than one entry only for a conditional or logical expression, where either branch
+ * is still a callback body and so both are scanned.
+ */
+function callbackBodies(initializer: ts.Expression): ts.FunctionLikeDeclaration[] {
+  const unwrapped = unwrapExpression(initializer);
+  if (ts.isArrowFunction(unwrapped) || ts.isFunctionExpression(unwrapped)) return [unwrapped];
+  if (ts.isConditionalExpression(unwrapped)) {
+    return [...callbackBodies(unwrapped.whenTrue), ...callbackBodies(unwrapped.whenFalse)];
+  }
+  if (ts.isBinaryExpression(unwrapped)) {
+    return [...callbackBodies(unwrapped.left), ...callbackBodies(unwrapped.right)];
+  }
+  return [];
+}
+
 function scriptKindForPath(file: string): ts.ScriptKind {
   return file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 }
@@ -217,12 +245,7 @@ export function scanPersonaWorkflowSource(
   const violations: PersonaWorkflowBoundaryViolation[] = [];
   const seen = new Set<string>();
 
-  const addViolation = (
-    node: ts.Node,
-    kind: PersonaWorkflowViolationKind,
-    symbol: string,
-    message: string,
-  ): void => {
+  const addViolation = (node: ts.Node, kind: PersonaWorkflowViolationKind, symbol: string, message: string): void => {
     const start = node.getStart(sourceFile);
     const key = `${kind}:${start}`;
     if (seen.has(key)) return;
@@ -237,6 +260,29 @@ export function scanPersonaWorkflowSource(
       symbol,
       message,
     });
+  };
+
+  /**
+   * Scans one callback body for an acknowledgement call on the interaction. The workflow's own
+   * acknowledgement is not visible here: it happens through the message controller's in-place
+   * methods, which are not named like Discord's interaction acknowledgement methods.
+   */
+  const walkForSelfAcknowledgement = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = unwrapExpression(node.expression);
+      if (ts.isPropertyAccessExpression(callee)) {
+        const method = callee.name.text;
+        if (SELF_ACKNOWLEDGEMENT_CALLS.has(method)) {
+          addViolation(
+            callee.name,
+            "self-acknowledging-on-selected",
+            method,
+            `A selection callback must not call ${method}() on the interaction; the anchor workflow owns acknowledgement.`,
+          );
+        }
+      }
+    }
+    ts.forEachChild(node, walkForSelfAcknowledgement);
   };
 
   const visit = (node: ts.Node): void => {
@@ -271,8 +317,8 @@ export function scanPersonaWorkflowSource(
       const isStringIndexedLowLevelCall =
         ts.isElementAccessExpression(callee) &&
         Boolean(callee.argumentExpression) &&
-        ts.isStringLiteralLike(unwrapExpression(callee.argumentExpression!)) &&
-        (unwrapExpression(callee.argumentExpression!) as ts.StringLiteralLike).text === LOW_LEVEL_PICKER;
+        ts.isStringLiteralLike(unwrapExpression(callee.argumentExpression)) &&
+        (unwrapExpression(callee.argumentExpression) as ts.StringLiteralLike).text === LOW_LEVEL_PICKER;
 
       if (isAliasedLowLevelCall || isStringIndexedLowLevelCall) {
         addViolation(
@@ -333,6 +379,13 @@ export function scanPersonaWorkflowSource(
           "Remove the empty picker callback; selection is returned by the persona workflow.",
         );
       }
+
+      if (name === WORKFLOW_ON_SELECTED) {
+        for (const callback of callbackBodies(node.initializer)) {
+          if (!callback.body) continue;
+          walkForSelfAcknowledgement(callback.body);
+        }
+      }
     }
 
     if (
@@ -348,6 +401,10 @@ export function scanPersonaWorkflowSource(
         PICKER_ON_SELECT,
         "Remove the empty picker callback; selection is returned by the persona workflow.",
       );
+    }
+
+    if (ts.isMethodDeclaration(node) && propertyNameText(node.name) === WORKFLOW_ON_SELECTED && node.body) {
+      walkForSelfAcknowledgement(node.body);
     }
 
     ts.forEachChild(node, visit);
@@ -388,8 +445,7 @@ export async function auditPersonaWorkflowBoundary(): Promise<PersonaWorkflowBou
   }
 
   violations.sort(
-    (a, b) =>
-      a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column || a.kind.localeCompare(b.kind),
+    (a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column || a.kind.localeCompare(b.kind),
   );
   return { violations, scannedFiles };
 }

@@ -29,16 +29,15 @@ const EXPECTED_PARTICIPANT_GOLDEN = {
 
 If Tomori wants to ping any of these users, prepend an "@" symbol to a unique mention handle shown below (case-insensitive). If there is ambiguity with names, ask for clarification instead of guessing. Use mentions only when the notification matters.
 
-Alice Saved (Mention: @{Alice Saved}; Aliases: @{Alice Guild}, @{Alice Display Global}, @{alice_username})
+Alice Saved (Mention: @{Alice Guild}; Aliases: @{Alice Saved}, @{Alice Display Global}, @{alice_username})
 - Alice Saved's Physical Appearance: auburn hair, green eyes
 - Server Roles: Archivist
-- Memories: ID:91 [tags: #general, maps] Alice likes archival maps.
+- Memories about Alice Saved: ID:91 [tags: #general, maps] Alice likes archival maps.
 - Reminders:
   - ID:92 "Bring the atlas" (scheduled for Sun, Aug 2, 2026, 09:00 AM (UTC+8))
 
 Tomori (This is you!)
 - Tomori's Physical Appearance: black hair, blue eyes
-- Status: Online - Currently active and responding to messages
 
 Ren
 - Ren's Physical Appearance: silver hair, violet eyes
@@ -47,17 +46,14 @@ Ren
 
 Webhook Guest
 
-Bob Saved (Mention: @{Bob Saved}; Aliases: @{Bob Guild}, @{Bob Display Global}, @{bob_username})
+Bob Saved (Mention: @{Bob Guild}; Aliases: @{Bob Saved}, @{Bob Display Global}, @{bob_username})
 - Server Roles: Archivist
 
 Mika Matrix
-- Status: Online or status unknown
 
 Pending Tasks Assigned to You:
 - ID:93 "Review the field notes" (scheduled for Sun, Aug 2, 2026, 10:00 AM (UTC+8), repeats every 24 hour(s)) (destination: <#200000000000000001>)
 
-Conversation context: #general (ID: 200000000000000001).
-Current time: <NOW>.
 ]`,
     },
   ],
@@ -113,7 +109,7 @@ describe("participant context Phase 0 baseline", () => {
 
       expect(normalizeParticipantContextItem(item)).toEqual(EXPECTED_PARTICIPANT_GOLDEN);
       expect(fixture.counters).toEqual({
-        userRowLoads: 1,
+        userRowLoads: 2,
         candidateQueries: 1,
         registrations: 0,
         blacklistReads: 2,
@@ -155,11 +151,17 @@ describe("participant context Phase 0 baseline", () => {
           sampleDialoguesIn: [],
           sampleDialoguesOut: [],
           lastUserMessage: "Please ask Bob and Ren about maps.",
+          model: "configured-model",
+          provider: "google",
+          utcOffsetHours: 8,
+          nowMs: Date.UTC(2026, 0, 1),
         },
         {
           client: fixture.client,
           guildId: PARTICIPANT_FIXTURE_IDS.guild,
           triggererName: "Alice",
+          triggererFormattedName: "Alice",
+          triggererAddressTerm: "",
           botName: "Tomori",
           personalMemoriesEnabled: true,
         },
@@ -213,40 +215,44 @@ describe("participant context Phase 0 baseline", () => {
 
       expect(fixture.counters.candidateQueries).toBe(1);
       expect(fixture.hydrationObservations.memoryLineages).toEqual([70, 70, 80, 80]);
-      expect(fixture.hydrationObservations.reminderScopes.slice(0, 3)).toEqual([
-        {
-          discordId: PARTICIPANT_FIXTURE_IDS.human,
-          personaId: PARTICIPANT_FIXTURE_IDS.activePersona,
-          includeUnassignedForMainPersona: true,
-        },
-        {
-          discordId: PARTICIPANT_FIXTURE_IDS.referencedHuman,
-          personaId: PARTICIPANT_FIXTURE_IDS.activePersona,
-          includeUnassignedForMainPersona: true,
-        },
-        {
-          discordId: PARTICIPANT_FIXTURE_IDS.bot,
-          personaId: PARTICIPANT_FIXTURE_IDS.activePersona,
-          includeUnassignedForMainPersona: undefined,
-        },
-      ]);
-      expect(fixture.hydrationObservations.reminderScopes.slice(3)).toEqual([
-        {
-          discordId: PARTICIPANT_FIXTURE_IDS.human,
-          personaId: PARTICIPANT_FIXTURE_IDS.historicalPersona,
-          includeUnassignedForMainPersona: false,
-        },
-        {
-          discordId: PARTICIPANT_FIXTURE_IDS.referencedHuman,
-          personaId: PARTICIPANT_FIXTURE_IDS.historicalPersona,
-          includeUnassignedForMainPersona: false,
-        },
-        {
-          discordId: PARTICIPANT_FIXTURE_IDS.bot,
-          personaId: PARTICIPANT_FIXTURE_IDS.historicalPersona,
-          includeUnassignedForMainPersona: undefined,
-        },
-      ]);
+      expect(fixture.hydrationObservations.reminderScopes.slice(0, 3)).toEqual(
+        expect.arrayContaining([
+          {
+            discordId: PARTICIPANT_FIXTURE_IDS.human,
+            personaId: PARTICIPANT_FIXTURE_IDS.activePersona,
+            includeUnassignedForMainPersona: true,
+          },
+          {
+            discordId: PARTICIPANT_FIXTURE_IDS.referencedHuman,
+            personaId: PARTICIPANT_FIXTURE_IDS.activePersona,
+            includeUnassignedForMainPersona: true,
+          },
+          {
+            discordId: PARTICIPANT_FIXTURE_IDS.bot,
+            personaId: PARTICIPANT_FIXTURE_IDS.activePersona,
+            includeUnassignedForMainPersona: undefined,
+          },
+        ]),
+      );
+      expect(fixture.hydrationObservations.reminderScopes.slice(3)).toEqual(
+        expect.arrayContaining([
+          {
+            discordId: PARTICIPANT_FIXTURE_IDS.human,
+            personaId: PARTICIPANT_FIXTURE_IDS.historicalPersona,
+            includeUnassignedForMainPersona: false,
+          },
+          {
+            discordId: PARTICIPANT_FIXTURE_IDS.referencedHuman,
+            personaId: PARTICIPANT_FIXTURE_IDS.historicalPersona,
+            includeUnassignedForMainPersona: false,
+          },
+          {
+            discordId: PARTICIPANT_FIXTURE_IDS.bot,
+            personaId: PARTICIPANT_FIXTURE_IDS.historicalPersona,
+            includeUnassignedForMainPersona: undefined,
+          },
+        ]),
+      );
       expect(mainText).toContain("Alice likes archival maps.");
       expect(mainText).not.toContain("Alice remembers the alter's star chart.");
       expect(alterText).not.toContain("Alice likes archival maps.");
@@ -268,7 +274,7 @@ describe("participant context Phase 0 baseline", () => {
             { type: "text", text: "Tomori: Here is the map." },
             { type: "image", uri: "https://example.test/map.png", mimeType: "image/png" },
           ],
-          sender: { name: "Tomori", type: "persona" },
+          sender: { id: "Tomori", name: "Tomori", type: "persona" },
           metadataTag: ContextItemTag.DIALOGUE_HISTORY,
           conversationUsers: item.conversationUsers,
           participantTargetIndex: item.participantTargetIndex,

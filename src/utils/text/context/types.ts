@@ -1,9 +1,21 @@
 import type { Client } from "discord.js";
 import type { MessageIdMap } from "@/utils/text/messageIdMap";
 import type { RequestSnapshot } from "@/types/misc/context";
-import type { AssembledServerConfig, PersonaUserBlockRow, ServerEmojiRow, ServerStickerRow } from "@/types/db/schema";
+import type {
+  CustomExpressionRow,
+  AssembledServerConfig,
+  PersonaUserBlockRow,
+  ServerEmojiRow,
+  ServerStickerRow,
+} from "@/types/db/schema";
 import type { StructuredContextItem } from "@/types/misc/context";
 import type { PreparedParticipantContext } from "@/utils/text/participants/preparation";
+
+export type MessageProxyConversationUser = {
+  serviceId: string;
+  displayName: string;
+  senderDiscId: string;
+};
 
 /**
  * Simplified message structure received from tomoriChat.ts.
@@ -14,8 +26,13 @@ export type SimplifiedMessageForContext = {
   authorId: string;
   authorName: string;
   authorType: "user" | "persona";
+  isSystemNotice?: boolean;
   personaName?: string | null;
+  authorPersonaId?: number | null;
+  authorPersonaLineageId?: number | null;
   content: string | null;
+  completionContent?: string;
+  completionSpeaker?: false;
   createdAt?: number;
   mediaSourceMessageIds?: string[];
   remoteMediaSourceKind?: "reply" | "forwarded";
@@ -43,6 +60,16 @@ export type SimplifiedMessageForContext = {
     /** Discord message that media-reference tools should fetch for this attachment. */
     sourceMessageId?: string;
   }>;
+  /**
+   * Text-readable file attachments. Kept structured rather than as hint text in `content`
+   * because the `read_file` hint must follow the turn's tool list, which is decided after
+   * history is simplified.
+   */
+  documentAttachments?: Array<{
+    filename: string;
+    /** Discord message that `read_file` should fetch for this attachment. */
+    sourceMessageId?: string;
+  }>;
 };
 
 export type PublicPersonaProfile = {
@@ -66,6 +93,10 @@ export interface BuildContextParams {
   parentChannelId?: string | null;
   client: Client;
   triggererName: string;
+  triggererFormattedName: string;
+  triggererAddressTerm: string;
+  historyUserLabels?: Map<string, string>;
+  historyPersonaMentionLabels?: Map<string, string>;
   triggererUserId?: number;
   emojiStrings?: string[];
   tomoriNickname: string;
@@ -93,8 +124,11 @@ export interface BuildContextParams {
   snapshot?: RequestSnapshot;
   preloadedEmojis?: ServerEmojiRow[] | null;
   preloadedStickers?: ServerStickerRow[] | null;
+  preloadedCustomExpressions?: CustomExpressionRow[] | null;
   isUserImpersonation?: boolean;
   impersonatedUserId?: string;
+  /** Whose short-term memory to read when it is not the trigger message's author, such as a Ping User target. */
+  shortTermMemoryUserId?: string;
   impersonatedUserNickname?: string;
   impersonatedUserPrompt?: string | null;
   /** Active persona-scoped user mutes/blocks for the responding persona. */
@@ -104,17 +138,19 @@ export interface BuildContextParams {
   /** Per-turn tool names retained by Deliberate Tool Mode; undefined means no scoped filtering. */
   deliberateToolAllowedNames?: readonly string[] | null;
   /**
-   * When `true`, skips the `DEFAULT_SYSTEM_PROMPT` fallback in the humanizer block.
-   * Set by the routing wrapper when a SillyTavern preset is active and no custom
-   * `/sysprompt` has been configured, so the preset fully controls the system prompt.
+   * Set by the routing wrapper while a SillyTavern preset is active: the stored server
+   * `system_prompt` and the `DEFAULT_SYSTEM_PROMPT` fallback are both skipped, so the preset
+   * fully controls the system prompt. A replace-mode channel prompt still fills the slot.
    */
-  suppressDefaultSystemPrompt?: boolean;
+  presetOwnsSystemPrompt?: boolean;
   /** Opaque message ID map: caller creates, context builder populates. */
   messageIdMap?: MessageIdMap;
 }
 
 /** Return type for both buildContext variants. */
 export type BuildContextResult = {
+  memoryRecall?: import("@/utils/text/context/memoryRecall").MemoryRecallOutcome;
+  nativeContextItems?: StructuredContextItem[];
   contextItems: StructuredContextItem[];
   tailDirectives: string[];
   lowerPriorityTailDirectives: string[];

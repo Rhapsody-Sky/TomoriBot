@@ -3,12 +3,13 @@
  * Handles UTC offset-based timezone conversions for TomoriBot
  */
 
-/**
- * Valid UTC offset bounds (UTC-12 through UTC+14, matching real-world timezones
- * and the /server timezone and /personal timezone command ranges)
- */
-export const UTC_OFFSET_MIN = -12;
-export const UTC_OFFSET_MAX = 14;
+import { UTC_OFFSET_MAX, UTC_OFFSET_MIN, UTC_OFFSET_STEP_HOURS } from "@/constants/utcOffset";
+import { resolveSupportedLocale } from "@/utils/text/localizer";
+
+const UTC_OFFSET_PREFIX_PATTERN = /^(?:utc|gmt)\s*/i;
+const UTC_OFFSET_DECIMAL_PATTERN = /^[+-]?\d{1,2}(?:\.\d+)?$/;
+/** Sign, hours, then minutes, as in "+5:30" or "-3:30". */
+const UTC_OFFSET_CLOCK_PATTERN = /^([+-]?)(\d{1,2}):([0-5]\d)$/;
 
 const MONTH_NAMES = [
   "January",
@@ -27,46 +28,99 @@ const MONTH_NAMES = [
 
 const MILLISECONDS_PER_HOUR = 3_600_000;
 const MILLISECONDS_PER_DAY = 86_400_000;
+/** A fraction of a month has no calendar length, so only that remainder uses the Gregorian average. */
+const AVERAGE_MONTH_MS = 30.44 * MILLISECONDS_PER_DAY;
 
 /**
  * Validates that a value is a usable UTC offset in hours
- * @param value - The value to validate (accepts fractional offsets like 5.5 for UTC+5:30)
- * @returns True if the value is a finite number within [UTC_OFFSET_MIN, UTC_OFFSET_MAX]
+ * @param value - The value to validate (accepts quarter-hour offsets like 5.5 for UTC+5:30)
+ * @returns True if the value is a quarter-hour multiple within [UTC_OFFSET_MIN, UTC_OFFSET_MAX]
  *
  * @example
  * ```ts
  * isValidUtcOffset(8)     // true
- * isValidUtcOffset(5.5)   // true (UTC+5:30)
+ * isValidUtcOffset(5.75)  // true (UTC+5:45)
+ * isValidUtcOffset(5.3)   // false (not on a quarter hour)
  * isValidUtcOffset(20)    // false (out of range)
  * isValidUtcOffset("8")   // false (not a number)
  * ```
  */
 export function isValidUtcOffset(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= UTC_OFFSET_MIN && value <= UTC_OFFSET_MAX;
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value / UTC_OFFSET_STEP_HOURS) &&
+    value >= UTC_OFFSET_MIN &&
+    value <= UTC_OFFSET_MAX
+  );
+}
+
+/**
+ * Parses a typed UTC offset in decimal hours ("5.5") or clock form ("+5:30"), with an optional
+ * "UTC" or "GMT" prefix so a pasted display value round-trips.
+ * @returns The offset in hours, or null when the text is not a valid offset
+ *
+ * @example
+ * ```ts
+ * parseUtcOffsetInput("5.5")       // 5.5
+ * parseUtcOffsetInput("UTC+5:45")  // 5.75
+ * parseUtcOffsetInput("-3:30")     // -3.5
+ * parseUtcOffsetInput("5:20")      // null (not on a quarter hour)
+ * ```
+ */
+export function parseUtcOffsetInput(raw: string): number | null {
+  const text = raw.trim().replace(UTC_OFFSET_PREFIX_PATTERN, "").replaceAll(" ", "");
+  let offset: number | null = null;
+
+  if (UTC_OFFSET_DECIMAL_PATTERN.test(text)) {
+    offset = Number(text);
+  } else {
+    const clock = text.match(UTC_OFFSET_CLOCK_PATTERN);
+    if (clock) {
+      const [, sign, hours, minutes] = clock;
+      offset = (sign === "-" ? -1 : 1) * (Number(hours) + Number(minutes) / 60);
+    }
+  }
+
+  return isValidUtcOffset(offset) ? offset : null;
+}
+
+/** Splits an offset into its sign and whole hours/minutes so formatters never print "5.5". */
+function splitUtcOffset(offset: number): { sign: "+" | "-"; hours: number; minutes: number } {
+  const totalMinutes = Math.round(Math.abs(offset) * 60);
+  return { sign: offset < 0 ? "-" : "+", hours: Math.floor(totalMinutes / 60), minutes: totalMinutes % 60 };
 }
 
 /**
  * Formats a UTC offset number into a display string
- * @param offset - The UTC offset in hours (e.g., 8, -5, 0)
- * @returns Formatted string (e.g., "UTC+8", "UTC-5", "UTC+0")
+ * @param offset - The UTC offset in hours (e.g., 8, -5, 5.5)
  *
  * @example
  * ```ts
- * formatUTCOffset(8)   // "UTC+8"
- * formatUTCOffset(-5)  // "UTC-5"
- * formatUTCOffset(0)   // "UTC+0"
+ * formatUTCOffset(8)     // "UTC+8"
+ * formatUTCOffset(-5)    // "UTC-5"
+ * formatUTCOffset(5.5)   // "UTC+5:30"
+ * formatUTCOffset(0)     // "UTC+0"
  * ```
  */
 export function formatUTCOffset(offset: number): string {
-  if (offset === 0) {
-    return "UTC+0";
-  }
+  return `UTC${formatUtcOffsetInput(offset, true)}`;
+}
 
-  if (offset > 0) {
-    return `UTC+${offset}`;
-  }
-
-  return `UTC${offset}`;
+/**
+ * Formats an offset as a modal pre-fill that {@link parseUtcOffsetInput} reads back unchanged.
+ * @param forceSign - Prefix "+" on non-negative offsets, as display labels do
+ *
+ * @example
+ * ```ts
+ * formatUtcOffsetInput(8)     // "8"
+ * formatUtcOffsetInput(-3.5)  // "-3:30"
+ * ```
+ */
+export function formatUtcOffsetInput(offset: number, forceSign = false): string {
+  const { sign, hours, minutes } = splitUtcOffset(offset);
+  const prefix = sign === "-" ? "-" : forceSign ? "+" : "";
+  const minuteSuffix = minutes === 0 ? "" : `:${String(minutes).padStart(2, "0")}`;
+  return `${prefix}${hours}${minuteSuffix}`;
 }
 
 /**
@@ -117,6 +171,29 @@ export function getCalendarDayWithOffset(epochMs: number, offsetHours: number): 
   );
 }
 
+/**
+ * Steps whole calendar months in a fixed UTC offset, keeping the wall-clock time and clamping
+ * to the target month's last day (Jan 31 plus one month is Feb 28). A fractional remainder
+ * falls back to the average month length.
+ * @param dayOfMonth - Day to aim for before clamping, so a monthly series clamped to Feb 28 can
+ *   return to the 31st; defaults to `from`'s own day.
+ */
+export function addMonthsWithOffset(from: Date, months: number, offsetHours: number, dayOfMonth?: number): Date {
+  const wholeMonths = Math.trunc(months);
+  const offsetMs = offsetHours * MILLISECONDS_PER_HOUR;
+  const local = new Date(from.getTime() + offsetMs);
+  const targetDay = dayOfMonth ?? local.getUTCDate();
+  const targetMonth = local.getUTCMonth() + wholeMonths;
+  const lastDayOfTargetMonth = new Date(Date.UTC(local.getUTCFullYear(), targetMonth + 1, 0)).getUTCDate();
+  local.setUTCFullYear(local.getUTCFullYear(), targetMonth, Math.min(targetDay, lastDayOfTargetMonth));
+  return new Date(local.getTime() - offsetMs + (months - wholeMonths) * AVERAGE_MONTH_MS);
+}
+
+/** Day of the month an instant falls on after a fixed UTC offset is applied. */
+export function getDayOfMonthWithOffset(date: Date, offsetHours: number): number {
+  return new Date(date.getTime() + offsetHours * MILLISECONDS_PER_HOUR).getUTCDate();
+}
+
 /** Formats an instant as an English absolute date after a fixed UTC offset. */
 export function formatDateWithOffset(epochMs: number, offsetHours: number): string {
   const offsetDate = new Date(epochMs + offsetHours * MILLISECONDS_PER_HOUR);
@@ -139,6 +216,8 @@ function getDayOfWeek(date: Date): string {
  * @param date - The Date object to format
  * @param offsetHours - The UTC offset in hours to apply
  * @param options - Optional Intl.DateTimeFormatOptions for custom formatting
+ * @param locale - Resolved through the authored-locale chain so the date's language matches the
+ *   localized sentence around it. Model-facing callers omit it and keep English.
  *
  * @example
  * ```ts
@@ -146,7 +225,12 @@ function getDayOfWeek(date: Date): string {
  * formatTimeWithOffset(date, 8);  // Custom formatting in UTC+8
  * ```
  */
-export function formatTimeWithOffset(date: Date, offsetHours: number, options?: Intl.DateTimeFormatOptions): string {
+export function formatTimeWithOffset(
+  date: Date,
+  offsetHours: number,
+  options?: Intl.DateTimeFormatOptions,
+  locale = "en-US",
+): string {
   const utcTime = date.getTime();
   const offsetTime = new Date(utcTime + offsetHours * MILLISECONDS_PER_HOUR);
 
@@ -160,7 +244,7 @@ export function formatTimeWithOffset(date: Date, offsetHours: number, options?: 
     ...options,
   };
 
-  return offsetTime.toLocaleString("en-US", defaultOptions);
+  return offsetTime.toLocaleString(resolveSupportedLocale(locale), defaultOptions);
 }
 
 /**
@@ -196,6 +280,10 @@ export function parseTimeWithOffset(timeStr: string, offsetHours: number): Date 
   }
 
   const localDate = Date.UTC(year, month, day, hour, minute, 0, 0);
+  const calendarDate = new Date(localDate);
+  if (calendarDate.getUTCMonth() !== month || calendarDate.getUTCDate() !== day) {
+    return null;
+  }
 
   const utcDate = new Date(localDate - offsetHours * MILLISECONDS_PER_HOUR);
 

@@ -1,3 +1,10 @@
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
+import {
+  findProviderRequestDeniedError,
+  createProviderUsageRecorder,
+  notifyProviderToolFailure,
+  type ProviderUsageContext,
+} from "@/utils/provider/providerUsage";
 /**
  * Peek Profile Picture Tool
  * Allows the AI to selectively process Discord user profile pictures on-demand
@@ -12,30 +19,21 @@ import type { EnhancedImageContent } from "@/types/tool/enhancedContextTypes";
 import { stashEnhancedContextItem } from "@/utils/chat/pendingEnhancedContext";
 import { resolveAvatarByIdentity } from "@/utils/discord/avatarResolver";
 import { sendToolProgressNotice } from "@/utils/discord/toolProgressNotice";
-import {
-  toZaiApiModelName,
-  ZAI_CODING_CHAT_COMPLETIONS_URL,
-  ZAI_GENERAL_CHAT_COMPLETIONS_URL,
-} from "@/providers/zai/zaiShared";
 import { BaseTool, type ToolContext, type ToolResult, type ToolParameterSchema } from "../../types/tool/interfaces";
 import { ContextItemTag, type StructuredContextItem } from "../../types/misc/context";
 import { ColorCode } from "@/utils/misc/logger";
 import { llmModelRepo } from "@/utils/db/repositories";
 import { getResolvedCapabilityModelId, resolveCapabilityCredentials } from "@/utils/provider/credentialResolver";
+import { resolveChatCompletionsUrl, resolveVisionApiModelName } from "@/utils/provider/visionCaption";
+import { buildOpenRouterAttributionHeaders } from "@/utils/provider/openrouterAttribution";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
+import { getEndpointRemotePolicy } from "@/utils/security/remoteUrlSecurity";
 import { fetchUserRemoteUrl } from "@/utils/security/userRemoteFetch";
-
-/**
- * Provider-to-chat-completions-URL mapping for OpenAI-compatible providers.
- * Google uses its own SDK and is handled separately.
- */
-const PROVIDER_CHAT_COMPLETIONS_URLS: Record<string, string> = {
-  openrouter: "https://openrouter.ai/api/v1/chat/completions",
-  zai: ZAI_GENERAL_CHAT_COMPLETIONS_URL,
-  zaicoding: ZAI_CODING_CHAT_COMPLETIONS_URL,
-  deepseek: "https://api.deepseek.com/chat/completions",
-};
+import { readOpenRouterLimitError } from "@/providers/openrouter/openrouterLimit";
+import { fetchWithProviderRequest } from "@/utils/provider/providerRequestHook";
+import { normalizeProviderUsage, type TokenUsage } from "@/utils/text/tokenEstimate";
+import { reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
 
 /** Default prompt sent to the vision model when analyzing a profile picture */
 const DEFAULT_AVATAR_ANALYSIS_PROMPT =
@@ -166,6 +164,7 @@ export class PeekProfilePictureTool extends BaseTool {
       };
     }
 
+    const requestScope: [context?: ProviderUsageContext] = [];
     log.info(`Processing profile picture for identity: ${targetIdentity} - Reason: ${reason}`);
 
     try {
@@ -201,7 +200,14 @@ export class PeekProfilePictureTool extends BaseTool {
       // vision model is configured, call the vision model directly with the avatar image
       // and return a text description. The primary model then responds to that description.
       if (!context.tomoriState.llm.sees_images && context.tomoriState.vision_llm) {
-        return await this.redirectToVisionModel(preparedImages, targetTypeLabel, userDisplayText, reason, context);
+        return await this.redirectToVisionModel(
+          preparedImages,
+          targetTypeLabel,
+          userDisplayText,
+          reason,
+          context,
+          requestScope,
+        );
       }
 
       // Enhanced context restart path: inject the raw image into the context so the
@@ -275,7 +281,8 @@ export class PeekProfilePictureTool extends BaseTool {
         },
       };
     } catch (error) {
-      log.error(`Profile picture processing failed for identity: ${targetIdentity}`, error as Error);
+      const denied = findProviderRequestDeniedError(error, ...requestScope);
+      if (denied) return notifyProviderToolFailure(context, denied);
 
       let errorMessage = "Failed to process the user's profile picture.";
       let errorStatus = "profile_processing_failed";
@@ -303,6 +310,19 @@ export class PeekProfilePictureTool extends BaseTool {
         }
       }
 
+      await reportProviderFailure({
+        summary: "Profile picture processing failed",
+        errorType: "ProfilePictureProcessingFailed",
+        error,
+        expected: ["avatar_target_not_found", "ambiguous_target_identity", "unsupported_target_identity"].includes(
+          errorStatus,
+        ),
+        serverId: context.tomoriState.server_id,
+        userId: context.internalUserId,
+        dimensions: { operation: "profile-picture", reason: errorStatus },
+        metadata: { targetIdentity },
+      });
+
       return {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error occurred during profile picture processing",
@@ -329,10 +349,12 @@ export class PeekProfilePictureTool extends BaseTool {
     userDisplayText: string,
     reason: string,
     context: ToolContext,
+    requestScope: [context?: ProviderUsageContext],
   ): Promise<ToolResult> {
     const creds = await resolveCapabilityCredentials(context.tomoriState.server_id, "vision", {
       userId: context.internalUserId ?? null,
     });
+    requestScope[0] = creds.usageContext;
     const visionLlmId = getResolvedCapabilityModelId(creds, "vision") ?? context.tomoriState.config.vision_llm_id;
     const visionLlm =
       visionLlmId === context.tomoriState.vision_llm?.llm_id
@@ -366,10 +388,7 @@ export class PeekProfilePictureTool extends BaseTool {
 
     // Resolve API model name and provider from the vision LLM row
     const provider = visionLlm.llm_provider.toLowerCase();
-    const apiModelName =
-      provider === "zai" || provider === "zaicoding"
-        ? toZaiApiModelName(visionLlm.llm_codename)
-        : visionLlm.llm_codename;
+    const apiModelName = resolveVisionApiModelName(provider, visionLlm.llm_codename);
 
     const hasBanner = images.some((image) => image.kind === "banner");
     const prompt = `${DEFAULT_AVATAR_ANALYSIS_PROMPT} This is the profile picture of ${targetTypeLabel}: ${userDisplayText}. Reason for analysis: ${reason}${hasBanner ? " A profile banner is also attached; use it as supporting context and describe any additional visual information it provides." : ""}`;
@@ -384,14 +403,27 @@ export class PeekProfilePictureTool extends BaseTool {
     if (provider === "google") {
       analysisResult = await this.callGoogleVisionWithBase64(apiKey, apiModelName, images, prompt);
     } else {
-      const endpointUrl = this.getVisionEndpointUrl(provider, context, creds.customEndpoint?.endpoint_url ?? null);
-      analysisResult = await this.callOpenAICompatibleVisionWithBase64(
-        apiKey,
-        apiModelName,
-        endpointUrl,
-        images,
-        prompt,
-      );
+      const endpointUrl = resolveChatCompletionsUrl(creds.provider, creds.customEndpoint?.endpoint_url ?? null);
+      if (!endpointUrl) {
+        return {
+          success: false,
+          error: `Provider "${provider}" has no vision transport for profile picture analysis.`,
+        };
+      }
+      try {
+        analysisResult = await withProviderUsageContext(creds.usageContext, async () =>
+          this.callOpenAICompatibleVisionWithBase64(
+            apiKey,
+            apiModelName,
+            endpointUrl,
+            images,
+            prompt,
+            createProviderUsageRecorder(creds.usageContext, apiModelName),
+          ),
+        );
+      } catch (error) {
+        throw findProviderRequestDeniedError(error, creds.usageContext) ?? error;
+      }
     }
 
     log.success(`PeekProfilePictureTool: Vision model analysis completed for ${targetTypeLabel}: ${userDisplayText}`);
@@ -407,23 +439,6 @@ export class PeekProfilePictureTool extends BaseTool {
         vision_provider: provider,
       },
     };
-  }
-
-  /**
-   * Resolve the chat completions endpoint URL for a given provider.
-   * @param context - Tool context (for custom endpoint URL)
-   * @returns Chat completions URL
-   */
-  private getVisionEndpointUrl(provider: string, context: ToolContext, customEndpointUrl?: string | null): string {
-    const knownUrl = PROVIDER_CHAT_COMPLETIONS_URLS[provider];
-    if (knownUrl) return knownUrl;
-
-    const customUrl = customEndpointUrl ?? context.tomoriState.config.custom_endpoint_url;
-    if (customUrl) {
-      return customUrl.endsWith("/chat/completions") ? customUrl : `${customUrl}/chat/completions`;
-    }
-
-    return "https://api.openai.com/v1/chat/completions";
   }
 
   /**
@@ -475,6 +490,7 @@ export class PeekProfilePictureTool extends BaseTool {
     endpointUrl: string,
     images: PreparedProfileImage[],
     prompt: string,
+    onUsage?: (usage: TokenUsage) => void,
   ): Promise<string> {
     const requestContent: Array<
       | { type: "text"; text: string }
@@ -507,25 +523,35 @@ export class PeekProfilePictureTool extends BaseTool {
       max_tokens: 1024,
     };
 
-    const response = await fetchUserRemoteUrl(endpointUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const response = await fetchWithProviderRequest(
+      endpointUrl,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          ...(endpointUrl === resolveChatCompletionsUrl("openrouter") && buildOpenRouterAttributionHeaders()),
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-    });
+      (input, init) => fetchUserRemoteUrl(input, init, getEndpointRemotePolicy()),
+    );
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "Unknown error");
-      throw new Error(`Vision API returned ${response.status}: ${errorText}`);
+      throw new Error(`Vision API returned ${response.status}: ${errorText}`, {
+        cause: readOpenRouterLimitError(response.status, response.headers, errorText) ?? undefined,
+      });
     }
 
     const data = (await response.json()) as {
       choices?: Array<{
         message?: { content?: string };
       }>;
+      usage?: unknown;
     };
+    const usage = normalizeProviderUsage(data.usage);
+    if (usage) onUsage?.(usage);
 
     const responseContent = data.choices?.[0]?.message?.content;
     if (!responseContent) {

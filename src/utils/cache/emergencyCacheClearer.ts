@@ -5,12 +5,9 @@ import { clearWhitelistCache, getWhitelistCacheStats } from "@/utils/cache/chann
 import { clearEmojiStickerCache, getEmojiStickerCacheStats } from "@/utils/cache/emojiStickerCache";
 import { clearGuildMcpConfigCache, getGuildMcpConfigCacheStats } from "@/utils/cache/guildMcpConfigCache";
 import { clearNovelaiSubscriptionCache, getNovelaiSubscriptionCacheSize } from "@/utils/cache/novelaiSubscriptionCache";
-import {
-  clearOpenRouterOnDemandCapabilityCache,
-  getOpenRouterOnDemandCapabilityCacheSize,
-} from "@/utils/cache/openrouterCapabilityCache";
 import { clearPersonalSpotlightCache, getPersonalSpotlightCacheStats } from "@/utils/cache/personalSpotlightCache";
 import { clearPersonaSpriteCache, getPersonaSpriteCacheSize } from "@/utils/cache/personaSpriteCacheStore";
+import { clearPersonaAppearances, getPersonaAppearanceCacheSize } from "@/utils/cache/personaAppearanceCacheStore";
 import {
   clearPersonaSpriteMessageCache,
   getPersonaSpriteMessageCacheSize,
@@ -26,6 +23,7 @@ import { clearUserCache, getUserCacheStats } from "@/utils/cache/userCache";
 import { clearWebhookIdentityCache, getWebhookIdentityCacheSize } from "@/utils/chat/webhookIdentity";
 import { clearWebhookCache, getWebhookCacheSizes } from "@/utils/discord/webhook/cache";
 import { clearPresetAvatarCache, getPresetAvatarCacheSize } from "@/utils/image/avatarHelper";
+import { clearImageCache, getImageCacheSize } from "@/utils/image/imageProcessor";
 import { log } from "@/utils/misc/logger";
 import {
   addProcessMemoryDeltaFields,
@@ -210,6 +208,7 @@ export function clearEmergencyCaches(options: EmergencyCacheClearOptions = {}): 
     };
   }
 
+  clearMeasured(steps, "personaAppearance", getPersonaAppearanceCacheSize, clearPersonaAppearances);
   clearMeasured(steps, "tomoriState", () => getTomoriStateCacheStats().cacheSize, clearTomoriStateCache);
   clearMeasured(steps, "user", () => getUserCacheStats().cacheSize, clearUserCache);
   clearMeasured(steps, "channelWhitelist", () => getWhitelistCacheStats().size, clearWhitelistCache);
@@ -221,12 +220,10 @@ export function clearEmergencyCaches(options: EmergencyCacheClearOptions = {}): 
   clearMeasured(steps, "webhook", getWebhookTotalCacheSize, clearWebhookCache);
   clearMeasured(steps, "webhookIdentity", getWebhookIdentityCacheSize, clearWebhookIdentityCache);
   clearMeasured(steps, "novelaiSubscription", getNovelaiSubscriptionCacheSize, clearNovelaiSubscriptionCache);
-  clearMeasured(
-    steps,
-    "openrouterOnDemandCapability",
-    getOpenRouterOnDemandCapabilityCacheSize,
-    clearOpenRouterOnDemandCapabilityCache,
-  );
+  // The OpenRouter catalogs are deliberately absent: they are provider metadata rather
+  // than per-guild growth, and dropping one would gate chat on database flags until the
+  // next refresh window for a few hundred KB.
+  clearMeasured(steps, "recentImages", getImageCacheSize, clearImageCache);
   clearMeasured(steps, "presetAvatar", getPresetAvatarCacheSize, clearPresetAvatarCache);
   clearMeasured(steps, "voiceTranscript", getVoiceTranscriptCacheSize, clearVoiceTranscriptCache);
   clearMeasured(steps, "markdownTable", getMarkdownTableCacheSize, clearMarkdownTableCache);

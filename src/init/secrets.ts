@@ -1,12 +1,12 @@
+import { initializeCredentialActivityFetch } from "@/utils/provider/providerRequestHook";
 import { log } from "@/utils/misc/logger";
 import { getAppSecrets } from "@/utils/security/secretsManager";
 import { keyManager } from "@/utils/security/keyManager";
 import type { AppEnvironment } from "@/types/config";
+import { readApiKeyInactivityDays } from "@/utils/security/apiKeyRetention";
 
 /**
- * Loads secrets from GCP Secret Manager (production) or .env (development),
- * assigns them to process.env for backward-compatibility with all downstream consumers,
- * and initializes the encryption key manager.
+ * Loads the selected secret source before consumers initialize database connections or keys.
  *
  * Must be called before any module that reads credentials from process.env.
  *
@@ -22,11 +22,17 @@ export async function loadSecrets(environment: AppEnvironment): Promise<void> {
   process.env.POSTGRES_USER = secrets.POSTGRES_USER;
   process.env.POSTGRES_PASSWORD = secrets.POSTGRES_PASSWORD;
   process.env.POSTGRES_DB = secrets.POSTGRES_DB;
-  process.env.CRYPTO_SECRET = secrets.CRYPTO_SECRET;
-
-  if (secrets.CRYPTO_SECRET_V1) process.env.CRYPTO_SECRET_V1 = secrets.CRYPTO_SECRET_V1;
-  if (secrets.CRYPTO_SECRET_V2) process.env.CRYPTO_SECRET_V2 = secrets.CRYPTO_SECRET_V2;
-  if (secrets.CRYPTO_SECRET_V3) process.env.CRYPTO_SECRET_V3 = secrets.CRYPTO_SECRET_V3;
+  // A mounted or AWS secret is authoritative, so ambient versions cannot survive a source change.
+  for (const name of Object.keys(process.env)) {
+    if (name === "CRYPTO_SECRET" || name === "CRYPTO_SECRET_CURRENT" || name.startsWith("CRYPTO_SECRET_V")) {
+      delete process.env[name];
+    }
+  }
+  for (const [name, value] of Object.entries(secrets)) {
+    if (name === "CRYPTO_SECRET" || name === "CRYPTO_SECRET_CURRENT" || /^CRYPTO_SECRET_V[1-9]\d*$/.test(name)) {
+      if (value) process.env[name] = value;
+    }
+  }
 
   if (secrets.DISCORD_WEBHOOK_URL) process.env.DISCORD_WEBHOOK_URL = secrets.DISCORD_WEBHOOK_URL;
 
@@ -61,11 +67,19 @@ export async function loadSecrets(environment: AppEnvironment): Promise<void> {
     process.env.MATRIX_APPSERVICE_PUBLIC_URL = secrets.MATRIX_APPSERVICE_PUBLIC_URL;
 
   if (secrets.TOPGG_TOKEN) process.env.TOPGG_TOKEN = secrets.TOPGG_TOKEN;
+  // An empty list must survive loading because it admits no one, while dropping it would read as unset and admit everyone.
+  if (secrets.VERTEX_ALLOWED_OWNERS !== undefined) process.env.VERTEX_ALLOWED_OWNERS = secrets.VERTEX_ALLOWED_OWNERS;
 
   // Must be set before any module reads MEMORY_PROTECTION(). Deployment env wins: a stale bundle
   // value could otherwise restore a limit above physical memory, leaving the guard unreachable.
   if (secrets.CONTAINER_MEMORY_LIMIT_MB && !process.env.CONTAINER_MEMORY_LIMIT_MB)
     process.env.CONTAINER_MEMORY_LIMIT_MB = secrets.CONTAINER_MEMORY_LIMIT_MB;
+
+  if (secrets.API_KEY_INACTIVITY_DAYS !== undefined) {
+    process.env.API_KEY_INACTIVITY_DAYS = secrets.API_KEY_INACTIVITY_DAYS;
+  }
+  readApiKeyInactivityDays();
+  initializeCredentialActivityFetch();
 
   const secretsSource =
     environment !== "production" || process.env.TEST_PRODUCTION === "true"

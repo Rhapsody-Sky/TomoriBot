@@ -1,20 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import sharp from "sharp";
 import { initMediaProcessing } from "@/init/media";
+import { log } from "@/utils/misc/logger";
+import { useEnvSandbox } from "../../helpers/env";
 
-const savedConcurrency = process.env.SHARP_CONCURRENCY;
-const savedCacheMemory = process.env.SHARP_CACHE_MEMORY_MB;
-const savedCacheItems = process.env.SHARP_CACHE_ITEMS;
-const savedCacheFiles = process.env.SHARP_CACHE_FILES;
+useEnvSandbox(["SHARP_CONCURRENCY", "SHARP_CACHE_MEMORY_MB", "SHARP_CACHE_ITEMS", "SHARP_CACHE_FILES", "RUN_ENV"]);
 
 let concurrencySpy: ReturnType<typeof spyOn>;
 let cacheSpy: ReturnType<typeof spyOn>;
+let metricSpy: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
   delete process.env.SHARP_CONCURRENCY;
   delete process.env.SHARP_CACHE_MEMORY_MB;
   delete process.env.SHARP_CACHE_ITEMS;
   delete process.env.SHARP_CACHE_FILES;
+  delete process.env.RUN_ENV;
+
+  metricSpy = spyOn(log, "metric").mockImplementation(() => {});
 
   // Stubbed rather than called through: both mutate one process-global libvips instance,
   // so a real call would leak the test's settings into every later test in the lane.
@@ -32,15 +35,7 @@ beforeEach(() => {
 afterEach(() => {
   concurrencySpy.mockRestore();
   cacheSpy.mockRestore();
-
-  if (savedConcurrency === undefined) delete process.env.SHARP_CONCURRENCY;
-  else process.env.SHARP_CONCURRENCY = savedConcurrency;
-  if (savedCacheMemory === undefined) delete process.env.SHARP_CACHE_MEMORY_MB;
-  else process.env.SHARP_CACHE_MEMORY_MB = savedCacheMemory;
-  if (savedCacheItems === undefined) delete process.env.SHARP_CACHE_ITEMS;
-  else process.env.SHARP_CACHE_ITEMS = savedCacheItems;
-  if (savedCacheFiles === undefined) delete process.env.SHARP_CACHE_FILES;
-  else process.env.SHARP_CACHE_FILES = savedCacheFiles;
+  metricSpy.mockRestore();
 });
 
 describe("initMediaProcessing", () => {
@@ -89,5 +84,26 @@ describe("initMediaProcessing", () => {
     });
 
     expect(() => initMediaProcessing()).not.toThrow();
+  });
+
+  it("does not emit the media_config metric in non-production environments", () => {
+    process.env.RUN_ENV = "development";
+
+    initMediaProcessing();
+
+    expect(metricSpy).not.toHaveBeenCalled();
+  });
+
+  it("emits the media_config metric in production environments", () => {
+    process.env.RUN_ENV = "production";
+
+    initMediaProcessing();
+
+    expect(metricSpy).toHaveBeenCalledWith("media_config", {
+      sharp_concurrency: 1,
+      sharp_cache_memory_mb: 16,
+      sharp_cache_items: 50,
+      sharp_cache_files: 0,
+    });
   });
 });

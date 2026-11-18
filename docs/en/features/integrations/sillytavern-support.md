@@ -8,84 +8,165 @@ head:
     content: "TomoriBot | Use SillyTavern Character Cards in Discord"
 # Hand-written search snippet; overrides the auto-derived description from
 # routeData.ts middleware.
-description: "Import SillyTavern character cards (PNG, v2, v3 JSON) and Prompt Manager presets into Discord with TomoriBot. Bring your existing characters to your server."
+description: "Import SillyTavern character cards and prompt presets into Discord with TomoriBot. Bring your existing characters to your server."
 sidebar:
   order: 2
+aiGenerated: true
 ---
 
-TomoriBot can import two things from [SillyTavern](https://github.com/SillyTavern/SillyTavern)
-that you may already have: **Prompt Manager presets** (how the prompt is laid out) and
-**character cards** (the character itself). This is a niche feature for ST users — if you've
-never used SillyTavern, you can skip this page.
+TomoriBot can import assets from [SillyTavern](https://github.com/SillyTavern/SillyTavern):
+Prompt Manager presets (which control prompt structure), character cards (the character definition),
+and lorebooks (embedded Character Books or standalone world info files).
+If you have never used SillyTavern, you can safely skip this page.
 
 ## Character Card Import
 
-Bring an existing SillyTavern character straight into Discord with `/persona import`. It
-accepts:
+Bring an existing SillyTavern character into Discord with `/persona import`. It accepts:
 
-- **PNG cards** with embedded `chara` / `char` metadata,
-- **v2-style JSON** cards (root-level `name`, `description`, `first_mes`, …),
+- **PNG cards** with embedded `chara` or `char` metadata.
+- **v2-style JSON** cards with root-level properties (`name`, `description`, `first_mes`).
 - **v3 JSON** cards (`spec: "chara_card_v3"` with a nested `data` object).
+- **`.charx` archives** (Character Card V3 packages).
 
-If the file has no TomoriBot metadata but is a valid ST v2/v3 card, import automatically runs
-it through the SillyTavern conversion flow. You can also feed a card to `/persona generate` to
-transform it into a fresh persona.
+A `.charx` file is a ZIP archive containing a `card.json` definition. TomoriBot imports the
+character text from `card.json` and skips bundled asset files (icons, sprites, audio, video).
+You can set an avatar in `/config` > Persona > Identity & Personality and add sprites in
+`/config` > Persona > Sprites.
 
-Imports pass through a validation schema before anything is saved (default caps: 5,000
-characters per string, 200 attributes, 100 sample dialogues per side, 100 trigger words —
-self-hosters can tune the `PRESET_MAX_*` env vars). For the exact conversion and field
-mapping, see the [card-support architecture](/architecture/integrations/sillytavern/card-support/).
+If an uploaded file is a valid SillyTavern card without TomoriBot metadata, the import
+converts it automatically. You can also pass a card to `/persona generate` to create a fresh
+persona inspired by the character.
+
+Imports are validated before saving (default limits: 5,000 characters per text field, 200
+attributes, 100 sample dialogues per side, 100 trigger words). For field mapping and
+conversion mechanics, see the
+[card-support architecture](/architecture/integrations/sillytavern/card-support/).
+
+:::tip
+A card's Character Book becomes that persona's [lorebook](/features/knowledge/memory/lorebooks/). Disabled entries stay disabled. Re-importing the card replaces the persona's whole lorebook, including entries you added yourself.
+:::
+
+## Character card export
+
+Use `/persona export` with `output_format` set to `SillyTavern-compatible PNG` to take a persona
+into SillyTavern. The card includes the avatar, personality, sample dialogues, persona prompt,
+and persona lorebook. It has no opening greeting; add one in SillyTavern before starting a chat.
+
+TomoriBot-specific settings, such as triggers, nudges, voice settings, and lorebook channel limits,
+are excluded. Choose `TomoriBot Card` or `Raw JSON` to preserve TomoriBot persona settings.
+`TomoriBot Bundle` also carries sprites and character reference media, plus voice reference audio
+when requested. This ZIP is a TomoriBot format; use the SillyTavern-compatible PNG for SillyTavern.
 
 ## Prompt Presets
+<!-- anchor: prompt-presets -->
 
-A SillyTavern Prompt Manager preset controls the **layout** of the prompt. Import one with
-`/st-preset import`, inspect which nodes are enabled with `/st-preset toggle`, and return to
-the normal layout with `/st-preset remove`.
+A SillyTavern Prompt Manager preset controls the order and layout of the prompt sent to the
+model. Open `/config` > Plugins > SillyTavern Presets to import presets, toggle individual
+nodes, switch active presets, or restore default formatting.
+
+:::tip
+Importing a preset with a name that already exists replaces that preset, including the nodes you had toggled on or off, and activates the new one. Give each variant a different name if you want to keep both.
+:::
 
 ### What a Preset Controls
 
-- Prompt order and marker placement
+- Prompt ordering and marker placement
 - Custom prompt nodes
-- Post-history / depth-injection nodes
-- Which imported nodes start enabled or disabled
+- Post-history and depth-injection nodes
+- Initial enabled state for imported nodes
 
-### What It Does *Not* Replace
+### What a Preset Does Not Replace
 
-A preset owns the *layout*, not every source of text. These still exist alongside it:
+A preset structures prompt layout; it does not replace the text sources that fill it:
 
-- Your system/persona blocks: `/config system-prompt set`, `/persona prompt set`,
-  `/persona attribute add`, `/persona sample-dialogue add`.
-- Live chat history and retrieved document context.
-- TomoriBot's automatic context: server memory, emoji/sticker context, users-in-conversation,
-  short-term memory, conditioning, and similar blocks.
+- System instructions and persona fields: `/config` > Behavior > General Behavior,
+  `/config` > Persona > Advanced, and `/config` > Persona > Identity & Personality.
+- Live chat history, retrieved document context, and activated lorebook entries.
+- Automatic context: server memories, emoji and sticker data, participant lists, and
+  short-term memories.
 
 ### How Native Blocks Map
 
-- `main` → the current system prompt (`/config system-prompt set`, else the built-in fallback)
-- `charDescription` → `/persona prompt set`
-- `charPersonality` → `/persona attribute add`
-- `dialogueExamples` → `/persona sample-dialogue add`
-- `chatHistory` → live channel history
-- `worldInfoBefore` / `worldInfoAfter` → retrieved document context (not ST lorebooks)
+Native blocks map directly to TomoriBot prompt components:
+
+- `main`: the channel prompt override, when configured
+- `charDescription`: `/config` > Persona > Advanced
+- `charPersonality`: `/config` > Persona > Identity & Personality
+- `dialogueExamples`: `/config` > Persona > Identity & Personality
+- `chatHistory`: live channel message history
+- `worldInfoBefore` and `worldInfoAfter`: lorebook entries for that placement, then retrieved document context
 
 ### System Prompt Rule
 
-While a preset is active, the built-in fallback system prompt is removed — but if *you* set
-your own with `/config system-prompt set`, it's still sent.
+When an imported preset is active, it fully controls the system prompt. TomoriBot's built-in
+prompt and any custom prompt from `/config` > Behavior > General Behavior are not sent, and the
+system prompt buttons there are locked. Your custom prompt is kept, and it comes back when you turn
+the preset off in `/config` > Plugins > SillyTavern Presets.
+
+### Conditional instructions
+
+Use Handlebars blocks to include instructions only when a value is present:
+
+```text
+{{#if description}}Follow the character description.{{else}}Use a neutral voice.{{/if}}
+{{#unless {{getvar::compact}}}}Include scene details.{{/unless}}
+```
+
+A bare name such as `description` means `{{description}}`. You can also put value macros directly
+inside a condition, as in `{{#if {{input}}}}`. Empty text, `false`, and `0` are false after spaces
+are trimmed and case is ignored. Unknown macros in conditions count as empty.
+
+Blocks can nest, including TomoriBot's `{{if capability:web_search}}` and `{{if tool:web_search}}`
+blocks. Close `#if` with `{{/if}}` and `#unless` with `{{/unless}}`. A malformed block (such as a second
+`else` or the wrong closer) is omitted. A Handlebars block without a closer ends at the end of its
+node. Stray `else` and closers are dropped. More than 32 nested blocks leave the conditional syntax
+unrendered. Import notes report these problems.
+
+`{{setvar::key::value}}` stores text; `{{addvar::key::value}}` appends it. A declaration in an untaken
+Handlebars branch has no effect. Conditions see declarations earlier in the node order, including
+earlier in the same node. Plain `{{getvar::key}}` text sees the final value after all enabled nodes
+have been visited. Tool and capability conditions run afterward, so they do not control variable
+assignment.
+
+### Preset macros
+<!-- anchor: preset-macros -->
+
+| Macro | Value |
+|---|---|
+| `{{user}}` | The member who triggered the reply |
+| `{{char}}`, `{{bot}}` | The active persona's name |
+| `{{personality}}` | Persona attributes |
+| `{{description}}` | Persona prompt |
+| `{{scenario}}` | Empty: card scenarios are folded into persona attributes |
+| `{{mesExamples}}` | Sample dialogue text |
+| `{{lastChatMessage}}`, `{{input}}` | The most recent user message in the supplied conversation |
+| `{{time}}` | Server time, such as `3:45 PM` |
+| `{{date}}` | Server date, such as `October 28, 2026` |
+| `{{weekday}}` | English weekday name, such as `Wednesday` |
+| `{{isotime}}` | Server time in `HH:mm` format, such as `15:45` |
+| `{{isodate}}` | Server date in `YYYY-MM-DD` format, such as `2026-10-28` |
+| `{{model}}` | Configured model id; per-turn randomizer picks and fallback models are not reflected |
+| `{{provider}}` | Configured provider id: `google`, `openrouter`, `novelai`, or `custom` |
+| `{{char_version}}` | Empty: character card versions are not stored |
+
+Temporal macros share one clock reading per prompt and use the server's numeric UTC offset.
+Daylight saving follows the offset you set. A member's personal timezone does not affect them.
+When time awareness is off, all five temporal macros are empty and a condition testing one is false.
+Keep temporal macros in late or depth-injected nodes: a changing value such as `{{time}}` invalidates
+the provider prompt cache for everything after it.
+
+`{{random: A, B}}` and `{{random::A::B}}` choose an item; `{{roll:2d6}}` rolls dice. `{{// notes}}`
+removes a comment and `{{trim}}` trims the node's surrounding whitespace. These macros and
+conditionals apply to preset instructions. Lorebook entries expand only `{{user}}`, `{{char}}`, and
+`{{bot}}`.
 
 ### Compatibility Notes
 
-Common surprises when a preset seems ignored:
+- Nodes disabled in `prompt_order` remain inactive until enabled in `/config` > Plugins > SillyTavern Presets. Empty and comment-only nodes are never sent.
+- Marker order is literal: placing `chatHistory` ahead of `dialogueExamples` places chat history first. World info markers position Always On lore; activated lore, retrieved documents, presence, and the clock stay near the latest four speaker turns. Fresh or cross-channel short-term memory also stays near those messages, or closer if configured.
+- Post-history injections merge into existing conversation history rather than sending as standalone messages.
+- Regex post-processing, preset-defined sampling parameters (temperature, top-p), and layered presets are not supported. Legacy text-completion presets import with ST-only blocks dropped.
 
-- Imported ≠ sent: nodes disabled in `prompt_order` stay off until you enable them with
-  `/st-preset toggle`. Comment-only and empty nodes are never sent; unknown markers are
-  skipped.
-- Order is literal — placing `chatHistory` before `dialogueExamples` sends live chat first.
-- Post-history/depth injections merge into existing chat-history entries rather than becoming
-  standalone messages; multiple nodes at the same depth are batched.
-- Regex post-processing, preset-side temperature/top-p/model overrides, and layered presets
-  are not supported. Legacy text-completion presets import through a best-effort path that
-  drops ST-only blocks (scenario, anchors, stop strings, …).
-
-Run `/help st-preset` for the full in-Discord reference. For the import engine internals, see
-the [preset-system architecture](/architecture/integrations/sillytavern/preset-system/).
+In `/help`, choose `Plugins`, then `SillyTavern Presets`, for the Discord guide. For internal
+preset processing, see the
+[preset-system architecture](/architecture/integrations/sillytavern/preset-system/).

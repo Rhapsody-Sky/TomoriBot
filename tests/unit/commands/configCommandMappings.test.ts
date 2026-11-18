@@ -1,13 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import {
   buildCapabilitiesManageConfigWritePlan,
+  getCapabilitiesManagePermissionDefinitions,
   type CapabilitiesManageConfigState,
 } from "@/utils/discord/manageConfigMapping";
 import {
   buildServerMemberPermissionsConfigWritePlan,
   type ServerMemberPermissionsCommandConfigState,
 } from "@/utils/discord/memberPermissionsConfigMapping";
-import { buildWorkaroundConfigWritePlan, type WorkaroundConfigState } from "@/utils/discord/workaroundConfigMapping";
 
 function sorted(values: string[]): string[] {
   return values.toSorted();
@@ -21,11 +21,14 @@ const disabledCapabilitiesManageState: CapabilitiesManageConfigState = {
   web_search_enabled: false,
   manage_message_enabled: false,
   thread_creation_enabled: false,
+  conditioning_interactions_enabled: false,
+  dice_rolling_enabled: false,
   imagegen_enabled: false,
+  danbooru_enabled: false,
   videogen_enabled: false,
   voice_message_enabled: false,
   user_blocking_enabled: false,
-  short_term_memory_enabled: false,
+  user_info_updates_enabled: false,
   time_awareness_enabled: false,
 };
 
@@ -37,38 +40,41 @@ const enabledCapabilitiesManageState: CapabilitiesManageConfigState = {
   web_search_enabled: true,
   manage_message_enabled: true,
   thread_creation_enabled: true,
+  conditioning_interactions_enabled: false,
+  dice_rolling_enabled: false,
   imagegen_enabled: true,
+  danbooru_enabled: true,
   videogen_enabled: true,
   voice_message_enabled: true,
   user_blocking_enabled: true,
-  short_term_memory_enabled: true,
+  user_info_updates_enabled: true,
   time_awareness_enabled: true,
 };
 
 const disabledServerMemberPermissionsState: ServerMemberPermissionsCommandConfigState = {
   server_memteaching_enabled: false,
-  attribute_memteaching_enabled: false,
-  sampledialogue_memteaching_enabled: false,
   prompt_snapshot_enabled: false,
+  persona_export_enabled: false,
 };
 
 const enabledServerMemberPermissionsState: ServerMemberPermissionsCommandConfigState = {
   server_memteaching_enabled: true,
-  attribute_memteaching_enabled: true,
-  sampledialogue_memteaching_enabled: true,
   prompt_snapshot_enabled: true,
-};
-
-const disabledWorkaroundState: WorkaroundConfigState = {
-  verbatim_tool_calling_enabled: false,
-};
-
-const enabledWorkaroundState: WorkaroundConfigState = {
-  verbatim_tool_calling_enabled: true,
+  persona_export_enabled: true,
 };
 
 describe("config command write mappings", () => {
   describe("/capabilities manage", () => {
+    it("keeps Playful Interactions last with or without voice tools", () => {
+      for (const includeElevenLabs of [true, false]) {
+        const definitions = getCapabilitiesManagePermissionDefinitions({
+          page: "available-tools",
+          includeElevenLabs,
+        });
+        expect(definitions.at(-1)?.value).toBe("conditioninginteractions");
+      }
+    });
+
     it("routes personalization and selfteaching to server_member_permissions_configs", () => {
       const plan = buildCapabilitiesManageConfigWritePlan(
         disabledCapabilitiesManageState,
@@ -97,9 +103,12 @@ describe("config command write mappings", () => {
           "websearch",
           "managemessage",
           "threadcreation",
+          "conditioninginteractions",
           "imagegen",
+          "danbooru",
           "videogen",
           "voicemessage",
+          "userinfo",
           "timeawareness",
         ],
         { includeElevenLabs: true },
@@ -112,9 +121,12 @@ describe("config command write mappings", () => {
         web_search_enabled: true,
         manage_message_enabled: true,
         thread_creation_enabled: true,
+        conditioning_interactions_enabled: true,
         imagegen_enabled: true,
+        danbooru_enabled: true,
         videogen_enabled: true,
         voice_message_enabled: true,
+        user_info_updates_enabled: true,
         time_awareness_enabled: true,
       });
       expect(plan.patch.memberPermissions).toEqual({});
@@ -144,21 +156,21 @@ describe("config command write mappings", () => {
     });
   });
 
-  describe("/server member-permissions", () => {
+  describe("/moderation Member Access", () => {
     it("routes checkbox selections to server_member_permissions_configs", () => {
       const plan = buildServerMemberPermissionsConfigWritePlan(disabledServerMemberPermissionsState, [
         "servermemories",
         "attributelist",
         "sampledialogues",
         "promptsnapshot",
+        "personaexport",
       ]);
 
       expect(plan.method).toBe("updateMemberPermissionsConfig");
       expect(plan.patch).toEqual({
         server_memteaching_enabled: true,
-        attribute_memteaching_enabled: true,
-        sampledialogue_memteaching_enabled: true,
         prompt_snapshot_enabled: true,
+        persona_export_enabled: true,
       });
     });
 
@@ -169,37 +181,10 @@ describe("config command write mappings", () => {
       expect(patchColumns).not.toContain("personal_memories_enabled");
       expect(patchColumns).not.toContain("self_teaching_enabled");
       expect(sorted(patchColumns)).toEqual([
-        "attribute_memteaching_enabled",
+        "persona_export_enabled",
         "prompt_snapshot_enabled",
-        "sampledialogue_memteaching_enabled",
         "server_memteaching_enabled",
       ]);
-    });
-  });
-
-  describe("/config workarounds", () => {
-    it("routes verbatim tool-calling to server_capabilities_configs", () => {
-      const plan = buildWorkaroundConfigWritePlan(disabledWorkaroundState, ["verbatim_tool_calling"]);
-
-      expect(plan.method).toBe("updateCapabilitiesConfig");
-      expect(plan.patch).toEqual({
-        verbatim_tool_calling_enabled: true,
-      });
-      expect(plan.changes).toEqual([
-        {
-          value: "verbatim_tool_calling",
-          dbColumn: "verbatim_tool_calling_enabled",
-          isEnabled: true,
-          labelKey: "commands.config.workarounds.verbatim_tool_calling_option",
-        },
-      ]);
-    });
-
-    it("returns an empty patch when the selected state is unchanged", () => {
-      const plan = buildWorkaroundConfigWritePlan(enabledWorkaroundState, ["verbatim_tool_calling"]);
-
-      expect(plan.patch).toEqual({});
-      expect(plan.changes).toHaveLength(0);
     });
   });
 });

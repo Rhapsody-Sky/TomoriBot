@@ -16,9 +16,16 @@
  * every call site the same honest "how much was hidden" line.
  *
  * Callers interpolate {@link TextPreview.text} into a locale string that owns
- * the code fence, matching the existing convention in
- * `commands.config.prompt.change.success_description`.
+ * the code fence.
  */
+
+import {
+  FENCE_GUARD,
+  getDiscordTextLength,
+  neutralizeFenceRuns,
+  truncateDiscordText,
+} from "@/utils/text/discordTextLimits";
+import { formatLocaleInteger, localizer } from "@/utils/text/localizer";
 
 /**
  * Character budget for a preview rendered inside a Components V2 workflow card.
@@ -29,14 +36,6 @@
  * title, description, and footer.
  */
 export const CV2_TEXT_PREVIEW_BUDGET = 3000;
-
-/**
- * Character budget for a preview rendered inside a standard embed description,
- * which Discord caps at 4096 characters. Kept equal to the Components V2 budget
- * so the same text truncates identically no matter which surface shows it.
- */
-export const EMBED_TEXT_PREVIEW_BUDGET = 3000;
-
 /**
  * Character budget for "here is what you just saved" confirmations.
  *
@@ -46,36 +45,16 @@ export const EMBED_TEXT_PREVIEW_BUDGET = 3000;
  */
 export const CONFIRMATION_PREVIEW_BUDGET = 200;
 
-/**
- * Zero-width space used to break up backtick runs. It renders as nothing but
- * stops the sequence from being parsed as a fence delimiter.
- */
-const FENCE_GUARD = "​";
-
 /** A fence-safe, budget-bounded rendering of user-authored text. */
 export interface TextPreview {
   /** Fence-safe text, ready to interpolate into a locale string's code block. */
   text: string;
   /** Whether {@link text} was cut short to fit the budget. */
   truncated: boolean;
-  /** Characters shown, counted against the original (pre-guard) text. */
+  /** Codepoints shown, counted against the original (pre-guard) text. */
   shownChars: number;
-  /** Total characters in the original text. */
+  /** Total codepoints in the original text. */
   totalChars: number;
-}
-
-/**
- * Breaks up runs of two or more backticks so user content cannot escape the
- * code fence it is rendered inside.
- *
- * Two backticks delimit inline code and three delimit a block, so any run of
- * two or more is a potential breakout. Interleaving a zero-width space leaves
- * the text visually unchanged while making the run inert.
- *
- * @param text - Raw user-authored text.
- */
-function neutralizeCodeFences(text: string): string {
-  return text.replace(/`{2,}/g, (run) => run.split("").join(FENCE_GUARD));
 }
 
 /**
@@ -84,39 +63,38 @@ function neutralizeCodeFences(text: string): string {
  * The fence guard is applied to the whole source *before* truncation, and the
  * budget then bounds the guarded string. This makes the budget a hard ceiling
  * on the rendered length rather than a headroom assumption: a run of `N`
- * backticks guards out to `2N - 1` characters, so guarding after a fixed slice
+ * backticks guards out to `2N - 1` codepoints, so guarding after a fixed slice
  * (as an earlier version did) could nearly double the length and blow the
  * Components V2 / embed cap the budget is meant to respect. `shownChars` is
- * recovered from the original (non-guard) characters that survived, so the
+ * recovered from the original (non-guard) codepoints that survived, so the
  * reported counts stay meaningful to a user who never sees the guards.
  *
  * @param text - The text to preview; `null`/`undefined`/blank yields a preview with `totalChars === 0`.
- * @param budget - Maximum characters to render, defaulting to {@link CV2_TEXT_PREVIEW_BUDGET}.
+ * @param budget - Maximum codepoints to render, defaulting to {@link CV2_TEXT_PREVIEW_BUDGET}.
  */
 export function buildTextPreview(
   text: string | null | undefined,
   budget: number = CV2_TEXT_PREVIEW_BUDGET,
 ): TextPreview {
   const source = text?.trim() ?? "";
-  if (source.length === 0) {
+  const totalChars = getDiscordTextLength(source);
+  if (totalChars === 0) {
     return { text: "", truncated: false, shownChars: 0, totalChars: 0 };
   }
 
-  // Guard the fence first so the guard's expansion counts against the
-  //    budget instead of being appended past it. A guarded run never contains
-  //    two adjacent backticks, so slicing it can at worst leave a single
-  //    trailing backtick, which cannot re-open a fence.
-  const totalChars = source.length;
-  const guardedFull = neutralizeCodeFences(source);
-  const truncated = guardedFull.length > budget;
-  const guarded = truncated ? guardedFull.slice(0, budget) : guardedFull;
+  // Guard the fence first so the guard's expansion counts against the budget instead of being
+  // appended past it. A guarded run never contains two adjacent backticks, so slicing it can at
+  // worst leave a single trailing backtick, which cannot re-open a fence.
+  const guardedFull = neutralizeFenceRuns(source);
+  const truncated = getDiscordTextLength(guardedFull) > budget;
+  const guarded = truncated ? truncateDiscordText(guardedFull, budget, "") : guardedFull;
 
   // Report shownChars in original terms by dropping the zero-width guards,
   //    so "Showing the first X of Y" stays honest even after fence expansion.
   return {
     text: guarded,
     truncated,
-    shownChars: guarded.split(FENCE_GUARD).join("").length,
+    shownChars: getDiscordTextLength(guarded.split(FENCE_GUARD).join("")),
     totalChars,
   };
 }
@@ -135,9 +113,61 @@ export function textPreviewFooterKey(preview: TextPreview): string | undefined {
  *
  * @returns Localizer vars with thousands-separated counts.
  */
-export function textPreviewFooterVars(preview: TextPreview): Record<string, string> {
+export function textPreviewFooterVars(preview: TextPreview, locale: string): Record<string, string> {
   return {
-    shown: preview.shownChars.toLocaleString("en-US"),
-    total: preview.totalChars.toLocaleString("en-US"),
+    shown: formatLocaleInteger(preview.shownChars, locale),
+    total: formatLocaleInteger(preview.totalChars, locale),
   };
+}
+
+/**
+ * Ceiling for a fenced panel preview, fence and marker included. Every previewed value has an edit
+ * modal that shows the complete text, so the panel only needs enough to recognize it.
+ */
+export const FENCED_PREVIEW_MAX_CHARS = 500;
+
+export interface FencedPreviewOptions {
+  /** Space the caller has left in its message. */
+  budget?: number;
+  /** Label of the button whose modal shows the complete text, when one does. */
+  actionLabel?: string;
+}
+
+const fenceMarkdown = (body: string): string => ["```markdown", body, "```"].join("\n");
+
+/**
+ * Renders user-authored text as a markdown code block within the smaller of `budget` and
+ * {@link FENCED_PREVIEW_MAX_CHARS} codepoints, fence included.
+ *
+ * Cut text ends in an HTML comment naming how much is hidden. Discord's markdown highlighting
+ * colors it like a code comment, so it reads as a marker rather than part of the stored text.
+ *
+ * @returns The fenced block, or an empty string when the budget cannot hold even the marker,
+ *   because cutting a fenced string would drop its closing delimiter and leak the fence into the
+ *   rest of the message.
+ */
+export function renderFencedPreview(
+  locale: string,
+  text: string,
+  { budget = FENCED_PREVIEW_MAX_CHARS, actionLabel }: FencedPreviewOptions = {},
+): string {
+  const limit = Math.min(budget, FENCED_PREVIEW_MAX_CHARS);
+  const guarded = neutralizeFenceRuns(text);
+  const full = fenceMarkdown(guarded);
+  if (getDiscordTextLength(full) <= limit) return full;
+
+  const totalChars = getDiscordTextLength(text);
+  const marker = (hidden: number): string =>
+    `<!-- ${localizer(
+      locale,
+      actionLabel ? "general.text_preview.hidden_marker_action" : "general.text_preview.hidden_marker",
+      { count: formatLocaleInteger(hidden, locale), action: actionLabel ?? "" },
+    )} -->`;
+  // Sizing with the total count reserves the longest marker this text can need, so the marker
+  // built from the real hidden count always fits.
+  const available = limit - getDiscordTextLength(fenceMarkdown(`\n${marker(totalChars)}`));
+  if (available < 0) return "";
+  const shown = truncateDiscordText(guarded, available, "").trimEnd();
+  const hidden = totalChars - getDiscordTextLength(shown.split(FENCE_GUARD).join(""));
+  return fenceMarkdown(shown ? `${shown}\n${marker(hidden)}` : marker(hidden));
 }

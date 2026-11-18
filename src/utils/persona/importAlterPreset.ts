@@ -1,3 +1,5 @@
+import { lorebookRepository } from "@/modules/lorebooks/db/repositories";
+import { lorebookEntryInputSchema, LOREBOOK_ENTRIES_PER_SCOPE_MAX } from "@/modules/lorebooks/db/types";
 /**
  * Shared alter-persona import core.
  *
@@ -15,9 +17,16 @@ import { presetRepository } from "@/utils/db/repositories/PresetRepository";
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { log } from "@/utils/misc/logger";
 import { resolvePersonaAvatarPublicUrl, uploadPersonaAvatarToStorage } from "@/utils/storage/avatarStorage";
-import { getBaseTriggerWords } from "@/utils/text/localizer";
+import { getAllBaseTriggerWords } from "@/utils/text/localizer";
 import { selectUnclaimedTriggerWords } from "@/utils/text/triggerWords";
-import type { PresetExportData } from "@/types/preset/presetExport";
+import type { PresetImportMode, PresetExportData } from "@/types/preset/presetExport";
+import { EMPTY_PERSONA_NAMING_CONFIG } from "@/types/personaNaming";
+import { naturalNudgeRepository } from "@/modules/natural-nudges/db/repositories";
+import {
+  DEFAULT_NATURAL_NUDGE_TALKATIVENESS,
+  personaAuthoredIdleNudgesSchema,
+  type PersonaAuthoredIdleNudge,
+} from "@/modules/natural-nudges/db/types";
 
 /**
  * Parameters for {@link importAlterPreset}.
@@ -38,6 +47,7 @@ export interface ImportAlterPresetParams {
   identityMode: "preserve" | "fork";
   /** Raw persona image (PNG) used as the alter avatar, or null to inherit the main avatar. */
   avatarImageBuffer: Buffer | null;
+  importMode?: PresetImportMode;
 }
 
 /**
@@ -95,7 +105,23 @@ function isUniqueViolation(error: unknown): boolean {
  * @returns A {@link ImportAlterPresetResult} describing success or the failure reason.
  */
 export async function importAlterPreset(params: ImportAlterPresetParams): Promise<ImportAlterPresetResult> {
-  const { client, guild, serverDiscId, presetData, identityMode, avatarImageBuffer } = params;
+  const { client, guild, serverDiscId, presetData, identityMode, avatarImageBuffer, importMode = "card" } = params;
+
+  if (
+    presetData.lorebook_entries !== undefined &&
+    !lorebookEntryInputSchema.array().max(LOREBOOK_ENTRIES_PER_SCOPE_MAX).safeParse(presetData.lorebook_entries).success
+  ) {
+    return { ok: false, reason: "config_failed" };
+  }
+
+  let importedIdleNudges: PersonaAuthoredIdleNudge[] | undefined;
+  if (presetData.natural_nudge_idle_nudges !== undefined) {
+    const parsedIdleNudges = personaAuthoredIdleNudgesSchema.safeParse(presetData.natural_nudge_idle_nudges);
+    if (!parsedIdleNudges.success) {
+      return { ok: false, reason: "config_failed" };
+    }
+    importedIdleNudges = parsedIdleNudges.data;
+  }
 
   const allPersonas = await personaRepository.loadAllForServer(serverDiscId);
   const personaLimits = getMemoryLimits();
@@ -120,8 +146,7 @@ export async function importAlterPreset(params: ImportAlterPresetParams): Promis
   //    ("tomori" etc.) too: they belong to the main persona regardless of locale,
   //    and the loader's single-owner dedup would strip them from an alter anyway.
   const claimedTriggerWords = [
-    ...getBaseTriggerWords("en-US"),
-    ...getBaseTriggerWords("ja"),
+    ...getAllBaseTriggerWords(),
     ...allPersonas.flatMap((persona) => persona.trigger_words ?? []),
   ];
 
@@ -130,7 +155,8 @@ export async function importAlterPreset(params: ImportAlterPresetParams): Promis
   //    (pointer) imports; the loader enforces the same ownership at read time.
   const importTriggers = presetData.trigger_words ?? [];
   const uniqueTriggers = selectUnclaimedTriggerWords(importTriggers, claimedTriggerWords, { lowercase: false });
-  const matchingOfficialPreset = await presetRepository.findMatchingOfficialPresetForImport(presetData);
+  const matchingOfficialPreset =
+    importMode === "bundle" ? null : await presetRepository.findMatchingOfficialPresetForImport(presetData);
   const createdAsPointer = matchingOfficialPreset !== null;
   const displayedTriggers = uniqueTriggers;
   const hasNoTriggers = displayedTriggers.length === 0;
@@ -155,7 +181,7 @@ export async function importAlterPreset(params: ImportAlterPresetParams): Promis
     null;
 
   const importedLineageId = presetData.persona_lineage_id ?? null;
-  let newAlterRow: { persona_id?: number } | undefined;
+  let newAlterRow: { persona_id?: number; persona_lineage_id?: number | string | bigint } | undefined;
   try {
     newAlterRow = matchingOfficialPreset
       ? ((await personaRepository.createPresetPointerAlterPersona({
@@ -175,13 +201,16 @@ export async function importAlterPreset(params: ImportAlterPresetParams): Promis
           sampleDialoguesIn: presetData.sample_dialogues_in,
           sampleDialoguesOut: presetData.sample_dialogues_out,
           personaLineageId: identityMode === "preserve" ? importedLineageId : null,
+          presetLineageId: importMode === "bundle" ? (presetData.preset_lineage_id ?? null) : null,
+          namingConfig: importMode === "bundle" ? (presetData.naming_config ?? EMPTY_PERSONA_NAMING_CONFIG) : undefined,
           physicalAppearanceTags: presetData.physical_appearance_tags ?? [],
-          naiCharRefUrl: presetData.nai_char_ref_url ?? null,
+          charRefUrl: presetData.char_ref_url ?? null,
           naiAttgAuthor: presetData.nai_attg_author ?? null,
           naiAttgTitle: presetData.nai_attg_title ?? null,
           naiAttgTags: presetData.nai_attg_tags ?? null,
           naiAttgGenre: presetData.nai_attg_genre ?? null,
           naiAttgStars: presetData.nai_attg_stars ?? null,
+          isNsfw: presetData.is_nsfw === true,
         })) ?? undefined);
   } catch (error) {
     // Surface a duplicate-name race as a friendly conflict; rethrow others.
@@ -207,6 +236,52 @@ export async function importAlterPreset(params: ImportAlterPresetParams): Promis
       importedPersonaPrompt,
     );
     if (!personaConfigUpdated) {
+      return { ok: false, reason: "config_failed" };
+    }
+    if (
+      !(await naturalNudgeRepository.savePersonaConfig(newTomoriId, {
+        talkativeness: presetData.natural_nudge_talkativeness ?? DEFAULT_NATURAL_NUDGE_TALKATIVENESS,
+        interests: presetData.natural_nudge_interests ?? [],
+      }))
+    ) {
+      return { ok: false, reason: "config_failed" };
+    }
+    if (
+      importedIdleNudges !== undefined &&
+      (await naturalNudgeRepository.replacePersonaIdleNudges(newTomoriId, importedIdleNudges)) !== "success"
+    ) {
+      return { ok: false, reason: "config_failed" };
+    }
+  }
+
+  if (
+    !(await personaRepository.setVoiceConfig(
+      newTomoriId,
+      {
+        speech_voice_design_prompt: presetData.speech_voice_design_prompt ?? null,
+        voice_source_priority: presetData.voice_source_priority ?? "design",
+        speech_voice_sample_id: null,
+        speech_voice_id: null,
+        speech_voice_name: null,
+      },
+      { materialize: Boolean(presetData.speech_voice_design_prompt) },
+    ))
+  )
+    return { ok: false, reason: "config_failed" };
+  invalidateTomoriStateCache(serverDiscId);
+
+  if (presetData.lorebook_entries !== undefined) {
+    const lineageId = Number(newAlterRow.persona_lineage_id);
+    if (
+      !Number.isSafeInteger(lineageId) ||
+      (await lorebookRepository.replaceLineageEntries(
+        mainPersona.server_id,
+        lineageId,
+        presetData.lorebook_entries,
+      )) !== "replaced"
+    ) {
+      await personaRepository.removePersona(newTomoriId);
+      invalidateTomoriStateCache(serverDiscId);
       return { ok: false, reason: "config_failed" };
     }
   }

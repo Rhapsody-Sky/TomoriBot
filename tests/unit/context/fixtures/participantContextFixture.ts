@@ -1,3 +1,4 @@
+import { clearUserCache } from "@/utils/cache/userCache";
 import { Collection, type Client, type GuildMember } from "discord.js";
 import type {
   AssembledServerConfig,
@@ -9,8 +10,14 @@ import type {
 } from "@/types/db/schema";
 import { PrivacyLevel } from "@/types/db/schema";
 import type { StructuredContextItem } from "@/types/misc/context";
-import { personalMemoryRepository, serverScheduleRepository, userRepository } from "@/utils/db/repositories";
-import { buildParticipantContextItem } from "@/utils/text/context/participants";
+import { messageProxyRepository } from "@/utils/db/repositories/MessageProxyRepository";
+import {
+  personalMemoryRepository,
+  serverScheduleRepository,
+  userNamingRepository,
+  userRepository,
+} from "@/utils/db/repositories";
+import { buildParticipantContextItems } from "@/utils/text/context/participants";
 import type { PublicPersonaProfile, SimplifiedMessageForContext } from "@/utils/text/context/types";
 import { attachPersonaMentionMapToContextItems, buildPersonaMentionCatalog } from "@/utils/text/personaMentionHandles";
 import {
@@ -92,12 +99,16 @@ function createUserRow(id: number, discordId: string, nickname: string): UserRow
     privacy_level: PrivacyLevel.MINIMAL,
     personal_memories: [],
     physical_appearance_tags: [" auburn hair ", "green eyes"],
-    nai_char_ref_url: null,
+    char_ref_url: null,
     impersonation_prompt: null,
     shortterm_cache_crossserver_opt_in: false,
     personal_dtm: "follow",
     personal_deliberate_tool_mode: "follow",
+    personal_server_fallback_enabled: true,
+    natural_nudge_opt_out: false,
     timezone_offset: null,
+    message_proxy_service: null,
+    message_proxy_instance_id: null,
   };
 }
 
@@ -138,6 +149,7 @@ function createMessage(
  * in a `finally` block so the shared Bun test process cannot retain the fakes.
  */
 export function createParticipantContextFixture(): ParticipantContextFixture {
+  clearUserCache();
   const counters: ParticipantFixtureCounters = {
     userRowLoads: 0,
     candidateQueries: 0,
@@ -288,9 +300,15 @@ export function createParticipantContextFixture(): ParticipantContextFixture {
     register: userRepository.register,
     isBlacklisted: userRepository.isBlacklisted,
     getPrivacyLevel: userRepository.getPrivacyLevel,
+    loadNamingPreferences: userNamingRepository.loadPreferences,
     loadForUserLineage: personalMemoryRepository.loadForUserLineage,
     getPendingRemindersForUser: serverScheduleRepository.getPendingRemindersForUser,
+    loadContextReferenceIdentities: messageProxyRepository.loadContextReferenceIdentities,
   };
+
+  // Reference resolution always checks stable proxy identities, so the fixture
+  // isolates that read from the live database even when it returns no rows.
+  messageProxyRepository.loadContextReferenceIdentities = async () => [];
 
   userRepository.loadByDiscordId = async (discordId) => {
     counters.userRowLoads += 1;
@@ -315,6 +333,7 @@ export function createParticipantContextFixture(): ParticipantContextFixture {
     counters.privacyReads += 1;
     return users.get(discordId)?.privacy_level ?? PrivacyLevel.MINIMAL;
   };
+  userNamingRepository.loadPreferences = async () => new Map();
   personalMemoryRepository.loadForUserLineage = async (userId, lineageId) => {
     counters.personalMemoryReads += 1;
     hydrationObservations.memoryLineages.push(lineageId);
@@ -381,13 +400,16 @@ export function createParticipantContextFixture(): ParticipantContextFixture {
     restoreRepositories() {
       if (restored) return;
       restored = true;
+      clearUserCache();
       userRepository.loadByDiscordId = originals.loadByDiscordId;
       userRepository.loadContextReferenceCandidates = originals.loadContextReferenceCandidates;
       userRepository.register = originals.register;
       userRepository.isBlacklisted = originals.isBlacklisted;
       userRepository.getPrivacyLevel = originals.getPrivacyLevel;
+      userNamingRepository.loadPreferences = originals.loadNamingPreferences;
       personalMemoryRepository.loadForUserLineage = originals.loadForUserLineage;
       serverScheduleRepository.getPendingRemindersForUser = originals.getPendingRemindersForUser;
+      messageProxyRepository.loadContextReferenceIdentities = originals.loadContextReferenceIdentities;
     },
   };
 }
@@ -420,6 +442,7 @@ export async function buildPreparedParticipantContext(
     requestScope?: ParticipantRequestScope;
     responderPersonaIds?: ReadonlySet<number>;
     onPrepared?: (prepared: PreparedParticipantContext) => void;
+    onItems?: (items: StructuredContextItem[]) => void;
   } = {},
 ): Promise<StructuredContextItem> {
   const activePersona = options.activePersona ?? fixture.activePersona;
@@ -444,7 +467,7 @@ export async function buildPreparedParticipantContext(
   });
   options.onPrepared?.(prepared);
 
-  const item = await buildParticipantContextItem({
+  const items = await buildParticipantContextItems({
     client: fixture.client,
     guildId: PARTICIPANT_FIXTURE_IDS.guild,
     channelName: "general",
@@ -463,6 +486,7 @@ export async function buildPreparedParticipantContext(
     publicPersonaProfiles: prepared.publicPersonaProfiles,
     preloadedReferencedUserRows: prepared.referencedUserRows,
     referencedUserIds: prepared.referencedUserIds,
+    requestScope: prepared.requestScope,
     toolPromptMacroResolver: { expand: async (text) => text },
     conversationCorpus: fixture.history
       .map((message) => message.content ?? "")
@@ -470,6 +494,8 @@ export async function buildPreparedParticipantContext(
       .toLowerCase(),
     convertMentions: async (text) => text,
   });
+  options.onItems?.(items);
+  const [item] = items;
   if (!item) throw new Error("Participant baseline fixture unexpectedly rendered no context item");
 
   const [itemWithPersonaAliases] = attachPersonaMentionMapToContextItems(

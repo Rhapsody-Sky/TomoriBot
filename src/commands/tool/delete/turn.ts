@@ -1,6 +1,7 @@
+import { verifyMessageWebhook } from "@/utils/chat/webhookIdentity";
 import type { AnyThreadChannel, ChatInputCommandInteraction, Client, Message } from "discord.js";
-import { BaseGuildTextChannel, EmbedBuilder, MessageFlags, type SlashCommandSubcommandBuilder } from "discord.js";
-import { tomoriChat, suppressNextSelfReply } from "@/events/messageCreate/tomoriChat";
+import { BaseGuildTextChannel, MessageFlags, type SlashCommandSubcommandBuilder } from "discord.js";
+import { tomoriChat } from "@/events/messageCreate/tomoriChat";
 import type { TomoriState, UserRow } from "@/types/db/schema";
 import { getCachedAllPersonas, getCachedMainPersona } from "@/utils/cache/tomoriStateCache";
 import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
@@ -184,6 +185,7 @@ export async function execute(
       // so index 0 = oldest and the last index = newest
       const messages: Message[] = [...fetched.values()].reverse();
 
+      await Promise.all(messages.map(verifyMessageWebhook));
       const detectedTurn = findLastPersonaTurnBlock({
         messages,
         allPersonas,
@@ -410,9 +412,6 @@ export async function execute(
           }
 
           if (lastMessage) {
-            // Prevent the self-reply suppression guard from blocking this trigger
-            suppressNextSelfReply(channel.id);
-
             // Fire-and-forget, so do not await so the command interaction resolves
             void tomoriChat({
               client,
@@ -427,6 +426,7 @@ export async function execute(
               textQuotaSource: "user",
               textQuotaTriggerKey: interaction.id,
               textQuotaUserDiscId: interaction.user.id,
+              suppressSelfReply: true,
               manualTriggerInvoker: {
                 userDiscId: interaction.user.id,
                 username: interaction.user.username,
@@ -488,8 +488,8 @@ export async function execute(
             await message.replace(
               buildPersonaWorkflowNotice({
                 locale,
-                titleKey: "general.errors.unexpected_title",
-                descriptionKey: "general.errors.unexpected_description",
+                titleKey: "general.errors.unknown_error_title",
+                descriptionKey: "general.errors.unknown_error_description",
                 color: ColorCode.ERROR,
               }),
             );
@@ -502,14 +502,7 @@ export async function execute(
     }
 
     await performDeletion(null, async (status) => {
-      await interaction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle(localizer(locale, status.titleKey))
-            .setDescription(localizer(locale, status.descriptionKey, status.descriptionVars))
-            .setColor(status.color),
-        ],
-      });
+      await replyInfoEmbed(interaction, locale, status);
     });
   } catch (error) {
     log.error("[deleteTurn] Unexpected error during turn deletion", error, {
@@ -523,13 +516,10 @@ export async function execute(
     if (personaWorkflowStarted) return;
 
     try {
-      await interaction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle(localizer(locale, "general.errors.unexpected_title"))
-            .setDescription(localizer(locale, "general.errors.unexpected_description"))
-            .setColor(ColorCode.ERROR),
-        ],
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "general.errors.unknown_error_title",
+        descriptionKey: "general.errors.unknown_error_description",
+        color: ColorCode.ERROR,
       });
     } catch {
       // Interaction may have already expired, so nothing we can do

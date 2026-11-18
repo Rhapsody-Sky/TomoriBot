@@ -1,3 +1,4 @@
+import { isManagedWebhookMessage } from "@/utils/chat/webhookIdentity";
 /**
  * Formats Discord messages into a text representation suitable for LLM fact extraction.
  * Also detects which bot personas participated (via webhook author matching)
@@ -62,7 +63,8 @@ function resolveMentions(content: string, msg: Message): string {
   resolved = resolved.replace(/<@!?(\d+)>/g, (_match, userId: string) => {
     const member = msg.guild?.members.cache.get(userId);
     if (member) return `@${member.displayName}`;
-    const user = msg.client.users.cache.get(userId);
+    // Read the message's own mentions first because the orphan-user sweeper evicts non-members from the client cache.
+    const user = msg.mentions.users.get(userId) ?? msg.client.users.cache.get(userId);
     if (user) return `@${user.username}`;
     return `@UnknownUser`;
   });
@@ -143,7 +145,7 @@ export function formatMessagesForExtraction(
       if (cachedRenderedTable) continue;
 
       if (isAudioAttachment(attachment)) {
-        // Check the in-memory cache first, so avoids re-running STT on history audio.
+        // A cached transcript avoids re-running STT on history audio.
         // "tts" source = Tomori's own voice message; caption text is already
         // included in msg.content (sent alongside the attachment), so we just
         // skip the [Attachment] tag to avoid duplication.
@@ -182,7 +184,8 @@ export function formatMessagesForExtraction(
     //    Strip "[Matrix|@user:host] " prefix from Matrix bridge webhook messages
     //    so TomoriBot sees just the display name (e.g., "Neko Neechan") in context
     const rawAuthorName = msg.member?.displayName ?? msg.author?.username ?? "Unknown";
-    const authorName = stripBridgePrefix(rawAuthorName);
+    const authorName =
+      msg.webhookId && !isManagedWebhookMessage(msg) ? rawAuthorName : stripBridgePrefix(rawAuthorName);
 
     lines.push(`[${timestamp}] ${authorName}: ${content}`);
 
@@ -190,7 +193,7 @@ export function formatMessagesForExtraction(
     //    Decorated names carry the persona in either part: flipped copied
     //    identities ("impersonated (SourcePersona)") put it inside the parens,
     //    legacy decorations ("SourcePersona (modifier)") put it first.
-    if (msg.webhookId && msg.author) {
+    if (isManagedWebhookMessage(msg) && msg.author) {
       // Matrix bridge messages also arrive as webhooks; a bridged user whose display name
       // happens to match a persona nickname must not register as that persona.
       if (isMatrixBridgeWebhookUsername(msg.author.username)) continue;

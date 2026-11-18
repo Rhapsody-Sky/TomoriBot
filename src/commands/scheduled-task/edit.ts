@@ -19,12 +19,17 @@ import { replyComponentsV2Status } from "@/utils/discord/ui/statusComponents";
 import { replyInfoEmbed } from "@/utils/discord/ui/embeds";
 import { getCachedTomoriState } from "@/utils/cache/tomoriStateCache";
 import { serverScheduleRepository } from "@/utils/db/repositories";
-import { isBridgeUserId } from "@/utils/bridges";
 import { validateFutureTime } from "@/utils/text/processors/timeUtils";
 import { formatTimeWithOffset, formatUTCOffset } from "@/utils/text/timezoneHelper";
+import {
+  formatReminderRepetition,
+  getReminderRepetition,
+  type ReminderRepetition,
+} from "@/utils/text/processors/reminderRepetition";
 import type { SelectOption } from "@/types/discord/modal";
 import type { ErrorContext, TomoriState, UserRow } from "@/types/db/schema";
 import type { ReminderSelectionRow } from "@/utils/db/repositories";
+import { buildReminderOptionParts } from "@/utils/discord/reminderSelectOptions";
 
 const SELECT_MODAL_CUSTOM_ID = "scheduled_task_edit_select_modal";
 const EDIT_MODAL_CUSTOM_ID = "scheduled_task_edit_value_modal";
@@ -32,6 +37,7 @@ const REMINDER_SELECT_ID = "reminder_select";
 const PURPOSE_INPUT_ID = "reminder_purpose_input";
 const TIME_INPUT_ID = "reminder_time_input";
 const INTERVAL_INPUT_ID = "reminder_interval_input";
+const INTERVAL_UNIT_ID = "reminder_interval_unit_radio";
 const REMINDER_FOR_ME_ID = "reminder_for_me_checkbox";
 const REMINDER_PURPOSE_MAX_LENGTH = 4000;
 
@@ -124,6 +130,16 @@ function buildEditedReminderTime(currentReminderTime: Date, timeInput: string, o
   }
 
   const currentParts = getLocalDateParts(currentReminderTime, offsetHours);
+  // Relative-time reminders carry seconds the HH:MM field cannot show, so an untouched field keeps the exact instant.
+  if (
+    !parsedTime.addDay &&
+    parsedTime.hour === currentParts.hour &&
+    parsedTime.minute === currentParts.minute &&
+    validateFutureTime(currentReminderTime)
+  ) {
+    return currentReminderTime;
+  }
+
   let editedTime = localDatePartsToUtcDate(
     {
       year: currentParts.year,
@@ -142,7 +158,7 @@ function buildEditedReminderTime(currentReminderTime: Date, timeInput: string, o
   return editedTime;
 }
 
-function parseIntervalHours(input: string): number | null {
+function parseIntervalCount(input: string): number | null {
   const trimmed = input.trim();
   if (!/^\d+$/.test(trimmed)) {
     return null;
@@ -160,27 +176,27 @@ function formatReminderDetails(
 ): {
   reminder_purpose: string;
   reminder_time: string;
-  repetition_interval_hours: string;
+  repeat_text: string;
   reminder_type: string;
   target_user: string;
   target_channel: string;
 } {
-  const reminderTime = formatTimeWithOffset(new Date(reminder.reminder_time), timezoneOffset, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const repetitionInterval =
-    typeof reminder.repetition_interval_hours === "number" && reminder.repetition_interval_hours >= 1
-      ? `${reminder.repetition_interval_hours}`
-      : "0";
-
+  const reminderTime = formatTimeWithOffset(
+    new Date(reminder.reminder_time),
+    timezoneOffset,
+    {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    },
+    locale,
+  );
   return {
     reminder_purpose: formatReminderPreview(reminder.reminder_purpose, 240),
     reminder_time: `${reminderTime} (${formatUTCOffset(timezoneOffset)})`,
-    repetition_interval_hours: repetitionInterval,
+    repeat_text: formatReminderRepetition(locale, getReminderRepetition(reminder)),
     reminder_type: reminder.self_reminder
       ? localizer(locale, "commands.scheduled-task.edit.type_task")
       : localizer(locale, "commands.scheduled-task.edit.type_reminder"),
@@ -195,7 +211,7 @@ async function performReminderEdit(
   reminderToEdit: ReminderSelectionRow,
   newPurpose: string,
   newReminderTime: Date,
-  newIntervalHours: number,
+  newRepetition: ReminderRepetition,
   isReminderForInvoker: boolean,
   client: Client,
   tomoriState: TomoriState,
@@ -217,7 +233,7 @@ async function performReminderEdit(
 
   const targetUserId = isReminderForInvoker ? userData.user_disc_id : (botUserId as string);
   const targetUserNickname = isReminderForInvoker
-    ? userData.user_nickname
+    ? (userData.user_nickname ?? replyInteraction.user.displayName)
     : (tomoriState.persona_nickname ?? client.user?.username ?? "Tomori");
 
   const updatedReminder = await serverScheduleRepository.updateReminder({
@@ -225,7 +241,7 @@ async function performReminderEdit(
     server_id: tomoriState.server_id,
     reminder_purpose: newPurpose,
     reminder_time: newReminderTime,
-    repetition_interval_hours: newIntervalHours > 0 ? newIntervalHours : null,
+    repetition: newRepetition,
     self_reminder: !isReminderForInvoker,
     user_discord_id: targetUserId,
     user_nickname: targetUserNickname,
@@ -246,7 +262,7 @@ async function performReminderEdit(
   if (!suppressSuccessReply) {
     await replyInfoEmbed(replyInteraction, locale, {
       titleKey: "commands.scheduled-task.edit.success_title",
-      descriptionKey: "commands.scheduled-task.edit.success_description",
+      descriptionKey: "commands.scheduled-task.edit.success_details",
       descriptionVars: {
         reminder_purpose: formatReminderPreview(newPurpose, 96),
       },
@@ -309,46 +325,27 @@ export async function execute(
       return;
     }
 
-    // Build select options: persona_id NULL means the main persona owns the reminder
     const reminderSelectOptions: SelectOption[] = reminders.map((reminder, index) => {
-      const personaName = reminder.persona_nickname ?? state.persona_nickname;
-      const formattedTime = formatTimeWithOffset(new Date(reminder.reminder_time), timezoneOffset, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
+      const parts = buildReminderOptionParts({
+        reminder,
+        state,
+        locale,
+        timezoneOffset,
+        hasManagePermission,
+        viewerUserId: userData.user_id,
+        repeatTextKey: "commands.scheduled-task.edit.select_repeat_text",
+        repeatMonthsTextKey: "commands.scheduled-task.edit.select_repeat_months_text",
+        managerCreatedByKey: "commands.scheduled-task.edit.select_manager_created_by_text",
       });
-      const repeatText =
-        typeof reminder.repetition_interval_hours === "number" && reminder.repetition_interval_hours >= 1
-          ? localizer(locale, "commands.scheduled-task.edit.select_repeat_text", {
-              hours: reminder.repetition_interval_hours,
-            })
-          : "";
       const typeText = reminder.self_reminder
         ? localizer(locale, "commands.scheduled-task.edit.select_type_task")
         : localizer(locale, "commands.scheduled-task.edit.select_type_reminder", {
             user_nickname: reminder.user_nickname,
           });
-      const isMatrixReminder = reminder.created_by_user_id === null && isBridgeUserId(reminder.user_discord_id);
-      const creatorName = isMatrixReminder
-        ? `${reminder.user_nickname} (Matrix)`
-        : (reminder.created_by_nickname ??
-          (reminder.created_by_user_id ? `user #${reminder.created_by_user_id}` : "unknown"));
-      const managerCreatedByText =
-        hasManagePermission && reminder.created_by_user_id !== userData.user_id
-          ? localizer(locale, "commands.scheduled-task.edit.select_manager_created_by_text", {
-              creator_name: creatorName,
-            })
-          : "";
       const description = localizer(locale, "commands.scheduled-task.edit.select_option_description", {
-        persona_name: personaName,
-        reminder_time: formattedTime,
-        timezone: formatUTCOffset(timezoneOffset),
+        ...parts,
         target_channel: getChannelDisplay(interaction, reminder.channel_disc_id),
         reminder_type: typeText,
-        repeat_text: repeatText,
-        manager_created_by_text: managerCreatedByText,
       });
 
       return {
@@ -400,7 +397,7 @@ export async function execute(
     // the one ephemeral message for this whole flow, so success will update it in-place.
     const confirmationResult = await promptWithUnacknowledgedConfirmation(selectModalInteraction, locale, {
       embedTitleKey: "commands.scheduled-task.edit.confirm_title",
-      embedDescriptionKey: "commands.scheduled-task.edit.confirm_description",
+      embedDescriptionKey: "commands.scheduled-task.edit.confirm_details",
       embedDescriptionVars: formatReminderDetails(interaction, selectedReminder, timezoneOffset, locale),
       embedColor: ColorCode.INFO,
       useComponentsV2: true,
@@ -416,6 +413,7 @@ export async function execute(
 
     const reminderForInvoker =
       selectedReminder.self_reminder !== true && selectedReminder.user_discord_id === userData.user_disc_id;
+    const currentRepetition = getReminderRepetition(selectedReminder);
     const editModalResult = await promptWithRawModal(confirmationResult.interaction, locale, {
       modalCustomId: EDIT_MODAL_CUSTOM_ID,
       modalTitleKey: "commands.scheduled-task.edit.modal_title",
@@ -448,7 +446,25 @@ export async function execute(
           style: TextInputStyle.Short,
           required: true,
           maxLength: 6,
-          value: (selectedReminder.repetition_interval_hours ?? 0).toString(),
+          value: (currentRepetition?.interval ?? 0).toString(),
+        },
+        {
+          kind: "radioGroup",
+          customId: INTERVAL_UNIT_ID,
+          labelKey: "commands.scheduled-task.edit.interval_unit_label",
+          required: true,
+          options: [
+            {
+              label: localizer(locale, "commands.scheduled-task.edit.interval_unit_hours_option"),
+              value: "hours",
+              default: currentRepetition?.unit !== "months",
+            },
+            {
+              label: localizer(locale, "commands.scheduled-task.edit.interval_unit_months_option"),
+              value: "months",
+              default: currentRepetition?.unit === "months",
+            },
+          ],
         },
         {
           kind: "checkbox",
@@ -474,6 +490,7 @@ export async function execute(
     const editedPurpose = editModalResult.values?.[PURPOSE_INPUT_ID]?.trim() ?? "";
     const editedTimeInput = editModalResult.values?.[TIME_INPUT_ID]?.trim() ?? "";
     const editedIntervalInput = editModalResult.values?.[INTERVAL_INPUT_ID]?.trim() ?? "";
+    const editedIntervalUnit = editModalResult.values?.[INTERVAL_UNIT_ID] === "months" ? "months" : "hours";
     const editedReminderForInvoker = editModalResult.values?.[REMINDER_FOR_ME_ID] === "true";
 
     if (!editedPurpose) {
@@ -499,8 +516,8 @@ export async function execute(
       return;
     }
 
-    const editedIntervalHours = parseIntervalHours(editedIntervalInput);
-    if (editedIntervalHours === null) {
+    const editedIntervalCount = parseIntervalCount(editedIntervalInput);
+    if (editedIntervalCount === null) {
       await replyInfoEmbed(editModalInteraction, locale, {
         titleKey: "commands.scheduled-task.edit.invalid_interval_title",
         descriptionKey: "commands.scheduled-task.edit.invalid_interval_description",
@@ -508,12 +525,14 @@ export async function execute(
       });
       return;
     }
+    const editedRepetition: ReminderRepetition =
+      editedIntervalCount > 0 ? { unit: editedIntervalUnit, interval: editedIntervalCount } : null;
 
-    const currentIntervalHours = selectedReminder.repetition_interval_hours ?? 0;
     const noChanges =
       editedPurpose === selectedReminder.reminder_purpose.trim() &&
       editedReminderTime.getTime() === new Date(selectedReminder.reminder_time).getTime() &&
-      editedIntervalHours === currentIntervalHours &&
+      editedRepetition?.unit === currentRepetition?.unit &&
+      editedRepetition?.interval === currentRepetition?.interval &&
       editedReminderForInvoker === reminderForInvoker;
 
     if (noChanges) {
@@ -529,7 +548,7 @@ export async function execute(
       selectedReminder,
       editedPurpose,
       editedReminderTime,
-      editedIntervalHours,
+      editedRepetition,
       editedReminderForInvoker,
       client,
       tomoriState,
@@ -545,19 +564,24 @@ export async function execute(
 
     const updatedDetails = {
       reminder_purpose: formatReminderPreview(editedPurpose, 240),
-      reminder_time: `${formatTimeWithOffset(editedReminderTime, timezoneOffset, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      })} (${formatUTCOffset(timezoneOffset)})`,
-      repetition_interval_hours: editedIntervalHours.toString(),
+      reminder_time: `${formatTimeWithOffset(
+        editedReminderTime,
+        timezoneOffset,
+        {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        },
+        locale,
+      )} (${formatUTCOffset(timezoneOffset)})`,
+      repeat_text: formatReminderRepetition(locale, editedRepetition),
       reminder_type: editedReminderForInvoker
         ? localizer(locale, "commands.scheduled-task.edit.type_reminder")
         : localizer(locale, "commands.scheduled-task.edit.type_task"),
       target_user: editedReminderForInvoker
-        ? userData.user_nickname
+        ? (userData.user_nickname ?? interaction.user.displayName)
         : localizer(locale, "commands.scheduled-task.edit.target_none"),
       target_channel: getChannelDisplay(interaction, selectedReminder.channel_disc_id),
     };
@@ -569,7 +593,7 @@ export async function execute(
       editModalInteraction,
       locale,
       "commands.scheduled-task.edit.success_title",
-      "commands.scheduled-task.edit.success_description",
+      "commands.scheduled-task.edit.success_details",
       ColorCode.SUCCESS,
       updatedDetails,
     );

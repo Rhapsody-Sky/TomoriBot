@@ -14,34 +14,24 @@
  */
 
 import { sql } from "@/utils/db/client";
+import { invalidateNovelAISubscription } from "@/utils/cache/novelaiSubscriptionCache";
 import { log } from "../misc/logger";
 import { encryptApiKey, decryptApiKey } from "./crypto";
-import {
-  type ApiKeyRotationRow,
-  type ApiKeyRotationErrorType,
-  type TomoriState,
-  apiKeyRotationSchema,
-} from "@/types/db/schema";
+import { storedCredentialUsageContext } from "@/utils/security/apiKeyRetention";
+import type { ProviderUsageContext } from "@/utils/provider/providerUsage";
+import { type ApiKeyRotationErrorType, type TomoriState, apiKeyRotationSchema } from "@/types/db/schema";
 
 /** Cooldown duration for rate limit errors (429) in milliseconds */
-const RATE_LIMIT_COOLDOWN_MS = (() => {
-  const parsed = Number.parseInt(process.env.KEY_ROTATION_RATE_LIMIT_COOLDOWN_MS || "60000", 10);
-  return Number.isFinite(parsed) ? Math.max(1000, parsed) : 60000;
-})();
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
 
 /** Cooldown duration for other API errors (401, 403, etc.) in milliseconds */
-const API_ERROR_COOLDOWN_MS = (() => {
-  const parsed = Number.parseInt(process.env.KEY_ROTATION_ERROR_COOLDOWN_MS || "300000", 10);
-  return Number.isFinite(parsed) ? Math.max(1000, parsed) : 300000;
-})();
+const API_ERROR_COOLDOWN_MS = 5 * 60_000;
 
 /** Maximum number of key attempts per request before giving up */
 export const MAX_KEY_ATTEMPTS = 3;
 
-/**
- * Result of selecting an API key for use
- */
 export interface SelectedKeyResult {
+  usageContext?: ProviderUsageContext;
   /** The decrypted API key ready for use */
   apiKey: string;
   /** The rotation_key_id to use for recording success/error (null for main key without pointer) */
@@ -138,25 +128,13 @@ export async function selectApiKey(
         continue;
       }
 
-      // Decrypt and return this key
-      let decryptedKey: string;
-
-      if (key.is_main_key_pointer) {
-        // Main key pointer: decrypt from the assembled server config api_key
-        if (!tomoriState.config.api_key) {
-          log.warn(`Main key pointer exists but server config api_key is null for server ${serverId}`);
-          continue;
-        }
-        const keyVersion = tomoriState.config.key_version || 1;
-        decryptedKey = await decryptApiKey(tomoriState.config.api_key, keyVersion);
-      } else {
-        // Regular rotation key: decrypt from row's api_key
-        if (!key.api_key) {
-          log.warn(`Rotation key ${key.rotation_key_id} has null api_key for server ${serverId}`);
-          continue;
-        }
-        decryptedKey = await decryptApiKey(key.api_key, key.key_version);
+      const ciphertext = key.is_main_key_pointer ? tomoriState.config.api_key : key.api_key;
+      if (!ciphertext) {
+        log.warn(`Rotation key ${key.rotation_key_id} has no stored credential on server ${serverId}`);
+        continue;
       }
+      const keyVersion = key.is_main_key_pointer ? tomoriState.config.key_version || 1 : key.key_version;
+      const decryptedKey = await decryptApiKey(ciphertext, keyVersion);
 
       if (!decryptedKey) {
         log.warn(`Failed to decrypt rotation key ${key.rotation_key_id} for server ${serverId}`);
@@ -169,6 +147,7 @@ export async function selectApiKey(
 
       return {
         apiKey: decryptedKey,
+        usageContext: provider === "vertex" ? undefined : await storedCredentialUsageContext(ciphertext, decryptedKey),
         rotationKeyId: key.rotation_key_id ?? null,
         isMainKey: key.is_main_key_pointer,
       };
@@ -333,7 +312,9 @@ export async function addRotationKey(serverId: number, provider: string, apiKey:
   try {
     const existingPointer = await sql`
       SELECT rotation_key_id FROM api_key_rotation
-      WHERE server_id = ${serverId} AND is_main_key_pointer = true
+      WHERE server_id = ${serverId}
+        AND provider = ${normalizedProvider}
+        AND is_main_key_pointer = true
       LIMIT 1
     `;
 
@@ -371,33 +352,12 @@ export async function addRotationKey(serverId: number, provider: string, apiKey:
       `;
     }
 
+    if (keyId && normalizedProvider === "novelai") invalidateNovelAISubscription(apiKey);
     log.success(`Added rotation key for server ${serverId} (provider: ${normalizedProvider})`);
     return true;
   } catch (error) {
     log.error(`Error adding rotation key for server ${serverId}:`, error);
     return false;
-  }
-}
-
-/**
- * Purges all rotation keys for a server.
- * This includes the main key pointer and all additional rotation keys.
- * Runtime state rows cascade-delete automatically via FK ON DELETE CASCADE.
- *
- */
-export async function purgeRotationKeys(serverId: number): Promise<number> {
-  try {
-    const result = await sql`
-      DELETE FROM api_key_rotation
-      WHERE server_id = ${serverId}
-    `;
-
-    const deletedCount = result.count || 0;
-    log.success(`Purged ${deletedCount} rotation key(s) for server ${serverId}`);
-    return deletedCount;
-  } catch (error) {
-    log.error(`Error purging rotation keys for server ${serverId}:`, error);
-    return 0;
   }
 }
 
@@ -427,84 +387,18 @@ export async function purgeRotationKeysForProvider(serverId: number, provider: s
   }
 }
 
-/**
- * Gets the count of rotation keys for a server (excluding main key pointer).
- *
- * @returns The count of additional rotation keys (not including main key pointer)
- */
-export async function getRotationKeyCount(serverId: number): Promise<number> {
-  try {
-    const result = await sql`
-      SELECT COUNT(*) as count FROM api_key_rotation
-      WHERE server_id = ${serverId} AND is_main_key_pointer = false
-    `;
-
-    return Number(result[0]?.count || 0);
-  } catch (error) {
-    log.error(`Error counting rotation keys for server ${serverId}:`, error);
-    return 0;
-  }
-}
-
-/**
- * Gets all rotation keys for a server (for loading into TomoriState).
- * JOINs runtime state so the returned rows include usage/error telemetry.
- *
- * @returns Array of validated ApiKeyRotationRow objects
- */
-export async function loadRotationKeys(serverId: number): Promise<ApiKeyRotationRow[]> {
-  try {
-    const rows = await sql`
-      SELECT
-        akr.rotation_key_id, akr.server_id, akr.provider, akr.api_key, akr.key_version,
-        akr.is_main_key_pointer, akr.is_enabled, akr.created_at, akr.updated_at,
-        COALESCE(rs.usage_count, 0)  AS usage_count,
-        COALESCE(rs.error_count, 0)  AS error_count,
-        rs.last_used_at, rs.last_error_at, rs.last_error_type, rs.last_error_message
-      FROM api_key_rotation akr
-      LEFT JOIN api_key_rotation_runtime_state rs USING (rotation_key_id)
-      WHERE akr.server_id = ${serverId}
-      ORDER BY COALESCE(rs.usage_count, 0) ASC, akr.rotation_key_id ASC
-    `;
-
-    if (!rows || rows.length === 0) {
-      return [];
-    }
-
-    const validatedKeys: ApiKeyRotationRow[] = [];
-    for (const row of rows) {
-      const parsed = apiKeyRotationSchema.safeParse(row);
-      if (parsed.success) {
-        validatedKeys.push(parsed.data);
-      } else {
-        const errorDetails = JSON.stringify(parsed.error.flatten(), null, 2);
-        log.warn(`Invalid rotation key row for server ${serverId}:\n${errorDetails}`);
-      }
-    }
-
-    return validatedKeys;
-  } catch (error) {
-    log.error(`Error loading rotation keys for server ${serverId}:`, error);
-    return [];
-  }
-}
-
-/**
- * Checks if API key rotation is active for a server.
- * Rotation is active when there are 2+ keys in the pool (main pointer + at least 1 rotation key).
- *
- * @returns True if rotation is active
- */
-export async function isRotationActive(serverId: number): Promise<boolean> {
+/** Returns the additional-key count for one provider pool. */
+export async function getRotationKeyCountForProvider(serverId: number, provider: string): Promise<number> {
   try {
     const result = await sql`
       SELECT COUNT(*) as count FROM api_key_rotation
       WHERE server_id = ${serverId}
+        AND provider = ${provider.toLowerCase()}
+        AND is_main_key_pointer = false
     `;
-
-    return Number(result[0]?.count || 0) >= 2;
+    return Number(result[0]?.count || 0);
   } catch (error) {
-    log.error(`Error checking rotation status for server ${serverId}:`, error);
-    return false;
+    log.error(`Error counting rotation keys for server ${serverId}, provider ${provider}:`, error);
+    return 0;
   }
 }

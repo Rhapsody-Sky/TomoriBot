@@ -1,7 +1,8 @@
+import { ContextItemTag, type StructuredContextItem } from "@/types/misc/context";
 import { describe, expect, it } from "bun:test";
 import type { TomoriState } from "@/types/db/schema";
 import type { ToolContext } from "@/types/tool/interfaces";
-import { resolveUserTarget } from "@/utils/discord/targetResolver";
+import { resolveIdentityTarget, resolveUserTarget } from "@/utils/discord/targetResolver";
 import {
   buildPreparedParticipantContext,
   createParticipantContextFixture,
@@ -72,27 +73,42 @@ describe("participant adversarial review regressions", () => {
         physical_appearance_tags: ["red hair"],
       } as TomoriState;
       fixture.personas.push(referencedPersona);
+      const referencedPersonaId = referencedPersona.persona_id;
+      if (referencedPersonaId === undefined) throw new Error("Fixture persona is missing its persona_id");
 
+      let renderedItems: StructuredContextItem[] = [];
       const item = await buildPreparedParticipantContext(fixture, {
-        responderPersonaIds: new Set([referencedPersona.persona_id]),
+        onItems: (items) => {
+          renderedItems = items;
+        },
+        responderPersonaIds: new Set([referencedPersonaId]),
       });
       const text = participantText(item);
       const target = item.conversationUsers?.find((candidate) => candidate.targetId === "persona:9");
 
-      expect(text).toContain("Kiyo\n- Kiyo's Physical Appearance: red hair\n- Status: Online or status unknown");
+      expect(text).toContain(`${referencedPersona.persona_nickname}\n`);
+      const statusItem = renderedItems.find(
+        (candidate) => candidate.metadataTag === ContextItemTag.KNOWLEDGE_USER_STATUS,
+      );
+      if (!statusItem) throw new Error("Referenced persona fixture lost its presence item");
+      expect(
+        participantText(statusItem)
+          .split("\n")
+          .some((line) => line.startsWith(`${referencedPersona.persona_nickname}: `)),
+      ).toBe(true);
       expect(target).toMatchObject({
         targetId: "persona:9",
         displayLabel: "Kiyo",
         aliases: ["Kiyo"],
         mentionable: false,
       });
-      await expect(
-        resolveUserTarget("Kiyo", { contextItems: [item] } as unknown as ToolContext),
-      ).resolves.toMatchObject({
+      const context = { contextItems: [item] } as unknown as ToolContext;
+      await expect(resolveIdentityTarget("Kiyo", context, fixture.personas)).resolves.toMatchObject({
         status: "resolved",
-        targetId: "persona:9",
-        source: "conversation",
+        targetType: "persona",
+        persona: { persona_id: referencedPersonaId },
       });
+      await expect(resolveUserTarget("Kiyo", context)).resolves.toMatchObject({ status: "not_found" });
     } finally {
       fixture.restoreRepositories();
     }
@@ -125,7 +141,7 @@ describe("participant adversarial review regressions", () => {
 
       const text = participantText(await buildPreparedParticipantContext(fixture));
 
-      expect(text).toContain("Alice Saved (Mention: @{Alice Saved}");
+      expect(text).toContain("Alice Saved (Mention: @{Alice Guild}");
       expect(text).toContain("- Alice Saved (sprite)'s Physical Appearance: silver hair, violet eyes");
       expect(text).not.toContain("- Ren's Physical Appearance: silver hair, violet eyes");
     } finally {

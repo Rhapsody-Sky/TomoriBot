@@ -6,7 +6,9 @@
  * and GoogleStreamAdapter for better code organization and maintainability.
  */
 
-import { GoogleGenAI, type HarmBlockThreshold, type HarmCategory } from "@google/genai";
+import { pickHumanizerSettings } from "@/constants/humanizer";
+import { ApiError, GoogleGenAI, type HarmBlockThreshold, type HarmCategory } from "@google/genai";
+import { MODEL_LOOKUP_TIMEOUT_MS, reportModelLookupFailure } from "@/utils/provider/modelCatalogLookup";
 import type {
   BaseGuildTextChannel,
   BaseGuildVoiceChannel,
@@ -41,6 +43,9 @@ import type {
   ProviderStructuredJsonRequest,
   StructuredOutputResult,
   SupportsConversationCompaction,
+  SupportsDecisions,
+  ProviderDecisionRequest,
+  DecisionResult,
   SupportsEmbeddings,
   SupportsPresetGeneration,
   SupportsStructuredOutput,
@@ -56,13 +61,15 @@ import {
 } from "../../types/provider/interfaces";
 import { getGoogleToolAdapter } from "./googleToolAdapter";
 import { callGoogleStructuredJSON } from "./googleStructuredOutput";
+import { callGoogleDecisions } from "@/providers/google/googleDecisions";
 import { getCachedDefaultLLM, isLLMCacheReady } from "../../utils/cache/llmCache";
 import { llmModelRepo } from "@/utils/db/repositories";
 import { googleProviderInfo } from "./providerInfo";
-import { getActiveTemperature, isParamDisabled } from "@/utils/provider/samplingControl";
-import { DEFAULT_MAX_OUTPUT_TOKENS, resolveMaxOutputTokens } from "@/utils/provider/maxOutputTokens";
+import { getActiveTemperature, isParamDisabled, omitGeminiSampling } from "@/utils/provider/samplingControl";
+import { resolveRequestMaxOutputTokens } from "@/utils/provider/modelLimits";
 import { applyDeliberateToolAllowlist } from "@/utils/tools/deliberateToolMode";
 import { buildStreamContext } from "@/utils/provider/streamContext";
+import { resolveToolsEnabled } from "@/utils/tools/toolUseGate";
 
 /**
  * Gets the default Google Gemini model with a robust fallback chain:
@@ -218,23 +225,51 @@ function logSkippedGooglePenaltyParams(
   });
 }
 
-/**
- * Google Gemini provider implementation
- */
 export class GoogleProvider
   extends BaseLLMProvider
   implements
     LLMProvider,
+    SupportsDecisions,
     SupportsEmbeddings,
     SupportsStructuredOutput,
     SupportsPresetGeneration,
     SupportsConversationCompaction
 {
+  async callDecisions(request: ProviderDecisionRequest): Promise<DecisionResult> {
+    return await callGoogleDecisions(request);
+  }
+
   /**
    * Get provider information and capabilities
    */
   getInfo(): ProviderInfo {
     return googleProviderInfo;
+  }
+
+  async checkTextModel(apiKey: string, codename: string): Promise<boolean | null> {
+    return await this.lookUpModel(apiKey, codename);
+  }
+
+  async checkImageModel(apiKey: string, codename: string): Promise<boolean | null> {
+    return await this.lookUpModel(apiKey, codename);
+  }
+
+  private async lookUpModel(apiKey: string, codename: string): Promise<boolean | null> {
+    try {
+      await new GoogleGenAI({ apiKey, httpOptions: { timeout: MODEL_LOOKUP_TIMEOUT_MS } }).models.get({
+        model: codename,
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return false;
+      // Google answers a malformed name and an invalid key with the same 400 INVALID_ARGUMENT, so
+      // only the name-format message proves the model is absent.
+      if (error instanceof ApiError && error.status === 400 && error.message.includes("unexpected model name format")) {
+        return false;
+      }
+      await reportModelLookupFailure("google", error, apiKey);
+      return null;
+    }
   }
 
   /**
@@ -318,6 +353,8 @@ export class GoogleProvider
   }
 
   async generatePreset(request: ProviderPresetGenerationRequest): Promise<PresetGenerationResult> {
+    const defaultSearchModelName = request.params.useWebSearch ? await this.getDefaultModel() : undefined;
+
     return await generatePresetFromPrompt(
       request.apiKey,
       {
@@ -325,6 +362,8 @@ export class GoogleProvider
         modelName: request.tomoriState.llm.llm_codename,
       },
       request.locale,
+      undefined,
+      defaultSearchModelName,
     );
   }
 
@@ -346,6 +385,9 @@ export class GoogleProvider
     streamingContext?: StreamingContext,
   ): Promise<Array<Record<string, unknown>>> {
     try {
+      if (streamingContext) {
+        streamingContext.speechToolState ??= { userId: streamingContext.triggererUserId };
+      }
       const toolStateForContext: ToolStateForContext = {
         server_id: tomoriState.server_id.toString(),
         activePersonaHasElevenlabsVoice: Boolean(
@@ -354,7 +396,11 @@ export class GoogleProvider
             tomoriState.speech_voice_id?.trim(),
         ),
         activePersonaVoiceDesignPrompt: tomoriState.speech_voice_design_prompt?.trim() || null,
-        activePersonaVoiceName: tomoriState.speech_voice_name,
+        activePersonaVoiceSampleId: tomoriState.speech_voice_sample_id,
+        activePersonaVoiceId: tomoriState.speech_voice_id,
+        activePersonaVoiceSourcePriority: tomoriState.voice_source_priority,
+        speechToolState: streamingContext?.speechToolState,
+
         diffusion_model_id: tomoriState.config.diffusion_model_id,
         nai_diffusion_model_id: tomoriState.config.nai_diffusion_model_id,
         video_model_id: tomoriState.config.video_model_id,
@@ -367,6 +413,7 @@ export class GoogleProvider
           supports_structoutput: tomoriState.llm.supports_structoutput,
         },
         config: {
+          emoji_usage_enabled: tomoriState.config.emoji_usage_enabled,
           sticker_usage_enabled: tomoriState.config.sticker_usage_enabled,
           web_search_enabled: tomoriState.config.web_search_enabled,
           self_teaching_enabled: tomoriState.config.self_teaching_enabled,
@@ -375,13 +422,18 @@ export class GoogleProvider
           videogen_enabled: tomoriState.config.videogen_enabled,
           voice_message_enabled: tomoriState.config.voice_message_enabled,
           user_blocking_enabled: tomoriState.config.user_blocking_enabled,
+          user_info_updates_enabled: tomoriState.config.user_info_updates_enabled,
           thread_creation_enabled: tomoriState.config.thread_creation_enabled,
+          conditioning_interactions_enabled: tomoriState.config.conditioning_interactions_enabled,
+          dice_rolling_enabled: tomoriState.config.dice_rolling_enabled,
+          danbooru_enabled: tomoriState.config.danbooru_enabled,
         },
       };
 
       const {
         builtInTools: availableBuiltInTools,
         mcpFunctionNames: availableMcpFunctionNames,
+        mcpToolFamilies,
         totalCount,
       } = await getAvailableToolsWithMCP("google", toolStateForContext);
 
@@ -398,6 +450,7 @@ export class GoogleProvider
         providerLabel: "Google provider",
         builtInTools: finalBuiltInTools,
         mcpFunctionNames: finalMcpFunctionNames,
+        mcpToolFamilies,
         allowedToolNames: streamingContext?.deliberateToolAllowedNames,
       }));
 
@@ -422,7 +475,7 @@ export class GoogleProvider
   }
 
   /**
-   * Uses the robust fallback chain: cache > database > env > hardcoded
+   * Uses the cached database default with database and available-model fallbacks.
    * @returns Promise<string> - The default model codename
    */
   async getDefaultModel(): Promise<string> {
@@ -434,14 +487,8 @@ export class GoogleProvider
    * @returns Promise<GoogleProviderConfig> - Provider-specific configuration object
    */
   async createConfig(tomoriState: TomoriState, apiKey: string): Promise<GoogleProviderConfig> {
-    // Resolve max output tokens: user config takes priority, then env var, then hardcoded default.
-    // Shared with the context truncator (see resolveMaxOutputTokens) so the reserve and the request
-    // never drift. Google does not clamp to a model-reported ceiling here (no providerReportedMax).
-    const maxOutputTokens = resolveMaxOutputTokens({
-      configured: tomoriState.config.llm_max_output_tokens,
-      envRaw: process.env.GOOGLE_MAX_OUTPUT_TOKENS,
-      fallback: DEFAULT_MAX_OUTPUT_TOKENS,
-    });
+    // Shared with the context truncator so the reserve and the request never drift.
+    const maxOutputTokens = await resolveRequestMaxOutputTokens(tomoriState);
     const modelCodename = tomoriState.llm.llm_codename;
     const disabledParams = tomoriState.config.llm_disabled_params ?? [];
     const temperature = getActiveTemperature(tomoriState.config);
@@ -503,7 +550,7 @@ export class GoogleProvider
           threshold: "BLOCK_NONE",
         },
       ],
-      generationConfig: {
+      generationConfig: omitGeminiSampling(tomoriState.llm.llm_codename, {
         ...(temperature !== undefined && {
           temperature,
         }),
@@ -527,12 +574,12 @@ export class GoogleProvider
         }),
         maxOutputTokens,
         stopSequences: [],
-      },
+      }),
     };
 
     // Only attach tools for models that explicitly support function calling.
     // This prevents Google API 400 errors on models like gemma-3-27b-it.
-    if (tomoriState.llm.has_tools) {
+    if (resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
       config.tools = await this.getTools(tomoriState);
     }
 
@@ -592,7 +639,7 @@ export class GoogleProvider
         baseTypeSpeedMsPerChar: DISCORD_STREAMING_CONSTANTS.BASE_TYPE_SPEED_MS_PER_CHAR,
         maxTypingTimeMs: DISCORD_STREAMING_CONSTANTS.MAX_TYPING_TIME_MS,
         minVisibleTypingDurationMs: DISCORD_STREAMING_CONSTANTS.MIN_VISIBLE_TYPING_DURATION_MS,
-        humanizerDegree: tomoriState.config.humanizer_degree,
+        humanizer: pickHumanizerSettings(tomoriState.config),
         emojiUsageEnabled: tomoriState.config.emoji_usage_enabled,
         safetySettings: safetySettings.map((setting) => ({
           category: setting.category as HarmCategory,
@@ -612,11 +659,11 @@ export class GoogleProvider
         log.info(`GoogleProvider: Applied thinking config for model ${config.model}`);
       }
 
-      if (streamingContext && tomoriState.llm.has_tools) {
+      if (streamingContext && resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("GoogleProvider: Reloading tools with streaming context for context-aware availability");
         const contextAwareTools = await this.getTools(tomoriState, streamingContext);
         streamConfig.tools = contextAwareTools;
-      } else if (streamingContext && !tomoriState.llm.has_tools) {
+      } else if (streamingContext && !resolveToolsEnabled(tomoriState, tomoriState.llm.has_tools)) {
         log.info("GoogleProvider: Skipping context-aware tool reload - model doesn't support tools");
       }
 

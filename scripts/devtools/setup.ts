@@ -8,6 +8,7 @@ import { isPlaceholder, readEnvValues, seedFromExample, upsertEnvKeys } from "..
 import { ask, askSecret, confirm, isNonInteractiveMode, type MenuItem, selectMenu } from "../lib/prompt";
 import { type SetupContext, type SetupModule, getFullInstallModules } from "../setup/registry";
 import { log } from "../lib/cliLogger";
+import { type PrivateNetworkSetting, parsePrivateNetworkSetting } from "@/utils/security/remoteUrlSecurity";
 
 config({ quiet: true });
 
@@ -168,7 +169,9 @@ function buildContext(scan: PrereqScan): SetupContext {
 }
 
 function generateSecret(length = 32): string {
-  return randomBytes(Math.ceil((length * 3) / 4)).toString("base64url").slice(0, length);
+  return randomBytes(Math.ceil((length * 3) / 4))
+    .toString("base64url")
+    .slice(0, length);
 }
 
 function validateNonPlaceholder(label: string): (value: string) => string | null {
@@ -181,11 +184,13 @@ function validateNonPlaceholder(label: string): (value: string) => string | null
 }
 
 function getMissingRequiredEnvKeys(env: Record<string, string>): string[] {
-  return REQUIRED_ENV_KEYS.filter((key) => isPlaceholder(env[key]));
+  const missing = REQUIRED_ENV_KEYS.filter((key) => isPlaceholder(env[key]));
+  if (parsePrivateNetworkSetting(env.ALLOW_PRIVATE_NETWORK) === null) missing.push("ALLOW_PRIVATE_NETWORK");
+  return missing;
 }
 
 function quoteSqlIdentifier(value: string): string {
-  return `"${value.replace(/"/g, "\"\"")}"`;
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function quoteSqlLiteral(value: string): string {
@@ -194,12 +199,15 @@ function quoteSqlLiteral(value: string): string {
 
 function buildPostgresUrl(connection: PostgresConnection): string {
   const user = encodeURIComponent(connection.user);
-  const auth =
-    connection.password.trim().length > 0 ? `${user}:${encodeURIComponent(connection.password)}` : user;
+  const auth = connection.password.trim().length > 0 ? `${user}:${encodeURIComponent(connection.password)}` : user;
   return `postgresql://${auth}@${connection.host}:${connection.port}/${connection.database}`;
 }
 
-function buildProvisioningSql(appUser: string, appPassword: string, appDatabase: string): {
+function buildProvisioningSql(
+  appUser: string,
+  appPassword: string,
+  appDatabase: string,
+): {
   roleSql: string;
   databaseExistsSql: string;
   createDatabaseSql: string;
@@ -228,19 +236,20 @@ function printManualProvisioningSql(sql: ReturnType<typeof buildProvisioningSql>
   log.warn("TomoriBot cannot connect with these .env database credentials until this SQL has run successfully.");
 }
 
-async function runPsql(connection: PostgresConnection, sql: string, stdout: "inherit" | "pipe" = "inherit"): Promise<{
+async function runPsql(
+  connection: PostgresConnection,
+  sql: string,
+  stdout: "inherit" | "pipe" = "inherit",
+): Promise<{
   exitCode: number;
   output: string;
 }> {
   const outputArgs = stdout === "pipe" ? ["-t", "-A"] : [];
-  const proc = Bun.spawn(
-    ["psql", buildPostgresUrl(connection), "-v", "ON_ERROR_STOP=1", ...outputArgs, "-c", sql],
-    {
-      cwd: ROOT,
-      stdout,
-      stderr: "inherit",
-    },
-  );
+  const proc = Bun.spawn(["psql", buildPostgresUrl(connection), "-v", "ON_ERROR_STOP=1", ...outputArgs, "-c", sql], {
+    cwd: ROOT,
+    stdout,
+    stderr: "inherit",
+  });
   const exitCode = await proc.exited;
   const output = stdout === "pipe" ? await new Response(proc.stdout).text() : "";
   return { exitCode, output };
@@ -349,7 +358,10 @@ async function chooseEnvMode(envAlreadyExisted: boolean, env: Record<string, str
   return selected.id;
 }
 
-async function configureDiscordToken(env: Record<string, string>, mode: EnvConfigureMode): Promise<Record<string, string>> {
+async function configureDiscordToken(
+  env: Record<string, string>,
+  mode: EnvConfigureMode,
+): Promise<Record<string, string>> {
   if (mode === "keep" || (mode === "fill" && !isPlaceholder(env.DISCORD_TOKEN))) {
     return {};
   }
@@ -368,7 +380,10 @@ async function configureDiscordToken(env: Record<string, string>, mode: EnvConfi
   return { DISCORD_TOKEN: token.trim() };
 }
 
-async function configureCryptoSecret(env: Record<string, string>, mode: EnvConfigureMode): Promise<Record<string, string>> {
+async function configureCryptoSecret(
+  env: Record<string, string>,
+  mode: EnvConfigureMode,
+): Promise<Record<string, string>> {
   if (isPlaceholder(env.CRYPTO_SECRET)) {
     const secret = generateSecret();
     log.success("Generated a 32-character CRYPTO_SECRET.");
@@ -391,6 +406,46 @@ async function configureCryptoSecret(env: Record<string, string>, mode: EnvConfi
   const secret = generateSecret();
   log.success("Generated a new 32-character CRYPTO_SECRET.");
   return { CRYPTO_SECRET: secret };
+}
+
+async function configurePrivateNetwork(
+  env: Record<string, string>,
+  mode: EnvConfigureMode,
+): Promise<Record<string, string>> {
+  const currentRaw = env.ALLOW_PRIVATE_NETWORK?.trim() ?? "";
+  const current = parsePrivateNetworkSetting(currentRaw);
+  if (mode === "keep" || (mode === "fill" && current !== null)) {
+    return {};
+  }
+
+  log.info("Private networks let custom endpoints and MCP servers reach localhost and your LAN, so local models work.");
+  log.info(
+    "Any member who can add an endpoint can reach whatever you allow here. Posted images, files, and link previews never can. Public HTTPS endpoints, including tunnels to local models, work with every choice.",
+  );
+  const choices: MenuItem<PrivateNetworkSetting["mode"]>[] = [
+    { id: "all", label: "Allow all", description: "Only you or a trusted Discord community uses this bot." },
+    {
+      id: "listed",
+      label: "Allow only listed servers",
+      description: "Share your local servers, such as KoboldCPP or ComfyUI, with members you don't fully trust.",
+    },
+    { id: "none", label: "Block", description: "Untrusted members use this bot." },
+  ];
+  // The menu defaults to its first item, so the current choice leads and a `--yes` rerun never widens access.
+  choices.sort((a, b) => Number(b.id === current?.mode) - Number(a.id === current?.mode));
+  const selected = await selectMenu("Allow private networks?", choices);
+  if (selected.id !== "listed") {
+    return { ALLOW_PRIVATE_NETWORK: selected.id === "all" ? "true" : "false" };
+  }
+
+  const list = await ask("Servers to allow, as host:port separated by commas", {
+    default: current?.mode === "listed" ? currentRaw : "localhost:5001",
+    validate: (value) =>
+      parsePrivateNetworkSetting(value)?.mode === "listed"
+        ? null
+        : "Enter host:port entries separated by commas, such as localhost:5001,localhost:8188.",
+  });
+  return { ALLOW_PRIVATE_NETWORK: list.trim() };
 }
 
 function needsDatabaseConfig(env: Record<string, string>, mode: EnvConfigureMode): boolean {
@@ -465,7 +520,11 @@ async function configureDockerDatabase(env: Record<string, string>): Promise<Dat
   };
 }
 
-async function configureDatabase(env: Record<string, string>, mode: EnvConfigureMode, scan: PrereqScan): Promise<DatabaseConfigResult> {
+async function configureDatabase(
+  env: Record<string, string>,
+  mode: EnvConfigureMode,
+  scan: PrereqScan,
+): Promise<DatabaseConfigResult> {
   if (!needsDatabaseConfig(env, mode)) {
     return { values: {}, startDockerDatabase: false };
   }
@@ -500,7 +559,9 @@ async function configureDatabase(env: Record<string, string>, mode: EnvConfigure
   const selected = await selectMenu<"native" | "docker">("Database for local Bun setup", choices);
 
   if (selected.id === "docker") {
-    log.info("This uses Docker only for PostgreSQL. TomoriBot will still start with `bun run dev` or `bun run launch`.");
+    log.info(
+      "This uses Docker only for PostgreSQL. TomoriBot will still start with `bun run dev` or `bun run launch`.",
+    );
     return configureDockerDatabase(env);
   }
 
@@ -518,19 +579,11 @@ async function maybeStartDockerDatabase(scan: PrereqScan): Promise<void> {
   await runInherited("docker", ["compose", "up", "-d", "postgres"]);
 }
 
-async function runBunInstall(): Promise<void> {
-  if (!(await confirm("Run bun install --frozen-lockfile now?", true))) {
-    log.info("Skipped dependency install. Run `bun install --frozen-lockfile` before starting TomoriBot.");
-    return;
-  }
-  await runInherited("bun", ["install", "--frozen-lockfile"]);
-}
-
 function printSetupComplete(title: string): void {
   log.section(title);
   log.info("Next steps:");
   log.info("  1. Start TomoriBot with `bun run dev` or `bun run launch`.");
-  log.info("  2. When Discord shows the bot online, run `/config setup` in your server.");
+  log.info("  2. When Discord shows the bot online, run `/setup` in your server.");
 }
 
 async function runBaseInstall(scan: PrereqScan, options: BaseInstallOptions = {}): Promise<void> {
@@ -547,6 +600,7 @@ async function runBaseInstall(scan: PrereqScan, options: BaseInstallOptions = {}
 
   Object.assign(envUpdates, await configureCryptoSecret(env, mode));
   Object.assign(envUpdates, await configureDiscordToken({ ...env, ...envUpdates }, mode));
+  Object.assign(envUpdates, await configurePrivateNetwork({ ...env, ...envUpdates }, mode));
   const database = await configureDatabase({ ...env, ...envUpdates }, mode, scan);
   Object.assign(envUpdates, database.values);
 
@@ -560,8 +614,6 @@ async function runBaseInstall(scan: PrereqScan, options: BaseInstallOptions = {}
   if (database.startDockerDatabase) {
     await maybeStartDockerDatabase(scan);
   }
-
-  await runBunInstall();
 
   if (options.showCompletion ?? true) {
     printSetupComplete("Base Install Complete");
@@ -635,6 +687,9 @@ async function main(): Promise<void> {
   }
 
   console.log(pc.bold("\nTomoriBot Setup Wizard\n"));
+  if (!process.stdin.isTTY && !flags.has("--yes") && !flags.has("--defaults") && process.env.CI !== "true") {
+    log.warn("Input is not an interactive terminal. The setup wizard will use defaults where available.");
+  }
   const scan = await scanPrereqs();
 
   if (flags.has("--full")) {

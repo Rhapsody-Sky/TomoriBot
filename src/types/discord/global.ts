@@ -1,10 +1,15 @@
 import type {
   Client,
+  Collection,
+  GatewayDispatchPayload,
+  GuildTextBasedChannel,
   Guild,
   GuildMember,
   Interaction,
   Message,
+  PartialMessage,
   Presence,
+  RateLimitData,
   VoiceState,
   GuildEmoji,
   Sticker,
@@ -16,6 +21,10 @@ export type EventFunction = (
 ) => Promise<void>;
 
 export type EventArg =
+  | Collection<string, Message | PartialMessage>
+  | GatewayDispatchPayload
+  | GuildTextBasedChannel
+  | number
   | VoiceState
   | Presence
   | Client
@@ -23,14 +32,16 @@ export type EventArg =
   | GuildMember
   | Interaction
   | Message
+  | PartialMessage
   | GuildEmoji
+  | RateLimitData
   | Sticker;
 
 export interface LocaleObject {
   [key: string]: LocaleValue;
 }
 
-export type LocaleValue = string | LocaleObject;
+export type LocaleValue = string | string[] | LocaleObject;
 
 export interface Locales {
   [locale: string]: LocaleObject;

@@ -1,12 +1,23 @@
-import type { Client } from "discord.js";
+import type { Client, Guild, GuildMember } from "discord.js";
 import type { TomoriState, UserRow } from "@/types/db/schema";
 import type { ContributionExecutionDiagnostic } from "@/utils/contributions/registry";
-import type { PublicPersonaProfile, SimplifiedMessageForContext } from "@/utils/text/context/types";
+import {
+  measureChatTurnStage,
+  recordChatTurnParticipantDiscovery,
+  recordChatTurnParticipantLookup,
+} from "@/utils/chat/turnLatency";
+import type {
+  MessageProxyConversationUser,
+  PublicPersonaProfile,
+  SimplifiedMessageForContext,
+} from "@/utils/text/context/types";
 import { resolveContextReferences, type ResolvedContextReferences } from "@/utils/text/contextReferences";
 import {
   createDiscordParticipantMemberDirectory,
+  repositoryMessageProxyIdentityReferenceSource,
   repositoryUserReferenceCandidateSource,
   type ParticipantMemberDirectory,
+  type MessageProxyIdentityReferenceSource,
   type UserReferenceCandidateSource,
 } from "@/utils/text/participants/candidateSources";
 import {
@@ -20,12 +31,14 @@ import type { ParticipantProfileEnricherRegistry } from "@/utils/text/participan
 
 export interface ParticipantRequestScope {
   discoveries: Map<string, Promise<CachedParticipantDiscovery>>;
+  memberFetches: Map<string, Promise<GuildMember | null>>;
 }
 
 interface ParticipantPreparationExternalCalls {
   candidateSourceReads: number;
   memberCacheHits: number;
   memberFetches: number;
+  messageProxyIdentityReads: number;
 }
 
 interface ParticipantPreparationDiagnostics {
@@ -39,9 +52,11 @@ interface ParticipantPreparationDiagnostics {
 }
 
 export interface PreparedParticipantContext {
+  requestScope: ParticipantRequestScope;
   discoveryPlan: ParticipantDiscoveryPlan;
   matrixUsers: ReadonlyMap<string, string>;
   syntheticUsers: ReadonlyMap<string, { displayName: string; type: "persona" | "webhook" }>;
+  messageProxyUsers: ReadonlyMap<string, MessageProxyConversationUser>;
   publicPersonaProfiles: readonly PublicPersonaProfile[];
   referencedUserRows: ReadonlyMap<string, UserRow>;
   referencedUserIds: ReadonlySet<string>;
@@ -58,9 +73,11 @@ export interface ParticipantPreparationInput {
   visibleUserIds: readonly string[];
   syntheticUsers?: ReadonlyMap<string, { displayName: string; type: "persona" | "webhook" }>;
   matrixUsers?: ReadonlyMap<string, string>;
+  messageProxyUsers?: ReadonlyMap<string, MessageProxyConversationUser>;
   responderPersonaIds?: ReadonlySet<number>;
   requestScope?: ParticipantRequestScope;
   candidateSource?: UserReferenceCandidateSource;
+  messageProxyIdentitySource?: MessageProxyIdentityReferenceSource;
   memberDirectory?: ParticipantMemberDirectory | null;
   sourceRegistry?: ParticipantSourceRegistry;
   profileEnricherRegistry?: ParticipantProfileEnricherRegistry;
@@ -83,7 +100,20 @@ const EMPTY_REJECTION_COUNTS: Record<ParticipantDiscoveryRejectionReason, number
 };
 
 export function createParticipantRequestScope(): ParticipantRequestScope {
-  return { discoveries: new Map() };
+  return { discoveries: new Map(), memberFetches: new Map() };
+}
+
+export function fetchParticipantMember(
+  guild: Guild,
+  discordId: string,
+  requestScope?: ParticipantRequestScope,
+): Promise<GuildMember | null> {
+  const key = `${guild.id}:${discordId}`;
+  const cached = requestScope?.memberFetches.get(key);
+  if (cached) return cached;
+  const promise = guild.members.fetch(discordId).catch(() => null);
+  requestScope?.memberFetches.set(key, promise);
+  return promise;
 }
 
 export async function prepareParticipantContext(
@@ -94,7 +124,10 @@ export async function prepareParticipantContext(
   const requestScope = input.requestScope ?? createParticipantRequestScope();
   const cached = requestScope.discoveries.get(cacheKey);
   const discoveryCacheHit = Boolean(cached);
-  const discoveryPromise = cached ?? discoverParticipants(frozen, input.candidateSource, input.memberDirectory);
+  recordChatTurnParticipantDiscovery(discoveryCacheHit);
+  const discoveryPromise =
+    cached ??
+    discoverParticipants(frozen, input.candidateSource, input.memberDirectory, input.messageProxyIdentitySource);
   if (!cached) requestScope.discoveries.set(cacheKey, discoveryPromise);
   const discoveryStartedAt = performance.now();
   let discovery: CachedParticipantDiscovery;
@@ -114,29 +147,33 @@ export async function prepareParticipantContext(
     publicPersonaProfiles,
     syntheticUsers: frozen.syntheticUsers,
   });
-  const composition = await composeParticipantDiscoveryPlan(
-    {
-      visibleInput: {
-        participantIds: frozen.visibleUserIds,
-        clientUserId: frozen.client.user?.id,
-        activePersonaId,
-        activePersonaIsAlter: frozen.activePersona?.is_alter,
-        syntheticUsers: frozen.syntheticUsers,
-        matrixUsers: frozen.matrixUsers,
+  const composition = await measureChatTurnStage("participant_composition_ms", () =>
+    composeParticipantDiscoveryPlan(
+      {
+        visibleInput: {
+          participantIds: frozen.visibleUserIds,
+          clientUserId: frozen.client.user?.id,
+          activePersonaId,
+          activePersonaIsAlter: frozen.activePersona?.is_alter,
+          syntheticUsers: frozen.syntheticUsers,
+          matrixUsers: frozen.matrixUsers,
+        },
+        personas: frozen.personas,
+        referencePlan,
       },
-      personas: frozen.personas,
-      referencePlan,
-    },
-    input.sourceRegistry,
+      input.sourceRegistry,
+    ),
   );
   const discoveryPlan = composition.plan;
   const rejectionCounts = { ...EMPTY_REJECTION_COUNTS };
   for (const rejection of discoveryPlan.rejections) rejectionCounts[rejection.reason] += rejection.count;
 
   return {
+    requestScope,
     discoveryPlan,
     matrixUsers: frozen.matrixUsers,
     syntheticUsers: frozen.syntheticUsers,
+    messageProxyUsers: frozen.messageProxyUsers,
     publicPersonaProfiles,
     referencedUserRows: discovery.references.referencedUserRows,
     referencedUserIds: discovery.references.referencedUserIds,
@@ -147,7 +184,7 @@ export async function prepareParticipantContext(
       includedCount: discoveryPlan.seeds.length,
       rejectionCounts,
       externalCalls: discoveryCacheHit
-        ? { candidateSourceReads: 0, memberCacheHits: 0, memberFetches: 0 }
+        ? { candidateSourceReads: 0, memberCacheHits: 0, memberFetches: 0, messageProxyIdentityReads: 0 }
         : discovery.externalCalls,
       sourceContributions: composition.diagnostics,
     },
@@ -196,6 +233,7 @@ function freezeParticipantInput(input: ParticipantPreparationInput): Participant
   visibleUserIds: readonly string[];
   syntheticUsers: ReadonlyMap<string, { displayName: string; type: "persona" | "webhook" }>;
   matrixUsers: ReadonlyMap<string, string>;
+  messageProxyUsers: ReadonlyMap<string, MessageProxyConversationUser>;
 } {
   return {
     ...input,
@@ -213,6 +251,7 @@ function freezeParticipantInput(input: ParticipantPreparationInput): Participant
     visibleUserIds: [...input.visibleUserIds],
     syntheticUsers: new Map([...(input.syntheticUsers ?? [])].map(([id, user]) => [id, { ...user }])),
     matrixUsers: new Map(input.matrixUsers ?? []),
+    messageProxyUsers: new Map([...(input.messageProxyUsers ?? [])].map(([id, user]) => [id, { ...user }])),
     responderPersonaIds: new Set(input.responderPersonaIds ?? []),
   };
 }
@@ -221,18 +260,30 @@ async function discoverParticipants(
   input: ReturnType<typeof freezeParticipantInput>,
   candidateSourceOverride?: UserReferenceCandidateSource,
   memberDirectoryOverride?: ParticipantMemberDirectory | null,
+  messageProxyIdentitySourceOverride?: MessageProxyIdentityReferenceSource,
 ): Promise<CachedParticipantDiscovery> {
   const startedAt = performance.now();
   const externalCalls: ParticipantPreparationExternalCalls = {
     candidateSourceReads: 0,
     memberCacheHits: 0,
     memberFetches: 0,
+    messageProxyIdentityReads: 0,
   };
   const candidateSource = candidateSourceOverride ?? repositoryUserReferenceCandidateSource;
   const countedCandidateSource: UserReferenceCandidateSource = {
     loadCandidates: async (query) => {
       externalCalls.candidateSourceReads += 1;
-      return candidateSource.loadCandidates(query);
+      recordChatTurnParticipantLookup("candidate");
+      return measureChatTurnStage("participant_candidate_ms", () => candidateSource.loadCandidates(query));
+    },
+  };
+  const messageProxyIdentitySource =
+    messageProxyIdentitySourceOverride ?? repositoryMessageProxyIdentityReferenceSource;
+  const countedMessageProxyIdentitySource: MessageProxyIdentityReferenceSource = {
+    loadIdentities: async (query) => {
+      externalCalls.messageProxyIdentityReads += 1;
+      recordChatTurnParticipantLookup("proxy");
+      return measureChatTurnStage("participant_proxy_ms", () => messageProxyIdentitySource.loadIdentities(query));
     },
   };
   const memberDirectory =
@@ -244,8 +295,13 @@ async function discoverParticipants(
     ? {
         cachedMemberIds: () => [...cachedMemberIds],
         resolveMember: async (discordId) => {
-          if (cachedMemberIds.has(discordId)) externalCalls.memberCacheHits += 1;
-          else externalCalls.memberFetches += 1;
+          if (cachedMemberIds.has(discordId)) {
+            externalCalls.memberCacheHits += 1;
+            recordChatTurnParticipantLookup("member_cache");
+          } else {
+            externalCalls.memberFetches += 1;
+            recordChatTurnParticipantLookup("member_fetch");
+          }
           return memberDirectory.resolveMember(discordId);
         },
       }
@@ -266,6 +322,7 @@ async function discoverParticipants(
     existingPersonaIds,
     responderPersonaIds: input.responderPersonaIds,
     candidateSource: countedCandidateSource,
+    messageProxyIdentitySource: countedMessageProxyIdentitySource,
     memberDirectory: countedMemberDirectory,
   });
   return { references, durationMs: performance.now() - startedAt, externalCalls };

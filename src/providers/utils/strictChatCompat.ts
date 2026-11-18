@@ -1,20 +1,16 @@
 import type { ContextPart, StructuredContextItem } from "@/types/misc/context";
 
-// Shared "strict chat-completion" message normalizations.
-//
-// Several provider APIs require message shapes that others merely tolerate. Historically each
-// adapter hardwired its own copy of these rules, which left custom-endpoint proxies (which inherit
-// the OpenAI-compatible builder) unable to front strict backends such as Claude. This module
-// centralizes the three normalizations behind one tested seam:
+// Shared "strict chat-completion" message normalizations: message shapes some provider APIs
+// require and others merely tolerate. Three normalizations live behind this one tested seam, so a
+// custom-endpoint proxy can front strict backends such as Claude.
 //
 //   A. Prefix-completion: vendor "continue this assistant turn" extension (`prefix: true`).
 //   B. Role alternation: merge consecutive same-role turns + guarantee a leading `user` turn.
 //   C. Media relocation: assistant turns cannot carry media; peel it into a synthetic `user`
-//                           turn. This one is ALWAYS-ON (universal across OpenAI/Anthropic/Gemini
-//                           shaped APIs) and is never gated by a toggle.
+//      turn. This one is ALWAYS-ON (universal across OpenAI/Anthropic/Gemini shaped APIs) and is
+//      never gated by a toggle.
 //
-// A and B are exposed as per-endpoint toggles (`supports_prefix_completion`,
-// `strict_role_alternation`); C is unconditional.
+// A and B are exposed as per-endpoint toggles, C is unconditional.
 
 /**
  * Minimal message shape shared by the OpenAI-compatible and Anthropic message arrays: a `role`
@@ -39,6 +35,17 @@ const ALTERNATION_REQUIRED_PROVIDERS = new Set<string>(["anthropic"]);
  * {@link ALTERNATION_REQUIRED_PROVIDERS}.
  */
 const PREFIX_COMPLETION_REQUIRED_PROVIDERS = new Set<string>(["deepseek", "zai", "zaicoding"]);
+
+/**
+ * Prefix-completion providers whose backend rejects `prefix: true` in a request that also carries
+ * `tools` (DeepSeek: "Function call should not be used with prefix"). Z.ai is absent because no
+ * such rejection has been observed there.
+ */
+const PREFIX_COMPLETION_EXCLUDES_TOOLS_PROVIDERS = new Set<string>(["deepseek"]);
+
+export function providerPrefixCompletionExcludesTools(provider: string): boolean {
+  return PREFIX_COMPLETION_EXCLUDES_TOOLS_PROVIDERS.has(provider);
+}
 
 /**
  * @returns `true` when the provider must always apply strict role alternation.
@@ -68,10 +75,17 @@ export function providerRequiresPrefixCompletion(provider: string): boolean {
  *
  * @param requestBody - The OpenAI-shaped request body (mutated in place).
  * @param outputPrefill - The already-trimmed output prefill, or undefined when none is set.
+ * @param requiresReasoningContent - When `true`, also stamps `reasoning_content: ""` on the
+ *   flagged turn. DeepSeek's thinking-mode backend rejects a `prefix: true` assistant turn that
+ *   omits the key (`"reasoning_content in the thinking mode must be passed back"`), the same
+ *   requirement the tool-call replay path already carries. Empty string because a manual prefill
+ *   has no captured chain-of-thought to echo. Gated behind the caller's flag (only DeepSeek sets
+ *   it today) so Z.ai/zaicoding prefix completion stays byte-identical.
  */
 export function applyAssistantPrefixCompletion(
   requestBody: Record<string, unknown>,
   outputPrefill: string | undefined,
+  requiresReasoningContent?: boolean,
 ): void {
   if (!outputPrefill) {
     return;
@@ -95,6 +109,9 @@ export function applyAssistantPrefixCompletion(
   }
 
   lastMessage.prefix = true;
+  if (requiresReasoningContent && lastMessage.reasoning_content === undefined) {
+    lastMessage.reasoning_content = "";
+  }
 }
 
 /** Canonical text used when prepending a synthetic leading `user` turn (Anthropic's wording). */
@@ -152,7 +169,7 @@ export function mergeConsecutiveSameRole<T extends NormalizableMessage>(messages
     // top-level tool_calls/tool_call_id: see hasToolMetadata).
     if (current.role === next.role && !hasToolMetadata(current) && !hasToolMetadata(next)) {
       const combined = [...normalizeToParts(current.content), ...normalizeToParts(next.content)];
-      const allText = combined.every((part) => part.type === "text");
+      const allText = combined.every((part) => part.type === "text" && part.cache_control === undefined);
       current = {
         ...current,
         content: allText ? combined.map((part) => String(part.text)).join("\n") : combined,
@@ -226,6 +243,8 @@ export function unseenToolImageNotice(imageCount: number): string {
     "to see images, tell the user to set up `/model vision` or to use a model with the vision capability.]"
   );
 }
+
+export { isPromptSystemItem as isSystemInstructionContextItem } from "@/utils/text/context/promptLayout";
 
 /**
  * Move neutral `image` parts off model turns into following synthetic user turns while sender

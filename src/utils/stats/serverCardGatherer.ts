@@ -15,7 +15,6 @@ import type { TopUserEntry } from "@/utils/db/repositories/StatRepository";
 import { log } from "@/utils/misc/logger";
 import { loadStoredPersonaAvatarDataUri } from "@/utils/storage/avatarStorage";
 import { type Timeframe, resolveWindowFrom } from "@/utils/stats/statsDashboard";
-import { prettifyModelCodename } from "@/utils/provider/customProviderUtils";
 import { extractAvatarAccentColor, extractCardPalette, loadTomoriconDataUri } from "@/utils/stats/cardColor";
 import { loadStatsPersonaAvatarDataUri, loadStatsPresetAvatarLookup } from "@/utils/stats/personaAvatar";
 import type {
@@ -79,7 +78,7 @@ export async function gatherServerCardData(args: GatherServerCardArgs): Promise<
 
   // One grouped query per ranked block: no per-row token/cost lookups.
   const [rawTopMembers, personaTokenCosts, modelCosts, tokenTotals, totalTriggers, estimatedCost] = await Promise.all([
-    statRepository.getTopUsers({ serverId, limit: 25, ...windowArg }),
+    statRepository.getTopUsers({ serverId, limit: 25, botUserDiscId: guild.client.user.id, ...windowArg }),
     statRepository.getPersonaTokenCostBreakdown({ serverId, limit: 5, ...windowArg }),
     statRepository.getModelCostBreakdown({ serverId, limit: 3, ...windowArg }),
     statRepository.getTokenTotals({ serverId, ...windowArg }),
@@ -139,7 +138,7 @@ export async function gatherServerCardData(args: GatherServerCardArgs): Promise<
   );
 
   const topModels: ServerModelBar[] = modelCosts.map((entry) => ({
-    name: prettifyModelCodename(entry.model),
+    name: entry.model,
     totalTokens: entry.inputTokens + entry.outputTokens,
     estimatedCost: entry.cost,
   }));

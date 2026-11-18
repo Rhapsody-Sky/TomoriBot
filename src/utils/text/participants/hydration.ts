@@ -1,4 +1,6 @@
-import { GatewayIntentBits, type Client, type Guild, type GuildMember, type User } from "discord.js";
+import type { MemoryRecallCollector } from "@/utils/text/context/memoryRecall";
+import type { ContextMemoryEntry } from "@/types/misc/context";
+import { GatewayIntentBits, type Client, type GuildMember, type User } from "discord.js";
 import {
   PrivacyLevel,
   type AssembledServerConfig,
@@ -8,17 +10,27 @@ import {
   type UserRow,
 } from "@/types/db/schema";
 import type { RequestSnapshot } from "@/types/misc/context";
+import { mapWithConcurrency } from "@/utils/async/bounded";
+import { getCachedUserRow, getCachedBlacklistStatus, getCachedPrivacyLevel } from "@/utils/cache/userCache";
+import { fetchParticipantMember, type ParticipantRequestScope } from "@/utils/text/participants/preparation";
 import { personalMemoryRepository, serverScheduleRepository, userRepository } from "@/utils/db/repositories";
+import type { MessageProxyIdentityContext, ProxyServicePresentation } from "@/utils/messageProxy/types";
+import { isMessageProxyIdentityUserId } from "@/utils/messageProxy/identityUserId";
+import { getProxyServicePresentation } from "@/utils/messageProxy/registry";
+import { messageProxyRepository } from "@/utils/db/repositories/MessageProxyRepository";
 import { resolvePreferredDiscordDisplayName } from "@/utils/discord/displayName";
+import { getMemberRoleNames } from "@/utils/discord/memberRoles";
 import { log } from "@/utils/misc/logger";
 import { formatMemoryWithId } from "@/utils/memory/memoryId";
 import { getUserPresenceDetails } from "@/utils/text/context/history";
 import type { MentionConverter } from "@/utils/text/context/templates";
-import type { PublicPersonaProfile } from "@/utils/text/context/types";
+import type { MessageProxyConversationUser, PublicPersonaProfile } from "@/utils/text/context/types";
+import { getReminderRepetition } from "@/utils/text/processors/reminderRepetition";
 import {
   buildBridgeUserAliases,
   buildDiscordUserAliases,
   buildPersonaAliases,
+  buildMessageProxyIdentityAliases,
   type DiscordAliasIdentity,
 } from "@/utils/text/participants/aliases";
 import {
@@ -34,6 +46,14 @@ import {
   type ParticipantProfileEnricherRegistry,
 } from "@/utils/text/participants/profileEnrichers";
 import type { ContributionExecutionDiagnostic } from "@/utils/contributions/registry";
+import {
+  userNamingRepository,
+  userPersonaNamingPairKey,
+  type UserPersonaNamingPair,
+} from "@/utils/db/repositories/UserNamingRepository";
+import type { UserPersonaNamingPreference } from "@/types/personaNaming";
+import { type EffectiveUserNaming, resolveEffectiveUserNaming } from "@/utils/text/userNaming";
+import { createParticipantAlias } from "@/utils/text/participants/aliases";
 
 export interface ActivePersonaScope {
   personaId?: number;
@@ -46,12 +66,16 @@ export interface ActivePersonaScope {
 export type ParticipantProfileFieldKind =
   | "status"
   | "physical_appearance"
+  | "naming"
   | "timezone"
+  | "local_time"
+  | "identity"
   | "presence"
   | "roles"
   | "personal_memories"
   | "human_reminders"
   | "persona_public_attributes"
+  | "message_proxy_identity"
   | `extension:${string}`;
 
 export type ParticipantFieldVisibilityReason =
@@ -72,6 +96,7 @@ export interface ParticipantProfileField {
     reason: ParticipantFieldVisibilityReason;
   };
   lines: readonly string[];
+  memoryEntries?: ContextMemoryEntry[];
 }
 
 export interface HydratedParticipantProfile {
@@ -93,12 +118,22 @@ export interface ParticipantExposurePolicy {
   exposeRoles: boolean;
   exposePhysicalAppearance: boolean;
   exposeTimezone: boolean;
+  exposeIdentity: boolean;
   exposePersonalMemories: boolean;
+}
+
+/** A present namespace, rendered once rather than repeated for every identity. */
+export interface MessageProxyNamespaceNote {
+  serviceId: string;
+  namespaceKey: string;
+  sectionHeading: string;
+  entry: string;
 }
 
 export interface ParticipantHydrationResult {
   profiles: readonly HydratedParticipantProfile[];
   personaTaskLines: readonly string[];
+  messageProxyNamespaces: readonly MessageProxyNamespaceNote[];
   diagnostics: ParticipantHydrationDiagnostics;
 }
 
@@ -115,13 +150,16 @@ interface ParticipantHydrationDiagnostics {
     memberReads: number;
     fallbackUserReads: number;
     presenceReads: number;
+    messageProxyContextReads: number;
   };
   enricherContributions: readonly ContributionExecutionDiagnostic[];
 }
 
 export interface ParticipantHydrationDependencies {
+  isMessageProxyIdentity(discordId: string): boolean;
+  getMessageProxyPresentation(serviceId: string): ProxyServicePresentation | null;
   loadUserRow(discordId: string): Promise<UserRow | null>;
-  registerUser(discordId: string, displayName: string, language: "en-US" | "ja"): Promise<UserRow | null>;
+  registerUser(discordId: string, displayName: string, language: string): Promise<UserRow | null>;
   isBlacklisted(guildId: string, discordId: string): Promise<boolean>;
   getPrivacyLevel(discordId: string): Promise<PrivacyLevel>;
   loadPersonalMemories(userId: number, lineageId: number): Promise<PersonalMemoryRow[]>;
@@ -131,12 +169,26 @@ export interface ParticipantHydrationDependencies {
     personaId?: number,
     includeUnassignedForMainPersona?: boolean,
   ): Promise<ReminderRow[]>;
-  loadMember(client: Client, guildId: string, discordId: string): Promise<GuildMember | null>;
+  loadMember(
+    client: Client,
+    guildId: string,
+    discordId: string,
+    requestScope?: ParticipantRequestScope,
+  ): Promise<GuildMember | null>;
   loadFallbackUser(client: Client, discordId: string): Promise<User | null>;
-  loadPresence(client: Client, discordId: string, guildId: string, preloadedMember?: GuildMember): Promise<string>;
+  loadPresence(
+    client: Client,
+    discordId: string,
+    guildId: string,
+    preloadedMember?: GuildMember,
+    requestScope?: ParticipantRequestScope,
+  ): Promise<string>;
+  loadMessageProxyIdentityContext(userDiscId: string): Promise<MessageProxyIdentityContext | null>;
+  loadNamingPreferences(pairs: UserPersonaNamingPair[]): Promise<Map<string, UserPersonaNamingPreference>>;
 }
 
 export interface ParticipantHydrationParams {
+  memoryRecall?: MemoryRecallCollector;
   client: Client;
   guildId: string;
   channelName: string;
@@ -149,6 +201,7 @@ export interface ParticipantHydrationParams {
   impersonatedIdentityName: string | null;
   matrixUsers?: ReadonlyMap<string, string>;
   syntheticUsers?: ReadonlyMap<string, { displayName: string; type: "persona" | "webhook" }>;
+  messageProxyUsers?: ReadonlyMap<string, MessageProxyConversationUser>;
   publicPersonaProfiles?: readonly PublicPersonaProfile[];
   preloadedReferencedUserRows?: ReadonlyMap<string, UserRow>;
   referencedUserIds?: ReadonlySet<string>;
@@ -157,13 +210,19 @@ export interface ParticipantHydrationParams {
   snapshot?: RequestSnapshot;
   convertMentions: MentionConverter;
   profileEnricherRegistry?: ParticipantProfileEnricherRegistry;
+  requestScope?: ParticipantRequestScope;
 }
 
+// Limit each turn to four seeds because concurrent turns share a ten-connection Postgres pool.
+const PARTICIPANT_HYDRATION_CONCURRENCY = 4;
+
 const DEFAULT_HYDRATION_DEPENDENCIES: ParticipantHydrationDependencies = {
-  loadUserRow: (discordId) => userRepository.loadByDiscordId(discordId),
+  isMessageProxyIdentity: isMessageProxyIdentityUserId,
+  getMessageProxyPresentation: getProxyServicePresentation,
+  loadUserRow: (discordId) => getCachedUserRow(discordId),
   registerUser: (discordId, displayName, language) => userRepository.register(discordId, displayName, language),
-  isBlacklisted: (guildId, discordId) => userRepository.isBlacklisted(guildId, discordId),
-  getPrivacyLevel: (discordId) => userRepository.getPrivacyLevel(discordId),
+  isBlacklisted: (guildId, discordId) => getCachedBlacklistStatus(guildId, discordId),
+  getPrivacyLevel: (discordId) => getCachedPrivacyLevel(discordId),
   loadPersonalMemories: (userId, lineageId) => personalMemoryRepository.loadForUserLineage(userId, lineageId, true),
   loadReminders: async (discordId, guildId, personaId, includeUnassignedForMainPersona) =>
     (await serverScheduleRepository.getPendingRemindersForUser(
@@ -172,13 +231,15 @@ const DEFAULT_HYDRATION_DEPENDENCIES: ParticipantHydrationDependencies = {
       personaId,
       includeUnassignedForMainPersona,
     )) ?? [],
-  loadMember: async (client, guildId, discordId) => {
+  loadMember: async (client, guildId, discordId, requestScope) => {
     const guild = client.guilds.cache.get(guildId);
-    return guild ? await guild.members.fetch(discordId).catch(() => null) : null;
+    return guild ? await fetchParticipantMember(guild, discordId, requestScope) : null;
   },
   loadFallbackUser: (client, discordId) => client.users.fetch(discordId).catch(() => null),
-  loadPresence: (client, discordId, guildId, preloadedMember) =>
-    getUserPresenceDetails(client, discordId, guildId, preloadedMember),
+  loadPresence: (client, discordId, guildId, preloadedMember, requestScope) =>
+    getUserPresenceDetails(client, discordId, guildId, preloadedMember, requestScope),
+  loadMessageProxyIdentityContext: (userDiscId) => messageProxyRepository.getIdentityContextByUserDiscId(userDiscId),
+  loadNamingPreferences: (pairs) => userNamingRepository.loadPreferences(pairs),
 };
 
 export function createParticipantExposurePolicy(params: {
@@ -189,8 +250,7 @@ export function createParticipantExposurePolicy(params: {
   isUserImpersonation: boolean;
   isImpersonatedUser: boolean;
 }): ParticipantExposurePolicy {
-  const canUseSavedNickname =
-    params.personalizationEnabled && !params.blacklisted && params.privacyLevel !== PrivacyLevel.FULL;
+  const canUseSavedNickname = params.personalizationEnabled && !params.blacklisted;
   return {
     canUseSavedNickname,
     exposeSavedNicknameAlias:
@@ -199,6 +259,8 @@ export function createParticipantExposurePolicy(params: {
     exposeRoles: params.privacyLevel === PrivacyLevel.MINIMAL,
     exposePhysicalAppearance: !params.isUserImpersonation,
     exposeTimezone: !params.isUserImpersonation,
+    exposeIdentity:
+      params.personalizationEnabled && !params.blacklisted && params.privacyLevel === PrivacyLevel.MINIMAL,
     exposePersonalMemories:
       (!params.isUserImpersonation || params.isImpersonatedUser) &&
       params.personalizationEnabled &&
@@ -213,7 +275,10 @@ export function canMentionParticipant(seed: ParticipantSeed): boolean {
 }
 
 export function formatPendingReminderForContext(
-  reminder: Pick<ReminderRow, "reminder_id" | "reminder_purpose" | "reminder_time" | "repetition_interval_hours">,
+  reminder: Pick<
+    ReminderRow,
+    "reminder_id" | "reminder_purpose" | "reminder_time" | "repetition_interval_hours" | "repetition_interval_months"
+  >,
   timezoneOffset: number,
 ): string {
   const formattedTime = `${formatTimeWithOffset(new Date(reminder.reminder_time), timezoneOffset, {
@@ -225,10 +290,10 @@ export function formatPendingReminderForContext(
     minute: "2-digit",
   })} (${formatUTCOffset(timezoneOffset)})`;
   const reminderIdPrefix = typeof reminder.reminder_id === "number" ? `ID:${reminder.reminder_id} ` : "";
-  const repeatText =
-    typeof reminder.repetition_interval_hours === "number" && reminder.repetition_interval_hours >= 1
-      ? `, repeats every ${reminder.repetition_interval_hours} hour(s)`
-      : "";
+  const repetition = getReminderRepetition(reminder);
+  const repeatText = repetition
+    ? `, repeats every ${repetition.interval} ${repetition.unit === "months" ? "month(s)" : "hour(s)"}`
+    : "";
 
   return `${reminderIdPrefix}"${reminder.reminder_purpose}" (scheduled for ${formattedTime}${repeatText})`;
 }
@@ -295,6 +360,51 @@ interface HydratedDiscordUserBase {
   blacklisted: boolean;
   personalizationEnabled: boolean;
   isTriggerer: boolean;
+  messageProxy: MessageProxyParticipant | null;
+  naming?: EffectiveUserNaming;
+}
+
+interface MessageProxyParticipant {
+  context: MessageProxyIdentityContext | null;
+  hostDiscIds: readonly string[];
+  presentation: ProxyServicePresentation | null;
+}
+
+/**
+ * Host accounts that may speak for this identity, preferring the account that
+ * actually proxied it in this history window over other linked accounts.
+ */
+function messageProxyHostDiscIds(
+  context: MessageProxyIdentityContext | null,
+  proxyingHostDiscId?: string | null,
+): string[] {
+  const ordered = new Set<string>();
+  if (proxyingHostDiscId?.trim()) ordered.add(proxyingHostDiscId.trim());
+  for (const hostDiscId of context?.hostUserDiscIds ?? []) {
+    const trimmed = hostDiscId.trim();
+    if (trimmed) ordered.add(trimmed);
+  }
+  return [...ordered];
+}
+
+/**
+ * A proxy identity is not an independent Discord account, so host privacy and
+ * blacklist state must govern it as well as its synthetic row.
+ */
+async function applyMessageProxyHostAuthorization(
+  hostDiscIds: readonly string[],
+  current: { blacklisted: boolean; privacyLevel: PrivacyLevel },
+  guildId: string,
+  dependencies: ParticipantHydrationDependencies,
+): Promise<{ blacklisted: boolean; privacyLevel: PrivacyLevel }> {
+  let { blacklisted, privacyLevel } = current;
+  for (const hostDiscId of hostDiscIds) {
+    if (privacyLevel !== PrivacyLevel.FULL && (await dependencies.getPrivacyLevel(hostDiscId)) === PrivacyLevel.FULL) {
+      privacyLevel = PrivacyLevel.FULL;
+    }
+    if (!blacklisted && (await dependencies.isBlacklisted(guildId, hostDiscId))) blacklisted = true;
+  }
+  return { blacklisted, privacyLevel };
 }
 
 async function hydrateDiscordUserBase(
@@ -304,12 +414,17 @@ async function hydrateDiscordUserBase(
 ): Promise<HydratedDiscordUserBase | null> {
   if (seed.key.kind !== "discord_user") return null;
   const discordId = seed.key.discordId;
+  // A synthetic proxy identity is not a Discord snowflake, so member, user, and
+  // presence fetches would be guaranteed API errors.
+  const isMessageProxyIdentity = dependencies.isMessageProxyIdentity(discordId);
   let userRow =
     params.preloadedReferencedUserRows?.get(discordId) ?? (await dependencies.loadUserRow(discordId).catch(() => null));
-  const member = await dependencies.loadMember(params.client, params.guildId, discordId).catch(() => null);
+  const member = isMessageProxyIdentity
+    ? null
+    : await dependencies.loadMember(params.client, params.guildId, discordId).catch(() => null);
   if (!userRow && !params.referencedUserIds?.has(discordId) && member) {
     const guild = params.client.guilds.cache.get(params.guildId);
-    const language = guild?.preferredLocale.startsWith("ja") ? "ja" : "en-US";
+    const language = guild?.preferredLocale ?? "en-US";
     const registrationDisplayName = resolvePreferredDiscordDisplayName({
       memberDisplayName: member.displayName,
       user: member.user,
@@ -321,15 +436,38 @@ async function hydrateDiscordUserBase(
     return null;
   }
 
-  const fallbackUser = member ? null : await dependencies.loadFallbackUser(params.client, discordId).catch(() => null);
+  const fallbackUser =
+    member || isMessageProxyIdentity
+      ? null
+      : await dependencies.loadFallbackUser(params.client, discordId).catch(() => null);
   const personalizationEnabled = params.tomoriConfig.personal_memories_enabled ?? true;
   const isTriggerer = params.snapshot?.triggererUserRow?.user_disc_id === discordId;
-  const blacklisted = isTriggerer
-    ? (params.snapshot?.isTriggererBlacklisted ?? false)
-    : await dependencies.isBlacklisted(params.guildId, discordId);
-  const privacyLevel = isTriggerer
-    ? (params.snapshot?.triggererPrivacyLevel ?? PrivacyLevel.MINIMAL)
-    : await dependencies.getPrivacyLevel(discordId);
+  const ownAuthorization = {
+    blacklisted: isTriggerer
+      ? (params.snapshot?.isTriggererBlacklisted ?? false)
+      : await dependencies.isBlacklisted(params.guildId, discordId).catch(() => true),
+    privacyLevel: isTriggerer
+      ? (params.snapshot?.triggererPrivacyLevel ?? PrivacyLevel.MINIMAL)
+      : await dependencies.getPrivacyLevel(discordId).catch(() => PrivacyLevel.FULL),
+  };
+  const messageProxyContext = isMessageProxyIdentity
+    ? await dependencies.loadMessageProxyIdentityContext(discordId).catch(() => null)
+    : null;
+  const messageProxy: MessageProxyParticipant | null = isMessageProxyIdentity
+    ? {
+        context: messageProxyContext,
+        hostDiscIds: messageProxyHostDiscIds(
+          messageProxyContext,
+          params.messageProxyUsers?.get(discordId)?.senderDiscId,
+        ),
+        presentation: messageProxyContext
+          ? dependencies.getMessageProxyPresentation(messageProxyContext.serviceId)
+          : null,
+      }
+    : null;
+  const { blacklisted, privacyLevel } = messageProxy
+    ? await applyMessageProxyHostAuthorization(messageProxy.hostDiscIds, ownAuthorization, params.guildId, dependencies)
+    : ownAuthorization;
   const serverNickname = member?.nickname ?? null;
   const globalName = member?.user.globalName ?? fallbackUser?.globalName ?? null;
   const username = member?.user.username ?? fallbackUser?.username ?? null;
@@ -343,8 +481,20 @@ async function hydrateDiscordUserBase(
     isUserImpersonation: params.activePersonaScope.isUserImpersonation,
     isImpersonatedUser,
   });
-  const customNickname = userRow.user_nickname;
-  let displayName = policy.canUseSavedNickname ? customNickname : serverNickname ? serverNickname : `<@${discordId}>`;
+  const customNickname = userRow.user_nickname?.trim() || null;
+  const messageProxyDisplayName = messageProxy
+    ? (customNickname ??
+      params.messageProxyUsers?.get(discordId)?.displayName ??
+      messageProxy.context?.displayName ??
+      discordId)
+    : null;
+  let displayName =
+    messageProxyDisplayName ??
+    (policy.canUseSavedNickname && customNickname
+      ? customNickname
+      : serverNickname
+        ? serverNickname
+        : `<@${discordId}>`);
   if (isImpersonatedUser && params.impersonatedIdentityName) displayName = params.impersonatedIdentityName;
 
   const identity: DiscordAliasIdentity = {
@@ -355,20 +505,24 @@ async function hydrateDiscordUserBase(
   };
   const aliases = [
     ...seed.aliases,
-    ...buildDiscordUserAliases({
-      owner: seed.key,
-      userRow,
-      identity,
-      exposeSavedNickname: policy.exposeSavedNicknameAlias,
-      impersonatedIdentityName: isImpersonatedUser ? params.impersonatedIdentityName : null,
-    }),
+    ...(messageProxy
+      ? buildMessageProxyIdentityAliases({
+          owner: seed.key,
+          displayName: messageProxyDisplayName,
+          savedNickname: policy.exposeSavedNicknameAlias ? customNickname : null,
+        })
+      : buildDiscordUserAliases({
+          owner: seed.key,
+          userRow,
+          identity,
+          exposeSavedNickname: policy.exposeSavedNicknameAlias,
+          impersonatedIdentityName: isImpersonatedUser ? params.impersonatedIdentityName : null,
+        })),
   ];
   const primaryAlias =
     isImpersonatedUser && params.impersonatedIdentityName
       ? params.impersonatedIdentityName
-      : policy.canUseSavedNickname
-        ? customNickname
-        : (serverNickname ?? globalName ?? username ?? discordId);
+      : (messageProxyDisplayName ?? serverNickname ?? globalName ?? username ?? discordId);
   return {
     profile: {
       key: seed.key,
@@ -376,7 +530,7 @@ async function hydrateDiscordUserBase(
       displayName,
       aliases,
       primaryAlias,
-      mentionable: canMentionParticipant(seed),
+      mentionable: canMentionParticipant(seed) && !messageProxy,
       isBot: false,
       resolvableTargetId: discordId,
     },
@@ -386,7 +540,81 @@ async function hydrateDiscordUserBase(
     blacklisted,
     personalizationEnabled,
     isTriggerer,
+    messageProxy,
   };
+}
+
+function applyPersonaRelativeNaming(
+  base: HydratedDiscordUserBase,
+  params: ParticipantHydrationParams,
+  preference: UserPersonaNamingPreference | undefined,
+): HydratedDiscordUserBase {
+  if (base.messageProxy) return base;
+  if (params.activePersonaScope.isUserImpersonation && base.profile.key.kind === "discord_user") return base;
+  const canUsePersonalizedNaming = base.personalizationEnabled && !base.blacklisted;
+  const liveDisplayName =
+    base.member?.displayName ?? base.member?.user.globalName ?? base.member?.user.username ?? base.userRow.user_disc_id;
+  const naming = resolveEffectiveUserNaming({
+    global: {
+      userNickname: canUsePersonalizedNaming ? base.userRow.user_nickname : null,
+      prefixOverride: canUsePersonalizedNaming ? (base.userRow.prefix_override ?? null) : null,
+      suffixOverride: canUsePersonalizedNaming ? (base.userRow.suffix_override ?? null) : null,
+      addressingStyle: canUsePersonalizedNaming ? (base.userRow.addressing_style ?? null) : null,
+    },
+    liveDisplayName,
+    persona: canUsePersonalizedNaming ? params.tomoriState?.naming_config : undefined,
+    preference: canUsePersonalizedNaming ? preference : null,
+  });
+  const aliasPurposes = ["input_reference", "output_mention", "tool_target", "copied_identity"] as const;
+  const effectiveNicknameAlias = createParticipantAlias({
+    owner: base.profile.key,
+    value: naming.nickname,
+    source: "effective_nickname",
+    purposes: aliasPurposes,
+    exposure: "visible",
+    priority: 8,
+  });
+  const formattedNameAlias = createParticipantAlias({
+    owner: base.profile.key,
+    value: naming.formattedName,
+    source: "formatted_name",
+    purposes: aliasPurposes,
+    exposure: "visible",
+    priority: 9,
+  });
+
+  return {
+    ...base,
+    naming,
+    profile: {
+      ...base.profile,
+      displayName: naming.formattedName,
+      aliases: [
+        ...base.profile.aliases,
+        ...(effectiveNicknameAlias ? [effectiveNicknameAlias] : []),
+        ...(formattedNameAlias ? [formattedNameAlias] : []),
+      ],
+    },
+  };
+}
+
+/**
+ * Names the affixes separately from the nickname, so an affix stays removable.
+ * Without it the model only ever sees the joined name and reads "stop calling me
+ * Master Mirri" as a nickname rewrite that re-composes to the same string. The
+ * parenthetical uses the tool's own field words so the mapping to a change is
+ * direct.
+ */
+function enrichNamingField(base: HydratedDiscordUserBase, params: ParticipantHydrationParams): ParticipantProfileField {
+  const naming = base.naming;
+  const lines: string[] = [];
+  if (naming && (naming.prefix || naming.suffix)) {
+    const affixes: string[] = [];
+    if (naming.prefix) affixes.push(`prefix "${naming.prefix}"`);
+    if (naming.suffix) affixes.push(`suffix "${naming.suffix}"`);
+    lines.push(`- ${params.botName} calls ${naming.nickname} "${naming.formattedName}" (${affixes.join(", ")})`);
+  }
+  return field(base.profile.key, "naming", 12, lines);
 }
 
 async function enrichPresenceField(
@@ -396,10 +624,14 @@ async function enrichPresenceField(
 ): Promise<ParticipantProfileField> {
   let lines: string[] = [];
   let failed = false;
-  if (base.policy.exposePresence) {
+  const hasPresenceIntent = params.client.options.intents?.has(GatewayIntentBits.GuildPresences);
+  // Proxy identities carry no presence of their own and are never mentionable, so idle/DND etiquette
+  // has nothing to govern. The host's own presence still renders whenever the host is a participant
+  // in its own right.
+  if (base.policy.exposePresence && !base.messageProxy) {
     if (params.isDMChannel) {
       lines = ["- Status: Online (Direct Message)"];
-    } else if (params.client.options.intents?.has(GatewayIntentBits.GuildPresences)) {
+    } else if (hasPresenceIntent) {
       try {
         const presence = await dependencies.loadPresence(
           params.client,
@@ -437,33 +669,49 @@ function enrichPhysicalAppearanceField(
   );
 }
 
-function enrichTimezoneField(
+function enrichTimezoneFields(
   base: HydratedDiscordUserBase,
   params: ParticipantHydrationParams,
-): ParticipantProfileField {
+): ParticipantProfileField[] {
   const offset = base.userRow.timezone_offset;
-  const lines =
-    base.policy.exposeTimezone && offset != null
-      ? [
-          `- ${base.profile.displayName}'s timezone: ${formatUTCOffset(offset)} (their local time: ${getCurrentTimeWithOffset(offset)})`,
-        ]
-      : [];
-  return field(
-    base.profile.key,
-    "timezone",
-    20,
-    lines,
-    hiddenReasonForPolicy(base.policy, "timezone", {
-      blacklisted: base.blacklisted,
-      personalizationEnabled: base.personalizationEnabled,
-      isUserImpersonation: params.activePersonaScope.isUserImpersonation,
-    }),
-  );
+  const visible = base.policy.exposeTimezone && offset != null;
+  const hiddenReason = hiddenReasonForPolicy(base.policy, "timezone", {
+    blacklisted: base.blacklisted,
+    personalizationEnabled: base.personalizationEnabled,
+    isUserImpersonation: params.activePersonaScope.isUserImpersonation,
+  });
+  return [
+    field(
+      base.profile.key,
+      "timezone",
+      20,
+      visible ? [`- ${base.profile.displayName}'s timezone: ${formatUTCOffset(offset)}`] : [],
+      hiddenReason,
+    ),
+    field(
+      base.profile.key,
+      "local_time",
+      21,
+      visible ? [`${base.profile.displayName}'s local time: ${getCurrentTimeWithOffset(offset)}`] : [],
+      hiddenReason,
+    ),
+  ];
+}
+
+function enrichIdentityField(base: HydratedDiscordUserBase): ParticipantProfileField {
+  const lines: string[] = [];
+  if (base.policy.exposeIdentity) {
+    const genderIdentity = base.userRow.gender_identity?.trim();
+    const pronouns = base.userRow.pronouns?.trim();
+    if (genderIdentity) lines.push(`- ${base.profile.displayName}'s Gender Identity: ${genderIdentity}`);
+    if (pronouns) lines.push(`- ${base.profile.displayName}'s Pronouns: ${pronouns}`);
+  }
+  return field(base.profile.key, "identity", 15, lines, base.policy.exposeIdentity ? "missing_data" : "privacy");
 }
 
 function enrichRolesField(base: HydratedDiscordUserBase, params: ParticipantHydrationParams): ParticipantProfileField {
-  const guild = params.client.guilds.cache.get(params.guildId);
-  const lines = base.policy.exposeRoles && base.member ? buildRoleLines(base.member, guild) : [];
+  const roles = base.policy.exposeRoles && base.member ? getMemberRoleNames(base.member, params.guildId) : [];
+  const lines = roles.length > 0 ? [`- Server Roles: ${roles.join(", ")}`] : [];
   return field(base.profile.key, "roles", 40, lines, base.policy.exposeRoles ? "missing_data" : "privacy");
 }
 
@@ -472,20 +720,26 @@ async function enrichPersonalMemoriesField(
   params: ParticipantHydrationParams,
   dependencies: ParticipantHydrationDependencies,
 ): Promise<ParticipantProfileField> {
-  const lines = base.policy.exposePersonalMemories
-    ? await hydratePersonalMemoryLines(base.userRow, base.profile.displayName, params, dependencies)
+  const memories = base.policy.exposePersonalMemories
+    ? await hydratePersonalMemoryEntries(base.userRow, base.profile.displayName, params, dependencies)
     : [];
-  return field(
-    base.profile.key,
-    "personal_memories",
-    50,
-    lines,
-    hiddenReasonForPolicy(base.policy, "personal_memories", {
-      blacklisted: base.blacklisted,
-      personalizationEnabled: base.personalizationEnabled,
-      isUserImpersonation: params.activePersonaScope.isUserImpersonation,
-    }),
-  );
+  const lines = memories.length
+    ? [`- Memories about ${base.profile.displayName}: ${memories.map((entry) => entry.formattedText).join("; ")}`]
+    : [];
+  return {
+    ...field(
+      base.profile.key,
+      "personal_memories",
+      50,
+      lines,
+      hiddenReasonForPolicy(base.policy, "personal_memories", {
+        blacklisted: base.blacklisted,
+        personalizationEnabled: base.personalizationEnabled,
+        isUserImpersonation: params.activePersonaScope.isUserImpersonation,
+      }),
+    ),
+    memoryEntries: memories.map(({ formattedText: _formattedText, ...entry }) => entry),
+  };
 }
 
 async function enrichHumanRemindersField(
@@ -511,38 +765,85 @@ async function enrichHumanRemindersField(
   return field(base.profile.key, "human_reminders", 60, lines);
 }
 
-async function hydrateDiscordUser(
-  seed: ParticipantSeed,
+async function resolveDiscordAccountLabel(
+  accountDiscId: string,
   params: ParticipantHydrationParams,
   dependencies: ParticipantHydrationDependencies,
-): Promise<HydratedParticipantProfile | null> {
-  const base = await hydrateDiscordUserBase(seed, params, dependencies);
-  if (!base) return null;
+): Promise<string> {
+  const member = await dependencies.loadMember(params.client, params.guildId, accountDiscId).catch(() => null);
+  const fallbackUser = member
+    ? null
+    : await dependencies.loadFallbackUser(params.client, accountDiscId).catch(() => null);
+  const userRow = await dependencies.loadUserRow(accountDiscId).catch(() => null);
+  const displayName =
+    member?.displayName?.trim() ||
+    userRow?.user_nickname?.trim() ||
+    fallbackUser?.globalName?.trim() ||
+    fallbackUser?.username?.trim() ||
+    `<@${accountDiscId}>`;
+  const username = member?.user.username?.trim() ?? fallbackUser?.username?.trim() ?? null;
+  return username && displayName.toLowerCase() !== username.toLowerCase()
+    ? `${displayName}, @${username}`
+    : displayName;
+}
+
+function enrichMessageProxyIdentityField(base: HydratedDiscordUserBase): ParticipantProfileField {
+  const context = base.messageProxy?.context;
+  if (!context) return field(base.profile.key, "message_proxy_identity", 5, []);
+  const presentation = base.messageProxy?.presentation ?? null;
+  return field(
+    base.profile.key,
+    "message_proxy_identity",
+    5,
+    presentation ? [presentation.identityMembershipLine(context)] : [],
+  );
+}
+
+/** Host IDs stay unresolved until namespace dedup, so they are labeled once. */
+interface MessageProxyNamespaceNoteSeed {
+  context: MessageProxyIdentityContext;
+  presentation: ProxyServicePresentation;
+  accountDiscIds: readonly string[];
+}
+
+function messageProxyNamespaceNoteSeed(base: HydratedDiscordUserBase): MessageProxyNamespaceNoteSeed | null {
+  const messageProxy = base.messageProxy;
+  const context = messageProxy?.context;
+  if (!messageProxy || !context) return null;
+  const presentation = messageProxy.presentation;
+  if (!presentation) return null;
+  return {
+    context,
+    presentation,
+    accountDiscIds: messageProxy.hostDiscIds,
+  };
+}
+
+async function hydrateDiscordUser(
+  base: HydratedDiscordUserBase,
+  params: ParticipantHydrationParams,
+  dependencies: ParticipantHydrationDependencies,
+): Promise<{ profile: HydratedParticipantProfile; namespaceNoteSeed: MessageProxyNamespaceNoteSeed | null } | null> {
   const fields: ParticipantProfileField[] = [
+    ...(base.messageProxy ? [enrichMessageProxyIdentityField(base)] : []),
     enrichPhysicalAppearanceField(base, params),
-    enrichTimezoneField(base, params),
+    enrichNamingField(base, params),
+    enrichIdentityField(base),
+    ...enrichTimezoneFields(base, params),
     await enrichPresenceField(base, params, dependencies),
     enrichRolesField(base, params),
     await enrichPersonalMemoriesField(base, params, dependencies),
     await enrichHumanRemindersField(base, params, dependencies),
   ];
-  return { ...base.profile, fields };
+  return { profile: { ...base.profile, fields }, namespaceNoteSeed: messageProxyNamespaceNoteSeed(base) };
 }
 
-function buildRoleLines(member: GuildMember, guild: Guild | undefined): string[] {
-  const roles = member.roles.cache
-    .filter((role) => role.id !== guild?.id && role.name !== "@everyone")
-    .sort((left, right) => right.position - left.position)
-    .map((role) => role.name);
-  return roles.length > 0 ? [`- Server Roles: ${roles.join(", ")}`] : [];
-}
-
-async function hydratePersonalMemoryLines(
+async function hydratePersonalMemoryEntries(
   userRow: UserRow,
   displayName: string,
   params: ParticipantHydrationParams,
   dependencies: ParticipantHydrationDependencies,
-): Promise<string[]> {
+): Promise<Array<ContextMemoryEntry & { formattedText: string }>> {
   if (!userRow.user_id) return [];
   const memories = await dependencies.loadPersonalMemories(
     userRow.user_id,
@@ -560,10 +861,26 @@ async function hydratePersonalMemoryLines(
         params.botName,
         params.tomoriConfig.personal_memories_enabled,
       );
-      return formatMemoryWithId(memory.personal_memory_id ?? index + 1, processed, memory.tags ?? []);
+      const formattedText = formatMemoryWithId(memory.personal_memory_id ?? index + 1, processed, memory.tags ?? []);
+      if (
+        params.memoryRecall &&
+        !(await params.memoryRecall.include({
+          kind: "personal",
+          id: memory.personal_memory_id as number,
+          decayDays: memory.decay_days,
+          line: `- Memories about ${displayName}: ${formattedText}`,
+        }))
+      )
+        return null;
+      return {
+        id: `personal:${memory.personal_memory_id ?? index + 1}`,
+        text: processed,
+        formattedText,
+        createdAt: memory.created_at?.getTime(),
+      };
     }),
   );
-  return [`- Memories: ${processedMemories.join("; ")}`];
+  return processedMemories.filter((memory) => memory !== null);
 }
 
 function memoryMatchesContext(memory: PersonalMemoryRow, params: ParticipantHydrationParams): boolean {
@@ -749,8 +1066,11 @@ export async function hydrateParticipantProfiles(
     memberReads: 0,
     fallbackUserReads: 0,
     presenceReads: 0,
+    messageProxyContextReads: 0,
   };
   const dependencies: ParticipantHydrationDependencies = {
+    isMessageProxyIdentity: baseDependencies.isMessageProxyIdentity,
+    getMessageProxyPresentation: baseDependencies.getMessageProxyPresentation,
     loadUserRow: async (discordId) => {
       externalCalls.userRowLoads += 1;
       return baseDependencies.loadUserRow(discordId);
@@ -777,7 +1097,7 @@ export async function hydrateParticipantProfiles(
     },
     loadMember: async (client, guildId, discordId) => {
       externalCalls.memberReads += 1;
-      return baseDependencies.loadMember(client, guildId, discordId);
+      return baseDependencies.loadMember(client, guildId, discordId, params.requestScope);
     },
     loadFallbackUser: async (client, discordId) => {
       externalCalls.fallbackUserReads += 1;
@@ -785,26 +1105,71 @@ export async function hydrateParticipantProfiles(
     },
     loadPresence: async (client, discordId, guildId, preloadedMember) => {
       externalCalls.presenceReads += 1;
-      return baseDependencies.loadPresence(client, discordId, guildId, preloadedMember);
+      return baseDependencies.loadPresence(client, discordId, guildId, preloadedMember, params.requestScope);
     },
+    loadMessageProxyIdentityContext: async (userDiscId) => {
+      externalCalls.messageProxyContextReads += 1;
+      return baseDependencies.loadMessageProxyIdentityContext(userDiscId);
+    },
+    loadNamingPreferences: (pairs) => baseDependencies.loadNamingPreferences(pairs),
   };
-  const profiles: HydratedParticipantProfile[] = [];
-  let botAdded = false;
-  for (const seed of params.participantSeeds) {
-    if (seed.key.kind === "bot" || (seed.key.kind === "persona" && seed.reasons.has("active_identity"))) {
-      if (!botAdded) {
-        profiles.push(hydrateBot(seed, params));
-        botAdded = true;
+  const bases = await mapWithConcurrency(params.participantSeeds, PARTICIPANT_HYDRATION_CONCURRENCY, (seed) =>
+    hydrateDiscordUserBase(seed, params, dependencies),
+  );
+  const discordBases = new Map<string, HydratedDiscordUserBase>();
+  for (const [index, base] of bases.entries()) {
+    if (base) discordBases.set(serializeParticipantKey(params.participantSeeds[index].key), base);
+  }
+  const personaLineageId = params.activePersonaScope.lineageId ?? params.snapshot?.tomoriState?.persona_lineage_id ?? 0;
+  const namingPreferences = await dependencies.loadNamingPreferences(
+    [...discordBases.values()].flatMap((base) =>
+      base.userRow.user_id ? [{ userId: base.userRow.user_id, personaLineageId }] : [],
+    ),
+  );
+  const hydratedSeeds = await mapWithConcurrency(
+    params.participantSeeds,
+    PARTICIPANT_HYDRATION_CONCURRENCY,
+    async (seed) => {
+      if (seed.key.kind === "bot" || (seed.key.kind === "persona" && seed.reasons.has("active_identity"))) {
+        return { profile: hydrateBot(seed, params), namespaceNoteSeed: null };
       }
-      continue;
+      if (seed.key.kind === "discord_user") {
+        const base = discordBases.get(serializeParticipantKey(seed.key));
+        if (!base) return null;
+        const preference = base.userRow.user_id
+          ? namingPreferences.get(userPersonaNamingPairKey(base.userRow.user_id, personaLineageId))
+          : undefined;
+        return hydrateDiscordUser(applyPersonaRelativeNaming(base, params, preference), params, dependencies);
+      }
+      const profile = hydrateSyntheticBase(seed, params);
+      return profile ? { profile, namespaceNoteSeed: null } : null;
+    },
+  );
+  const profiles: HydratedParticipantProfile[] = [];
+  const messageProxyNamespaces = new Map<string, MessageProxyNamespaceNote>();
+  let botAdded = false;
+  for (const [index, hydrated] of hydratedSeeds.entries()) {
+    if (!hydrated) continue;
+    const seed = params.participantSeeds[index];
+    if (seed.key.kind === "bot" || (seed.key.kind === "persona" && seed.reasons.has("active_identity"))) {
+      if (botAdded) continue;
+      botAdded = true;
     }
-    if (seed.key.kind === "discord_user") {
-      const profile = await hydrateDiscordUser(seed, params, dependencies);
-      if (profile) profiles.push(profile);
-      continue;
+    profiles.push(hydrated.profile);
+    const noteSeed = hydrated.namespaceNoteSeed;
+    const namespaceMapKey = noteSeed ? `${noteSeed.context.serviceId}\u0000${noteSeed.context.namespaceKey}` : null;
+    if (noteSeed && namespaceMapKey && !messageProxyNamespaces.has(namespaceMapKey)) {
+      const accountLabels = await Promise.all(
+        noteSeed.accountDiscIds.map((accountDiscId) => resolveDiscordAccountLabel(accountDiscId, params, dependencies)),
+      );
+      const namespace = noteSeed.presentation.namespacePresentation(noteSeed.context, accountLabels);
+      messageProxyNamespaces.set(namespaceMapKey, {
+        serviceId: noteSeed.context.serviceId,
+        namespaceKey: noteSeed.context.namespaceKey,
+        sectionHeading: namespace.sectionHeading,
+        entry: namespace.entry,
+      });
     }
-    const syntheticProfile = hydrateSyntheticBase(seed, params);
-    if (syntheticProfile) profiles.push(syntheticProfile);
   }
   await applyPublicPersonaProfiles(profiles, params);
   const enriched = await applyParticipantProfileEnrichers({
@@ -815,6 +1180,7 @@ export async function hydrateParticipantProfiles(
   return {
     profiles: enriched.profiles,
     personaTaskLines: await hydratePersonaTaskLines(params, dependencies),
+    messageProxyNamespaces: [...messageProxyNamespaces.values()],
     diagnostics: {
       durationMs: performance.now() - startedAt,
       profileCount: enriched.profiles.length,

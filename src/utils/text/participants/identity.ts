@@ -27,6 +27,8 @@ export type ParticipantCapability = "mentionable";
 
 export type ParticipantAliasSource =
   | "saved_nickname"
+  | "effective_nickname"
+  | "formatted_name"
   | "guild_display_name"
   | "guild_nickname"
   | "global_name"
@@ -36,7 +38,8 @@ export type ParticipantAliasSource =
   | "persona_nickname"
   | "persona_trigger"
   | "bridge_display_name"
-  | "webhook_display_name";
+  | "webhook_display_name"
+  | "message_proxy_display_name";
 
 export interface ParticipantAlias {
   owner: ParticipantKey;

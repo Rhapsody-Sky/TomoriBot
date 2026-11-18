@@ -26,6 +26,7 @@ export interface ConversationUserReference {
 }
 
 interface ContextItemSender {
+  id: string;
   name: string;
   type: "user" | "persona";
 }
@@ -44,7 +45,10 @@ export enum ContextItemTag {
   KNOWLEDGE_PERSONA_SPRITES = "knowledge_persona_sprites",
   KNOWLEDGE_SERVER_MEMORIES = "knowledge_server_memories",
   KNOWLEDGE_SERVER_DOCUMENTS = "knowledge_server_documents",
-  KNOWLEDGE_VERBATIM_TOOL_DEFINITIONS = "knowledge_verbatim_tool_definitions", // Available tool JSON schemas, injected only when the verbatim tool-calling workaround is enabled
+  KNOWLEDGE_RECALLED_MEMORIES = "knowledge_recalled_memories",
+  KNOWLEDGE_LOREBOOK_BEFORE = "knowledge_lorebook_before",
+  KNOWLEDGE_LOREBOOK_AFTER = "knowledge_lorebook_after",
+  KNOWLEDGE_VERBATIM_TOOL_DEFINITIONS = "knowledge_verbatim_tool_definitions", // Available tool JSON schemas, injected only for a model with verbatim tool calling enabled
   KNOWLEDGE_SERVER_CONDITIONING = "knowledge_server_conditioning",
   KNOWLEDGE_PERSONA_USER_BLOCKS = "knowledge_persona_user_blocks",
   KNOWLEDGE_USER_MEMORIES = "knowledge_user_memories", // For a block of multiple users' memories
@@ -58,16 +62,41 @@ export enum ContextItemTag {
   CONTEXT_NOTE_INJECTION = "context_note_injection", // Author's note injected into dialogue at configurable depth
 }
 
+export interface ContextMemoryEntry {
+  id: string;
+  text: string;
+  createdAt?: number;
+}
+
 export type StructuredContextItem = {
+  personaSprites?: { personaId: number; spriteKeys: string[] };
+  completionText?: string;
+  boomerangTranscript?: boolean;
+  memoryEntries?: ContextMemoryEntry[];
+  personalMemoryItems?: StructuredContextItem[];
   role: "system" | "user" | "model"; // 'system' for initial instructions, 'user' for user/tool inputs, 'model' for LLM responses
   parts: ContextPart[];
   mediaDescriptors?: MediaDescriptor[];
   metadataTag?: ContextItemTag; // Optional tag for internal processing
   messageId?: string; // Optional Discord message ID for tools that need to reference the original message
+  /**
+   * Every Discord message folded into a merged history turn, so a reply to a later chunk of a split
+   * reply still resolves. `messageId` holds only the first.
+   */
+  combinedMessageIds?: string[];
   sender?: ContextItemSender; // Hidden sender metadata for provider-side history normalization
+  /** Visible participant fields before mention-rendering instructions are added. */
+  participantReviewEvidence?: {
+    participants: Array<{ name: string; fields: string[] }>;
+    channel: string;
+    currentTime: string;
+    timezone: string;
+  };
   conversationUsers?: ConversationUserReference[]; // Hidden metadata for user resolution and mention handling
   participantTargetIndex?: import("@/utils/text/participants/targetIndex").ParticipantTargetIndex;
   personaMentionMap?: Map<string, string>; // Hidden metadata for preserving known persona @trigger text
+  /** Built only when the context model can call tools, so a generation attempt that sends none drops it. */
+  requiresToolCalling?: true;
 };
 
 /**

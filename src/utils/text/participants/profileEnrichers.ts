@@ -1,3 +1,4 @@
+import type { ContextMemoryEntry } from "@/types/misc/context";
 import {
   aggregateContributionDiagnostics,
   createContributionRegistry,
@@ -14,7 +15,7 @@ import type {
   ParticipantProfileFieldKind,
 } from "@/utils/text/participants/hydration";
 
-const DEFAULT_ENRICHER_TIMEOUT_MS = 1_500;
+const ENRICHER_TIMEOUT_MS = 1_500;
 
 type HydratedParticipantBase = Omit<HydratedParticipantProfile, "fields">;
 
@@ -25,6 +26,7 @@ interface ParticipantProfileFieldContribution {
     reason: ParticipantFieldVisibilityReason;
   };
   lines: readonly string[];
+  memoryEntries?: readonly ContextMemoryEntry[];
   order?: number;
 }
 
@@ -60,11 +62,6 @@ export interface ParticipantProfileEnrichmentResult {
   diagnostics: readonly ContributionExecutionDiagnostic[];
 }
 
-function enricherTimeoutMs(): number {
-  const configured = Number.parseInt(process.env.PARTICIPANT_ENRICHER_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ENRICHER_TIMEOUT_MS;
-}
-
 function coreFieldEnricher(
   id: string,
   kind: ParticipantProfileFieldKind,
@@ -85,11 +82,17 @@ function coreFieldEnricher(
   };
 }
 
+// Every core field kind needs an entry here: enrichment rebuilds the field list
+// from this registry, so an unregistered kind is dropped without an error.
 const CORE_FIELD_ENRICHERS: readonly ParticipantProfileEnricher[] = [
-  coreFieldEnricher("core.status", "status", 100),
+  coreFieldEnricher("core.message-proxy-identity", "message_proxy_identity", 90),
+  coreFieldEnricher("core.status", "status", 100, "core.message-proxy-identity"),
   coreFieldEnricher("core.physical-appearance", "physical_appearance", 110, "core.status"),
-  coreFieldEnricher("core.timezone", "timezone", 120, "core.physical-appearance"),
-  coreFieldEnricher("core.presence", "presence", 130, "core.timezone"),
+  coreFieldEnricher("core.naming", "naming", 112, "core.physical-appearance"),
+  coreFieldEnricher("core.identity", "identity", 115, "core.naming"),
+  coreFieldEnricher("core.timezone", "timezone", 120, "core.identity"),
+  coreFieldEnricher("core.local-time", "local_time", 125, "core.timezone"),
+  coreFieldEnricher("core.presence", "presence", 130, "core.local-time"),
   coreFieldEnricher("core.roles", "roles", 140, "core.presence"),
   coreFieldEnricher("core.personal-memories", "personal_memories", 150, "core.roles"),
   coreFieldEnricher("core.human-reminders", "human_reminders", 160, "core.personal-memories"),
@@ -149,6 +152,9 @@ function coreFieldContribution(field: ParticipantProfileField): ParticipantProfi
     kind: field.kind,
     visibility: Object.freeze({ ...field.visibility }),
     lines: Object.freeze([...field.lines]),
+    ...(field.memoryEntries && {
+      memoryEntries: Object.freeze(field.memoryEntries.map((entry) => Object.freeze({ ...entry }))),
+    }),
     order: field.order,
   });
 }
@@ -175,7 +181,7 @@ export async function applyParticipantProfileEnrichers(params: {
     for (const registration of registry.ordered) {
       const executed = await executeContribution<readonly ParticipantProfileFieldContribution[]>({
         descriptor: registration,
-        timeoutMs: enricherTimeoutMs(),
+        timeoutMs: ENRICHER_TIMEOUT_MS,
         outputCount: (output) => output.length,
         run: async (signal) => {
           if (!registration.enricher.supports(participant)) return [];
@@ -200,6 +206,9 @@ export async function applyParticipantProfileEnrichers(params: {
               : nextExtensionOrder++,
           visibility: { ...contribution.visibility },
           lines: [...contribution.lines],
+          ...(contribution.memoryEntries && {
+            memoryEntries: contribution.memoryEntries.map((entry) => ({ ...entry })),
+          }),
         });
       }
     }

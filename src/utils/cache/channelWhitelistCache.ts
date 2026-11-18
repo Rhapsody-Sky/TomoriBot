@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { broadcastInvalidation, registerInvalidation, invalidationKey } from "@/utils/cache/invalidationBus";
 import type { WhitelistCheckResult } from "@/types/misc/channelWhitelist";
 import { whitelistRepository } from "@/utils/db/repositories/WhitelistRepository";
 
@@ -14,12 +16,7 @@ const whitelistCache = new Map<string, { result: WhitelistCheckResult; expiresAt
 let cacheHits = 0;
 let cacheMisses = 0;
 
-/**
- * Cache TTL in milliseconds (configurable via CHANNEL_WHITELIST_CACHE_TTL_MINUTES)
- * Default: 5 minutes
- */
-const CACHE_TTL_MINUTES = Number.parseInt(process.env.CHANNEL_WHITELIST_CACHE_TTL_MINUTES || "5", 10);
-const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Generate cache key from server and channel Discord IDs
@@ -90,12 +87,13 @@ export async function getCachedWhitelistStatus(
  * @param channelDiscId - Optional Discord channel ID (snowflake)
  */
 export function invalidateWhitelistCache(serverDiscId: string, channelDiscId?: string): void {
-  const prefix = channelDiscId ? `${serverDiscId}:${channelDiscId}:` : `${serverDiscId}:`;
   for (const key of whitelistCache.keys()) {
-    if (key.startsWith(prefix)) {
+    const [server, channel, parent] = key.split(":");
+    if (server === serverDiscId && (!channelDiscId || channel === channelDiscId || parent === channelDiscId)) {
       whitelistCache.delete(key);
     }
   }
+  broadcastInvalidation("whitelist", [channelDiscId === undefined ? [serverDiscId] : [serverDiscId, channelDiscId]]);
 }
 
 /**
@@ -134,3 +132,10 @@ export function clearWhitelistCache(): void {
   cacheHits = 0;
   cacheMisses = 0;
 }
+
+registerInvalidation(
+  "whitelist",
+  z.union([z.tuple([invalidationKey]), z.tuple([invalidationKey, invalidationKey])]),
+  ([server, channel]) => invalidateWhitelistCache(server, channel),
+  clearWhitelistCache,
+);
