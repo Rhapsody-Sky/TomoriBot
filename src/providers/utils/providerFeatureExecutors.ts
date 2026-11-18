@@ -1,3 +1,4 @@
+import { storedCredentialUsageContext } from "@/utils/security/apiKeyRetention";
 import {
   findProviderRequestDeniedError,
   reportProviderUsage,
@@ -109,7 +110,12 @@ export async function callDecisionsForProvider(request: DecisionExecutionRequest
     return { status: "invalid-input", correlationId, errorLogged: false };
   }
   const reference = request.reference;
-  let apiStyle: DecisionApiStyle = reference.provider === "openrouter" ? "openrouter-decisions" : "system-one";
+  let apiStyle: DecisionApiStyle =
+    reference.provider === "google"
+      ? "google-decisions"
+      : reference.provider === "openrouter"
+        ? "openrouter-decisions"
+        : "system-one";
   const trace = () => ({ reference, apiStyle, correlationId });
   const cancelled = (): DecisionResult => {
     decisionTrace(trace(), "cancelled", { questionCount: request.questions.length, elapsedMs: Date.now() - startedAt });
@@ -186,7 +192,7 @@ export async function callDecisionsForProvider(request: DecisionExecutionRequest
         operation: "decision-request",
         stage: "resolution",
         category: "credentials",
-        provider: custom ? "custom" : "openrouter",
+        provider: custom ? "custom" : reference.provider,
         apiStyle,
         modelId: reference.modelId,
         registrationId: reference.registrationId,
@@ -203,11 +209,17 @@ export async function callDecisionsForProvider(request: DecisionExecutionRequest
           : await llmProviderRepo.loadUserSavedProviderConfig(request.scope.ownerId, reference.provider);
     let apiKey: string | null = credentials?.apiKey ?? null;
     try {
-      if (connection) apiKey = await loadCustomConnectionCredential(connection, failureContext);
-      else if (!credentials) {
+      if (connection) {
+        const stored = await loadCustomConnectionCredential(connection, failureContext);
+        apiKey = stored?.apiKey ?? null;
+        usageContext = stored?.usageContext;
+      } else if (!credentials) {
         apiKey = nativeConfig?.api_key
           ? await decryptApiKey(nativeConfig.api_key, nativeConfig.key_version, failureContext)
           : null;
+        if (apiKey && nativeConfig?.api_key && reference.provider !== "vertex") {
+          usageContext = await storedCredentialUsageContext(nativeConfig.api_key, apiKey);
+        }
       }
     } catch {
       // Credential decryption reports its safe cause with the operation context before throwing.
@@ -354,6 +366,7 @@ export async function callExpressionInitializationForProvider(
       images: request.images,
       temperature: request.temperature,
       schemaName: "expression_batch_result",
+      ...(request.providerName === "deepseek" ? { thinkingLevel: "none" } : {}),
       onUsage: request.onUsage,
     },
     buildExpressionResponseSchema(),

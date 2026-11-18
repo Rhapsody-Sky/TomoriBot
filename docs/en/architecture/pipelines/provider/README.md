@@ -42,6 +42,7 @@ thresholds, calibration, and response routing belong to consumers.
 
 | Transport | Translation |
 |---|---|
+| Native Google | `POST /v1beta/decisions`: text `input`, named `noul` and `choice` questions, API key in `x-goog-api-key` |
 | Native OpenRouter | `/api/alpha/decisions`: text `state`, named `noul` questions and answers |
 | Custom System One | `POST <stored-base>/systemone`: the same named `noul` protocol |
 | Custom OpenAI Decisions | `POST <stored-base>/decisions`: text `input`, ordered predicates and predicate/refusal answers |
@@ -65,7 +66,11 @@ are bounded to 1 MiB. Until callers need a model-specific tokenizer, the seriali
 byte count must fit its documented input-token ceiling. This conservative admission rule can reject
 otherwise fitting requests and never truncates evidence. Custom calls retain the SSRF gate and pinned
 fetch. Discovery checks explicit Decision output modality, finite prices, and documented input limits.
-Only OpenRouter receives global seeds; seeding does not select a model or activate a drafting gate.
+Google and OpenRouter receive global seeds; seeding does not select a model or activate a drafting gate.
+Google defaults to `gemini-decision-1` with a 262,144-token input limit and paid-tier input pricing
+of $0.10 per million tokens. Its response omits the model ID and reports `total_input_tokens`,
+`total_output_tokens` (always zero), and `total_tokens`; the adapter retains the requested model ID.
+Google safety blocks arrive as HTTP 400 with a typed safety code and return `refused`.
 
 INFO traces contain protocol, numeric model/registration identities, correlation, counts, elapsed
 time, outcome, and actual usage/cost when supplied. They omit evidence, question text, caller labels,
@@ -78,7 +83,8 @@ missing selection, and rejected input are expected outcomes. The existing logger
 `RUN_ENV=production` unless `TEST_PRODUCTION=true`; retained warnings reach JSON logs at every level,
 and errors also persist in `error_logs`. Both carry ambient workspace/turn context.
 
-Protocol references: [OpenRouter Decisions](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request),
+Protocol references: [Google Decisions](https://aistudio.google.com/docs/decisions-api),
+[OpenRouter Decisions](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request),
 [System One](https://docs.typesafe.ai/api), and
 [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions).
 
@@ -112,7 +118,8 @@ An embedding family switch re-embeds stored chunks in place, preserving their ID
 and boundaries, including history facts and edited chunks. Vector generation runs outside the write
 transaction; each document commits only if its stored chunk set still matches the embedded snapshot.
 A conflict gets one fresh attempt. An incomplete re-embed processes the remaining documents, then
-raises a failure instead of reporting a successful model switch; a retry skips chunks already on the
+raises a failure instead of reporting a successful model switch; a retry (re-picking the target
+model in `/config` or choosing `Re-embed Documents` in `/memories`) skips chunks already on the
 target model.
 
 Stream usage is normalized by `normalizeProviderUsage` in `src/utils/text/tokenEstimate.ts`.
@@ -140,6 +147,8 @@ translator can turn a provider failure into this error using the failed request'
 translation, and never translates a denial belonging to another context. Omit the context argument only
 for credential resolution or an already-scoped error propagating to its presentation owner. An
 explicit undefined context matches only an unscoped denial.
+Model-validation refusals before credential resolution omit a context. Modal callers handle
+revalidation denials separately from the previously resolved request's context.
 Check for denials before credential-specific and generic handling. `deferNotice` lets the stream
 state machine leave a notice to the retry owner rather than posting it before fallback completes.
 
@@ -221,6 +230,10 @@ its input preserves scope, mode and replacement identity. Hosted speech registra
 catalog separately and sends option writes to this callback, so personal options can store selections
 without built-in credentials. Built-in speech writes keep using the speech repository.
 The registry never adds storage of its own.
+
+Model registration and server or personal image selection validate the payer's model support before
+writing selections. A `ProviderRequestDeniedError` from validation keeps its localized refusal in the
+panel instead of becoming an invalid-model or write-failure message.
 
 An option's panel `handleAction` owns interaction acknowledgement. It may show a modal immediately,
 or acknowledge before awaiting its lazy `loadSelection()` callback, which loads the scope and edit
@@ -328,53 +341,21 @@ fallback ref's payer tag. A deployment that needs it keeps that tag on its own b
 
 ## Stage flow
 
-```
-tool loop pipeline -> LLMProvider.streamToDiscord()
-                            |  (builds StreamConfig + StreamAdapter)
-                            v
-                    [Stage 01] startStream: Context assembly
-                            |  contextItems -> provider-native payload
-                            |  tools, history replay, stop strings
-                            v
-                    [Stage 02] startStream: Raw chunk generation
-                            |  HTTP stream open -> yield RawStreamChunk
-                            |  parameter degradation, speaker tail holdback
-                            v
-                    [Stage 03] processChunk: Chunk normalization
-                            |  RawStreamChunk -> ProcessedChunk
-                            |  (text, function_call, error, done, thoughts)
-                            v
-                    [Stage 04] executeStream: Orchestrator state machine
-                      for-await loop -> checks stop signals and heartbeats
-                            |
-                       +----+-------------------------------------------+
-                       | type="text"          | type="function_call"    | type="done"
-                       v                      v                         v
-               [Stage 05]               flush buffer -> return      record terminal
-           processTextChunk          { status: "function_call" }   metadata; continue
-            Buffer management
-                       |
-                       v
-               [Stage 06]
-           sendBufferSegment
-            Segment normalization
-            (clean, mentions, guard)
-                       |
-                       v
-               [Stage 07]
-            sendSegment ->
-          sendSinglePayload
-            Discord delivery
-          (webhook / channel,
-           typing simulation)
-                       |
-                       v
-             StreamResult
-           { status, accumulatedText,
-             thoughtLog, detailsContent }
-                       |
-                       v
-              tool loop pipeline
+```mermaid
+flowchart TD
+  in["tool loop pipeline → LLMProvider.streamToDiscord()<br/>(builds StreamConfig + StreamAdapter)"] --> s01["[Stage 01] startStream: Context assembly<br/>contextItems → provider-native payload<br/>tools, history replay, stop strings"]
+  s01 --> s02["[Stage 02] startStream: Raw chunk generation<br/>HTTP stream open → yield RawStreamChunk<br/>parameter degradation, speaker tail holdback"]
+  s02 --> s03["[Stage 03] processChunk: Chunk normalization<br/>RawStreamChunk → ProcessedChunk<br/>(text, function_call, error, done, thoughts)"]
+  s03 --> s04["[Stage 04] executeStream: Orchestrator state machine<br/>for-await loop → checks stop signals and heartbeats"]
+  s04 -->|"type = text"| s05["[Stage 05] processTextChunk<br/>Buffer management"]
+  s04 -->|"type = function_call"| fn["Flush buffer →<br/>return { status: function_call }"]
+  s04 -->|"type = done"| done["Record terminal metadata;<br/>continue"]
+  s05 --> s06["[Stage 06] sendBufferSegment<br/>Segment normalization (clean, mentions, guard)"]
+  s06 --> s07["[Stage 07] sendSegment → sendSinglePayload<br/>Discord delivery (webhook / channel, typing simulation)"]
+  s07 --> res["StreamResult<br/>{ status, accumulatedText, thoughtLog, detailsContent }"]
+  fn --> res
+  done --> res
+  res --> out["tool loop pipeline"]
 ```
 
 ## Stage index

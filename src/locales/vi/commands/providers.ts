@@ -3,6 +3,8 @@ export default {
     description: `Thêm, xem, chỉnh sửa và xóa thông tin xác thực nhà cung cấp, endpoint và danh mục model.`,
     title: `Nhà cung cấp của máy chủ`,
     personal_title: `Nhà cung cấp cá nhân`,
+    credential_missing: "Mình không có API key cho cấu hình đã lưu này. Dùng **Sửa** để thêm lại.",
+    credential_retention: "Bản cài đặt này xóa các khóa đã lưu sau {days} ngày không có yêu cầu xác thực.",
     selector_guidance: "**Chọn** hoặc **thêm** nhà cung cấp hay endpoint bằng menu thả xuống bên dưới.",
     select_placeholder: `Chọn nhà cung cấp, endpoint hoặc hành động...`,
     select_add_provider: `+ Thêm nhà cung cấp mới`,
@@ -94,6 +96,8 @@ export default {
     validation_failed: `Nhà cung cấp đã từ chối API key đó hoặc không thể xác thực. Chưa lưu thông tin nào.`,
     validation_no_balance:
       "Nhà cung cấp đã nhận diện API key đó, nhưng tài khoản hết số dư nên chưa thể trả lời tin nhắn. Hãy nạp tiền trên trang web của nhà cung cấp rồi gửi lại cùng key đó. Chưa lưu thông tin nào.",
+    host_restricted: `Người host TomoriBot chỉ cho phép Google Vertex AI cho một số máy chủ và người dùng nhất định, và đây không phải là một trong số đó. Hãy chọn nhà cung cấp khác. Chưa lưu thông tin nào.`,
+    vertex_config_invalid: `Cài đặt Google Vertex AI phải có dạng \`project-id::location\`, ví dụ \`my-project::global\`. Project và vị trí chỉ được dùng chữ cái, số và dấu gạch nối. Chưa lưu thông tin nào.`,
     missing_default_model: `Thông tin xác thực đã được lưu, nhưng nhà cung cấp này không có model văn bản mặc định để kích hoạt.`,
     write_failed: `Không thể lưu hoặc kích hoạt nhà cung cấp. Hãy thử lại.`,
     add_endpoint_modal_title: `Thêm endpoint tùy chỉnh`,
@@ -181,6 +185,16 @@ export default {
     },
     model_compat_label: `Tương thích Chat Completion`,
     model_compat_description: `Điều chỉnh định dạng và giao thức cho backend nghiêm ngặt. Để tắt trừ khi thật sự cần.`,
+    model_image_request_format_label: `Định dạng yêu cầu hình ảnh`,
+    model_image_request_format_description: `Khớp với định dạng API mà model hình ảnh này chấp nhận.`,
+    image_request_formats: {
+      images: `Images API`,
+      "chat-completions": `Chat Completions`,
+    },
+    image_request_format_descriptions: {
+      images: `Gửi prompt tới /images/generations.`,
+      "chat-completions": `Gửi yêu cầu tạo ảnh dưới dạng tin nhắn chat tới /chat/completions.`,
+    },
     model_image_supports_label: `Tính năng hình ảnh`,
     model_image_supports_description: `Chỉ khai báo các tính năng hình ảnh mà model và endpoint này thực sự hỗ trợ.`,
     model_image_supports: {

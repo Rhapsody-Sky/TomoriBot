@@ -417,6 +417,7 @@ export interface MemoriesPanelRenderInput {
   documents?: DocumentListRow[];
   documentCount?: number;
   documentChunkCount?: number;
+  mismatchedEmbeddingDocuments?: number;
   documentChunks?: DocumentChunkRow[];
   documentCountsByPersona?: ReadonlyMap<number, number>;
   eligibleHistoryPersonaIds?: ReadonlySet<number>;
@@ -487,7 +488,6 @@ export function buildMemoriesPanelPayload(input: MemoriesPanelRenderInput): Memo
     receipt,
   } = input;
   const writesDisabled = readStatus !== "fresh";
-  const memberTeachingBlocked = !canManage && input.memteachingEnabled === false;
 
   const categoryButtons = buildCategoryButtonRow(
     [
@@ -533,6 +533,22 @@ export function buildMemoriesPanelPayload(input: MemoriesPanelRenderInput): Memo
       },
       buildRetryRow(locale, category, selectedLineageId || undefined),
     );
+    return buildPayload(components, receipt);
+  }
+
+  if (!canManage && (category === "documents" || category === "lorebooks" || page.kind === "vectorize")) {
+    components.push({
+      type: ComponentType.TextDisplay,
+      content: localizer(locale, "commands.memories.manager_only_detail"),
+    });
+    return buildPayload(components, receipt);
+  }
+
+  if (category === "memories" && !canManage && input.memteachingEnabled === false) {
+    components.push({
+      type: ComponentType.TextDisplay,
+      content: localizer(locale, "commands.memories.teaching_disabled_error_detail"),
+    });
     return buildPayload(components, receipt);
   }
 
@@ -868,7 +884,7 @@ export function buildMemoriesPanelPayload(input: MemoriesPanelRenderInput): Memo
               memoryId: selectedMemory?.server_memory_id ?? 0,
             }),
             label: localizer(locale, "commands.memories.vectorize_button"),
-            disabled: writesDisabled || !selectedMemory,
+            disabled: writesDisabled || !selectedMemory || !canManage,
           },
           {
             type: ComponentType.Button,
@@ -891,14 +907,6 @@ export function buildMemoriesPanelPayload(input: MemoriesPanelRenderInput): Memo
       content: `### ${localizer(locale, "commands.memories.documents_title")}
 ${localizer(locale, "commands.memories.documents_description")}`,
     };
-    if (memberTeachingBlocked) {
-      components.push(documentsHeading, {
-        type: ComponentType.TextDisplay,
-        content: withLinePrefix("> ", localizer(locale, "commands.memories.documents_teaching_disabled")),
-      });
-      return buildPayload(components, receipt);
-    }
-
     // 0 is the serverwide sentinel and the page's default scope, so an absent selection stays 0
     // rather than falling through to whichever persona happens to sort first.
     const selectedPersonaId = input.selectedDocumentPersonaId ?? 0;
@@ -1012,16 +1020,52 @@ ${localizer(locale, "commands.memories.documents_description")}`,
       ),
     );
 
-    components.push({
-      type: ComponentType.TextDisplay,
-      content: withLinePrefix(
-        "> ",
-        localizer(locale, "commands.memories.document_counts", {
-          documents: input.documentCount ?? 0,
-          chunks: input.documentChunkCount ?? 0,
-        }),
-      ),
-    });
+    const countsContent = withLinePrefix(
+      "> ",
+      localizer(locale, "commands.memories.document_counts", {
+        documents: input.documentCount ?? 0,
+        chunks: input.documentChunkCount ?? 0,
+      }),
+    );
+    const mismatchedEmbeddingDocuments = input.mismatchedEmbeddingDocuments ?? 0;
+    if (mismatchedEmbeddingDocuments > 0 && page.kind !== "document-remove" && page.kind !== "document-chunk-remove") {
+      components.push({
+        type: ComponentType.Section,
+        components: [
+          {
+            type: ComponentType.TextDisplay,
+            content: [
+              countsContent,
+              withLinePrefix(
+                "-# ",
+                statusNote(
+                  "warning",
+                  localizer(locale, "commands.memories.document_reembed_notice", {
+                    count: mismatchedEmbeddingDocuments,
+                  }),
+                ),
+              ),
+            ].join("\n"),
+          },
+        ],
+        accessory: {
+          type: ComponentType.Button,
+          style: ButtonStyle.Secondary,
+          customId: buildMemoriesRouteId({
+            action: "document-reembed",
+            locale,
+            personaId: selectedPersonaId,
+          }),
+          label: safeSelectOptionText(localizer(locale, "commands.memories.document_reembed_button"), 80),
+          disabled: writesDisabled,
+        },
+      });
+    } else {
+      components.push({
+        type: ComponentType.TextDisplay,
+        content: countsContent,
+      });
+    }
 
     const documents = input.documents ?? [];
     if (page.kind === "document-remove") {

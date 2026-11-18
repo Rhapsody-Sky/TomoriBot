@@ -27,6 +27,33 @@ TomoriBot aplica las migraciones de base de datos pendientes al iniciar. Algunas
 
 Para avatares locales, conserva los webhooks administrados de TomoriBot: eliminarlos impide que el bot edite mensajes de webhook más antiguos.
 
+## Limpieza de claves de API inactivas
+
+Establece `API_KEY_INACTIVITY_DAYS` en un número entero positivo y reinicia el bot para habilitar la
+limpieza de credenciales en la base de datos. Déjalo sin definir para desactivar la eliminación. Por ejemplo:
+
+```dotenv
+API_KEY_INACTIVITY_DAYS=90
+```
+
+Las claves vencen tras esa cantidad de días sin una solicitud autenticada. Las respuestas fallidas del
+proveedor cuentan como actividad. Las claves que nunca se usaron envejecen desde su inserción o reemplazo;
+las claves existentes reciben un período de gracia completo cuando se instala el seguimiento de actividad
+por primera vez. El seguimiento continúa con la eliminación desactivada, por lo que habilitar la política
+más adelante puede eliminar de inmediato claves que ya estaban inactivas. La limpieza se ejecuta al iniciar
+y cada hora en lotes limitados en el proceso principal.
+
+La política cubre claves de API del servidor, personales, de rotación adicional y de servicios opcionales.
+Los ajustes de modelos guardados se conservan. Una clave de rotación adicional apta puede reemplazar a una
+principal vencida automáticamente. Vuelve a ingresar una clave eliminada mediante `/providers` o `/personal providers`
+para restaurar el servicio; es posible que las selecciones de voz también deban elegirse de nuevo. Las credenciales
+del host, incluido Vertex ADC, permanecen bajo el control del operador.
+
+La eliminación de la base de datos no revoca una clave en su proveedor ni borra copias de seguridad conservadas.
+Revoca las claves comprometidas mediante la consola del proveedor. Los recursos en el proveedor, como las voces
+creadas, también pueden requerir eliminación manual después de borrar su clave almacenada. Configura la retención
+de copias de seguridad por separado.
+
 ## Copias de seguridad de la base de datos y claves de recuperación
 <!-- anchor: database-backups-and-recovery-keys -->
 
@@ -81,7 +108,7 @@ Los servidores locales de TTS ya no autentican solicitudes con las configuracion
 bun run backup
 bun run restore-backup --latest
 # O elige un paquete:
-bun run restore-backup --from backups/<bundle-directory>
+bun run restore-backup --from "backups/<bundle-directory>"
 ```
 
 Los paquetes se almacenan en `backups/` o `TOMORI_BACKUP_DIR`. Sigue los [pasos de recuperación](#database-backups-and-recovery-keys) antes de restaurar. `bun run backup:personas` exporta personas y memorias del servidor para `/persona import`; no puede restaurar una base de datos.

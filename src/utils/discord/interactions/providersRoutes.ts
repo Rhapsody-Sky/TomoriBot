@@ -1,4 +1,5 @@
 import { withProviderOptionCopy } from "@/utils/provider/providerOptionRegistry";
+import { getProviderRequestFailureCopy } from "@/utils/provider/providerUsage";
 import {
   ComponentType,
   MessageFlags,
@@ -117,6 +118,7 @@ export interface ProvidersRouteDependencies {
   ): Promise<void>;
   takeModelFlags(interactionId: string, nonce: string): string[] | undefined;
   takeImageSupports(interactionId: string, nonce: string): string[] | undefined;
+  takeImageRequestFormat(interactionId: string, nonce: string): string | undefined;
   takeCompatFlags(interactionId: string, nonce: string): string[] | undefined;
   takeVoiceMode(interactionId: string, nonce: string): string | undefined;
   takeScriptMarkup(interactionId: string, nonce: string): string | undefined;
@@ -258,6 +260,8 @@ function addReceipt(locale: string, result: AddServerProviderResult, scopeKind: 
     "unsupported-provider": "commands.providers.unsupported_provider",
     "validation-failed": "commands.providers.validation_failed",
     "no-balance": "commands.providers.validation_no_balance",
+    "host-restricted": "commands.providers.host_restricted",
+    "vertex-config-invalid": "commands.providers.vertex_config_invalid",
     "missing-model": "commands.providers.missing_default_model",
     "write-failed": "commands.providers.write_failed",
   };
@@ -340,7 +344,17 @@ function modelReceipt(
       ),
     };
   }
-  const keys: Record<Exclude<SaveProviderModelResult["status"], "success">, string> = {
+  if (result.status === "provider-denied") {
+    const copy = getProviderRequestFailureCopy(result.denied, locale);
+    return {
+      tone: "error",
+      heading: localizer(locale, copy.titleKey),
+      detail: copy.description,
+      reason: "model_save_provider_denied",
+      action: resolveProviderPanelAction(scopeKind, "model.save"),
+    };
+  }
+  const keys: Record<Exclude<SaveProviderModelResult["status"], "success" | "provider-denied">, string> = {
     "invalid-model": "commands.providers.model_invalid",
     "unsupported-capability": "commands.providers.model_unsupported",
     "not-found": "commands.providers.model_not_found",
@@ -382,6 +396,8 @@ function providerEditReceipt(
     "invalid-combination": "commands.providers.provider_edit_invalid_combination",
     "not-found": "commands.providers.model_not_found",
     "validation-failed": "commands.providers.validation_failed",
+    "host-restricted": "commands.providers.host_restricted",
+    "vertex-config-invalid": "commands.providers.vertex_config_invalid",
     "write-failed": "commands.providers.write_failed",
   };
   return {
@@ -457,6 +473,7 @@ function imageModalDefaults(
       image: {
         supports: editing?.imageSettings ?? getDefaultImageEndpointSupports(section.apiStyle ?? "openai-compatible"),
         allowInpaint: section.apiStyle === "comfyui",
+        ...(section.apiStyle === "openai-compatible" ? { requestFormat: editing?.imageRequestFormat ?? "images" } : {}),
       },
     };
   }
@@ -650,6 +667,8 @@ export function createProvidersInteractionRoute(
       takeRawModalCheckboxGroupValues(interactionId, buildProviderModelModalFieldId("flags", nonce)),
     takeImageSupports: (interactionId, nonce) =>
       takeRawModalCheckboxGroupValues(interactionId, buildProviderModelModalFieldId("image-supports", nonce)),
+    takeImageRequestFormat: (interactionId, nonce) =>
+      takeRawModalSelectValue(interactionId, buildProviderModelModalFieldId("image-request-format", nonce)),
     takeCompatFlags: (interactionId, nonce) =>
       takeRawModalCheckboxGroupValues(interactionId, buildProviderModelModalFieldId("compat", nonce)),
     takeEndpointBehavior: (interactionId, nonce) =>
@@ -910,6 +929,8 @@ export function createProvidersInteractionRoute(
         route.action === "model-submit" ? (dependencies.takeModelFlags(interaction.id, route.nonce) ?? []) : [];
       const selectedImageSupports =
         route.action === "model-submit" ? dependencies.takeImageSupports(interaction.id, route.nonce) : undefined;
+      const selectedImageRequestFormat =
+        route.action === "model-submit" ? dependencies.takeImageRequestFormat(interaction.id, route.nonce) : undefined;
       const selectedCompatFlags =
         route.action === "model-submit" ? dependencies.takeCompatFlags(interaction.id, route.nonce) : undefined;
       const selectedVoiceMode =
@@ -974,6 +995,7 @@ export function createProvidersInteractionRoute(
           () =>
             dependencies.operations.addServerProvider({
               serverDiscId: interaction.guildId ?? interaction.user.id,
+              actorDiscId: interaction.user.id,
               ...scope,
               provider: selectedProvider ?? "",
               apiKey: modal.fields.getTextInputValue(buildAddProviderModalFieldId("api-key", route.nonce)),
@@ -1111,6 +1133,7 @@ export function createProvidersInteractionRoute(
           () =>
             dependencies.operations.editServerProvider({
               serverDiscId: interaction.guildId ?? interaction.user.id,
+              actorDiscId: interaction.user.id,
               ...scope,
               provider: route.provider,
               apiKey: modal.fields.getTextInputValue(buildEditProviderModalFieldId("api-key", route.nonce)),
@@ -1255,6 +1278,7 @@ export function createProvidersInteractionRoute(
               supportsAssistantPrefill: resolveCompatFlag("prefill", target?.textSettings?.supportsAssistantPrefill),
               verbatimToolCalling: resolveCompatFlag("verbatim-tools", target?.textSettings?.verbatimToolCalling),
               imageSupportValues: route.capability === "image" ? selectedImageSupports : undefined,
+              imageRequestFormat: route.capability === "image" ? selectedImageRequestFormat : undefined,
               speechVoiceMode: route.capability === "speech" ? selectedVoiceMode : undefined,
               speechScriptMarkup: route.capability === "speech" ? selectedScriptMarkup : undefined,
               speechInstructValues: route.capability === "speech" ? selectedInstructValues : undefined,

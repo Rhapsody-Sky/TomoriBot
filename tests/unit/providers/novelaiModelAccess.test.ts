@@ -1,4 +1,5 @@
-import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as retention from "@/utils/db/repositories/ApiKeyRetentionRepository";
+import { beforeEach, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { savedProviderConfigSchema, userSavedProviderConfigSchema } from "@/types/db/schema";
 import { getNovelAIModelAccessError } from "@/providers/novelai/modelAccess";
 import { NovelaiStreamAdapter } from "@/providers/novelai/novelaiStreamAdapter";
@@ -127,6 +128,7 @@ describe("Xialong access", () => {
     restores.push(serverWrite, personalWrite);
     const base = {
       serverDiscId: "guild",
+      actorDiscId: "actor",
       provider: "novelai",
       state: createPersona({ llm: xialong }),
       apiKey: "tablet-credential",
@@ -313,6 +315,7 @@ describe("Xialong access", () => {
     restores.push(encrypt, serverWrite, personalWrite);
     const base = {
       serverDiscId: "guild",
+      actorDiscId: "actor",
       provider: "novelai",
       state: createPersona({ llm: xialong }),
       apiKey: "tablet-credential",
@@ -368,3 +371,9 @@ describe("Xialong access", () => {
     });
   });
 });
+
+let activityLookup: { mockRestore(): void };
+beforeEach(() => {
+  activityLookup = spyOn(retention, "loadCredentialActivityReferences").mockResolvedValue([]);
+});
+afterEach(() => activityLookup.mockRestore());

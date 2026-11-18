@@ -43,6 +43,11 @@ Root command files may export optional boundary flags:
 - `nsfw = true`: marks the command as age-restricted.
 - `isCommandEnabled(context)`: evaluated before registration; returning `false` omits the command from the registration payload and execution map.
 
+`/config` registers with a `ManageGuild` default and also checks that permission at runtime before
+loading guild configuration. Component routes and modal submissions repeat the check using the
+current interaction, including controls from older panels. DM workspace owners retain access.
+Persona attribute and sample dialogue editing have no member teaching permission.
+
 Command metadata descriptions and choices are auto-localized by `commandLoader.ts`. Builders configure English text with `localizer("en-US", key)`. The loader matches keys across authored locale trees using `{option_name}_description` and `{choice_value}_option`.
 
 ## Runtime interaction dispatch
@@ -51,6 +56,7 @@ All Discord interactions arrive at `src/events/interactionCreate/handleCommands.
 
 1. **Autocomplete:** If `interaction.isAutocomplete()` is true, routes to `runAutocompleteCommand()`.
 2. **Chat-input slash commands:** If `interaction.isChatInputCommand()` is true, routes to `runChatInputCommand()`:
+   - Acknowledges `/help`, `/config`, and `/setup` with an ephemeral deferred reply before command loading or database work; their entry points render panels and edit that reply.
    - Resolves category, group, and subcommand names into an execution key.
    - Evaluates server blacklist status; an unreadable status blocks execution with the temporary database error, while a confirmed blacklist entry receives the blacklist warning.
    - Checks category cooldown in `cooldownRepository`, scaling duration with `COMMAND_COOLDOWN_SCALE`.
@@ -121,10 +127,16 @@ conditioning writes, or manual chat dispatch. A reason adds a playful footer wit
 Reasons appear in italics within the localized action sentence for both user and persona targets.
 Persona targets retain conditioning and manual chat behavior, including fallback persona selection
 when neither target option is supplied.
+They defer ephemerally before loading state or recording conditioning. Public action and blocked-user
+messages use a follow-up; webhook delivery keeps an ephemeral confirmation.
 
 ## Interaction timing rules
 
 Discord requires interaction acknowledgement within approximately three seconds of generation (`interaction.createdTimestamp`). An acknowledgement taking longer than 1.5 seconds emits a rate-limited latency warning (`INTERACTION_ACK_WARN_MS`). After acknowledgement, the bot has up to 15 minutes to complete work.
+
+Routed interaction failures record the interaction's age at dispatch and the dispatch duration. Raw
+modal REST failures record its age before the request and the request duration, so logs distinguish
+late arrival from handler work and Discord request latency.
 
 ### Reply and deferral ownership
 

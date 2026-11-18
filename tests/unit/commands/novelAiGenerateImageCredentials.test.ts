@@ -73,9 +73,9 @@ const resolveCredentials = mock(async () => ({
   savedConfig: personalNaiConfig,
   source: "personal" as const,
 }));
-const getOptionalKey = mock(async () => "server-nai-key");
-const checkQuota = mock(async () => ({ allowed: true }));
-const reserveQuota = mock(async () => ({ allowed: true, reservation: null }));
+const getOptionalKey = mock(async () => ({ apiKey: "server-nai-key", usageContext: {} }));
+const checkQuota = mock(async (): Promise<realQuota.QuotaCheckResult> => ({ allowed: true }));
+const reserveQuota = mock(async (): Promise<realQuota.ImageQuotaClaim> => ({ allowed: true, reservation: null }));
 const generateImage = mock(async () => {
   throw new Error("401 Unauthorized");
 });
@@ -127,7 +127,7 @@ scopedMock.module("@/utils/provider/credentialResolver", () => ({
 }));
 scopedMock.module("@/utils/security/crypto", () => ({
   ...realCrypto,
-  getOptApiKey: getOptionalKey,
+  getOptApiKeyCredentials: getOptionalKey,
 }));
 scopedMock.module("@/utils/image/naiDiffusionModels", () => ({
   ...realNaiModels,
@@ -295,6 +295,46 @@ describe("/novelai generate image credential selection", () => {
     expect(replyInfo.mock.calls.at(-1)?.[2]).toMatchObject({
       titleKey: "commands.novelai.generate.image.character_reference_requires_v4_title",
       files: [expect.objectContaining({ name: "image_generation_input.txt" })],
+    });
+  });
+
+  it("attaches the personal-providers tip key on pre-modal and post-modal NovelAI quota refusals", async () => {
+    const { execute } = await import("@/commands/novelai/generate/image");
+    const resetTime = new Date(Date.now() + 60_000);
+
+    checkQuota.mockResolvedValueOnce({
+      allowed: false,
+      reason: "user_quota_exceeded",
+      userRemaining: 0,
+      resetTime,
+    });
+    await execute({} as Client, interaction, createUserRow(), "en-US");
+    expect(modal).not.toHaveBeenCalled();
+    expect(generateImage).not.toHaveBeenCalled();
+    expect(replyInfo.mock.calls.at(-1)?.[2]).toMatchObject({
+      titleKey: "commands.generate.image.quota_exceeded_title",
+      tipKeys: ["genai.tips.use_personal_providers"],
+    });
+
+    modalResult = {
+      outcome: "submit",
+      interaction,
+      values: { nai_image_prompt: "A moonlit garden", nai_image_orientation: "portrait" },
+      attachments: {},
+    };
+    reserveQuota.mockResolvedValueOnce({
+      allowed: false,
+      reason: "serverwide_quota_exceeded",
+      userRemaining: 0,
+      resetTime,
+      reservation: null,
+    });
+    await execute({} as Client, interaction, createUserRow(), "en-US");
+    expect(modal).toHaveBeenCalledTimes(1);
+    expect(generateImage).not.toHaveBeenCalled();
+    expect(replyInfo.mock.calls.at(-1)?.[2]).toMatchObject({
+      titleKey: "commands.generate.image.quota_exceeded_title",
+      tipKeys: ["genai.tips.use_personal_providers"],
     });
   });
 });

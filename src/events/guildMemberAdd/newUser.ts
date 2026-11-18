@@ -1,12 +1,14 @@
+import { withStoredCredentialUsage } from "@/utils/security/apiKeyRetention";
 import { ChannelType, type Client, type GuildMember, type Message, type TextChannel } from "discord.js";
 import { GoogleGenAI } from "@google/genai";
 import type { Part } from "@google/genai";
 import type { StructuredContextItem } from "@/types/misc/context";
 import type { EnhancedImageContent } from "@/types/tool/enhancedContextTypes";
-import type { TomoriState } from "@/types/db/schema";
+import { PrivacyLevel, type TomoriState } from "@/types/db/schema";
 import { ContextItemTag } from "@/types/misc/context";
-import { tomoriChat, suppressNextSelfReply } from "@/events/messageCreate/tomoriChat";
+import { tomoriChat } from "@/events/messageCreate/tomoriChat";
 import { getCachedAllPersonas, getCachedTomoriState } from "@/utils/cache/tomoriStateCache";
+import { getCachedPrivacyLevel } from "@/utils/cache/userCache";
 import { userRepository } from "@/utils/db/repositories";
 import {
   buildForcedMentionsForUser,
@@ -14,6 +16,7 @@ import {
   sendPersonaMention,
 } from "@/utils/discord/mentionHelper";
 import { resolvePreferredDiscordDisplayName } from "@/utils/discord/displayName";
+import { getMemberRoleNames } from "@/utils/discord/memberRoles";
 import { downloadImage } from "@/utils/image/avatarHelper";
 import { log } from "@/utils/misc/logger";
 import { decryptApiKey } from "@/utils/security/crypto";
@@ -145,7 +148,9 @@ async function getAvatarVisionDescription(member: GuildMember, persona: TomoriSt
   log.info(`newUser: Delegating avatar analysis to vision model ${provider}/${apiModelName} for member ${member.id}`);
 
   if (provider === "google") {
-    return await callGoogleVisionForAvatar(apiKey, apiModelName, base64Image, WELCOME_AVATAR_VISION_PROMPT);
+    return await withStoredCredentialUsage(persona.config.api_key, apiKey, () =>
+      callGoogleVisionForAvatar(apiKey, apiModelName, base64Image, WELCOME_AVATAR_VISION_PROMPT),
+    );
   }
 
   const knownUrl = VISION_PROVIDER_URLS[provider];
@@ -158,12 +163,8 @@ async function getAvatarVisionDescription(member: GuildMember, persona: TomoriSt
         : `${customUrl}/chat/completions`
       : "https://api.openai.com/v1/chat/completions");
 
-  return await callOpenAICompatibleVisionForAvatar(
-    apiKey,
-    apiModelName,
-    endpointUrl,
-    base64Image,
-    WELCOME_AVATAR_VISION_PROMPT,
+  return await withStoredCredentialUsage(persona.config.api_key, apiKey, () =>
+    callOpenAICompatibleVisionForAvatar(apiKey, apiModelName, endpointUrl, base64Image, WELCOME_AVATAR_VISION_PROMPT),
   );
 }
 
@@ -182,6 +183,9 @@ async function buildWelcomeContextItem(params: {
   const sentences = [
     `${displayName} just joined the server ${member.guild.name}, greet them by mentioning them with @{${displayName}}!`,
   ];
+  if ((await getCachedPrivacyLevel(member.id)) === PrivacyLevel.MINIMAL) {
+    sentences.push(`Their current server roles are: ${JSON.stringify(getMemberRoleNames(member, member.guild.id))}.`);
+  }
   const parts: StructuredContextItem["parts"] = [];
 
   if (includeAvatarContext) {
@@ -252,13 +256,12 @@ async function triggerWelcomeMessage(client: Client, member: GuildMember): Promi
     );
     return;
   }
-  const greetedMember = gate.member;
-
   const graceMembership = await checkWelcomeMembership(member);
   if (graceMembership.status !== "active") {
     logSkippedWelcome(member, graceMembership, "after onboarding finished");
     return;
   }
+  const greetedMember = graceMembership.member;
 
   const tomoriState = await getCachedTomoriState(member.guild.id);
   if (!tomoriState) return;
@@ -377,7 +380,6 @@ async function sendWelcome(params: {
 
   const welcomeStartTime = Date.now();
 
-  suppressNextSelfReply(welcomeChannel.id);
   log.info(
     `Triggering welcome message for ${member.user.tag} in channel ${welcomeChannel.id} using persona ${chosenPersona.persona_nickname}`,
   );
@@ -394,6 +396,8 @@ async function sendWelcome(params: {
     isUserImpersonation: false,
     textQuotaSource: "system",
     textQuotaTriggerKey: `welcome:${member.guild.id}:${member.id}:${lastMessage.id}`,
+    borrowsTriggerMessage: true,
+    suppressSelfReply: true,
     injectedContextItems: [welcomeContextItem],
     forcedMentions: forcedMentions.length > 0 ? forcedMentions : undefined,
   });

@@ -1,6 +1,7 @@
 export default {
   tools: {
     media: {
+      generation_source_line: "提供方：{provider} · 模型：{model}",
       delivery_failed: "Discord 未能发送媒体，未记录成功的发送。",
       delivery_unconfirmed:
         "Discord 未确认媒体是否已发布。请结束本轮，并在重新生成或发布前检查频道，因为再次尝试可能造成重复。",
@@ -12,6 +13,8 @@ export default {
       delivery_failed: "无法发送掷骰结果。未能成功完成掷骰。",
     },
     execution: {
+      channel_history_unavailable: "发起请求的用户和我都需要读取目标频道历史消息的权限。",
+      private_channel_target: "跨频道工具无法以私密频道或可见性无法验证的频道为目标。请改在那个频道里向我提问。",
       unavailable: `在当前设置、模型能力或 bot 权限下，工具 \`{tool}\` 不可用。`,
     },
     sprite_selection: {

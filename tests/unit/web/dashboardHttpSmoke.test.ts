@@ -1397,9 +1397,8 @@ describe("dashboard memory and naming authorization", () => {
       readStatus: "fresh",
       memberAccess: {
         serverMemteachingEnabled: false,
-        attributeMemteachingEnabled: false,
-        sampledialogueMemteachingEnabled: false,
         promptSnapshotEnabled: false,
+        personaExportEnabled: false,
       },
       serverModelAccess: { allowServerModels: true },
       userBlacklist: {

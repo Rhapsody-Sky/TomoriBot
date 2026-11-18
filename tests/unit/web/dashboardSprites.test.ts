@@ -203,14 +203,14 @@ describe("dashboard sprites", () => {
     const { app, headers } = setup();
     spyOn(configSpriteOperations, "exportSprites").mockResolvedValue({
       status: "success",
-      buffer: Buffer.from("zip-fixture"),
-      filename: "mirri-sprites.zip",
+      files: [{ buffer: Buffer.from("zip-fixture"), filename: "mirri-sprites.zip" }],
       spriteCount: 2,
       skippedCount: 1,
     });
     const response = await app.request(`${base}/export`, { headers });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/zip");
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="mirri-sprites.zip"');
     expect(response.headers.get("x-sprite-skipped")).toBe("1");
     expect(await response.text()).toBe("zip-fixture");
   });

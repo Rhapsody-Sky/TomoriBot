@@ -126,8 +126,9 @@ Server managers can open `Personas` > `Character` > `Nudges` in the dashboard or
   nudges off under Availability.
 
 Official presets include these settings. `/persona generate` suggests interests for new personas.
-`Generate interests` uses the Idle Nudge Planner to add topics to an existing persona. Persona
-cards include talkativeness, interests, and idle nudge definitions.
+`Generate interests` uses the Idle Nudge Planner to add topics to an existing persona.
+`TomoriBot Card`, `Raw JSON` and ZIP bundle exports include talkativeness, interests and idle
+nudge definitions. `SillyTavern-compatible PNG` omits these settings.
 
 ## When Nudges Fire
 

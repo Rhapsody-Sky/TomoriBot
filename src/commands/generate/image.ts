@@ -467,7 +467,12 @@ export async function execute(
     }
 
     if (!quotaCheck.allowed) {
-      await replyImageQuotaExceeded(interaction, locale, quotaCheck, await recoveryTips([], imageCreds.source));
+      await replyImageQuotaExceeded(
+        interaction,
+        locale,
+        quotaCheck,
+        await recoveryTips(["genai.tips.use_personal_providers"], imageCreds.source),
+      );
       return;
     }
   }
@@ -558,15 +563,6 @@ export async function execute(
     }
 
     modalSubmitInteraction = modalResult.interaction;
-    if (modelSelection) {
-      imageCreds = await resolveCapabilityCredentials(tomoriState.server_id, "image-standard", {
-        userId: userData.user_id ?? null,
-        modelSelection,
-      });
-      apiKey = imageCreds.apiKey;
-      imageRoute = await resolveStandardImageRoute(imageCreds);
-      if (!imageRoute) throw new GenerationModelUnavailableError();
-    }
     const prompt = modalResult.values?.[PROMPT_INPUT_ID];
     const aspectRatio = modalResult.values?.[ASPECT_RATIO_SELECT_ID];
     const imageAttachments = REFERENCE_IMAGE_INPUT_IDS.map((customId) => modalResult.attachments?.[customId]).filter(
@@ -583,6 +579,27 @@ export async function execute(
       referenceFilenames: imageAttachments.map((attachment) => attachment.filename),
     };
 
+    if (modelSelection) {
+      try {
+        imageCreds = await resolveCapabilityCredentials(tomoriState.server_id, "image-standard", {
+          userId: userData.user_id ?? null,
+          modelSelection,
+        });
+      } catch (error) {
+        const denied = findProviderRequestDeniedError(error);
+        if (!denied) throw error;
+        await replyInfoEmbed(modalSubmitInteraction, locale, {
+          ...getProviderRequestFailureCopy(denied, locale),
+          color: ColorCode.ERROR,
+          flags: MessageFlags.Ephemeral,
+          ...recoveryOptions(),
+        });
+        return;
+      }
+      apiKey = imageCreds.apiKey;
+      imageRoute = await resolveStandardImageRoute(imageCreds);
+      if (!imageRoute) throw new GenerationModelUnavailableError();
+    }
     const referenceImages: Array<{ mimeType: string; data: string }> = [];
     let referenceImageUrl: string | undefined;
 
@@ -623,7 +640,12 @@ export async function execute(
     if (imageCreds.source === "server") {
       const claim = await reserveImageQuota(tomoriState.server_id, interaction.user.id);
       if (!claim.allowed) {
-        await replyImageQuotaExceeded(modalSubmitInteraction, locale, claim, await recoveryTips([], "server"));
+        await replyImageQuotaExceeded(
+          modalSubmitInteraction,
+          locale,
+          claim,
+          await recoveryTips(["genai.tips.use_personal_providers"], "server"),
+        );
         return;
       }
       quotaReservation = claim.reservation;
@@ -633,22 +655,28 @@ export async function execute(
 
     let generatedImageData: string | null = null;
     if (imageRoute.kind === "custom") {
-      const result = await generateCustomImageViaEndpoint({
-        endpoint: imageRoute.endpoint,
-        apiKey,
-        prompt,
-        aspectRatio,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      });
+      const endpoint = imageRoute.endpoint;
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        generateCustomImageViaEndpoint({
+          endpoint,
+          apiKey,
+          prompt,
+          aspectRatio,
+          referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        }),
+      );
       generatedImageData = result.imageData;
     } else if (imageRoute.kind === "native") {
-      const result = await imageRoute.provider.generateNativeImage({
-        apiKey,
-        model: modelCodename,
-        prompt,
-        aspectRatio,
-        ...(referenceImages.length > 0 ? { referenceImages } : {}),
-      });
+      const provider = imageRoute.provider;
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        provider.generateNativeImage({
+          apiKey,
+          model: modelCodename,
+          prompt,
+          aspectRatio,
+          ...(referenceImages.length > 0 ? { referenceImages } : {}),
+        }),
+      );
       generatedImageData = result.imageData;
     } else if (imageRoute.kind === "openrouter") {
       const result = await withProviderUsageContext(imageCreds.usageContext, async () =>
@@ -670,15 +698,17 @@ export async function execute(
 
       const messageParts = buildGeminiImagePromptParts(prompt, referenceImages);
 
-      const response = await chat.sendMessage({
-        message: messageParts,
-        config: {
-          responseModalities: ["IMAGE"],
-          imageConfig: {
-            aspectRatio: aspectRatio,
+      const response = await withProviderUsageContext(imageCreds.usageContext, () =>
+        chat.sendMessage({
+          message: messageParts,
+          config: {
+            responseModalities: ["IMAGE"],
+            imageConfig: {
+              aspectRatio: aspectRatio,
+            },
           },
-        },
-      });
+        }),
+      );
 
       if (response?.candidates && response.candidates.length > 0 && response.candidates[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
@@ -701,14 +731,16 @@ export async function execute(
         });
       }
       const { generateZaiNativeImage } = await import("@/providers/zai/zaiImageGeneration");
-      const result = await generateZaiNativeImage({
-        apiKey,
-        model: modelCodename,
-        prompt,
-        aspectRatio,
-        endpointUrl:
-          executionProvider === "zaicoding" ? ZAI_CODING_IMAGES_GENERATIONS_URL : ZAI_GENERAL_IMAGES_GENERATIONS_URL,
-      });
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        generateZaiNativeImage({
+          apiKey,
+          model: modelCodename,
+          prompt,
+          aspectRatio,
+          endpointUrl:
+            executionProvider === "zaicoding" ? ZAI_CODING_IMAGES_GENERATIONS_URL : ZAI_GENERAL_IMAGES_GENERATIONS_URL,
+        }),
+      );
       generatedImageData = result.imageData;
     } else {
       if (referenceImages.length > 0) {
@@ -723,13 +755,15 @@ export async function execute(
         });
       }
       const { generateNvidiaNativeImage } = await import("@/providers/nvidia/nvidiaImageGeneration");
-      const result = await generateNvidiaNativeImage({
-        apiKey,
-        model: modelCodename,
-        prompt,
-        aspectRatio,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-      });
+      const result = await withProviderUsageContext(imageCreds.usageContext, () =>
+        generateNvidiaNativeImage({
+          apiKey,
+          model: modelCodename,
+          prompt,
+          aspectRatio,
+          referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        }),
+      );
       generatedImageData = result.imageData;
     }
 
@@ -820,7 +854,7 @@ export async function execute(
       return;
     }
     if (error instanceof GenerationModelUnavailableError) {
-      await replyGenerationModelUnavailable(modalSubmitInteraction ?? interaction, locale);
+      await replyGenerationModelUnavailable(modalSubmitInteraction ?? interaction, locale, recoveryOptions());
       return;
     }
     const denied = findProviderRequestDeniedError(error, imageCreds?.usageContext);

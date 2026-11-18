@@ -1,3 +1,4 @@
+import { readApiKeyInactivityDays } from "@/utils/security/apiKeyRetention";
 import {
   ButtonStyle,
   ComponentType,
@@ -44,7 +45,11 @@ import {
 } from "@/utils/discord/ui/componentsV2Limits";
 import { safeSelectOptionText } from "@/utils/discord/ui/modals";
 import { measureFormattedPanelTextLength } from "@/utils/discord/ui/panelProse";
-import type { ImageEndpointSupports } from "@/utils/provider/customImageEndpointSupport";
+import {
+  IMAGE_REQUEST_FORMATS,
+  type ImageEndpointSupports,
+  type ImageRequestFormat,
+} from "@/utils/provider/customImageEndpointSupport";
 import {
   SPEECH_SCRIPT_MARKUPS,
   SPEECH_VOICE_MODES,
@@ -224,6 +229,17 @@ const SCRIPT_MARKUP_KEYS: Record<(typeof SPEECH_SCRIPT_MARKUPS)[number], { label
   },
 };
 
+const IMAGE_REQUEST_FORMAT_KEYS: Record<ImageRequestFormat, { label: string; description: string }> = {
+  images: {
+    label: "commands.providers.image_request_formats.images",
+    description: "commands.providers.image_request_format_descriptions.images",
+  },
+  "chat-completions": {
+    label: "commands.providers.image_request_formats.chat-completions",
+    description: "commands.providers.image_request_format_descriptions.chat-completions",
+  },
+};
+
 const IMAGE_SUPPORT_KEYS: Record<keyof ImageEndpointSupports, string> = {
   txt2img: "commands.providers.model_image_supports.txt2img",
   img2img: "commands.providers.model_image_supports.img2img",
@@ -382,6 +398,9 @@ export function buildAddEndpointModal(
   nonce: string,
   routeNamespace: ProvidersRouteNamespace = PROVIDERS_ROUTE_NAMESPACE,
 ): { custom_id: string; title: string; components: RawDiscordComponent[] } {
+  const endpointCapabilities = (Object.keys(ENDPOINT_API_STYLES) as CustomEndpointCapability[]).filter(
+    (capability) => routeNamespace === PROVIDERS_ROUTE_NAMESPACE || capability !== "decision",
+  );
   return {
     custom_id: buildProvidersRouteId(routeNamespace, { action: "endpoint-submit", locale, nonce }),
     title: safeSelectOptionText(localizer(locale, "commands.providers.add_endpoint_modal_title"), 45),
@@ -396,18 +415,20 @@ export function buildAddEndpointModal(
           type: 21,
           custom_id: buildAddEndpointModalFieldId("api-style", nonce),
           required: true,
-          options: [...new Set(Object.values(ENDPOINT_API_STYLES).flat())].map((style, index) => ({
-            value: style,
-            label: safeSelectOptionText(
-              localizer(locale, API_STYLE_KEYS[style].label),
-              DISCORD_SELECT_OPTION_LABEL_MAX,
-            ),
-            description: safeSelectOptionText(
-              localizer(locale, API_STYLE_KEYS[style].description),
-              DISCORD_SELECT_OPTION_DESCRIPTION_MAX,
-            ),
-            default: index === 0,
-          })),
+          options: [...new Set(endpointCapabilities.flatMap((capability) => ENDPOINT_API_STYLES[capability]))].map(
+            (style, index) => ({
+              value: style,
+              label: safeSelectOptionText(
+                localizer(locale, API_STYLE_KEYS[style].label),
+                DISCORD_SELECT_OPTION_LABEL_MAX,
+              ),
+              description: safeSelectOptionText(
+                localizer(locale, API_STYLE_KEYS[style].description),
+                DISCORD_SELECT_OPTION_DESCRIPTION_MAX,
+              ),
+              default: index === 0,
+            }),
+          ),
         },
       },
       endpointTextInput(locale, nonce, "auth-token", false),
@@ -606,6 +627,7 @@ export type ProviderModelModalField =
   | "flags"
   | "compat"
   | "image-supports"
+  | "image-request-format"
   | "voice-mode"
   | "script-markup"
   | "supports-instruct"
@@ -667,7 +689,7 @@ export interface ProviderModelModalDefaults {
   codeName?: string;
   text?: ProviderPanelModel["textSettings"];
   decision?: ProviderPanelModel["decisionSettings"];
-  image?: { supports: ImageEndpointSupports; allowInpaint: boolean };
+  image?: { supports: ImageEndpointSupports; allowInpaint: boolean; requestFormat?: ImageRequestFormat };
   speech?: { settings: SpeechEndpointSettings; allowVoiceMode: boolean };
 }
 
@@ -925,6 +947,33 @@ export function buildProviderModelModal(
   // The caller omits `image` when nothing would store the declaration: a curated provider whose image
   // path never consults these flags, such as NovelAI's own tool.
   if (capability === "image" && defaults?.image) {
+    if (entryKind === "endpoint" && defaults.apiStyle === "openai-compatible") {
+      components.push({
+        type: 18,
+        label: safeSelectOptionText(localizer(locale, "commands.providers.model_image_request_format_label"), 45),
+        description: safeSelectOptionText(
+          localizer(locale, "commands.providers.model_image_request_format_description"),
+          100,
+        ),
+        component: {
+          type: 21,
+          custom_id: buildProviderModelModalFieldId("image-request-format", nonce),
+          required: true,
+          options: IMAGE_REQUEST_FORMATS.map((format) => ({
+            value: format,
+            label: safeSelectOptionText(
+              localizer(locale, IMAGE_REQUEST_FORMAT_KEYS[format].label),
+              DISCORD_SELECT_OPTION_LABEL_MAX,
+            ),
+            description: safeSelectOptionText(
+              localizer(locale, IMAGE_REQUEST_FORMAT_KEYS[format].description),
+              DISCORD_SELECT_OPTION_DESCRIPTION_MAX,
+            ),
+            default: format === (defaults.image?.requestFormat ?? "images"),
+          })),
+        },
+      });
+    }
     const offered = IMAGE_SUPPORT_FIELDS.filter((field) => field !== "inpaint" || defaults.image?.allowInpaint);
     components.push({
       type: 18,
@@ -1144,10 +1193,14 @@ function buildEntryContent(
   guidance: string,
   availableTextLength: number,
 ): string {
-  let bodyLimit = Math.max(0, availableTextLength - guidance.length);
+  const days = readApiKeyInactivityDays();
+  const missing = entry.credentialMissing
+    ? `${localizer(locale, "commands.providers.credential_missing")}${days === null ? "" : ` ${localizer(locale, "commands.providers.credential_retention", { days })}`}\n\n`
+    : "";
+  let bodyLimit = Math.max(0, availableTextLength - guidance.length - missing.length);
   let content = "";
   for (let attempt = 0; attempt < ENTRY_FIT_ATTEMPTS; attempt++) {
-    content = `${buildEntryBody(locale, entry, routeNamespace, bodyLimit)}${guidance}`;
+    content = `${missing}${buildEntryBody(locale, entry, routeNamespace, bodyLimit)}${guidance}`;
     const overflow =
       measureFormattedPanelTextLength({ type: ComponentType.TextDisplay, content }) - availableTextLength;
     if (overflow <= 0) return content;

@@ -21,6 +21,9 @@ import { getCachedPrivacyLevel } from "@/utils/cache/userCache";
 import { resolveMessageProxyMessageIdentitiesForHistory } from "@/utils/messageProxy/historyAttribution";
 import { captureDiscordOwnership } from "@/utils/discord/webhook/webhookCore";
 import { sendChannelMessageOnce } from "@/utils/discord/webhook/singleAttemptMessage";
+import type { ManualTriggerInvoker } from "@/utils/chat/types";
+import { getChannelPrivacyReason } from "@/utils/discord/channelPrivacy";
+import { localizer } from "@/utils/text/localizer";
 
 // Stores pending boomerang data keyed by source channel ID.
 // After tomoriChat() completes in the target channel, the source channel
@@ -46,6 +49,8 @@ export interface PendingBoomerang {
   isUserImpersonation?: boolean;
   /** Impersonated Discord user ID to preserve across boomerang follow-up */
   impersonatedUserId?: string;
+  manualTriggerInvoker?: ManualTriggerInvoker;
+  borrowsTriggerMessage: boolean;
   /** Recent messages from the target channel (newest first) */
   targetChannelMessages: Array<{
     author: string;
@@ -150,9 +155,7 @@ export function consumePendingBoomerang(channelId: string): PendingBoomerang | u
 export function buildBoomerangContext(boomerang: PendingBoomerang): StructuredContextItem[] {
   let messagesBlock = "";
   if (boomerang.targetChannelMessages.length > 0) {
-    const formatted = boomerang.targetChannelMessages.map((m) => `"${m.author}: ${m.content}"`).join("\n");
-    // Truncate if total exceeds ~1500 chars to stay within reasonable context size
-    messagesBlock = formatted.length > 1500 ? `${formatted.substring(0, 1497)}...` : formatted;
+    messagesBlock = boomerang.targetChannelMessages.map((m) => `"${m.author}: ${m.content}"`).join("\n");
   }
 
   const resultStr = boomerang.success ? "Success" : `Failed: ${boomerang.error ?? "unknown error"}`;
@@ -162,11 +165,7 @@ export function buildBoomerangContext(boomerang: PendingBoomerang): StructuredCo
     `You have just returned from channel \`${boomerang.targetChannelName}\`.\nReport back naturally on what happened there.`;
   const outro = boomerang.outroText ?? "Now continue the conversation here with a concise update.";
 
-  let contextText = `[System: ${intro}\nOutcome: ${resultStr}.`;
-  if (messagesBlock) {
-    contextText += `\nHere is what was happening in channel \`${boomerang.targetChannelName}\` (last 10 messages, oldest first):\n${messagesBlock}`;
-  }
-  contextText += `\n${outro}]`;
+  const contextText = `[System: ${intro}\nOutcome: ${resultStr}.\n${outro}]`;
 
   return [
     {
@@ -174,6 +173,21 @@ export function buildBoomerangContext(boomerang: PendingBoomerang): StructuredCo
       parts: [{ type: "text", text: contextText }],
       metadataTag: ContextItemTag.SYSTEM_INSTRUCTION_BLOCK,
     },
+    ...(messagesBlock
+      ? [
+          {
+            role: "user" as const,
+            parts: [
+              {
+                type: "text" as const,
+                text: `Recent transcript from channel \`${boomerang.targetChannelName}\` (oldest first):\n${messagesBlock}`,
+              },
+            ],
+            metadataTag: ContextItemTag.SYSTEM_INSTRUCTION_BLOCK,
+            boomerangTranscript: true,
+          },
+        ]
+      : []),
   ];
 }
 
@@ -358,6 +372,14 @@ export class CrossChannelMessageTool extends BaseTool {
       };
     }
 
+    if (getChannelPrivacyReason(targetChannel, context.tomoriState.config.private_channel_ids ?? [])) {
+      return {
+        success: false,
+        error: localizer(context.locale, "tools.execution.private_channel_target"),
+        data: { status: "cross_channel_failed_private_target" },
+      };
+    }
+
     const blockedChannelIds = new Set(context.tomoriState.config.crosschannel_blocklist_ids ?? []);
     const isThreadTarget =
       "isThread" in targetChannel && typeof targetChannel.isThread === "function" && targetChannel.isThread();
@@ -387,8 +409,13 @@ export class CrossChannelMessageTool extends BaseTool {
     const botMember =
       guild.members.me ??
       (context.client.user ? await guild.members.fetch(context.client.user.id).catch(() => null) : null);
-    const invokingMember =
-      context.message?.member ?? (context.userId ? await guild.members.fetch(context.userId).catch(() => null) : null);
+    const invokingMember = context.borrowsTriggerMessage
+      ? null
+      : context.message && context.message.member?.id === context.userId
+        ? context.message.member
+        : context.userId
+          ? await guild.members.fetch(context.userId).catch(() => null)
+          : null;
 
     if (!invokingMember) {
       return {
@@ -427,7 +454,6 @@ export class CrossChannelMessageTool extends BaseTool {
         };
       }
 
-      // Peek mode only needs ViewChannel: skip send permission check
       if (!isPeekOnly) {
         const isThread =
           "isThread" in targetChannel && typeof targetChannel.isThread === "function" && targetChannel.isThread();
@@ -454,6 +480,16 @@ export class CrossChannelMessageTool extends BaseTool {
             status: "cross_channel_failed_invoker_no_view_permission",
             reason: "Invoker is missing ViewChannel permission on the target channel.",
           },
+        };
+      }
+      if (
+        !perms?.has(PermissionFlagsBits.ReadMessageHistory) ||
+        !invokerPerms.has(PermissionFlagsBits.ReadMessageHistory)
+      ) {
+        return {
+          success: false,
+          error: localizer(context.locale, "tools.execution.channel_history_unavailable"),
+          data: { status: "cross_channel_failed_no_history_permission" },
         };
       }
     }
@@ -546,23 +582,21 @@ export class CrossChannelMessageTool extends BaseTool {
       metadataTag: ContextItemTag.SYSTEM_INSTRUCTION_BLOCK,
     };
 
-    // Suppress self-reply to avoid loop
-    const { suppressNextSelfReply } = await import("../../events/messageCreate/tomoriChat");
-    suppressNextSelfReply(targetChannel.id);
-
     const { tomoriChat } = await import("../../events/messageCreate/tomoriChat");
 
     const sourcePersonaId = context.activePersonaId ?? context.tomoriState.persona_id ?? undefined;
     const isSourceUserImpersonation = context.isUserImpersonation === true;
     const sourceImpersonatedUserId = context.impersonatedUserId;
-    const manualTriggerInvoker = context.userId
-      ? {
-          userDiscId: context.userId,
-          username: context.message?.author.username ?? "System",
-          locale: context.locale,
-          member: invokingMember,
-        }
-      : undefined;
+    const borrowsTriggerMessage = context.borrowsTriggerMessage === true;
+    const manualTriggerInvoker =
+      !borrowsTriggerMessage && context.userId
+        ? {
+            userDiscId: context.userId,
+            username: context.message?.author.username ?? "System",
+            locale: context.locale,
+            member: invokingMember,
+          }
+        : undefined;
 
     try {
       assertActive();
@@ -580,6 +614,8 @@ export class CrossChannelMessageTool extends BaseTool {
         textQuotaSource: "system",
         injectedContextItems: [taskInjection],
         manualTriggerInvoker,
+        borrowsTriggerMessage,
+        suppressSelfReply: true,
         manualStreamingContextOverrides: { disableCrossChannelMessage: true },
       });
 
@@ -619,6 +655,8 @@ export class CrossChannelMessageTool extends BaseTool {
           personaId: sourcePersonaId,
           isUserImpersonation: isSourceUserImpersonation,
           impersonatedUserId: sourceImpersonatedUserId,
+          manualTriggerInvoker,
+          borrowsTriggerMessage,
           targetChannelMessages: targetMessages,
         });
 
@@ -669,6 +707,8 @@ export class CrossChannelMessageTool extends BaseTool {
           personaId: sourcePersonaId,
           isUserImpersonation: isSourceUserImpersonation,
           impersonatedUserId: sourceImpersonatedUserId,
+          manualTriggerInvoker,
+          borrowsTriggerMessage,
           targetChannelMessages: [],
         });
       }

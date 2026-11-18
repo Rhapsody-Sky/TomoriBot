@@ -1485,6 +1485,7 @@ class UserRepository implements IRepository<UserExportShape> {
           WHERE created_by_user_id = ${userId} OR user_discord_id = ${user.user_disc_id}
         `;
 
+        await tx`DELETE FROM short_term_memories WHERE user_disc_id = ${user.user_disc_id}`;
         await tx`DELETE FROM users WHERE user_id = ${userId}`;
 
         return {

@@ -21,6 +21,8 @@
 import { sql } from "@/utils/db/client";
 import { normalizeStmCategories, type ShortTermMemoryRow } from "@/types/db/schema";
 import { log } from "@/utils/misc/logger";
+import { z } from "zod";
+import { broadcastInvalidation, invalidationKey, registerInvalidation } from "@/utils/cache/invalidationBus";
 
 /**
  * A single message in a short-term memory conversation
@@ -57,9 +59,6 @@ export interface ShortTermMemoryEntry {
 
   /** Discord channel ID */
   channelId: string;
-
-  /** Parent channel ID when channelId is a thread , so used for privacy/RP inheritance checks */
-  parentChannelId?: string | null;
 
   /** Optional channel name (for same-server channel mentions) */
   channelName?: string;
@@ -393,7 +392,6 @@ function storeMemoryEntry(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   const existing = cache.get(key);
 
@@ -406,7 +404,6 @@ function storeMemoryEntry(
     serverId,
     serverName,
     channelId,
-    parentChannelId,
     channelName,
     personaId,
     personaLineageId,
@@ -671,7 +668,6 @@ function updateSummaryForKey(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   let existing = cache.get(key);
 
@@ -682,7 +678,6 @@ function updateSummaryForKey(
       serverId,
       serverName,
       channelId,
-      parentChannelId,
       channelName,
       personaId,
       personaLineageId,
@@ -707,7 +702,6 @@ function updateSummaryForKey(
  * @param channelName - Optional channel name for same-server channel mentions
  * @param personaId - Optional persona ID for persona-scoped memory
  * @param personaLineageId - Optional persona lineage ID for cross-server persona matching
- * @param parentChannelId - Parent channel ID when channelId is a thread (used for privacy inheritance)
  */
 export function storeShortTermMemory(
   userId: string,
@@ -723,7 +717,6 @@ export function storeShortTermMemory(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   try {
     if (!userId || !channelId || !serverId) {
@@ -745,7 +738,6 @@ export function storeShortTermMemory(
       channelName,
       personaId,
       personaLineageId,
-      parentChannelId,
     );
 
     if (serverId !== "DM") {
@@ -758,7 +750,6 @@ export function storeShortTermMemory(
         channelName,
         personaId,
         personaLineageId,
-        parentChannelId,
       );
     }
 
@@ -907,7 +898,6 @@ export function getShortTermMemoryForServerChannel(
  * @param channelName - Channel name (optional, for new entries)
  * @param personaId - Optional persona ID for persona-scoped memory
  * @param personaLineageId - Optional persona lineage ID for cross-server persona matching
- * @param parentChannelId - Parent channel ID when channelId is a thread (used for privacy inheritance)
  */
 export function updateShortTermMemorySummary(
   userId: string,
@@ -918,7 +908,6 @@ export function updateShortTermMemorySummary(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): void {
   try {
     if (!userId || !channelId || !summary) {
@@ -940,7 +929,6 @@ export function updateShortTermMemorySummary(
       channelName,
       personaId,
       personaLineageId,
-      parentChannelId,
     );
 
     if (serverId && serverId !== "DM") {
@@ -953,7 +941,6 @@ export function updateShortTermMemorySummary(
         channelName,
         personaId,
         personaLineageId,
-        parentChannelId,
       );
     }
 
@@ -1183,16 +1170,7 @@ export function clearShortTermMemoryForServerChannel(
  */
 export function clearShortTermMemoryForUser(userId: string): void {
   try {
-    let clearedCount = 0;
-
-    for (const key of cache.keys()) {
-      if (key.startsWith(`${USER_CACHE_PREFIX}:${userId}:`)) {
-        cache.delete(key);
-        clearedCount++;
-      }
-    }
-
-    stats.invalidations += clearedCount;
+    evictUserShortTermMemory(userId);
 
     deleteStmRowsInBackground({
       whereClause: "scope_kind = 'user' AND user_disc_id = $1",
@@ -1207,6 +1185,30 @@ export function clearShortTermMemoryForUser(userId: string): void {
     });
   }
 }
+
+function evictUserShortTermMemory(userId?: string): void {
+  const prefix = userId === undefined ? `${USER_CACHE_PREFIX}:` : `${USER_CACHE_PREFIX}:${userId}:`;
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) {
+      cache.delete(key);
+      stats.invalidations++;
+    }
+  }
+  if (userId === undefined) bulkWarmedUsers.clear();
+  else bulkWarmedUsers.delete(userId);
+}
+
+export function invalidateShortTermMemoryForUser(userId: string): void {
+  evictUserShortTermMemory(userId);
+  broadcastInvalidation("userStm", [[userId]]);
+}
+
+registerInvalidation(
+  "userStm",
+  z.tuple([invalidationKey]),
+  ([user]) => invalidateShortTermMemoryForUser(user),
+  () => evictUserShortTermMemory(),
+);
 
 /**
  * Remove expired entries from cache (cleanup job)
@@ -1280,7 +1282,6 @@ export function getShortTermMemoryCacheStats(): CacheStats & {
  * @param channelName - Optional channel name
  * @param personaId - Optional persona ID for persona-scoped memory
  * @param personaLineageId - Optional persona lineage ID
- * @param parentChannelId - Optional parent channel ID (thread privacy)
  */
 export async function updateShortTermMemoryCategories(
   userId: string,
@@ -1291,7 +1292,6 @@ export async function updateShortTermMemoryCategories(
   channelName?: string,
   personaId?: number | null,
   personaLineageId?: number | null,
-  parentChannelId?: string | null,
 ): Promise<void> {
   try {
     if (!userId || !channelId) {
@@ -1311,7 +1311,6 @@ export async function updateShortTermMemoryCategories(
         serverId: serverId ?? "unknown",
         serverName,
         channelId,
-        parentChannelId,
         channelName,
         personaId,
         personaLineageId,
@@ -1331,7 +1330,6 @@ export async function updateShortTermMemoryCategories(
           serverId,
           serverName,
           channelId,
-          parentChannelId,
           channelName,
           personaId,
           personaLineageId,

@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { OpenrouterStreamAdapter, type OpenrouterStreamConfig } from "@/providers/openrouter/openrouterStreamAdapter";
 import { humanizerSettingsFromDegree } from "@/constants/humanizer";
+import type { ContextPart, StructuredContextItem } from "@/types/misc/context";
 import type { RawStreamChunk, StreamContext } from "@/types/stream/interfaces";
 import { StreamOrchestrator } from "@/utils/discord/streamOrchestrator";
 import { sumTurnUsage } from "@/utils/text/tokenEstimate";
-import { createPersona } from "../../helpers/fixtures";
+import { log } from "@/utils/misc/logger";
+import { reportStreamProviderFailure } from "@/utils/provider/providerErrorMetrics";
+import { createLlmRow, createPersona } from "../../helpers/fixtures";
 import { stubGlobalFetch } from "../../helpers/fetchStub";
 
 const originalFetch = globalThis.fetch;
@@ -65,6 +68,26 @@ async function collectRawChunks(adapter: OpenrouterStreamAdapter): Promise<RawSt
   }
   return chunks;
 }
+
+it("sends extra-high effort through OpenRouter's reasoning field", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const fetchStub = stubGlobalFetch((_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return makeSseResponse(["[DONE]"]);
+  });
+  try {
+    const context = makeStreamContext();
+    context.tomoriState = createPersona({
+      llm: createLlmRow({ llm_provider: "openrouter", llm_codename: makeStreamConfig().model }),
+      config: { thinking_level: "xhigh" },
+    });
+    for await (const _chunk of new OpenrouterStreamAdapter().startStream(makeStreamConfig(), context)) {
+    }
+    expect(bodies[0]?.reasoning).toEqual({ effort: "xhigh" });
+  } finally {
+    fetchStub.mockRestore();
+  }
+});
 
 it("serializes each sent body once for OpenRouter and NVIDIA, including failures and retries", async () => {
   const { NvidiaStreamAdapter } = await import("@/providers/nvidia/nvidiaStreamAdapter");
@@ -798,6 +821,358 @@ describe("OpenrouterStreamAdapter response body teardown", () => {
     await drainStream(new OpenrouterStreamAdapter().startStream(makeStreamConfig(), makeStreamContext()));
 
     expect(cancelled).toBe(false);
+  });
+});
+
+describe("OpenrouterStreamAdapter video context", () => {
+  it("rechecks YouTube capability on existing context while retaining direct video support", async () => {
+    const bodies: Array<{ messages: unknown[] }> = [];
+    const fetchStub = stubGlobalFetch((_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return makeSseResponse(["[DONE]"]);
+    });
+    try {
+      for (const seesYoutube of [false, true]) {
+        for (const youtube of [false, true]) {
+          const context = makeStreamContext();
+          context.contextItems = [
+            {
+              role: "user",
+              parts: [
+                {
+                  type: "video",
+                  uri: youtube ? "https://www.youtube.com/watch?v=example" : "https://example.test/video.mp4",
+                  mimeType: youtube ? "video/youtube" : "video/mp4",
+                  isYouTubeLink: youtube,
+                },
+              ],
+            },
+          ];
+          const config = { ...makeStreamConfig(), seesVideos: true, seesYoutube };
+          await drainStream(new OpenrouterStreamAdapter().startStream(config, context));
+          const parts =
+            bodies.at(-1)?.messages.flatMap((message) => {
+              const content = (message as { content?: unknown }).content;
+              return Array.isArray(content)
+                ? content
+                : typeof content === "string"
+                  ? [{ type: "text", text: content }]
+                  : [];
+            }) ?? [];
+          expect(parts.some((part) => part.type === "video_url")).toBe(!youtube || seesYoutube);
+          expect(parts.some((part) => part.type === "text")).toBe(youtube && !seesYoutube);
+        }
+      }
+    } finally {
+      fetchStub.mockRestore();
+    }
+  });
+
+  it("selects the latest supported video when a YouTube link follows a direct video", async () => {
+    const bodies: Array<{ messages: Array<{ content: unknown }> }> = [];
+    const fetchStub = stubGlobalFetch((_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return makeSseResponse(["[DONE]"]);
+    });
+    try {
+      for (const sameMessage of [false, true]) {
+        for (const seesYoutube of [false, true]) {
+          for (const seesVideos of [false, true]) {
+            const direct: ContextPart = { type: "video", uri: "https://example.test/video.mp4", mimeType: "video/mp4" };
+            const youtube: ContextPart = {
+              type: "video",
+              uri: "https://www.youtube.com/watch?v=example",
+              mimeType: "video/youtube",
+              isYouTubeLink: true,
+            };
+            const context = makeStreamContext();
+            context.contextItems = sameMessage
+              ? [{ role: "user", parts: [direct, youtube] }]
+              : [
+                  { role: "user", parts: [direct] },
+                  { role: "user", parts: [youtube] },
+                ];
+            const config: OpenrouterStreamConfig = { ...makeStreamConfig(), seesVideos, seesYoutube };
+            await drainStream(new OpenrouterStreamAdapter().startStream(config, context));
+            const videos = bodies
+              .at(-1)
+              ?.messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+              .filter((part) => part.type === "video_url");
+            expect(videos).toEqual(
+              seesVideos ? [{ type: "video_url", video_url: { url: seesYoutube ? youtube.uri : direct.uri } }] : [],
+            );
+          }
+        }
+      }
+    } finally {
+      fetchStub.mockRestore();
+    }
+  });
+
+  it("retains safe video diagnostics on HTTP and SSE failures without fetching videos or duplicating incident records", async () => {
+    const cases = [
+      {
+        uri: "https://cdn.discordapp.com/attachments/111/222/PRIVATE_FILENAME.mp4?ex=00000001&is=0&hm=PRIVATE_SIGNATURE",
+        mimeType: "video/mp4",
+        expected: { source: "discord_cdn", scheme: "https", mimeType: "video/mp4", expiresAtUnixSeconds: 1 },
+      },
+      {
+        uri: "https://www.youtube.com/watch?v=AbCdEfGhI12&private=PRIVATE_QUERY",
+        mimeType: "video/youtube",
+        expected: { source: "youtube", scheme: "https", mimeType: "video/youtube" },
+      },
+      {
+        uri: "https://PRIVATE_HOST.example.test/PRIVATE_FILENAME?token=PRIVATE_QUERY",
+        mimeType: "PRIVATE_MIME",
+        expected: { source: "remote_url", scheme: "https", mimeType: "other" },
+      },
+      {
+        uri: "data:video/mp4;base64,UFJJVkFURV9WSURFT19CWVRFUw==",
+        mimeType: "video/mp4",
+        expected: {
+          source: "inline_data",
+          scheme: "data",
+          mimeType: "video/mp4",
+          encodedBytes: Buffer.byteLength("data:video/mp4;base64,UFJJVkFURV9WSURFT19CWVRFUw=="),
+        },
+      },
+    ];
+    const errors = spyOn(log, "error").mockImplementation(async () => {});
+    try {
+      for (const transport of ["http", "sse"]) {
+        for (const video of cases) {
+          errors.mockClear();
+          const payload = {
+            id: "gen-fixture",
+            error: {
+              code: 400,
+              message: "Failed to download one or more videos",
+              metadata: { provider_name: "Fixture Provider" },
+            },
+          };
+          let requestCount = 0;
+          const fetchStub = stubGlobalFetch((_input, init) => {
+            requestCount++;
+            expect(init?.method).toBe("POST");
+            return transport === "http"
+              ? Response.json(payload, { status: 400, headers: { "x-request-id": "req-fixture" } })
+              : makeSseResponse([payload, "[DONE]"]);
+          });
+          try {
+            const context = makeStreamContext();
+            context.tomoriState = createPersona();
+            context.holdResponseText = true;
+            context.contextItems = [
+              {
+                role: "user",
+                parts: [
+                  { type: "text", text: "PRIVATE_PROMPT" },
+                  { type: "video", uri: "https://example.test/earlier.mp4", mimeType: "video/mp4" },
+                  { type: "video", uri: video.uri, mimeType: video.mimeType },
+                ],
+              },
+            ];
+            const config: OpenrouterStreamConfig = { ...makeStreamConfig(), seesYoutube: true, seesVideos: true };
+            const adapter = new OpenrouterStreamAdapter();
+            const chunks: RawStreamChunk[] = [];
+            for await (const chunk of adapter.startStream(config, context)) chunks.push(chunk);
+            const error = chunks.map((chunk) => adapter.processChunk(chunk).error).find(Boolean);
+            if (!error) throw new Error("Expected provider rejection");
+            await reportStreamProviderFailure({
+              providerError: error,
+              providerName: "openrouter",
+              context,
+              requestApiKey: config.apiKey,
+              denied: false,
+              surfaced: false,
+            });
+            expect(requestCount).toBe(1);
+            expect(errors.mock.calls).toHaveLength(1);
+            const diagnostics = errors.mock.calls[0]?.[2]?.metadata?.videoRequestDiagnostics;
+            expect(diagnostics).toMatchObject({
+              model: config.model,
+              attempt: "default",
+              omittedVideos: 1,
+              httpStatus: transport === "http" ? 400 : 200,
+              generationId: "gen-fixture",
+              servingProvider: "Fixture Provider",
+              videos: [video.expected],
+            });
+            expect(context.videoRequestDiagnostics?.requestId).toBe(transport === "http" ? "req-fixture" : undefined);
+            const serialized = JSON.stringify(diagnostics);
+            for (const privateValue of [
+              config.apiKey,
+              video.uri,
+              "PRIVATE_PROMPT",
+              "PRIVATE_FILENAME",
+              "PRIVATE_SIGNATURE",
+              "PRIVATE_QUERY",
+              "PRIVATE_HOST",
+              "PRIVATE_MIME",
+              "UFJJVkFURV9WSURFT19CWVRFUw==",
+            ]) {
+              expect(serialized).not.toContain(privateValue);
+            }
+          } finally {
+            fetchStub.mockRestore();
+          }
+        }
+      }
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("rejects unsafe provider identities and clears video diagnostics when a reused context sends no video", async () => {
+    const context = makeStreamContext();
+    context.holdResponseText = true;
+    context.contextItems = [
+      {
+        role: "user",
+        parts: [
+          {
+            type: "video",
+            uri: "https://cdn.discordapp.com/attachments/111/222/video.mp4?ex=PRIVATE_EXPIRY&hm=PRIVATE_SIGNATURE",
+            mimeType: "video/mp4",
+          },
+        ],
+      },
+    ];
+    const fetchStub = stubGlobalFetch(() =>
+      Response.json(
+        { id: "x".repeat(201), error: { message: "Rejected", metadata: { provider_name: "https://PRIVATE_HOST" } } },
+        { status: 400, headers: { "x-request-id": "https://PRIVATE_HOST?token=PRIVATE_QUERY" } },
+      ),
+    );
+    try {
+      const adapter = new OpenrouterStreamAdapter();
+      const config: OpenrouterStreamConfig = { ...makeStreamConfig(), seesYoutube: true, seesVideos: true };
+      await drainStream(adapter.startStream(config, context));
+      expect(context.videoRequestDiagnostics?.videos).toEqual([
+        { source: "discord_cdn", scheme: "https", mimeType: "video/mp4" },
+      ]);
+      expect(context.videoRequestDiagnostics?.requestId).toBeUndefined();
+      expect(context.videoRequestDiagnostics?.generationId).toBeUndefined();
+      expect(context.videoRequestDiagnostics?.servingProvider).toBeUndefined();
+      config.seesVideos = false;
+      await drainStream(adapter.startStream(config, context));
+      expect(context.videoRequestDiagnostics).toBeUndefined();
+    } finally {
+      fetchStub.mockRestore();
+    }
+  });
+
+  it("sends only the latest video across history and attachments while preserving other context", async () => {
+    const latestVideos: Array<Extract<ContextPart, { type: "video" }>> = [
+      { type: "video", uri: "https://example.test/latest.mp4", mimeType: "video/mp4" },
+      { type: "video", uri: "http://example.test/latest.webm", mimeType: "video/webm" },
+      { type: "video", uri: "data:video/mp4;base64,aGVsbG8=", mimeType: "video/mp4" },
+      {
+        type: "video",
+        uri: "https://www.youtube.com/watch?v=example",
+        mimeType: "video/mp4",
+        isYouTubeLink: true,
+      },
+    ];
+    for (const latestVideo of latestVideos) {
+      for (const latestRole of ["user", "model"] as const) {
+        const context = makeStreamContext();
+        context.tomoriState = createPersona({ config: { thinking_level: "none" } });
+        context.contextItems = [
+          {
+            role: "user",
+            parts: [
+              { type: "text", text: "Earlier question" },
+              { type: "video", uri: "https://example.test/earlier.mp4", mimeType: "video/mp4" },
+            ],
+          },
+          {
+            role: latestRole,
+            parts: [
+              { type: "text", text: "Latest question" },
+              { type: "image", uri: "data:image/png;base64,aGVsbG8=", mimeType: "image/png" },
+              { type: "video", uri: "https://example.test/first-attachment.mp4", mimeType: "video/mp4" },
+              latestVideo,
+            ],
+          },
+        ];
+        const originalItems = structuredClone(context.contextItems);
+        let requestMessages: Array<Record<string, unknown>> = [];
+        let requestCount = 0;
+        const fetchStub = stubGlobalFetch((_input, init) => {
+          requestCount++;
+          requestMessages = JSON.parse(String(init?.body)).messages;
+          const videoCount = requestMessages
+            .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+            .filter((part) => part.type === "video_url").length;
+          return videoCount > 1
+            ? Response.json({ error: { message: "Too many videos in request" } }, { status: 400 })
+            : makeSseResponse(["[DONE]"]);
+        });
+        const adapter = new OpenrouterStreamAdapter();
+        try {
+          const chunks: RawStreamChunk[] = [];
+          const config: OpenrouterStreamConfig = { ...makeStreamConfig(), seesYoutube: true, seesVideos: true };
+          for await (const chunk of adapter.startStream(config, context)) {
+            chunks.push(chunk);
+          }
+          expect(chunks.map((chunk) => adapter.processChunk(chunk).type)).not.toContain("error");
+          expect(requestCount).toBe(1);
+          expect(requestMessages).toEqual(await adapter.buildProbeMessages(context.contextItems, true, true, true));
+          const parts = requestMessages.flatMap((message) =>
+            Array.isArray(message.content) ? message.content : [{ type: "text", text: message.content }],
+          );
+          expect(parts.filter((part) => part.type === "video_url")).toEqual([
+            { type: "video_url", video_url: { url: latestVideo.uri } },
+          ]);
+          expect(parts).toContainEqual({
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,aGVsbG8=" },
+          });
+          for (const text of ["Earlier question", "Latest question"]) {
+            expect(parts.some((part) => typeof part.text === "string" && part.text.includes(text))).toBe(true);
+          }
+          const omitted = requestMessages[0]?.content;
+          expect(typeof omitted).toBe("string");
+          expect(String(omitted).length).toBeGreaterThan("Earlier question".length);
+          expect(context.contextItems).toEqual(originalItems);
+        } finally {
+          fetchStub.mockRestore();
+        }
+      }
+    }
+  });
+
+  it("preserves single-video and text-only requests and honors disabled video support", async () => {
+    const adapter = new OpenrouterStreamAdapter();
+    const textItem: StructuredContextItem = { role: "user", parts: [{ type: "text", text: "Question" }] };
+    expect(await adapter.buildProbeMessages([textItem], true, true)).toEqual([{ role: "user", content: "Question" }]);
+    const items: StructuredContextItem[] = [
+      {
+        role: "user",
+        parts: [...textItem.parts, { type: "video", uri: "https://example.test/only.mp4", mimeType: "video/mp4" }],
+      },
+    ];
+    expect(await adapter.buildProbeMessages(items, true, true)).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Question" },
+          { type: "video_url", video_url: { url: "https://example.test/only.mp4" } },
+        ],
+      },
+    ]);
+    expect(
+      await adapter.buildProbeMessages(
+        [...items, { role: "user", parts: [{ type: "video", uri: "file:///video.mp4", mimeType: "video/mp4" }] }],
+        true,
+        true,
+      ),
+    ).toEqual(await adapter.buildProbeMessages(items, true, true));
+    const disabledMessages = await adapter.buildProbeMessages(items, true, false);
+    expect(disabledMessages.every((message) => typeof message.content === "string")).toBe(true);
+    expect(String(disabledMessages[0]?.content).startsWith("Question")).toBe(true);
+    expect(String(disabledMessages[0]?.content).length).toBeGreaterThan("Question".length);
   });
 });
 

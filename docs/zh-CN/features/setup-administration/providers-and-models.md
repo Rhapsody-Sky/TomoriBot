@@ -42,7 +42,9 @@ TomoriBot连接到外部AI提供商，而不是托管内置模型。你可以连
 切勿与其他人共享你的API密钥。从`/providers`中的`编辑端点`操作添加或替换自定义端点的承载身份验证令牌。
 :::
 
-Vertex AI使用应用程序默认凭证 (ADC) 而不是存储的机密进行身份验证。对于本地托管，ADC可以来自`gcloud`； 托管部署应使用工作负载身份或服务帐户。AI Studio API密钥单独无法验证完整的Vertex AI。所选的Google云项目必须启用计费和Vertex AI API，并且主机身份需要Vertex访问权限。设置指南可从`/help`中的`API Keys`页面上的Google Vertex AI获取。
+运维人员可开启自动移除闲置 API 密钥的功能。若已保存的配置遗失了密钥，可在 `/providers` 或 `/personal providers` 中使用**编辑**重新添加。已保存的模型设置将保留。移除存储的密钥不会在提供方处将其撤销，也不会清除备份中的副本。
+
+Vertex AI使用应用程序默认凭证 (ADC) 而不是存储的机密进行身份验证。对于本地托管，ADC可以来自`gcloud`； 托管部署应使用工作负载身份或服务帐户。AI Studio API密钥单独无法验证完整的Vertex AI。所选的Google云项目必须启用计费和Vertex AI API，并且主机身份需要Vertex访问权限。部署 TomoriBot 的人可以将 Vertex AI 限制为仅供特定服务器和用户使用；其他人需要选择其他提供方。设置指南可从`/help`中的`API Keys`页面上的Google Vertex AI获取。
 
 Google Gemini 与 Vertex AI 的配置通过已认证的模型列表端点来验证凭据，Vertex AI Express 则使用 `countTokens` 验证 API 密钥，因此配置过程绝不会生成文本。
 
@@ -123,7 +125,7 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) 和OpenCode Zen (`https://opencode
 
 - [设置：本地LLM](/zh-CN/self-hosting/local-endpoints/setup-local-llm/)：Ollama、KoboldCPP、LM Studio、vLLM、LiteLLM。
 - [Setup: ComfyUI](/zh-CN/self-hosting/local-endpoints/setup-comfyui/)：本地图像和视频生成。
-- [设置：ChatMock](/zh-CN/self-hosting/local-endpoints/setup-chatmock/)：ChatGPT帐户或Codex CLI。
+- [设置：ChatMock](/zh-CN/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/)：ChatGPT帐户或Codex CLI。
 
 ## 支持的提供方
 <!-- anchor: supported-providers -->
@@ -143,7 +145,7 @@ OpenCode Go (`https://opencode.ai/zen/go/v1`) 和OpenCode Zen (`https://opencode
 | Z.ai | ✅ | ✅ | ✅ | - | 免费模型； 🟡 ToS = 仅限编码和代理使用 |
 | Z.ai编码 | ✅ | ✅ | - | - | 认购计划 |
 | Google Vertex AI | ✅ | ✅ | ✅ | ✅ | 包括“免费”Express版本 |
-| Codex CLI（通过ChatMock） | ✅ | ✅ | ✅ | - | [设置](/zh-CN/self-hosting/local-endpoints/setup-chatmock/) |
+| Codex CLI（通过ChatMock） | ✅ | ✅ | ✅ | - | [设置](/zh-CN/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/) |
 
 ### 图像生成
 

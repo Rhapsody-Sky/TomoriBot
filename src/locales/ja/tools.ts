@@ -1,6 +1,7 @@
 export default {
   tools: {
     media: {
+      generation_source_line: "プロバイダー：{provider} · モデル：{model}",
       delivery_failed: "Discordはメディアを送信できませんでした。送信成功は記録されていません。",
       delivery_unconfirmed:
         "Discordはメディアが投稿されたか確認できませんでした。このターンを終了し、再生成や再投稿の前にチャンネルを確認してください。再試行すると重複する可能性があります。",
@@ -13,6 +14,10 @@ export default {
       delivery_failed: "ダイスの結果を投稿できませんでした。ロールは送信されませんでした。",
     },
     execution: {
+      channel_history_unavailable:
+        "対象チャンネルのメッセージ履歴を読むには、リクエストしたユーザーと私の両方に権限が必要です。",
+      private_channel_target:
+        "クロスチャンネルツールは、プライベートチャンネルまたは公開状況を確認できないチャンネルを対象にすることはできません。代わりにそのチャンネルで話しかけてください。",
       unavailable: `ツール \`{tool}\` は、現在の設定、モデルの機能、またはBotの権限では利用できません。`,
     },
     sprite_selection: {

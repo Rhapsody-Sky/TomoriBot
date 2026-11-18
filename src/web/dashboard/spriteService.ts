@@ -156,7 +156,10 @@ export class DashboardSpriteService {
   }
 
   async export(snapshot: DashboardGuildSnapshot, personaId: number) {
-    return assertResult(await configSpriteOperations.exportSprites({ persona: this.persona(snapshot, personaId) }));
+    const result = assertResult(
+      await configSpriteOperations.exportSprites({ persona: this.persona(snapshot, personaId) }),
+    );
+    return { ...result.files[0], skippedCount: result.skippedCount };
   }
 
   async image(snapshot: DashboardGuildSnapshot, personaId: number, key: string) {

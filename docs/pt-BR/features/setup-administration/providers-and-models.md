@@ -42,7 +42,9 @@ Cada provedor tem suas próprias etapas de geração de chaves. Em `/help`, esco
 Nunca compartilhe sua chave API com mais ninguém. Adicione ou substitua um token de autenticação do portador de um endpoint personalizado de sua ação `Editar Endpoint` em `/providers`.
 :::
 
-Vertex AI autentica com Application Default Credentials (ADC) em vez de um segredo armazenado. Para hospedagem local, o ADC pode vir de `gcloud`; as implantações hospedadas devem usar uma identidade de carga de trabalho ou conta de serviço. Uma chave AI Studio API sozinha não autentica Vertex AI completo. O projeto Google Cloud selecionado deve ter faturamento e Vertex AI API ativados, e a identidade do host precisa de acesso Vertex. O guia de configuração está disponível em Google Vertex AI na página `API Keys` em `/help`.
+Um operador pode ativar a remoção automática de chaves de API não utilizadas. Se uma configuração salva perder sua chave, use **Editar** em `/providers` ou `/personal providers` para adicioná-la novamente. As configurações de modelo salvas permanecem. A remoção de uma chave armazenada não a revoga no provedor nem apaga cópias em backups.
+
+Vertex AI autentica com Application Default Credentials (ADC) em vez de um segredo armazenado. Para hospedagem local, o ADC pode vir de `gcloud`; as implantações hospedadas devem usar uma identidade de carga de trabalho ou conta de serviço. Uma chave AI Studio API sozinha não autentica Vertex AI completo. O projeto Google Cloud selecionado deve ter faturamento e Vertex AI API ativados, e a identidade do host precisa de acesso Vertex. Quem hospeda o TomoriBot pode limitar o Vertex AI a certos servidores e usuários; os demais devem escolher um provedor diferente. O guia de configuração está disponível em Google Vertex AI na página `API Keys` em `/help`.
 
 A configuração do Google Gemini e do Vertex AI valida as credenciais por meio do endpoint autenticado de listagem de modelos, e o Vertex AI Express valida chaves de API com `countTokens`, portanto a configuração nunca gera texto.
 
@@ -123,7 +125,7 @@ Para instruções completas sobre a execução de servidores locais, consulte:
 
 - [Configuração: LLM local](/pt-BR/self-hosting/local-endpoints/setup-local-llm/): Ollama, KoboldCPP, LM Studio, vLLM, LiteLLM.
 - [Configuração: ComfyUI](/pt-BR/self-hosting/local-endpoints/setup-comfyui/): geração local de imagem e vídeo.
-- [Configuração: ChatMock](/pt-BR/self-hosting/local-endpoints/setup-chatmock/): conta ChatGPT ou Codex CLI.
+- [Configuração: ChatMock](/pt-BR/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/): conta ChatGPT ou Codex CLI.
 
 ## Provedores Suportados
 <!-- anchor: supported-providers -->
@@ -143,7 +145,7 @@ Se você não possui hardware para hospedar seus próprios modelos, o TomoriBot 
 | Z.ai | ✅ | ✅ | ✅ | - | Modelos gratuitos; 🟡 ToS = apenas codificação e uso do agente |
 | Codificação Z.ai | ✅ | ✅ | - | - | Plano de assinatura |
 | Google Vertex AI | ✅ | ✅ | ✅ | ✅ | Inclui versão Express 'gratuita' |
-| CLI do Codex (via ChatMock) | ✅ | ✅ | ✅ | - | [Configuração](/pt-BR/self-hosting/local-endpoints/setup-chatmock/) |
+| CLI do Codex (via ChatMock) | ✅ | ✅ | ✅ | - | [Configuração](/pt-BR/self-hosting/local-endpoints/proxies-and-remote-access/setup-chatmock/) |
 
 ### Geração de Imagem
 

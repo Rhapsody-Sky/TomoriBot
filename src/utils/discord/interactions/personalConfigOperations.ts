@@ -1,7 +1,6 @@
 import { validateOpenRouterSpeechModel } from "@/utils/cache/openrouterSpeechModelCache";
 import { validateOpenRouterTranscriptionModel } from "@/utils/cache/openrouterTranscriptionModelCache";
-import { getNovelAIModelAccessError } from "@/providers/novelai/modelAccess";
-import { decryptApiKey } from "@/utils/security/crypto";
+import { getStoredNovelAIModelAccessError } from "@/providers/novelai/modelAccess";
 import { DEFAULT_THINKING_LEVEL, isThinkingLevelValue } from "@/constants/thinkingLevels";
 import { getRegisterableLocales } from "@/utils/text/localizer";
 import type { APIAttachment } from "discord.js";
@@ -27,6 +26,7 @@ import { parseAndValidateImageTags } from "@/utils/image/tagHelpers";
 import { log } from "@/utils/misc/logger";
 import { isCustomProvider, parseCustomProvider } from "@/utils/provider/customProviderUtils";
 import { findProviderOption } from "@/utils/provider/providerOptionRegistry";
+import { findProviderRequestDeniedError, type ProviderRequestDeniedError } from "@/utils/provider/providerUsage";
 import { getFallbackModelRefKey, getPrimaryFallbackRefKeys } from "@/utils/provider/fallbackModelIdentity";
 import {
   assignPersonalCapabilityToProvider,
@@ -122,6 +122,7 @@ export interface PersonalConfigOperations {
     | { status: "success" }
     | { status: "no-changes" | "write-failed" }
     | { status: "novelai-unavailable"; descriptionKey: string }
+    | { status: "provider-denied"; denied: ProviderRequestDeniedError }
   >;
   setCapabilityEnabled(input: {
     userId: number;
@@ -364,7 +365,25 @@ export const personalConfigOperations: PersonalConfigOperations = {
     if (!targetRow) return { status: "write-failed" };
 
     const availableModels = await loadAvailableModelsForCapability(userId, provider, capability);
-    if (!availableModels.some((model) => model.id === modelId)) return { status: "write-failed" };
+    const selectedModel = availableModels.find((model) => model.id === modelId);
+    if (!selectedModel) return { status: "write-failed" };
+    const option = findProviderOption(provider);
+    if (capability === "image" && option?.selection.validateModel) {
+      try {
+        if (
+          !(await option.selection.validateModel({
+            scope: { kind: "personal", ownerId: userId },
+            capability: "image",
+            modelCodename: selectedModel.name,
+          }))
+        )
+          return { status: "write-failed" };
+      } catch (error) {
+        const denied = findProviderRequestDeniedError(error);
+        if (denied) return { status: "provider-denied", denied };
+        throw error;
+      }
+    }
 
     if (capability === "transcription") {
       const selected = availableModels.find((model) => model.id === modelId);
@@ -415,9 +434,10 @@ export const personalConfigOperations: PersonalConfigOperations = {
     if (capability === "text") {
       const selected = availableModels.find((model) => model.id === modelId);
       if (provider.toLowerCase() === "novelai" && selected?.name === "xialong-v1") {
-        const descriptionKey = await getNovelAIModelAccessError(
+        const descriptionKey = await getStoredNovelAIModelAccessError(
           selected.name,
-          targetRow.api_key ? await decryptApiKey(targetRow.api_key, targetRow.key_version) : null,
+          targetRow.api_key,
+          targetRow.key_version,
         );
         if (descriptionKey) return { status: "novelai-unavailable", descriptionKey };
       }

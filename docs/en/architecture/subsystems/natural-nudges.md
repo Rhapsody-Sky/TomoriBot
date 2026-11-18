@@ -61,19 +61,18 @@ Repository reads retry retired database connections through `withTransientDbRetr
 reads fail the evaluation instead of supplying empty activity data that could be cached for later
 cycles. Reads inside a caller's transaction stay with that transaction and do not retry independently.
 
-```
-reconcile tick
-  └─ NaturalNudgeProcessor.processDueIdleNudges
-       ├─ pending opener?  → resolve its verdict, stop
-       ├─ failure or unanswered stop? → stop
-       ├─ heat → idle nudges per day → due time, level's daily cap, waking hours
-       ├─ lull: effective channels quiet for 1-3 hours (gateway lastMessageId)
-       ├─ planner model: llm_id, else the chat model; no_model abort and backoff unless it resolves
-       ├─ persona raffle → persona scope filter → channel sample → channel/tool eligibility
-       ├─ category raffle → target lottery when required → full prerequisites → weighted nudge shortlist
-       │    └─ Play Scene: one shared partner draw and compatible channels
-       └─ detached: planIdleNudge → recheckBeforeSend → tomoriChat({ naturalNudge, sceneTurn? })
-                                                       └─ fire row + one agenda row per speaker
+```mermaid
+flowchart TD
+  tick["reconcile tick"] --> proc["NaturalNudgeProcessor.processDueIdleNudges"]
+  proc -->|"pending opener?"| opener["resolve its verdict, stop"]
+  proc -->|"failure or unanswered stop?"| stop["stop"]
+  proc --> heat["heat → idle nudges per day → due time, level's daily cap, waking hours"]
+  heat --> lull["lull: effective channels quiet for 1-3 hours (gateway lastMessageId)"]
+  lull --> model["planner model: llm_id, else chat model;<br/>no_model abort and backoff unless it resolves"]
+  model --> persona["persona raffle → persona scope filter →<br/>channel sample → channel/tool eligibility"]
+  persona --> cat["category raffle → target lottery when required →<br/>full prerequisites → weighted nudge shortlist<br/>(Play Scene: one shared partner draw and compatible channels)"]
+  cat --> detached["detached: planIdleNudge → recheckBeforeSend →<br/>tomoriChat({ naturalNudge, sceneTurn? })"]
+  detached --> rows["fire row + one agenda row per speaker"]
 ```
 
 ## State: fire history and derived meters
@@ -189,11 +188,13 @@ activity still controls dormancy.
   `Manage Server`. The weight modal accepts four positive whole numbers totaling 100 and saves
   them together. Heat buttons use atomic database updates. Both writes invalidate the shared
   nudge eligibility snapshot after success.
-- **Failure stop.** Planner failures after their one format retry, and generation errors, count
-  toward `server_natural_nudge_runtime_state.consecutive_failures`; three stop the server until a
-  normal turn succeeds there (`text_generated` newer than `stopped_at`). Aborts never count. Idle Nudges
-  and Active Nudges each lift the stop when they read it (`runtime/failureStop.ts`), because a server
-  with idle nudges off is never evaluated by the idle nudge timer.
+- **Failure cooldown.** Planner failures after their one format retry, and generation errors, count
+  toward `server_natural_nudge_runtime_state.consecutive_failures`; three pause both modes for
+  three hours from `stopped_at`. Both modes admit the next eligible attempt after expiry through
+  `runtime/failureStop.ts`, keeping the streak so another failure renews the full cooldown.
+  A delivered nudge clears both fields, and a normal turn succeeding after `stopped_at` clears them
+  early when either mode next evaluates. Aborts never count. Cooldowns survive restarts, while
+  waking hours, activity, ignored invitations, and daily request limits still gate retries.
 - **Server keys only.** The planner, checker, and interest generation resolve through
   `resolveNudgeModel` (`runtime/model.ts`), which wraps `resolveServerStructuredModel`
   (`src/utils/provider/serverStructuredOutput.ts`) and never uses a personal key. The turn planner
@@ -222,8 +223,10 @@ activity still controls dormancy.
   messages posted during planning. The placeholder is sent only when the history read succeeds and
   comes back empty, and it is deleted again before the turn starts, so the turn borrows a message
   object whose blank line is already gone from the channel.
-- **Private channels plan alone.** A private channel is offered to the planner by itself, so its
-  history never shapes a nudge in another channel.
+- **Private channels plan alone.** The shared `getChannelPrivacyReason` check includes restricted
+  Discord audiences, private threads, unresolved audiences, and the manual private channel list.
+  A private channel is offered to the planner by itself, so its history never shapes a nudge in
+  another channel. STM sharing does not relax planner isolation.
 - **Agendas belong to one persona.** `natural_nudge_agendas` rows key by `(message_disc_id,
   persona_id)`. Context rebuild and the prompt snapshot render an agenda above its opener only for
   that persona (`runtime/agendas.ts`). The agenda expires when the opener leaves the context window.
@@ -342,19 +345,18 @@ An Active Nudge has no planner. A message counter decides when to look, one matc
 the conversation matches a persona's interest, and the winner gets a plain turn. The `messageCreate`
 handler starts the counter check in the background, so its settings read does not delay chat.
 
-```
-messageCreate (activeNudge.ts)
-  └─ observeActiveNudgeMessage
-       ├─ persona message → counter starts over; an open check's watch notes it
-       ├─ human message in an effective channel (a thread counts toward its parent)
-       │    └─ count reaches its roll (activeNudgeTripRange) → claim the server → detached check
-       └─ runActiveNudgeCheck
-            ├─ Phase A, fresh reads: settings, stop, daily cap, 1 per channel per hour, matcher
-            ├─ options: interests of personas with talkativeness above 0 allowed in the channel
-            ├─ matchActiveNudge over the last 5 messages → interest or none
-            ├─ winner: an owner of that interest who did not speak in the window; 10% detour
-            ├─ wait 15-45 s → recheckBeforeSend, one re-match when 5 posted
-            └─ tomoriChat({ naturalNudge, borrowsTriggerMessage }) → fire row (mode active)
+```mermaid
+flowchart TD
+  msg["messageCreate (activeNudge.ts)"] --> obs["observeActiveNudgeMessage"]
+  obs -->|"persona message"| reset["counter starts over;<br/>an open check's watch notes it"]
+  obs -->|"human message in effective channel<br/>(thread counts toward parent)"| roll["count reaches roll (activeNudgeTripRange) →<br/>claim server → detached check"]
+  roll --> check["runActiveNudgeCheck"]
+  check --> phaseA["Phase A, fresh reads: settings, stop,<br/>daily cap, 1 per channel per hour, matcher"]
+  phaseA --> opts["options: interests of personas with<br/>talkativeness above 0 allowed in channel"]
+  opts --> match["matchActiveNudge over last 5 messages →<br/>interest or none"]
+  match --> win["winner: owner of that interest who did not<br/>speak in window; 10% detour"]
+  win --> wait["wait 15-45 s → recheckBeforeSend,<br/>one re-match when 5 posted"]
+  wait --> chat["tomoriChat({ naturalNudge, borrowsTriggerMessage }) →<br/>fire row (mode active)"]
 ```
 
 - **Counter in memory.** `ActiveNudgeCounter` keeps one count per listed channel, shared with its threads,
@@ -377,15 +379,15 @@ messageCreate (activeNudge.ts)
   (`checker_llm_id`) or a Decision model (`checker_decision_model_id`), at most one, and a pinned
   checker that cannot answer does not fall back. Unpinned, the recommended checker is resolved from
   the server's current keys on every check, so adding or removing a provider needs no write: the
-  Decision model selected in `/config > Models`, then the catalog's default OpenRouter Decision
-  model, then `gemma-4-31b-it` on a Google key, then the planner model.
+  Decision model selected in `/config > Models`, then Google's default `gemini-decision-1` on a
+  Google key, then the catalog's default OpenRouter Decision model, then the planner model.
 - **Matcher, one boundary, two backends** (`runtime/matcher.ts`). A Decision model gets one `choice`
   question and must list `choice` in `supported_primitives`. A text model gets a structured enum of
   the option IDs at temperature 0, with one format retry. Both use the wording the false-fire evaluation measured, up
   to 25 interests plus `none` (some Decision models reject more than 26 options; personas whose new
   labels would overflow sit the check out), and argmax. A refused, blocked, or unparseable answer
   reads as `none`, and so does a choice that is not its own most likely option. A transport failure
-  is recorded but never counts toward the failure stop, so a broken matcher cannot stop idle nudges.
+  is recorded but never counts toward the failure cooldown, so a broken matcher cannot pause idle nudges.
 - **Member text stays data.** The evidence is `Name: text` lines read through the same privacy filter
   as planner transcripts. A text-model checker sees it inside an escaped `<<< >>>` block; the
   Decision API receives it as its separate evidence field.
@@ -406,7 +408,7 @@ messageCreate (activeNudge.ts)
   otherwise it aborts as `window_gone`.
 - **Plain turn.** The turn carries `naturalNudge` with no tools and `borrowsTriggerMessage`, and no
   brief, agenda, or injected context, so it skips the same stats and memory writes as an idle nudge.
-  Active Nudges have no pending or unanswered rules; they count toward the shared failure stop.
+  Active Nudges have no pending or unanswered rules; generation failures count toward the shared cooldown.
 - **Telemetry.** One `natural_nudge_active` row per check: outcome, phase, reason, heat, matcher
   kind and model, option count, the Decision margin over `none`, detour, matcher tokens, and whether
   a second call ran with its own tokens.

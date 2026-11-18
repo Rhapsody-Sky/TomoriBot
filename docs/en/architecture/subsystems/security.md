@@ -19,7 +19,7 @@ Application secrets are managed by `src/utils/security/secretsManager.ts` during
 - **Environment mapping**: verified secrets populate `process.env`. `CryptoKeyManager.initialize()` executes immediately after secret loading so encryption keys are ready before database connection initialization. The selected secret source replaces the entire encryption-version set, including `CRYPTO_SECRET_CURRENT`; undeclared ambient versions are cleared. Runtime and maintenance scripts use this same loader.
 - **Registered secret names**: `registerSecretEnvKeys()` adds deployment-specific names to the optional set before loading, and every source (environment, mounted JSON, AWS Secrets Manager) then loads them like a built-in optional field. Registering after `getAppSecrets()` has run throws, because a late name would be missing from the returned secrets and silently disable the feature that needs it.
 - **Subprocess arguments**: other local users can read a process's command line, so secrets never go there. `withPostgresPassfile()` in `src/utils/backup/dataBackup.ts` gives `pg_dump` and `psql` the database password through a private temporary `PGPASSFILE` and removes the bot's own database credential variables from their environment. The OpenRouter video `curl` fallback reads its headers and body from stdin (`-K -`).
-- **Log redaction**: every `log` method, including `log.metric`, passes its fields through `sanitizeLogPayload()` before either sink, so string values get the same credential redaction as structured fields. Numeric fields keep their type.
+- **Log redaction**: every `log` method, including `log.metric`, passes its fields through `sanitizeLogPayload()` before either sink. `MetricSampleRepository` applies the same redaction to fields before inserting new `metric_samples` rows. Numeric fields keep their type; existing database rows are not rewritten.
 
 ## Encryption at rest and key rotation
 
@@ -43,6 +43,33 @@ Server-wide provider keys support pooled failover and load balancing via `src/ut
 - **Error cooldowns**: keys that encounter rate limits enter a 60-second cooldown. Keys with general API errors enter a 5-minute cooldown.
 - **Main key pointer**: each provider maintains a primary pointer (`is_main_key_pointer = true`) so the server's primary credential participates in rotation without coupling to other providers.
 - **Personal scope isolation**: personal provider credentials (`/personal providers`) bypass rotation pools entirely. They edit the user's primary saved credential directly and never read or write server rotation rows.
+
+## Inactive database API keys
+
+`API_KEY_INACTIVITY_DAYS` optionally removes dormant server, personal, rotation-pool and optional-service
+API keys. Unset disables deletion. Tracking stays active in either mode. Existing credentials receive
+a full grace period when the activity migration runs; never-used keys age from insertion or replacement.
+Later enabling deletion can immediately remove keys whose tracked inactivity exceeds the policy.
+
+`credentialResolver` and other stored-key owners attach generation references to `ProviderUsageContext`.
+The final fetch gate in `providerRequestHook.ts` commits activity before sending a matching authenticated
+request, including requests that receive authentication or quota failures. The Google SDK shares this
+gate because it has no asynchronous transport interceptor. OpenRouter's non-fetch video transport calls
+the same activity writer explicitly. Anonymous downloads, decryption and local validation do not renew
+activity. Prompt inspection uses cached subscription facts and model limits without refreshing them.
+
+`ApiKeyRetentionRepository` uses PostgreSQL row locks and generation checks to serialize activity,
+replacement and cleanup across processes. A stale generation or failed activity write prevents dispatch.
+Encryption maintenance and saving the same key preserve its age and generation. Assembled server state
+reads the active saved provider credential; the migration preserves legacy-only active keys. Deprecated
+mirrors remain in the encryption inventory and are cleared with an expired primary key.
+
+The primary process runs bounded cleanup through `src/timers/apiKeyJanitor.ts`. Successful batches
+invalidate server snapshots and subscription metadata locally and through the invalidation bus. Saved
+model/settings rows remain; existing triggers retire speech bindings and clear dependent selections.
+An eligible extra rotation key replaces an expired primary without resetting its activity age. Cleanup neither decrypts keys nor contacts providers. Host ADC, unauthenticated endpoint placeholders,
+OAuth tokens and webhook credentials are outside this policy. See the
+[operator procedure](/self-hosting/maintenance/#inactive-api-key-cleanup) for backup and revocation limits.
 
 ## Privacy model and participant protection
 
@@ -75,7 +102,7 @@ Managed via `/moderation` and persisted in `personalization_blacklist`:
 - Keyed by `(server_id, persona_id, user_disc_id)`.
 - `mute`: prevents the user from triggering the persona.
 - `block`: prevents triggers and hides the target's recent messages from the persona's conversation history context.
-- Does not alter stored memory rows or trigger data deletion.
+- Does not alter stored memory rows.
 
 ## SQL injection protections
 

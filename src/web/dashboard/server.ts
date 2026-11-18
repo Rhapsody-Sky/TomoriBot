@@ -2775,7 +2775,12 @@ export function createDashboardApp(client: Client) {
       return context.json(
         context.req.method === "GET"
           ? await providers.loadRotationKeys(result.snapshot, provider)
-          : await providers.updateRotationKeys(result.snapshot, provider, await context.req.json().catch(() => null)),
+          : await providers.updateRotationKeys(
+              result.snapshot,
+              result.actor.discordId,
+              provider,
+              await context.req.json().catch(() => null),
+            ),
       );
     },
   );

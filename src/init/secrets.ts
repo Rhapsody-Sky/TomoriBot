@@ -1,7 +1,9 @@
+import { initializeCredentialActivityFetch } from "@/utils/provider/providerRequestHook";
 import { log } from "@/utils/misc/logger";
 import { getAppSecrets } from "@/utils/security/secretsManager";
 import { keyManager } from "@/utils/security/keyManager";
 import type { AppEnvironment } from "@/types/config";
+import { readApiKeyInactivityDays } from "@/utils/security/apiKeyRetention";
 
 /**
  * Loads the selected secret source before consumers initialize database connections or keys.
@@ -65,6 +67,8 @@ export async function loadSecrets(environment: AppEnvironment): Promise<void> {
     process.env.MATRIX_APPSERVICE_PUBLIC_URL = secrets.MATRIX_APPSERVICE_PUBLIC_URL;
 
   if (secrets.TOPGG_TOKEN) process.env.TOPGG_TOKEN = secrets.TOPGG_TOKEN;
+  // An empty list must survive loading because it admits no one, while dropping it would read as unset and admit everyone.
+  if (secrets.VERTEX_ALLOWED_OWNERS !== undefined) process.env.VERTEX_ALLOWED_OWNERS = secrets.VERTEX_ALLOWED_OWNERS;
 
   // Must be set before any module reads MEMORY_PROTECTION(). Deployment env wins: a stale bundle
   // value could otherwise restore a limit above physical memory, leaving the guard unreachable.
@@ -85,6 +89,12 @@ export async function loadSecrets(environment: AppEnvironment): Promise<void> {
   ] as const) {
     if (secrets[key]) process.env[key] = secrets[key];
   }
+
+  if (secrets.API_KEY_INACTIVITY_DAYS !== undefined) {
+    process.env.API_KEY_INACTIVITY_DAYS = secrets.API_KEY_INACTIVITY_DAYS;
+  }
+  readApiKeyInactivityDays();
+  initializeCredentialActivityFetch();
 
   const secretsSource =
     environment !== "production" || process.env.TEST_PRODUCTION === "true"

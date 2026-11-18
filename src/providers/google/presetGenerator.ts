@@ -6,6 +6,9 @@
  */
 
 import { GoogleGenAI, type Content, type GenerateContentConfig } from "@google/genai";
+import { GoogleStreamAdapter } from "@/providers/google/googleStreamAdapter";
+import { isOperatorActionableProviderError } from "@/utils/provider/providerErrorClassification";
+import { redactProviderDetail, reportProviderFailure } from "@/utils/provider/providerErrorMetrics";
 import type { GeneratePresetParams, PresetGenerationResult } from "@/types/provider/featureInterfaces";
 import { PRESET_MAX_STRING_LENGTH, type PresetExportData } from "../../types/preset/presetExport";
 import { log } from "../../utils/misc/logger";
@@ -24,6 +27,19 @@ export type {
   GeneratePresetParams,
   PresetGenerationResult,
 } from "@/types/provider/featureInterfaces";
+
+async function reportPresetFailure(error: unknown, apiKey: string, operation: string): Promise<void> {
+  const normalized = new GoogleStreamAdapter().handleProviderError(error);
+  await reportProviderFailure({
+    summary: "Google persona generation failed",
+    errorType: "PresetGenerationFailed",
+    error,
+    expected: !isOperatorActionableProviderError(normalized),
+    detail: redactProviderDetail(getErrorMessage(error), apiKey),
+    dimensions: { provider: "google", operation, code: normalized.code ?? "unknown" },
+    redactValues: [apiKey],
+  });
+}
 
 interface CharacterSearchContext {
   description?: string; // Character description from user
@@ -63,6 +79,7 @@ function isGoogleModelUnavailableError(errorMessage: string): boolean {
   return (
     normalizedMessage.includes("model not found") ||
     normalizedMessage.includes("model_not_found") ||
+    normalizedMessage.includes("is not found for api version") ||
     normalizedMessage.includes("no longer available")
   );
 }
@@ -244,7 +261,7 @@ IMPORTANT: In any dialogue examples, use "{user}" ONLY where you would write the
       log.success(`✨ Character search successful with model: ${MODEL_NAME}`);
       return { characterInfo: responseText.trim() };
     } catch (apiError: unknown) {
-      log.warn("Google character search request failed", apiError as Error);
+      log.warn("Google character search request failed", apiError as Error, undefined, { redactValues: [apiKey] });
       const errorMessage = getErrorMessage(apiError);
 
       let errorCode: number | undefined;
@@ -296,7 +313,7 @@ IMPORTANT: In any dialogue examples, use "{user}" ONLY where you would write the
       throw apiError;
     }
   } catch (error) {
-    log.error("Character search error:", error);
+    await reportPresetFailure(error, apiKey, "persona-search");
     const errorMessage = getErrorMessage(error);
 
     if (error instanceof TypeError && errorMessage.includes("network")) {
@@ -549,7 +566,7 @@ Use the web search information to accurately represent the character's personali
         log.success(`Preset generation successful with model: ${MODEL_NAME}`);
         return { preset };
       } catch (apiError: unknown) {
-        log.warn("Google preset generation request failed", apiError as Error);
+        log.warn("Google preset generation request failed", apiError as Error, undefined, { redactValues: [apiKey] });
         const errorMessage = getErrorMessage(apiError);
 
         let errorCode: number | undefined;
@@ -620,7 +637,7 @@ Use the web search information to accurately represent the character's personali
       errorType: "UNKNOWN",
     };
   } catch (error) {
-    log.error("Preset generation error:", error);
+    await reportPresetFailure(error, apiKey, "persona-generation");
     const errorMessage = getErrorMessage(error);
 
     if (error instanceof TypeError && errorMessage.includes("network")) {

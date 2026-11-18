@@ -30,15 +30,15 @@ When a server adopts an official preset via `/setup` or `/persona default`, the 
 
 Preset media is stored once and shared across servers:
 
-```
-Seeder / Sweep Lock (PostgreSQL Advisory Lock)
-  ├── Seed Pass ──> Uploads immutable assets to presets/{lineage}/...
-  │                 ├── preset_avatar_shared_url (avatars)
-  │                 ├── preset_char_ref_shared_url (character references)
-  │                 └── preset_sprites (expressions)
-  └── Fan-out
-      ├── Alters  ──> Live-resolve shared URL per webhook send (no local copy)
-      └── Main    ──> Reconciler PATCHes guild member avatar on hash delta
+```mermaid
+flowchart TD
+  lock["Seeder / Sweep Lock<br/>(PostgreSQL Advisory Lock)"] --> seed["Seed Pass<br/>Uploads immutable assets to presets/{lineage}/..."]
+  seed --> av["preset_avatar_shared_url (avatars)"]
+  seed --> ref["preset_char_ref_shared_url (character references)"]
+  seed --> spr["preset_sprites (expressions)"]
+  lock --> fan["Fan-out"]
+  fan -->|"Alters"| alters["Live-resolve shared URL per webhook send<br/>(no local copy)"]
+  fan -->|"Main"| main["Reconciler PATCHes guild member avatar<br/>on hash delta"]
 ```
 
 ### Alter avatars
@@ -79,7 +79,36 @@ The first local edit to prompt text, attributes, sprites, or naming forks the po
 
 ## Cards, imports, and vision generation
 
+- **Export access**: `server_member_permissions_configs.persona_export_enabled` defaults to false.
+  `/moderation` > Member Access controls it. `/persona export` checks fresh workspace config for
+  guild members without `ManageGuild` before reading preset or media bytes. Managers bypass the
+  member setting, and DMs use their own workspace. Denials use an ephemeral acknowledgement.
+  Successful member exports complete that acknowledgement before sending a public follow-up,
+  so Discord does not inherit its private visibility. Manager and DM exports use a public reply.
+  `/config`, including sprite previews and the `Export Sprites` action, requires `ManageGuild`
+  in guilds. Entry points, component actions, and modal submissions check the current actor before
+  loading workspace data. DM owners retain access to their own workspace.
+- **Media bundles**: `/persona export output_format:bundle` creates a ZIP with native persona data,
+  avatar, sprites and their usage metadata, and the character reference image. `include_voice:true`
+  also includes the assigned reference sample and transcript; provider voice IDs and credentials
+  stay excluded. `/persona import` and `/nsfw persona import` accept the ZIP for main and alter personas.
+  Bundle imports explicitly bypass official-preset pointer matching and restore independent copies,
+  preserving preset provenance, naming settings, and the selected memory-lineage behavior.
+  Export optimizes image copies without changing stored originals: it tries lossless PNG encoding,
+  then reduces resolution only when an image exceeds 1 MiB. Voice audio is kept as WAV and compressed
+  within the ZIP. The finished ZIP must fit both the interaction upload limit and
+  `MAX_PERSONA_IMPORT_SIZE_MB`; oversized exports fail without silently dropping media.
+  The bundle reader validates all media and bounds compressed bytes, expanded entries, image pixels,
+  and voice duration before persona writes. Restoration stages uploads, then commits sprite,
+  reference, and voice assignment changes together. A failure cleans staged uploads and reports
+  that the persona settings were imported but media restoration is incomplete; keep the ZIP to retry.
+  Main-persona imports retain the previous character reference until that media transaction succeeds,
+  so failed imports keep the reference reachable for retry cleanup.
+  Existing server voice samples and provider selections are preserved.
 - **Export**: Exports materialize pointer state into self-contained cards, tagging `preset_lineage_id` for character provenance. PNG and JSON exports carry the optional voice description (up to 1,000 characters) and Design/Clone priority. They also carry the effective authored idle nudges and the lineage's lorebook entries, including disabled entries. Local nudge availability, server custom nudges, local sample IDs, sample bytes, provider voice IDs, credentials, and Gemini bindings are excluded.
+  Assistant examples without matching user inputs receive the existing model-only dialogue marker
+  in the exported copy; stored examples stay unchanged. Both formats pass import validation before
+  export succeeds. An input without an assistant reply fails validation.
 - **Import**: Re-establishes a live preset pointer only when attributes, public flags, dialogues, triggers, and prompt text exactly match the seeded preset and the card's idle nudge list, when it has one, equals the preset's. Deviations produce independent materialized copies. Importing an authored voice description also
   materializes the persona; older cards without it keep their pointer behavior. Main and alter
   imports restore the description and priority, defaulting missing priority to Design, and need a
@@ -98,6 +127,8 @@ generation before another model request. Google likewise aborts when its search 
 The command owns the failure reply and preserves the inputs with a retry hint; background tools
 suppress their public denial notices. Search engines can still fall back within one tool call.
 OpenRouter's initial model request chooses the search tool, so it can incur usage before search fails.
+Google persona search and generation report terminal overloads through the shared provider failure
+classifier, which retains warnings and metrics for transient failures and incidents for unknown failures.
 Anthropic requests omit unsupported array constraints.
 The shared schema used by other providers stays unchanged. Local validation still rejects
 noncompliant output without exporting a card; validation receipts preserve the inputs and show the
@@ -111,3 +142,5 @@ failed requirement without suggesting an API-key problem.
 - `src/utils/db/repositories/PersonaRepository.ts`: Live pointer state assembly and alter avatar resolution.
 - `src/utils/db/repositories/PersonaSpriteRepository.ts`: Unified sprite resolution across pointer and materialized personas.
 - `src/utils/persona/spriteArchive.ts`: Sprite package export and import serialization.
+- `src/utils/persona/personaBundleArchive.ts` and `personaBundleOperations.ts`: Media bundle validation,
+  optimization, storage staging, and restoration.

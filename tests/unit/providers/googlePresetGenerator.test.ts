@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { log } from "@/utils/misc/logger";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { GoogleGenAI } from "@google/genai";
 import { generatePresetFromPrompt } from "@/providers/google/presetGenerator";
 import { DEFAULT_PRESET_GENERATION_MAX_OUTPUT_TOKENS } from "@/utils/provider/maxOutputTokens";
@@ -40,37 +41,41 @@ describe("Google preset generation", () => {
     expect(requestedModels).toEqual(["configured-google-default", "selected-persona-model"]);
   });
 
-  it("classifies a retired Search grounding model as a model error", async () => {
-    let requests = 0;
-    const client = {
-      models: {
-        generateContent: async () => {
-          requests++;
-          throw new Error(
-            '{"error":{"code":404,"message":"This model models/gemini-old is no longer available to new users."}}',
-          );
-        },
-      },
-    } as unknown as GoogleGenAI;
-
-    const result = await generatePresetFromPrompt(
-      "test-api-key",
-      {
-        characterName: "Juno",
-        characterDescription: "A helpful guide.",
-        speechExamples: "Calm and clear.",
-        useWebSearch: true,
-        modelName: "selected-persona-model",
-      },
-      "en-US",
-      client,
-      "configured-provider-default",
-    );
-
-    expect(result.errorType).toBe("MODEL_ERROR");
-    expect(result.failureStage).toBe("web_search");
-    expect(result.preset).toBeUndefined();
-    expect(requests).toBe(1);
+  it("classifies retired and missing API-version models in search and generation", async () => {
+    const messages = [
+      "This model models/gemini-old is no longer available to new users.",
+      "models/gemini-unavailable is not found for API version v1beta, or is not supported for generateContent.",
+    ];
+    for (const message of messages) {
+      for (const useWebSearch of [false, true]) {
+        let requests = 0;
+        const client = {
+          models: {
+            generateContent: async () => {
+              requests++;
+              throw new Error(JSON.stringify({ error: { code: 404, message } }));
+            },
+          },
+        } as unknown as GoogleGenAI;
+        const result = await generatePresetFromPrompt(
+          "test-api-key",
+          {
+            characterName: "Juno",
+            characterDescription: "A helpful guide.",
+            speechExamples: "Calm and clear.",
+            useWebSearch,
+            modelName: "selected-persona-model",
+          },
+          "en-US",
+          client,
+          "configured-provider-default",
+        );
+        expect(result.errorType).toBe("MODEL_ERROR");
+        expect(result.failureStage).toBe(useWebSearch ? "web_search" : undefined);
+        expect(result.preset).toBeUndefined();
+        expect(requests).toBe(1);
+      }
+    }
   });
 
   it("replies with a localized summary, never the upstream message or an unrecognized code", async () => {
@@ -278,4 +283,57 @@ describe("Google preset generation", () => {
     expect(generationPrompt).not.toContain("Web Search Instructions:");
     expect(generationPrompt).not.toContain("web search tools");
   });
+});
+
+it("reports Google persona overloads as warnings while retaining unexpected failures as incidents", async () => {
+  const errorSpy = spyOn(log, "error").mockResolvedValue(undefined);
+  const warnSpy = spyOn(log, "warn").mockImplementation(() => {});
+  const metricSpy = spyOn(log, "metric").mockImplementation(() => {});
+  try {
+    for (const useWebSearch of [false, true]) {
+      for (const overloaded of [true, false]) {
+        errorSpy.mockClear();
+        warnSpy.mockClear();
+        metricSpy.mockClear();
+        const client = {
+          models: {
+            generateContent: async () => {
+              throw new Error(
+                overloaded
+                  ? JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "High demand" } })
+                  : "Unexpected application failure",
+              );
+            },
+          },
+        } as unknown as GoogleGenAI;
+        const result = await generatePresetFromPrompt(
+          "test-api-key",
+          {
+            characterName: "Juno",
+            characterDescription: "A helpful guide.",
+            speechExamples: "Calm and clear.",
+            modelName: "selected-model",
+            useWebSearch,
+          },
+          "en-US",
+          client,
+        );
+        expect(result.error).toBeDefined();
+        expect(result.preset).toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledTimes(overloaded ? 0 : 1);
+        expect(metricSpy).toHaveBeenCalledTimes(overloaded ? 1 : 0);
+        if (overloaded) {
+          expect(
+            warnSpy.mock.calls.some(
+              (call) => call[3]?.retain === true && call[3]?.redactValues?.includes("test-api-key"),
+            ),
+          ).toBe(true);
+        }
+      }
+    }
+  } finally {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    metricSpy.mockRestore();
+  }
 });

@@ -111,6 +111,8 @@ const OPTIONAL_SECRET_FIELDS = [
   "MATRIX_APPSERVICE_PUBLIC_URL",
   "TOPGG_TOKEN",
   "CONTAINER_MEMORY_LIMIT_MB",
+  "VERTEX_ALLOWED_OWNERS",
+  "API_KEY_INACTIVITY_DAYS",
 ] as const;
 
 const registeredSecretNames = new Set<string>();
@@ -250,7 +252,7 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
 
       // Optional fields: same shape as AWS secret blob
       for (const field of optionalSecretFields()) {
-        if (rawSecrets[field]) {
+        if (rawSecrets[field] !== undefined) {
           secrets[field] = rawSecrets[field];
         }
       }
@@ -322,7 +324,7 @@ export async function getAppSecrets(): Promise<TomoriSecrets> {
     }
 
     for (const field of optionalSecretFields()) {
-      if (rawSecrets[field]) {
+      if (rawSecrets[field] !== undefined) {
         secrets[field] = rawSecrets[field];
       }
     }

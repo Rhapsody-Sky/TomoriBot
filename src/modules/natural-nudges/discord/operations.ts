@@ -418,7 +418,9 @@ const naturalNudgeOperations = {
     if (current.idle_nudges.length >= PERSONA_AUTHORED_IDLE_NUDGE_LIMIT) return "limit";
     const draft = parseIdleNudgeForm(category, form);
     if (!draft) return "invalid";
-    return naturalNudgeRepository.addPersonaIdleNudge(personaId, draft, id);
+    return id === undefined
+      ? naturalNudgeRepository.addPersonaIdleNudge(personaId, draft)
+      : naturalNudgeRepository.addPersonaIdleNudge(personaId, draft, id);
   },
 
   /** Edits the definition a fingerprint still matches, preserving its stable local ID and availability. */

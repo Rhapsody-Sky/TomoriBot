@@ -1,9 +1,12 @@
+import { withProviderUsageContext } from "@/utils/provider/providerUsage";
+import { withStoredCredentialUsage } from "@/utils/security/apiKeyRetention";
 import {
   registerHostedSpeechModelForScope,
   registerHostedTranscriptionModelForScope,
 } from "@/utils/provider/openrouterModelRegistry";
 import { getNovelAIModelAccessError } from "@/providers/novelai/modelAccess";
 import { isNovelAITextModel } from "@/providers/novelai/modelProfiles";
+import { VERTEX_CONFIG_ERROR_CODE, VERTEX_OWNER_NOT_ALLOWED_CODE } from "@/providers/vertex/vertexClient";
 import { supportsSpeechMode } from "@/utils/speech/voiceSourceCapabilities";
 import type {
   CustomEndpointConnectionRow,
@@ -35,6 +38,7 @@ import type {
 } from "@/types/discord/providerPanel";
 import { getCachedTomoriState, getRecordedDbError, invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { getCachedUserRow } from "@/utils/cache/userCache";
+import { findProviderRequestDeniedError, type ProviderRequestDeniedError } from "@/utils/provider/providerUsage";
 import { llmModelRepo } from "@/utils/db/repositories/LlmModelRepository";
 import { configRepository } from "@/utils/db/repositories/ConfigRepository";
 import {
@@ -52,6 +56,8 @@ import {
   type ImageEndpointSupports,
   imageEndpointSupportsFromSubmittedValues,
   readImageEndpointSupports,
+  imageRequestFormatSchema,
+  readImageRequestFormat,
 } from "@/utils/provider/customImageEndpointSupport";
 import {
   readSpeechEndpointSettings,
@@ -153,12 +159,15 @@ export type AddServerProviderResult =
         | "unsupported-provider"
         | "validation-failed"
         | "no-balance"
+        | "host-restricted"
+        | "vertex-config-invalid"
         | "missing-model"
         | "write-failed";
     };
 
 export type AddServerProviderInput = ProviderPanelOwner & {
   serverDiscId: string;
+  actorDiscId: string;
   provider: string;
   apiKey: string;
 };
@@ -215,6 +224,7 @@ export interface AddCustomEndpointConnectionDependencies {
 
 export type SaveProviderModelResult =
   | { status: "success"; entryId: string; codeName: string; removed?: boolean }
+  | { status: "provider-denied"; denied: ProviderRequestDeniedError }
   | { status: "invalid-model" | "unsupported-capability" | "not-found" | "already-available" | "write-failed" };
 
 export type SaveProviderModelInput = ProviderPanelOwner & {
@@ -235,6 +245,7 @@ export type SaveProviderModelInput = ProviderPanelOwner & {
   // Raw checkbox values, because only the resolved connection knows the api style that decides
   // whether inpainting was offerable in the modal at all.
   imageSupportValues?: string[];
+  imageRequestFormat?: string;
   // Raw modal values for the same reason: the resolved connection's api style decides whether the
   // clone/VoiceDesign/Auto split applies at all.
   speechVoiceMode?: string;
@@ -247,10 +258,20 @@ export type EditProviderResult =
   | { status: "success"; entryId: string; changed: string[] }
   | { status: "unchanged"; entryId: string }
   | { status: "novelai-unavailable"; descriptionKey: string }
-  | { status: "invalid-key" | "invalid-combination" | "not-found" | "validation-failed" | "write-failed" };
+  | {
+      status:
+        | "invalid-key"
+        | "invalid-combination"
+        | "not-found"
+        | "validation-failed"
+        | "host-restricted"
+        | "vertex-config-invalid"
+        | "write-failed";
+    };
 
 type EditProviderInput = ProviderPanelOwner & {
   serverDiscId: string;
+  actorDiscId: string;
   provider: string;
   apiKey: string;
   rotationKey: string;
@@ -482,7 +503,9 @@ async function buildCuratedCapabilities(
       llmModelRepo.loadAvailableDiffusionModels(catalogProvider, false, context.scope),
       llmModelRepo.loadAvailableEmbeddingModels(catalogProvider, false, context.scope),
       llmModelRepo.loadAvailableVideoGenerationModels(catalogProvider, false, context.scope),
-      llmModelRepo.loadAvailableDecisionModels(catalogProvider, false, context.scope),
+      context.scope.kind === "personal"
+        ? Promise.resolve([])
+        : llmModelRepo.loadAvailableDecisionModels(catalogProvider, false, context.scope),
       llmModelRepo.loadAvailableSpeechModels(catalogProvider, context.scope),
       option ? Promise.resolve([]) : llmModelRepo.loadAvailableTranscriptionModels(provider, context.scope),
     ]);
@@ -604,7 +627,8 @@ async function buildCuratedCapabilities(
     if (
       (capability === "speech" && speechRows.length === 0) ||
       (capability === "transcription" && transcriptionRows.length === 0) ||
-      (capability === "decision" && !getStaticProviderInfo(catalogProvider)?.featureSupport.decisions) ||
+      (capability === "decision" &&
+        (context.scope.kind === "personal" || !getStaticProviderInfo(catalogProvider)?.featureSupport.decisions)) ||
       (option && !providerOptionOffersPanelCapability(option, capability))
     ) {
       return { capability, availability: "unavailable", models: [] };
@@ -628,7 +652,7 @@ function buildEndpointCapabilities(
     // supports, so a missing one means this endpoint cannot host that capability at all:
     // `registerEndpointModel` answers `not-found` for it. Reporting it unavailable keeps the panel
     // from offering a model modal that can only fail.
-    if (capabilityConnections.length === 0) {
+    if (capabilityConnections.length === 0 || (context.scope.kind === "personal" && capability === "decision")) {
       return { capability, availability: "unavailable", models: [] };
     }
 
@@ -684,6 +708,9 @@ function buildEndpointCapabilities(
           capability === "image" ? readImageEndpointSupports(endpoint) : undefined,
         );
         if (!model) return [];
+        if (capability === "image" && endpoint.api_style === "openai-compatible") {
+          model.imageRequestFormat = readImageRequestFormat(endpoint);
+        }
         if (capability === "transcription") model.isWorkspaceActive = endpoint.is_default;
         if (capability === "speech") {
           model.speechActiveModes = [
@@ -731,6 +758,10 @@ function buildEndpointEntries(
     return {
       id: `endpoint:${representativeId}`,
       kind: "endpoint",
+      credentialMissing: sortedConnections.some(
+        (connection) =>
+          connection.requires_auth && !savedConfigs.get(buildCustomProviderName(connection.connection_id))?.api_key,
+      ),
       displayName: sortedConnections[0]?.label ?? `Endpoint ${representativeId}`,
       savedAt: newestDate(sortedConnections.map((connection) => connection.updated_at ?? connection.created_at)),
       connectionIds,
@@ -856,6 +887,7 @@ export async function loadServerProviderPanelScope(
           kind: "provider",
           provider,
           rotationKeyCount,
+          credentialMissing: !config.api_key,
           displayName: getProviderDisplayName(provider),
           savedAt: config.updated_at ?? config.saved_at ?? null,
           capabilities,
@@ -944,6 +976,7 @@ async function loadPersonalProviderPanelScope(
           kind: "provider",
           provider,
           rotationKeyCount: 0,
+          credentialMissing: !config.api_key,
           displayName: getProviderDisplayName(provider),
           savedAt: config.updated_at ?? config.saved_at ?? null,
           capabilities: await buildCuratedCapabilities(provider, config, modelContext),
@@ -974,7 +1007,11 @@ async function loadPersonalProviderPanelScope(
   };
 }
 
-function rejectedKeyStatus(validation: ApiKeyValidationResult): "validation-failed" | "no-balance" {
+export type KeyRejectionStatus = "validation-failed" | "no-balance" | "host-restricted" | "vertex-config-invalid";
+
+export function rejectedKeyStatus(validation: ApiKeyValidationResult): KeyRejectionStatus {
+  if (validation.error?.code === VERTEX_OWNER_NOT_ALLOWED_CODE) return "host-restricted";
+  if (validation.error?.code === VERTEX_CONFIG_ERROR_CODE) return "vertex-config-invalid";
   return validation.error && isAccountBalanceExhaustedError(validation.error) ? "no-balance" : "validation-failed";
 }
 
@@ -1059,7 +1096,7 @@ async function addCuratedProvider(
     });
     return { status: "unsupported-provider" };
   }
-  const validation = await providerInstance.validateApiKey(input.apiKey);
+  const validation = await providerInstance.validateApiKey(input.apiKey, input.serverDiscId);
   if (!validation.valid) return { status: rejectedKeyStatus(validation) };
 
   const existingConfig = await dependencies.loadSavedConfig(input.state.server_id, provider);
@@ -1164,7 +1201,7 @@ async function addPersonalProvider(
     });
     return { status: "unsupported-provider" };
   }
-  const validation = await instance.validateApiKey(apiKey);
+  const validation = await instance.validateApiKey(apiKey, input.actorDiscId);
   if (!validation.valid) return { status: rejectedKeyStatus(validation) };
   const existingConfig = await llmProviderRepo.loadUserSavedProviderConfig(userId, provider);
   const encryption = await encryptApiKey(apiKey);
@@ -1225,9 +1262,9 @@ export async function addCustomEndpointConnection(
   const capabilities = CUSTOM_ENDPOINT_CAPABILITIES_BY_API_STYLE[
     input.apiStyle as keyof typeof CUSTOM_ENDPOINT_CAPABILITIES_BY_API_STYLE
   ] as readonly CustomEndpointCapability[] | undefined;
-  if (!capabilities) return { status: "invalid-style" };
-
   const personal = input.scopeKind === "personal";
+  if (!capabilities || (personal && capabilities.includes("decision"))) return { status: "invalid-style" };
+
   const ownerId = personal ? input.ownerId : input.state.server_id;
   const scopeKind = personal ? "personal" : "server";
   const existingConnections = await dependencies.loadConnections(ownerId, scopeKind, label);
@@ -1424,15 +1461,21 @@ async function registerSharedProviderModel(
       state: input.state ?? null,
     };
     if (!(await option.selection.ensure(scope))) return { status: "write-failed" };
-    if (
-      option.selection.validateModel &&
-      !(await option.selection.validateModel({
-        scope,
-        capability: input.capability,
-        modelCodename: input.codeName.trim(),
-      }))
-    ) {
-      return { status: "invalid-model" };
+    try {
+      if (
+        option.selection.validateModel &&
+        !(await option.selection.validateModel({
+          scope,
+          capability: input.capability,
+          modelCodename: input.codeName.trim(),
+        }))
+      ) {
+        return { status: "invalid-model" };
+      }
+    } catch (error) {
+      const denied = findProviderRequestDeniedError(error);
+      if (denied) return { status: "provider-denied", denied };
+      throw error;
     }
   }
   if (input.capability === "speech") {
@@ -1606,7 +1649,7 @@ async function isModelRejectedByCatalog(
     if (!saved?.api_key) return false;
     // Decryption is itself a database round trip, so a retired pool connection can fail it too.
     const apiKey = await decryptApiKey(saved.api_key, saved.key_version);
-    return (await checkModel(apiKey, codeName)) === false;
+    return (await withStoredCredentialUsage(saved.api_key, apiKey, () => checkModel(apiKey, codeName))) === false;
   } catch (error) {
     await reportModelLookupFailure(provider, error);
     return false;
@@ -1711,6 +1754,13 @@ async function registerEndpointModel(input: SaveProviderModelInput): Promise<Sav
   const workflowConfig = input.workflow
     ? { ...(editingEndpoint?.extra_config ?? {}), workflow: input.workflow }
     : editingEndpoint?.extra_config;
+  const imageRequestFormat =
+    input.capability === "image" && connection.api_style === "openai-compatible"
+      ? imageRequestFormatSchema.safeParse(
+          input.imageRequestFormat ?? editingEndpoint?.extra_config.image_request_format ?? "images",
+        )
+      : null;
+  if (imageRequestFormat && !imageRequestFormat.success) return { status: "invalid-model" };
   const speechSettings =
     input.capability === "speech"
       ? speechEndpointSettingsFromSubmittedValues(
@@ -1725,6 +1775,7 @@ async function registerEndpointModel(input: SaveProviderModelInput): Promise<Sav
       ? {
           ...(workflowConfig ?? {}),
           workflow_supports: imageEndpointSupportsFromSubmittedValues(input.imageSupportValues, connection.api_style),
+          ...(imageRequestFormat?.success ? { image_request_format: imageRequestFormat.data } : {}),
         }
       : speechSettings
         ? {
@@ -1805,6 +1856,9 @@ export async function saveProviderModel(input: SaveProviderModelInput): Promise<
     );
     return { status: "success", entryId: input.entryId, codeName: input.codeName, removed: true };
   }
+  if (input.scopeKind === "personal" && input.capability === "decision") {
+    return { status: "unsupported-capability" };
+  }
   const codeName = input.codeName.trim();
   if (!codeName || codeName.length > 200) return { status: "invalid-model" };
   if (
@@ -1842,12 +1896,19 @@ async function novelAISavedModelAccessError(
   return null;
 }
 
-async function validateProviderCredential(provider: string, apiKey: string): Promise<boolean> {
+async function rejectProviderCredential(
+  provider: string,
+  apiKey: string,
+  ownerDiscordId: string,
+): Promise<Exclude<KeyRejectionStatus, "no-balance"> | null> {
   try {
     const instance = await ProviderFactory.getProviderByName(provider);
-    return (await instance.validateApiKey(apiKey)).valid;
+    const validation = await instance.validateApiKey(apiKey, ownerDiscordId);
+    if (validation.valid) return null;
+    const status = rejectedKeyStatus(validation);
+    return status === "no-balance" ? "validation-failed" : status;
   } catch {
-    return false;
+    return "validation-failed";
   }
 }
 
@@ -1865,7 +1926,8 @@ async function editServerProvider(input: EditProviderInput): Promise<EditProvide
     if (!existing || parseCustomProvider(provider)) return { status: "not-found" };
     if (!apiKey) return { status: "unchanged", entryId };
     if (apiKey.length < 10) return { status: "invalid-key" };
-    if (!(await validateProviderCredential(provider, apiKey))) return { status: "validation-failed" };
+    const rejection = await rejectProviderCredential(provider, apiKey, input.actorDiscId);
+    if (rejection) return { status: rejection };
     const accessError = await novelAISavedModelAccessError(provider, [existing.llm_id], apiKey);
     if (accessError) return { status: "novelai-unavailable", descriptionKey: accessError };
     const encryption = await encryptApiKey(apiKey);
@@ -1906,7 +1968,8 @@ async function editServerProvider(input: EditProviderInput): Promise<EditProvide
 
   const credentials = [apiKey, rotationKey].filter(Boolean);
   for (const credential of credentials) {
-    if (!(await validateProviderCredential(provider, credential))) return { status: "validation-failed" };
+    const rejection = await rejectProviderCredential(provider, credential, input.serverDiscId);
+    if (rejection) return { status: rejection };
     const accessError = await novelAISavedModelAccessError(
       provider,
       [existing.llm_id, input.state.llm.llm_provider === provider ? input.state.llm.llm_id : null],
@@ -1924,10 +1987,12 @@ async function editServerProvider(input: EditProviderInput): Promise<EditProvide
     });
     if (!updated) return { status: "write-failed" };
     if (input.state.llm.llm_provider.toLowerCase() === provider) {
+      const savedConfig = await llmProviderRepo.loadSavedProviderConfig(input.state.server_id, provider);
+      if (!savedConfig) return { status: "write-failed" };
       const activated = await activateServerTextModelFromSavedConfig({
         serverDiscId: input.serverDiscId,
         tomoriState: input.state,
-        savedConfig: nextConfig,
+        savedConfig,
       });
       if (activated.status !== "activated") return { status: "write-failed" };
     }
@@ -1986,12 +2051,16 @@ async function editServerEndpoint(input: EditEndpointInput): Promise<EditEndpoin
 
   if (changesUrl) {
     for (const connection of group) {
-      const credential = authToken || (await loadCustomConnectionCredential(connection));
-      const reachable = await validateCustomEndpointReachability({
-        apiStyle: connection.api_style,
-        endpointUrl,
-        apiKey: credential,
-      });
+      const credential = authToken
+        ? { apiKey: authToken, usageContext: undefined }
+        : await loadCustomConnectionCredential(connection);
+      const reachable = await withProviderUsageContext(credential?.usageContext, () =>
+        validateCustomEndpointReachability({
+          apiStyle: connection.api_style,
+          endpointUrl,
+          apiKey: credential?.apiKey,
+        }),
+      );
       if (!reachable.ok) {
         log.warn(
           `Custom endpoint update failed reachability (${connection.api_style}): ${reachable.reason.slice(0, 200)}`,
@@ -2013,11 +2082,16 @@ async function editServerEndpoint(input: EditEndpointInput): Promise<EditEndpoin
       // different server in one submit still records the new server's backend.
       const [textConnection] = textConnections;
       if (!textConnection) return { status: "handoff-unsupported" };
-      backend = await detectVramHandoffBackend({
-        apiStyle: textConnection.api_style,
-        endpointUrl: changesUrl ? endpointUrl : textConnection.endpoint_url,
-        apiKey: authToken || (await loadCustomConnectionCredential(textConnection)),
-      });
+      const credential = authToken
+        ? { apiKey: authToken, usageContext: undefined }
+        : await loadCustomConnectionCredential(textConnection);
+      backend = await withProviderUsageContext(credential?.usageContext, () =>
+        detectVramHandoffBackend({
+          apiStyle: textConnection.api_style,
+          endpointUrl: changesUrl ? endpointUrl : textConnection.endpoint_url,
+          apiKey: credential?.apiKey,
+        }),
+      );
       if (!backend) return { status: "handoff-unsupported" };
     }
     vramHandoff = { connectionIds: textConnections.map((connection) => connection.connection_id), backend };

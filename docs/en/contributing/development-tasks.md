@@ -23,6 +23,8 @@ bun run db:lifecycle    # when schema.sql changed
 - `bun run db:lifecycle` needs a local PostgreSQL user that can create and drop databases. It tests
   fresh initialization, backup and restore, and the maintenance scripts in a temporary database.
 - `bun run test <path>` runs selected files through the same disposable-database setup.
+- Before removing an export reported by `bun run knip`, check `git grep <symbol> release -- src tests`.
+  If `release` uses it, keep the export and add a JSDoc `@public` tag naming the release caller.
 - NovelAI fitting and streaming tests require the pinned local tokenizer definitions. Provision
   `novelai_nerdstash_v2`, `novelai_llama3`, and `novelai_glm` with
   `bun run setup:tokenizers --family <family>` before running them; the existing CI test job does this.
@@ -41,6 +43,12 @@ bun run vl > /tmp/vl.log 2>&1; echo "VL_EXIT=$?" >> /tmp/vl.log
 - Two-space indentation and double quotes (Biome enforces both).
 - Strict TypeScript without `any`. Shared types go in `src/types/`. Validate untrusted input with Zod.
 - `camelCase` file names, `@/*` imports for `src/*`, and `node:` imports for Node built-ins.
+- **Export downloads**: build user-facing export filenames with `buildExportFilename` in
+  `src/utils/discord/attachmentFilename.ts`
+  (`tomori-{kind}[-{scope}][-{subject}]-{YYYYMMDDTHHMMSSZ}[-{shortId}][-part-{n}-of-{m}].{ext}`).
+  Share one timestamp across every file in a multipart export, sanitize user-provided subjects, and
+  omit server, account, and Discord IDs from privacy-minimized exports.
+  Operational host backups (`backup_*`, `personas_*`) keep their existing directory conventions.
 - Comments follow the [comment policy](/contributing/policies/comments/). JSDoc on exported functions
   only where behavior is not obvious from the name and types.
 - **Workspace**: in code and contributor docs, a workspace is a Discord server or a DM scope.

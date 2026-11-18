@@ -36,6 +36,7 @@ import { createRouteInteraction } from "../../helpers/routeInteraction";
 import * as providerOptionRegistry from "@/utils/provider/providerOptionRegistry";
 import { localizedCopy } from "../../helpers/localeCases";
 import { initializeLocalizer, localizer } from "@/utils/text/localizer";
+import { ProviderRequestDeniedError } from "@/utils/provider/providerUsage";
 
 beforeAll(async () => initializeLocalizer());
 
@@ -985,6 +986,40 @@ describe("providers routes", () => {
     expect(calls).toEqual(["deferUpdate", "reload", "write:google/new-model:true:true", "reload", "editReply"]);
   });
 
+  it("shows the provider's refusal when model registration cannot be priced", async () => {
+    const denied = new ProviderRequestDeniedError(undefined, () => ({
+      titleKey: "commands.providers.model_save_failed",
+      description: localizedCopy("en-US", "commands.providers.model_unsupported"),
+    }));
+    const customId = buildProvidersRouteId(PROVIDERS_ROUTE_NAMESPACE, {
+      action: "model-submit",
+      locale: "en-US",
+      entryKind: "provider",
+      entryKey: "google",
+      capability: "text",
+      editingModelId: null,
+      nonce: "abcdefgh",
+    });
+    const interaction = createRouteInteraction({
+      kind: "modal",
+      customId,
+      fields: { [buildProviderModelModalFieldId("code-name", "abcdefgh")]: "example/model" },
+    });
+    const route = createProvidersInteractionRoute({
+      resolveScope: async () => scope,
+      takeModelFlags: () => [],
+      operations: {
+        ...providerPanelOperations,
+        saveProviderModel: async () => ({ status: "provider-denied", denied }),
+      },
+    });
+    await route.execute({} as Client, interaction as never, parsed(customId));
+
+    expect(interaction.calls[0].method).toBe("deferUpdate");
+    expect(JSON.stringify(interaction.edits)).toContain(localizedCopy("en-US", "commands.providers.model_unsupported"));
+    expect(JSON.stringify(interaction.edits)).not.toContain(localizedCopy("en-US", "commands.providers.model_invalid"));
+  });
+
   it("carries stored image capabilities into the edit modal it opens as the acknowledgement", async () => {
     const calls: string[] = [];
     const customId = buildProvidersRouteId(PROVIDERS_ROUTE_NAMESPACE, {
@@ -1069,6 +1104,97 @@ describe("providers routes", () => {
         allowInpaint: true,
       },
     });
+  });
+
+  it("restores and submits each custom image model's request format in both provider panels", async () => {
+    for (const namespace of [PROVIDERS_ROUTE_NAMESPACE, PERSONAL_PROVIDERS_ROUTE_NAMESPACE] as const) {
+      const customId = buildProvidersRouteId(namespace, {
+        action: "model-submit",
+        locale: "en-US",
+        entryKind: "endpoint",
+        entryKey: "73",
+        capability: "image",
+        editingModelId: 42,
+        nonce: "abcdefgh",
+      });
+      const model = {
+        id: 42,
+        codeName: "arbitrary-image-model",
+        isWorkspaceActive: true,
+        isWorkspaceFallback: false,
+        isProviderFallback: false,
+        isCustomRegistration: true,
+        imageRequestFormat: "chat-completions" as const,
+      };
+      const loadedScope: LoadedProviderPanelScope = {
+        ...scope,
+        scopeKind: namespace === PROVIDERS_ROUTE_NAMESPACE ? "server" : "personal",
+        routeNamespace: namespace,
+        ownerId: 77,
+        data: {
+          ...scope.data,
+          entries: [
+            {
+              id: "endpoint:73",
+              kind: "endpoint",
+              displayName: "juno",
+              savedAt: null,
+              connectionIds: [73],
+              isPreset: false,
+              connectionDetails: [
+                {
+                  connectionId: 73,
+                  endpointUrl: "https://engine.example.com/v1",
+                  apiStyle: "openai-compatible",
+                  capability: "image",
+                  vramHandoff: null,
+                },
+              ],
+              capabilities: [
+                { capability: "image", availability: "available", apiStyle: "openai-compatible", models: [model] },
+              ],
+            },
+          ],
+        },
+      };
+      let submitted: string | undefined;
+      let defaults: Parameters<typeof buildProviderModelModal>[6];
+      const route = createProvidersInteractionRoute(
+        {
+          resolveScope: async () => loadedScope,
+          takeImageRequestFormat: () => "chat-completions",
+          takeImageSupports: () => ["txt2img"],
+          showModelModal: async (_interaction, _locale, _kind, _key, _capability, _id, _nonce, input) => {
+            defaults = input;
+          },
+          operations: {
+            ...providerPanelOperations,
+            saveProviderModel: async (input) => {
+              submitted = input.imageRequestFormat;
+              return { status: "success", entryId: input.entryId, codeName: input.codeName };
+            },
+          },
+        },
+        { namespace, authorize: () => true, includeBrave: false, allowRotation: false },
+      );
+      const openId = buildProvidersRouteId(namespace, {
+        action: "model-select",
+        locale: "en-US",
+        entryKind: "endpoint",
+        entryKey: "73",
+      });
+      const open = createRouteInteraction({ customId: openId, kind: "string-select", values: ["edit:image:42"] });
+      await route.execute({} as Client, open as never, parsed(openId));
+      expect(defaults?.image?.requestFormat).toBe("chat-completions");
+      const submit = createRouteInteraction({
+        customId,
+        kind: "modal",
+        fields: { "code-name_abcdefgh": model.codeName },
+      });
+      await route.execute({} as Client, submit as never, parsed(customId));
+      expect(submitted).toBe("chat-completions");
+      expect(submit.calls[0]?.method).toBe("deferUpdate");
+    }
   });
 
   it("passes submitted image capability values through to the model write", async () => {

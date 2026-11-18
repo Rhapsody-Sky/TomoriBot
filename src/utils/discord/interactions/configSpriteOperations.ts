@@ -1,7 +1,7 @@
 import type { PersonaSpriteRow, TomoriState } from "@/types/db/schema";
 import { invalidateTomoriStateCache } from "@/utils/cache/tomoriStateCache";
 import { personaSpriteRepository } from "@/utils/db/repositories";
-import { sanitizeAttachmentFilenamePart } from "@/utils/discord/attachmentFilename";
+import { buildExportFilename } from "@/utils/discord/attachmentFilename";
 import { convertToPNG } from "@/utils/image/imageProcessor";
 import { log } from "@/utils/misc/logger";
 import { forkPointerForAvatarChange } from "@/utils/persona/pointerFork";
@@ -83,10 +83,11 @@ type ConfigSpriteImportResult =
   | { status: "write-failed" };
 
 type ConfigSpriteExportResult =
-  | { status: "success"; buffer: Buffer; filename: string; spriteCount: number; skippedCount: number }
+  | { status: "success"; files: Array<{ buffer: Buffer; filename: string }>; spriteCount: number; skippedCount: number }
   | { status: "no-sprites" }
   | { status: "all-images-failed" }
-  | { status: "memory-critical" };
+  | { status: "memory-critical" }
+  | { status: "image-too-large"; spriteName: string };
 
 export interface ConfigSpriteOperations {
   addSprite(input: {
@@ -117,7 +118,7 @@ export interface ConfigSpriteOperations {
     quotaKey: string;
     attachment: PersonaSpriteAttachment | null;
   }): Promise<ConfigSpriteImportResult>;
-  exportSprites(input: { persona: TomoriState }): Promise<ConfigSpriteExportResult>;
+  exportSprites(input: { persona: TomoriState; maxArchiveBytes?: number }): Promise<ConfigSpriteExportResult>;
 }
 
 /**
@@ -416,7 +417,7 @@ export const configSpriteOperations: ConfigSpriteOperations = {
     return { status: "success", created, replaced, failed };
   },
 
-  async exportSprites({ persona }) {
+  async exportSprites({ persona, maxArchiveBytes }) {
     const personaId = persona.persona_id;
     if (!personaId) return { status: "no-sprites" };
 
@@ -445,20 +446,37 @@ export const configSpriteOperations: ConfigSpriteOperations = {
     }
     if (buildEntries.length === 0) return { status: "all-images-failed" };
 
-    const archive = await buildSpriteArchive({
-      personaNickname: persona.persona_nickname,
-      personaId,
-      entries: buildEntries,
-    });
-    const sanitizedNickname = sanitizeAttachmentFilenamePart(persona.persona_nickname, {
-      fallback: "persona",
-      maxLength: 50,
-    });
+    const archives: Buffer[] = [];
+    const pending = [buildEntries];
+    const archiveLimit = maxArchiveBytes === undefined ? Infinity : Math.min(maxArchiveBytes, MAX_ARCHIVE_BYTES);
+    for (let entries = pending.pop(); entries; entries = pending.pop()) {
+      const archive = await buildSpriteArchive({
+        personaNickname: persona.persona_nickname,
+        personaId,
+        entries,
+      });
+      if (archive.buffer.length > archiveLimit) {
+        if (entries.length === 1) return { status: "image-too-large", spriteName: entries[0].sprite.sprite_name };
+        const midpoint = Math.ceil(entries.length / 2);
+        pending.push(entries.slice(midpoint), entries.slice(0, midpoint));
+      } else {
+        archives.push(archive.buffer);
+      }
+    }
+    const now = new Date();
     return {
       status: "success",
-      buffer: archive.buffer,
-      filename: `${sanitizedNickname}-sprites-${Date.now()}.zip`,
-      spriteCount: archive.spriteCount,
+      files: archives.map((buffer, index) => ({
+        buffer,
+        filename: buildExportFilename({
+          kind: "sprites",
+          subject: { value: persona.persona_nickname, fallback: "persona" },
+          part: archives.length > 1 ? { index: index + 1, total: archives.length } : undefined,
+          extension: "zip",
+          now,
+        }),
+      })),
+      spriteCount: buildEntries.length,
       skippedCount,
     };
   },

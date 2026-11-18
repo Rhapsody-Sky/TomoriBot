@@ -467,6 +467,7 @@ export class DashboardProviderService {
       const result = await providerPanelOperations.addServerProvider({
         state,
         serverDiscId: snapshot.serverDiscordId,
+        actorDiscId: actor.discordId,
         provider: "brave",
         apiKey: parsed.data.apiKey,
       });
@@ -652,12 +653,13 @@ export class DashboardProviderService {
     return { name: entry.displayName, count: entry.rotationKeyCount };
   }
 
-  async updateRotationKeys(snapshot: DashboardGuildSnapshot, provider: string, value: unknown) {
+  async updateRotationKeys(snapshot: DashboardGuildSnapshot, actorDiscordId: string, provider: string, value: unknown) {
     const parsed = rotationSchema.safeParse(value);
     if (!parsed.success) throw connectionError("rotation_invalid", 422);
     const { panel, entry } = await this.loadRotationEntry(snapshot, provider);
     const result = await providerPanelOperations.editServerProvider({
       ...panel,
+      actorDiscId: actorDiscordId,
       serverDiscId: snapshot.serverDiscordId,
       provider: entry.provider,
       apiKey: "",

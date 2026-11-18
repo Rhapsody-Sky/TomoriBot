@@ -3,6 +3,10 @@ export default {
     description: `Agrega, edita y elimina credenciales, endpoints y catálogos de modelos de proveedores.`,
     title: `Proveedores del servidor`,
     personal_title: `Proveedores personales`,
+    credential_missing:
+      "No tengo una clave de API para esta configuración guardada. Usa **Editar** para agregarla de nuevo.",
+    credential_retention:
+      "Esta instalación elimina las claves guardadas después de {days} días sin solicitudes autenticadas.",
     selector_guidance:
       "**Selecciona** o **agrega** un proveedor o punto de conexión usando el menú desplegable a continuación.",
     select_placeholder: `Elige un proveedor, punto de conexión o acción...`,
@@ -96,6 +100,8 @@ export default {
     validation_failed: `El proveedor rechazó esa clave de API o no pudo validarla. No se guardó nada.`,
     validation_no_balance:
       "El proveedor reconoció esa clave de API, pero la cuenta no tiene saldo, así que aún no puede responder mensajes. Agrega crédito en el sitio web del proveedor y vuelve a enviar la misma clave. No se guardó nada.",
+    host_restricted: `Quien aloja TomoriBot solo permite Google Vertex AI para ciertos servidores y usuarios, y este no es uno de ellos. Elige un proveedor diferente. No se guardó nada.`,
+    vertex_config_invalid: `La configuración de Google Vertex AI debe tener el formato \`project-id::location\`, por ejemplo \`my-project::global\`. El proyecto y la ubicación solo pueden usar letras, números y guiones. No se guardó nada.`,
     missing_default_model: `Las credenciales se guardaron, pero este proveedor no tiene un modelo de texto predeterminado para activar.`,
     write_failed: `El proveedor no se pudo guardar ni activar. Inténtalo de nuevo.`,
     add_endpoint_modal_title: `Agregar punto de conexión personalizado`,
@@ -184,6 +190,16 @@ export default {
     model_compat_label: `Compatibilidades de finalización de chat`,
     model_compat_description: `Ajustes de formato y protocolo para backends estrictos. Déjalo desactivado salvo si hace falta.`,
     model_image_supports_label: `Capacidades de imagen`,
+    model_image_request_format_label: `Formato de solicitud de imagen`,
+    model_image_request_format_description: `Elige el formato de API que acepta este modelo de imagen.`,
+    image_request_formats: {
+      images: `API de imágenes`,
+      "chat-completions": `Chat Completions`,
+    },
+    image_request_format_descriptions: {
+      images: `Envía prompts a /images/generations.`,
+      "chat-completions": `Envía solicitudes de imagen como mensajes de chat a /chat/completions.`,
+    },
     model_image_supports_description: `Declara solo las funciones de imagen que este modelo y punto de conexión realmente admiten.`,
     model_image_supports: {
       txt2img: `Texto a imagen`,

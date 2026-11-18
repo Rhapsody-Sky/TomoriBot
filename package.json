@@ -1,6 +1,6 @@
 {
   "name": "tomoribot",
-  "version": "0.8.1.70",
+  "version": "0.8.1.82",
   "description": "Customizable AI Assistant Discord Bot",
   "main": "./src/index.ts",
   "type": "module",
@@ -56,7 +56,7 @@
     "//audit": "audit:clean runs bun audit --audit-level=high — only high/critical advisories block the pipeline",
     "audit:clean": "bun run scripts/checks/auditClean.ts",
     "db:lifecycle": "bun scripts/checks/validateLifecycle.ts",
-    "knip": "bunx --bun knip --config scripts/knip.json",
+    "knip": "bun run scripts/checks/checkKnip.ts",
     "vl": "bun run scripts/checks/vl.ts"
   },
   "workspaces": [
@@ -110,7 +110,6 @@
   "overrides": {
     "micromark-extension-math>katex": "^0.18.2",
     "rehype-katex>katex": "^0.18.2",
-    "@aws-sdk/xml-builder>fast-xml-parser": "5.7.0",
     "body-parser": ">=2.4.0",
     "body-parser>qs": "6.17.1",
     "express-rate-limit": "^8.6.1",
@@ -120,12 +119,12 @@
     "minimatch": ">=11.0.1",
     "morgan": ">=1.12.1",
     "qs": "6.17.1",
-    "hono": ">=4.13.7",
-    "@hono/node-server": ">=2.0.5",
+    "hono": ">=4.13.16",
+    "@hono/node-server": ">=2.1.6",
     "undici": "^6.29.1",
     "js-yaml": "^4.3.2",
     "brace-expansion": ">=5.0.12",
-    "fast-xml-parser": ">=5.7.0",
+    "fast-xml-parser": ">=5.12.0",
     "postcss": ">=8.5.18",
     "nanoid": ">=3.3.17 <4",
     "svgo": "^4.1.0",

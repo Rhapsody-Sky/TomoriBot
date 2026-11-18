@@ -27,6 +27,20 @@ TomoriBot 会在启动时应用待处理的数据库迁移。部分迁移可能�
 
 对于本地头像，请保留 TomoriBot 托管的 Webhook：删除它们会导致 bot 无法编辑较早的 Webhook 消息。
 
+## 闲置 API 密钥清理
+
+将 `API_KEY_INACTIVITY_DAYS` 设置为正整数并重启 bot，即可启用数据库凭据清理功能。保持未设置则禁用删除。例如：
+
+```dotenv
+API_KEY_INACTIVITY_DAYS=90
+```
+
+密钥在连续该天数内无已通过验证的请求后即会过期。提供方返回的失败响应同样计为活动。从未使用过的密钥从插入或替换时开始计算时长；首次安装活动追踪功能时，现有密钥将获得完整的宽限期。即使禁用了删除功能，追踪仍会继续进行，因此后续启用该策略可能会立即移除已经休眠的密钥。清理工作会在启动时以及主进程上每小时分批有限执行。
+
+该策略涵盖服务器、个人、额外的轮换以及可选服务的 API 密钥。已保存的模型设置将保留。符合条件的额外轮换密钥可自动替换过期的主密钥。通过 `/providers` 或 `/personal providers` 重新输入被移除的密钥即可恢复服务；可能还需要重新选择语音设置。包括 Vertex ADC 在内的主机凭据仍由运维人员自行掌控。
+
+从数据库中移除密钥并不会撤销其在提供方处的有效性，也不会清除保留的备份。若密钥泄露，请通过提供方控制台进行撤销。在清除已存储的密钥后，提供方侧的资源（例如已创建的声音）可能也需要手动移除。备份保留策略请单独配置。
+
 ## 数据库备份与恢复密钥
 <!-- anchor: database-backups-and-recovery-keys -->
 
@@ -36,7 +50,7 @@ TomoriBot 会在启动时应用待处理的数据库迁移。部分迁移可能�
 
 1. 停止所有 bot 实例。配置目标数据库、Discord 令牌和原始加密密钥。
 2. 安装 `psql` 和所需的数据库扩展，包括 `pgvector`。数据库账户必须有权启用 `pgcrypto`，或者必须由管理员预先启用它。
-3. 运行 `bun run restore-backup --latest` 或 `bun run restore-backup --from backups/<bundle-directory>`。检查目标并确认提示。恢复程序会在执行具有破坏性的 SQL 前检查密钥。
+3. 运行 `bun run restore-backup --latest` 或 `bun run restore-backup --from "backups/<bundle-directory>"`。检查目标并确认提示。恢复程序会在执行具有破坏性的 SQL 前检查密钥。
 4. 在重启前运行 `bun run audit-keys` 和 `bun run rotate-keys --dry-run`。如果凭据需要迁移，请运行 `bun run rotate-keys --bot-stopped` 并再次审计。如果恢复失败，请保持 bot 处于停止状态：先前的 SQL 语句可能已经更改了数据库。
 
 单独备份本地 `data/` 目录，包括头像、语音样本和 `data/custom-expressions/`。将文件恢复到相同路径。对于 GCS 或 S3 表情图片，请备份 `custom-expressions/` 对象并将它们的键恢复到相同的已配置存储桶。外链表情图片取决于其外部主机。
@@ -81,7 +95,7 @@ bun run update
 bun run backup
 bun run restore-backup --latest
 # 或选择具体的备份包：
-bun run restore-backup --from backups/<bundle-directory>
+bun run restore-backup --from "backups/<bundle-directory>"
 ```
 
 备份包保存在 `backups/` 或 `TOMORI_BACKUP_DIR` 中。在恢复前请遵循[恢复步骤](#database-backups-and-recovery-keys)。`bun run backup:personas` 仅导出人格和服务器记忆以供 `/persona import` 使用；它不能用于恢复数据库。

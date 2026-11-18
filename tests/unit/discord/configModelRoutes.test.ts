@@ -326,13 +326,13 @@ function makeHarness(options: HarnessOptions = {}): Harness {
         };
       },
       loadNaiPresets: async (target) => (options.naiPresets ?? []).filter((preset) => preset.model_target === target),
-      loadFallbacksView: async () => ({
+      loadFallbacksView: async (_state, _locale, expandedProvider, entryStart) => ({
         slots: [{ label: null }, { label: null }, { label: null }, { label: null }, { label: null }],
         providerEntries: options.fallbackProviderEntries ?? [
           { value: encodeConfigProviderPageValue("google", 0), label: "Google" },
         ],
-        expandedProvider: null,
-        entryStart: 0,
+        expandedProvider: expandedProvider ?? null,
+        entryStart: entryStart ?? 0,
         randomizerEnabled: options.state?.config.model_randomizer_enabled ?? false,
         hasFallbacks: (options.state?.config.fallback_model_refs ?? []).length > 0,
       }),
@@ -1562,6 +1562,116 @@ describe("config models capability writes", () => {
     }
   });
 
+  it("re-embeds when re-selecting the already configured embedding model if mismatched chunks remain", async () => {
+    const providers = spyOn(llmProviderRepo, "loadSavedProviderConfigs").mockResolvedValue([
+      makeSavedProvider("google", { embedding_model_id: 3 }),
+    ]);
+    const embeddings = spyOn(llmModelRepo, "loadAvailableEmbeddingModels").mockResolvedValue([
+      { embedding_model_id: 3, codename: "text-embedding-004", provider: "google", model_family: "gemini" },
+    ] as never);
+    const byId = spyOn(llmModelRepo, "loadEmbeddingModelById").mockResolvedValue({
+      embedding_model_id: 3,
+      codename: "text-embedding-004",
+      model_family: "gemini",
+    } as never);
+    const update = spyOn(configRepository, "updateModelConfig").mockResolvedValue(true);
+    const ragAvailable = spyOn(ragAvailability, "isRagAvailable").mockReturnValue(true);
+    const countMismatched = spyOn(serverMemoryRepository, "countMismatchedEmbeddingDocuments").mockResolvedValue(2);
+    const context = {};
+    const credentials = spyOn(credentialResolver, "resolveCapabilityCredentials").mockResolvedValue({
+      apiKey: "key",
+      usageContext: context,
+    } as never);
+    const reembed = spyOn(ragRepository, "reembedServerDocuments").mockImplementation(async () => {
+      expect(currentProviderUsageContext()).toBe(context);
+    });
+
+    try {
+      const recovered = await configModelOperations.setCapabilityModel({
+        tomoriState: makeState({ config: { embedding_model_id: 3 } }),
+        serverDiscId: "guild-1",
+        capability: "embedding",
+        provider: "google",
+        modelId: 3,
+      });
+
+      expect(recovered).toMatchObject({ status: "success", modelName: "text-embedding-004", reembedded: true });
+      expect(countMismatched).toHaveBeenCalledWith(9, "gemini");
+      expect(update).not.toHaveBeenCalled();
+      expect(reembed).toHaveBeenCalledTimes(1);
+
+      countMismatched.mockResolvedValueOnce(0);
+      const upToDate = await configModelOperations.setCapabilityModel({
+        tomoriState: makeState({ config: { embedding_model_id: 3 } }),
+        serverDiscId: "guild-1",
+        capability: "embedding",
+        provider: "google",
+        modelId: 3,
+      });
+
+      expect(upToDate).toEqual({ status: "already-selected", modelName: "text-embedding-004" });
+      expect(update).not.toHaveBeenCalled();
+      expect(reembed).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const spy of [providers, embeddings, byId, update, ragAvailable, countMismatched, credentials, reembed]) {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("re-embeds on a same-family embedding switch only when mismatched chunks remain", async () => {
+    const providers = spyOn(llmProviderRepo, "loadSavedProviderConfigs").mockResolvedValue([
+      makeSavedProvider("google", { embedding_model_id: 2 }),
+    ]);
+    const embeddings = spyOn(llmModelRepo, "loadAvailableEmbeddingModels").mockResolvedValue([
+      { embedding_model_id: 3, codename: "text-embedding-005", provider: "google", model_family: "gemini" },
+    ] as never);
+    const byId = spyOn(llmModelRepo, "loadEmbeddingModelById").mockImplementation(async (id: number) =>
+      id === 3
+        ? ({ embedding_model_id: 3, codename: "text-embedding-005", model_family: "gemini" } as never)
+        : ({ embedding_model_id: 2, codename: "text-embedding-004", model_family: "gemini" } as never),
+    );
+    const update = spyOn(configRepository, "updateModelConfig").mockResolvedValue(true);
+    const ragAvailable = spyOn(ragAvailability, "isRagAvailable").mockReturnValue(true);
+    const countMismatched = spyOn(serverMemoryRepository, "countMismatchedEmbeddingDocuments").mockResolvedValue(3);
+    const credentials = spyOn(credentialResolver, "resolveCapabilityCredentials").mockResolvedValue({
+      apiKey: "key",
+      usageContext: {},
+    } as never);
+    const reembed = spyOn(ragRepository, "reembedServerDocuments").mockResolvedValue(undefined);
+
+    try {
+      const withMismatch = await configModelOperations.setCapabilityModel({
+        tomoriState: makeState({ config: { embedding_model_id: 2 } }),
+        serverDiscId: "guild-1",
+        capability: "embedding",
+        provider: "google",
+        modelId: 3,
+      });
+
+      expect(withMismatch).toMatchObject({ status: "success", modelName: "text-embedding-005", reembedded: true });
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(reembed).toHaveBeenCalledTimes(1);
+
+      countMismatched.mockResolvedValueOnce(0);
+      const cleanSwitch = await configModelOperations.setCapabilityModel({
+        tomoriState: makeState({ config: { embedding_model_id: 2 } }),
+        serverDiscId: "guild-1",
+        capability: "embedding",
+        provider: "google",
+        modelId: 3,
+      });
+
+      expect(cleanSwitch).toMatchObject({ status: "success", modelName: "text-embedding-005", reembedded: false });
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(reembed).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const spy of [providers, embeddings, byId, update, ragAvailable, countMismatched, credentials, reembed]) {
+        spy.mockRestore();
+      }
+    }
+  });
+
   it("refuses to clear a slot whose absorbed command has no clear path", async () => {
     const update = spyOn(configRepository, "updateModelConfig").mockResolvedValue(true);
     for (const capability of CATALOG_MODEL_CAPABILITIES.filter(
@@ -1651,7 +1761,7 @@ describe("config models authorization", () => {
 
     expect(update).not.toHaveBeenCalled();
     expect(naiUpdate).not.toHaveBeenCalled();
-    expect(renderedText(harness.edits.at(-1))).toContain(
+    expect(renderedText(harness.replies.at(-1))).toContain(
       localizedCopy("en-US", "commands.config.panel.denied_heading"),
     );
     update.mockRestore();
@@ -1681,7 +1791,7 @@ describe("config models authorization", () => {
 
     expect(modelUpdate).not.toHaveBeenCalled();
     expect(naiUpdate).not.toHaveBeenCalled();
-    expect(renderedText(harness.edits.at(-1))).toContain(
+    expect(renderedText(harness.replies.at(-1))).toContain(
       localizedCopy("en-US", "commands.config.panel.denied_heading"),
     );
     modelUpdate.mockRestore();
@@ -1707,7 +1817,7 @@ describe("config models authorization", () => {
     );
 
     expect(update).not.toHaveBeenCalled();
-    expect(renderedText(harness.edits.at(-1))).toContain(
+    expect(renderedText(harness.replies.at(-1))).toContain(
       localizedCopy("en-US", "commands.config.panel.denied_heading"),
     );
     update.mockRestore();
@@ -1889,7 +1999,7 @@ describe("config models parameters page", () => {
 
       await dispatch(harness, interaction);
 
-      expect(interaction.deferred).toBe(true);
+      expect(interaction.deferred).toBe(context.isManager !== false);
     }
 
     expect(apply).not.toHaveBeenCalled();
@@ -2268,10 +2378,52 @@ describe("config models fallbacks and randomizer", () => {
     expect(write).toHaveBeenCalledWith(9, [{ type: "llm", id: 7 }], { serverDiscId: "guild-1" });
     expect(harness.telemetry).toContain("server-config.workspace.fallbacks.set");
 
+    const select = findComponentByCustomId(
+      harness.edits.at(-1),
+      buildConfigRouteId({ action: "fallback-provider-select", locale: "en-US" }),
+    );
+    const selectOptions = (select?.options ?? []) as Array<{ value?: string; default?: boolean }>;
+    expect(selectOptions.length).toBeGreaterThan(0);
+    expect(selectOptions.every((option) => option.default !== true)).toBe(true);
+
     providers.mockRestore();
     endpoints.mockRestore();
     models.mockRestore();
     write.mockRestore();
+  });
+
+  it("does not pre-select any option in the Fallbacks provider dropdown when expanded", async () => {
+    const harness = makeHarness({
+      fallbackProviderEntries: [
+        { value: encodeConfigProviderPageValue("openrouter", 0), label: "OpenRouter (Page 1)" },
+        { value: encodeConfigProviderPageValue("openrouter", 24), label: "OpenRouter (Page 2)" },
+        { value: encodeConfigProviderPageValue("google", 0), label: "Google" },
+      ],
+    });
+
+    await dispatch(
+      harness,
+      makeInteraction({
+        customId: buildConfigRouteId({
+          action: "fallback-provider-page",
+          locale: "en-US",
+          provider: "openrouter",
+          start: 0,
+        }),
+        harness,
+      }),
+    );
+
+    const select = findComponentByCustomId(
+      harness.edits.at(-1),
+      buildConfigRouteId({ action: "fallback-provider-select", locale: "en-US" }),
+    );
+    const selectOptions = (select?.options ?? []) as Array<{ value?: string; default?: boolean }>;
+    expect(selectOptions).toHaveLength(3);
+    expect(selectOptions.every((option) => option.default !== true)).toBe(true);
+    expect(select?.placeholder).toBe(
+      localizedCopy("en-US", "commands.config.panel.fallback_provider_page_placeholder", { provider: "OpenRouter" }),
+    );
   });
 });
 
@@ -2465,8 +2617,19 @@ describe("config models view loaders", () => {
     );
 
     const view = await loadConfigFallbacksView(makeState(), "en-US", "google");
+    expect(view.expandedProvider).toBe("google");
     expect(view.providerEntries.length).toBeGreaterThan(1);
     expect(decodeConfigProviderPageValue(view.providerEntries[1].value)?.start).toBe(24);
+
+    models.mockResolvedValueOnce([{ llm_id: 1, llm_codename: "gemini-2.5-flash", llm_provider: "google" }] as never);
+    const singlePageView = await loadConfigFallbacksView(makeState(), "en-US", "google");
+    expect(singlePageView.expandedProvider).toBeNull();
+    expect(singlePageView.providerEntries).toHaveLength(1);
+
+    models.mockClear();
+    const deletedProviderView = await loadConfigFallbacksView(makeState(), "en-US", "openrouter");
+    expect(deletedProviderView.expandedProvider).toBeNull();
+    expect(models).not.toHaveBeenCalled();
 
     providers.mockRestore();
     models.mockRestore();
