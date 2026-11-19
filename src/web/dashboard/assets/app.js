@@ -6666,11 +6666,11 @@
       .setAttribute("aria-labelledby", `server-settings-${activeGroup.id}`);
     const content = workspace.querySelector("[data-server-settings-content]");
     content.innerHTML = `
+      ${activeGroup.id === "media" ? '<section class="card" id="tool-phrase-panel"></section>' : ""}
       ${activeGroup.panels.map((panel) => renderSettingsPanel(panel)).join("")}
       ${activeGroup.id === "conversation" ? '<div id="response-drafting-workspace" class="card"></div>' : ""}
       ${activeGroup.id === "models" ? renderLogitBiasPanel() : ""}
       ${activeGroup.id === "memory" ? renderStmCategories() : ""}
-      ${activeGroup.id === "media" ? '<section class="card" id="tool-phrase-panel"></section>' : ""}
       ${activeGroup.id === "channels" && !state.overview.guild.isDirectMessage ? '<section class="card" id="random-schedule-panel"></section>' : ""}`;
     initDraftForms(content);
     enhanceDashboard(content);
@@ -6726,54 +6726,248 @@
 
   async function loadToolPhrasePanel(host) {
     const path = `/guilds/${state.guildId}/settings/tool-triggers`;
-    const header = personaCardHead(ui("tool_phrases"), ui("tool_phrases_hint"));
-    host.innerHTML = header + loadingBar(ui("tool_phrases"));
+    const header = (actions = "") => personaCardHead(ui("tool_phrases"), ui("tool_phrases_hint"), actions);
+    host.innerHTML = header() + loadingBar(ui("tool_phrases"));
     try {
-      let { targets } = await api(path);
+      let { targets, maxPerTarget } = await api(path);
       if (!host.isConnected) return;
       let selected = (targets.find(({ entries }) => entries.length) ?? targets[0]).target;
+      const groupOptions = () =>
+        targets
+          .map(
+            ({ target, label }) =>
+              `<option value="${escapeHtml(target)}"${target === selected ? " selected" : ""}>${escapeHtml(label)}</option>`,
+          )
+          .join("");
+      const focusGroup = () => host.querySelector('button[aria-haspopup="listbox"]')?.focus({ preventScroll: true });
+      const mutate = (patch) => api(path, { method: "PATCH", body: JSON.stringify(patch) });
+      const applyResult = (result, target, nextIndex) => {
+        targets = result.targets;
+        selected = target;
+        render();
+        const next =
+          host.querySelectorAll("[data-phrase-remove]")[nextIndex] ||
+          host.querySelector("[data-trigger-add]:not(:disabled)");
+        if (next) next.focus({ preventScroll: true });
+        else focusGroup();
+      };
       const render = () => {
         const { entries } = targets.find(({ target }) => target === selected);
-        host.innerHTML = `${header}<div class="stack"><form class="stack"><label class="field">${fieldLabel(ui("tool_phrase_target"))}<select name="target">${targets.map(({ target, label }) => `<option value="${escapeHtml(target)}"${target === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
-          <label class="field">${fieldLabel(ui("tool_phrase_literal"))}<input name="phrase" maxlength="40" required></label>
-          <div class="actions" data-form-actions><button class="button small primary" type="submit" data-fx="spark">${escapeHtml(ui("tool_phrase_add"))}</button></div></form>
-          ${entries.length ? `<div class="rows">${entries.map(({ kind, value }, index) => `<div class="item"><div><strong dir="auto">${escapeHtml(value)}</strong>${kind === "regex" ? `<div class="item-meta">${escapeHtml(ui("tool_phrase_regex"))}</div>` : ""}</div><div class="item-actions"><button class="button small icon danger" type="button" data-phrase-remove="${index}" aria-label="${escapeHtml(ui("tool_phrase_remove"))}" data-tooltip="${escapeHtml(ui("tool_phrase_remove"))}">${navigationIcon("trash-2")}</button></div></div>`).join("")}</div>` : `<p class="hint">${escapeHtml(ui("tool_phrase_empty"))}</p>`}</div>`;
-        const form = host.querySelector("form");
-        form.elements.target.onchange = () => {
-          const phrase = form.elements.phrase.value;
-          selected = form.elements.target.value;
+        const count = escapeHtml(
+          ui("tool_trigger_count").replace("{count}", String(entries.length)).replace("{max}", String(maxPerTarget)),
+        );
+        const add = `<button class="button small primary" type="button" data-trigger-add aria-haspopup="dialog" data-fx="spark"${entries.length >= maxPerTarget ? " disabled" : ""}>${navigationIcon("plus")}${escapeHtml(ui("tool_phrase_add"))}</button>`;
+        const removeLabel = ui("tool_phrase_remove");
+        const actions = entries.length ? `<div class="actions">${add}</div>` : "";
+        host.innerHTML = `
+          <div class="card-head"><div><h3>${escapeHtml(ui("tool_phrases"))}<small>${count}</small></h3><p class="hint">${escapeHtml(ui("tool_phrases_hint"))}</p></div>${actions}</div>
+          <div class="stack">
+            <label class="field">${fieldLabel(ui("tool_phrase_target"))}<select data-trigger-group>${groupOptions()}</select></label>
+            <div class="rows">${
+              entries.length
+                ? entries
+                    .map(
+                      ({ kind, value }, index) => `
+              <article class="item">
+                <div><p>${kind === "regex" ? `<code dir="auto">${escapeHtml(value)}</code>` : `<strong dir="auto">${escapeHtml(value)}</strong>`}</p>
+                  <div class="item-meta"><span class="chip">${escapeHtml(ui(kind === "regex" ? "tool_phrase_regex" : "tool_phrase_phrase"))}</span></div></div>
+                <div class="item-actions"><button class="button small icon danger" type="button" data-phrase-remove="${index}" aria-label="${escapeHtml(`${removeLabel} ${value}`)}" data-tooltip="${escapeHtml(removeLabel)}">${navigationIcon("trash-2")}</button></div>
+              </article>`,
+                    )
+                    .join("")
+                : `<div class="empty-note"><span class="mark" aria-hidden="true">✦</span><strong>${escapeHtml(ui("tool_phrase_empty"))}</strong>${add}</div>`
+            }</div>
+          </div>`;
+        host.querySelector("[data-trigger-group]").onchange = (event) => {
+          selected = event.target.value;
           render();
-          host.querySelector('[name="phrase"]').value = phrase;
-          host.querySelector('[name="phrase"]').focus();
+          focusGroup();
         };
-        const update = async (patch) => {
-          try {
-            const result = await withBusyForm(host, () =>
-              api(path, { method: "PATCH", body: JSON.stringify({ ...patch, target: selected }) }),
-            );
-            if (!host.isConnected || !result) return;
-            targets = result.targets;
-            render();
-            host.querySelector('[name="phrase"]').focus({ preventScroll: true });
-            toast(ui("tool_phrase_saved"));
-          } catch (error) {
-            if (host.isConnected) showFormError(form, error);
-          }
-        };
-        form.onsubmit = (event) => {
-          event.preventDefault();
-          void update({ action: "add", value: form.elements.phrase.value });
-        };
+        host.querySelector("[data-trigger-add]").onclick = (event) =>
+          openToolTriggerEditor(event.currentTarget, groupOptions(), mutate, (result, target) => {
+            if (!host.isConnected) return;
+            applyResult(result, target);
+          });
         host.querySelectorAll("[data-phrase-remove]").forEach((button) => {
-          button.onclick = () => update({ action: "remove", ...entries[Number(button.dataset.phraseRemove)] });
+          button.onclick = async () => {
+            const index = Number(button.dataset.phraseRemove);
+            const target = selected;
+            try {
+              const result = await withBusyForm(host, () => mutate({ action: "remove", target, ...entries[index] }));
+              if (!host.isConnected || !result) return;
+              applyResult(result, target, Math.min(index, entries.length - 2));
+              toast(ui("tool_phrase_saved"));
+            } catch (error) {
+              if (host.isConnected) toast(error.message, "error");
+            }
+          };
         });
         enhanceDashboard(host);
       };
       render();
     } catch (error) {
-      if (host.isConnected)
-        host.innerHTML = `${header}<p class="notice error" role="alert">${escapeHtml(error.message)}</p>`;
+      if (host.isConnected) host.innerHTML = header() + errorNotice(error.message);
     }
+  }
+
+  function openToolTriggerEditor(button, options, mutate, onSaved) {
+    const { dialog, form, fields, save } = openDashboardEditor(button, "tool_phrase_add");
+    form.querySelector("[data-editor-context]").hidden = true;
+    form.querySelector("[data-editor-cancel]").classList.add("small");
+    save.classList.add("small");
+    save.textContent = ui("tool_phrase_add");
+    save.hidden = false;
+    form.noValidate = true;
+    fields.innerHTML = `
+      <label class="field">${fieldLabel(ui("tool_phrase_target"))}<select name="target">${options}</select></label>
+      <div class="segmented fill" data-fx="indicator" role="radiogroup" aria-label="${escapeHtml(ui("tool_phrase_kind"))}">
+        <button type="button" role="radio" aria-checked="true" data-trigger-kind="literal">${escapeHtml(ui("tool_phrase_phrase"))}</button>
+        <button type="button" role="radio" aria-checked="false" tabindex="-1" data-trigger-kind="regex">${escapeHtml(ui("tool_phrase_regex"))}</button>
+      </div>
+      <label class="field" data-trigger-literal>${fieldLabel(ui("tool_phrase_literal"), ui("tool_phrase_literal_hint"))}
+        <input name="phrase" maxlength="40" required autocomplete="off" aria-describedby="tool-trigger-phrase-error">
+        <span class="error" id="tool-trigger-phrase-error" role="alert" hidden></span>
+      </label>
+      <div class="stack" data-trigger-regex hidden>
+        <label class="field">${fieldLabel(ui("tool_regex_label"), ui("tool_regex_hint"))}
+          <input name="pattern" maxlength="120" required autocomplete="off" spellcheck="false" aria-describedby="tool-trigger-pattern-error" disabled>
+          <span class="error" id="tool-trigger-pattern-error" role="alert" hidden></span>
+        </label>
+        <div class="field"><label class="field-label" for="tool-trigger-test-text">${escapeHtml(ui("tool_regex_sample"))}</label>
+          <textarea id="tool-trigger-test-text" name="testText" rows="2" maxlength="2000"></textarea>
+          <span role="status" aria-atomic="true"><span class="badge" data-trigger-test-result hidden></span></span>
+        </div>
+      </div>`;
+    const radios = [...fields.querySelectorAll("[data-trigger-kind]")];
+    const literalSection = fields.querySelector("[data-trigger-literal]");
+    const regexSection = fields.querySelector("[data-trigger-regex]");
+    const { phrase, pattern, testText, target } = form.elements;
+    const resultBadge = fields.querySelector("[data-trigger-test-result]");
+    let kind = "literal";
+    let scheduledTest;
+    let testTimeout;
+    let testWorker;
+
+    function setError(input, message) {
+      const error = fields.querySelector(`#${input.getAttribute("aria-describedby")}`);
+      if (message) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
+      error.textContent = message;
+      error.hidden = !message;
+    }
+
+    function stopTest() {
+      clearTimeout(scheduledTest);
+      clearTimeout(testTimeout);
+      testWorker?.terminate();
+      testWorker = undefined;
+    }
+
+    function showResult(key, tone = "") {
+      resultBadge.className = tone ? `badge ${tone} dot` : "badge";
+      resultBadge.textContent = key ? ui(key) : "";
+      resultBadge.hidden = !key;
+    }
+
+    function patternError(value) {
+      try {
+        new RegExp(value, "iu");
+        return "";
+      } catch {
+        return ui("tool_regex_invalid");
+      }
+    }
+
+    function updatePreview() {
+      stopTest();
+      showResult("");
+      if (kind !== "regex") return;
+      const value = pattern.value.trim();
+      const issue = patternError(value);
+      setError(pattern, issue);
+      if (!value || issue || !testText.value) return;
+      const text = testText.value.trim();
+      scheduledTest = setTimeout(() => {
+        const finish = (key, tone) => {
+          stopTest();
+          showResult(key, tone);
+        };
+        try {
+          testWorker = new Worker("/settings/assets/tool-trigger-test.js");
+        } catch {
+          finish("tool_regex_test_failed", "warning");
+          return;
+        }
+        const worker = testWorker;
+        worker.onmessage = ({ data }) => {
+          if (testWorker !== worker) return;
+          if (data === null) finish("tool_regex_test_failed", "warning");
+          else finish(data ? "tool_regex_match" : "tool_regex_no_match", data ? "success" : "");
+        };
+        worker.onerror = () => {
+          if (testWorker === worker) finish("tool_regex_test_failed", "warning");
+        };
+        testTimeout = setTimeout(() => finish("tool_regex_test_timeout", "warning"), 500);
+        worker.postMessage({ pattern: value, text });
+      }, 150);
+    }
+
+    function selectKind(next) {
+      kind = next;
+      for (const radio of radios) {
+        const selected = radio.dataset.triggerKind === kind;
+        radio.setAttribute("aria-checked", String(selected));
+        radio.tabIndex = selected ? 0 : -1;
+      }
+      literalSection.hidden = phrase.disabled = kind !== "literal";
+      regexSection.hidden = pattern.disabled = kind !== "regex";
+      setError(phrase, "");
+      form.querySelector("[data-form-error]")?.remove();
+      updatePreview();
+    }
+
+    for (const [index, radio] of radios.entries()) {
+      radio.onclick = () => selectKind(radio.dataset.triggerKind);
+      radio.onkeydown = (event) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? radios[0] : event.key === "End" ? radios[1] : radios[1 - index];
+        selectKind(next.dataset.triggerKind);
+        next.focus();
+      };
+    }
+    dialog.addEventListener("close", stopTest);
+    phrase.oninput = () => setError(phrase, "");
+    pattern.oninput = updatePreview;
+    testText.oninput = updatePreview;
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const input = kind === "regex" ? pattern : phrase;
+      const value = input.value.trim();
+      const issue = !value ? ui("tool_trigger_required") : kind === "regex" ? patternError(value) : "";
+      setError(input, issue);
+      form.querySelector("[data-form-error]")?.remove();
+      if (issue) {
+        input.focus();
+        return;
+      }
+      try {
+        const result = await withBusyForm(form, () => mutate({ action: "add", kind, target: target.value, value }));
+        if (!result || !dialog.open) return;
+        dialog.close();
+        onSaved(result, target.value);
+        toast(ui("tool_phrase_saved"));
+      } catch (error) {
+        if (["tool_phrase_duplicate", "tool_regex_invalid"].includes(error.code)) {
+          setError(input, error.message);
+          input.focus();
+        } else {
+          showFormError(form, error);
+        }
+      }
+    };
+    enhanceDashboard(dialog);
+    phrase.focus();
   }
 
   async function loadRandomSchedulePanel(host) {

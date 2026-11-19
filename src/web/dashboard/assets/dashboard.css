@@ -997,3 +997,7 @@ body[data-theme="dark"] [data-dashboard-entry="login"] [data-entry-logo] {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+#tool-phrase-panel .item p {
+  overflow-wrap: anywhere;
+}

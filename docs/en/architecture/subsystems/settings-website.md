@@ -129,9 +129,9 @@ Members with Manage Server or Administrator can additionally:
 - manage server Logit Bias under `Server settings` > `Models & sampling`;
 - choose a system prompt preset as an editable draft, or restore the built-in
   prompt. An active SillyTavern preset locks the server prompt;
-- configure tool capabilities, custom literal phrases for deliberate tool mode,
-  and notices. Existing regular expressions can be removed in the dashboard;
-  use Discord to add one;
+- configure tool capabilities and notices, and manage custom phrases and regular
+  expressions for Deliberate Tool Mode under `Server settings` > `Tools & media`.
+  The regular expression test runs locally in the browser;
 - manage scheduled triggers in visible text channels. Editing keeps the channel
   and persona and restarts the interval. The existing scheduler delivers them;
 - set server response cooldowns and channel overrides using the scopes offered

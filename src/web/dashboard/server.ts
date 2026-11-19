@@ -65,6 +65,7 @@ import {
   loadRandomTriggers,
   loadSystemPromptChoices,
   loadToolTriggers,
+  MAX_TOOL_TRIGGERS_PER_TARGET,
   removeRandomTrigger,
   saveRandomTrigger,
   updateToolTriggers,
@@ -169,6 +170,10 @@ const dashboardAssets = {
   "app.css": { path: "src/web/dashboard/assets/app.css", contentType: "text/css; charset=utf-8" },
   "companion.css": { path: "src/web/dashboard/assets/companion.css", contentType: "text/css; charset=utf-8" },
   "app.js": { path: "src/web/dashboard/assets/app.js", contentType: "application/javascript; charset=utf-8" },
+  "tool-trigger-test.js": {
+    path: "src/web/dashboard/assets/tool-trigger-test.js",
+    contentType: "application/javascript; charset=utf-8",
+  },
   "natural-nudges.js": {
     path: "src/web/dashboard/assets/natural-nudges.js",
     contentType: "application/javascript; charset=utf-8",
@@ -706,6 +711,7 @@ export function createDashboardApp(client: Client) {
         assetName === "design.js" ||
         assetName === "fx.js" ||
         assetName === "app.js" ||
+        assetName === "tool-trigger-test.js" ||
         assetName === "natural-nudges.js" ||
         assetName === "app.css" ||
         assetName === "companion.css" ||
@@ -1030,11 +1036,24 @@ export function createDashboardApp(client: Client) {
           "tool_phrases_hint",
           "tool_phrase_target",
           "tool_phrase_literal",
+          "tool_phrase_literal_hint",
+          "tool_phrase_kind",
+          "tool_phrase_phrase",
           "tool_phrase_add",
           "tool_phrase_regex",
+          "tool_regex_label",
+          "tool_regex_hint",
+          "tool_regex_sample",
+          "tool_regex_match",
+          "tool_regex_no_match",
+          "tool_regex_test_failed",
+          "tool_regex_test_timeout",
+          "tool_trigger_count",
+          "tool_trigger_required",
           "tool_phrase_remove",
           "tool_phrase_empty",
           "tool_phrase_saved",
+          "tool_regex_invalid",
           "random_schedules",
           "random_schedules_hint",
           "random_schedule_channel",
@@ -3277,7 +3296,7 @@ export function createDashboardApp(client: Client) {
       context.req.method === "GET"
         ? loadToolTriggers(result.snapshot)
         : await updateToolTriggers(result.snapshot, await context.req.json().catch(() => null));
-    return context.json({ targets });
+    return context.json({ targets, maxPerTarget: MAX_TOOL_TRIGGERS_PER_TARGET });
   });
 
   const naturalNudgesPath = `${BASE_PATH}/api/guilds/:guildId/natural-nudges`;

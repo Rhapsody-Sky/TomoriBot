@@ -6,18 +6,24 @@ import { localizer, resolvePresetDisplayName } from "@/utils/text/localizer";
 import {
   DELIBERATE_TOOL_TRIGGER_TARGETS,
   getToolNamesForDeliberateTriggerTarget,
+  normalizeDeliberateToolRegexTrigger,
   normalizeDeliberateToolTrigger,
   type DeliberateToolTrigger,
 } from "@/utils/tools/deliberateToolMode";
 import { DashboardServiceError } from "./errors";
 import type { DashboardGuildSnapshot } from "./types";
 
-const MAX_TOOL_PHRASES_PER_TARGET = 16;
+export const MAX_TOOL_TRIGGERS_PER_TARGET = 16;
 const MAX_RANDOM_TRIGGERS = Number.parseInt(process.env.RANDOM_TRIGGER_MAX_PER_SERVER ?? "10", 10);
 const MAX_SCHEDULE_HOURS = 2_147_483_647;
 
 const toolTriggerPatch = z.discriminatedUnion("action", [
-  z.strictObject({ action: z.literal("add"), target: z.string().max(40), value: z.string().trim().min(1).max(40) }),
+  z.strictObject({
+    action: z.literal("add"),
+    target: z.string().max(40),
+    kind: z.enum(["literal", "regex"]).default("literal"),
+    value: z.string().trim().min(1).max(120),
+  }),
   z.strictObject({
     action: z.literal("remove"),
     target: z.string().max(40),
@@ -76,6 +82,20 @@ export function loadToolTriggers(snapshot: DashboardGuildSnapshot) {
   }));
 }
 
+function parseAddedToolTrigger(kind: "literal" | "regex", value: string): DeliberateToolTrigger {
+  if (kind === "literal") {
+    if (value.length > 40) throw behaviorError("tool_phrase_invalid", 422);
+    return normalizeDeliberateToolTrigger(value);
+  }
+  const pattern = normalizeDeliberateToolRegexTrigger(value);
+  try {
+    new RegExp(pattern, "iu");
+  } catch {
+    throw behaviorError("tool_regex_invalid", 422);
+  }
+  return { type: "regex", value: pattern };
+}
+
 export async function updateToolTriggers(snapshot: DashboardGuildSnapshot, value: unknown) {
   const parsed = toolTriggerPatch.safeParse(value);
   if (!parsed.success || !getToolNamesForDeliberateTriggerTarget(parsed.data.target).length)
@@ -84,17 +104,16 @@ export async function updateToolTriggers(snapshot: DashboardGuildSnapshot, value
   const saved = { ...snapshot.config.deliberate_tool_triggers };
   const current = saved[patch.target] ?? [];
   if (patch.action === "add") {
-    const phrase = normalizeDeliberateToolTrigger(patch.value);
-    if (!phrase) throw behaviorError("tool_phrase_invalid", 422);
+    const entry = parseAddedToolTrigger(patch.kind, patch.value);
+    const normalize = patch.kind === "regex" ? normalizeDeliberateToolRegexTrigger : normalizeDeliberateToolTrigger;
+    const { value } = describeToolTrigger(entry);
     if (
-      current
-        .map(describeToolTrigger)
-        .some(({ kind, value }) => kind === "literal" && normalizeDeliberateToolTrigger(value) === phrase)
+      current.map(describeToolTrigger).some((stored) => stored.kind === patch.kind && normalize(stored.value) === value)
     )
       throw behaviorError("tool_phrase_duplicate", 409);
-    if (current.length >= MAX_TOOL_PHRASES_PER_TARGET)
-      throw behaviorError("tool_phrase_limit", 422, { max: MAX_TOOL_PHRASES_PER_TARGET });
-    saved[patch.target] = [...current, phrase];
+    if (current.length >= MAX_TOOL_TRIGGERS_PER_TARGET)
+      throw behaviorError("tool_phrase_limit", 422, { max: MAX_TOOL_TRIGGERS_PER_TARGET });
+    saved[patch.target] = [...current, entry];
   } else {
     const remaining = current.filter((entry) => {
       const { kind, value } = describeToolTrigger(entry);

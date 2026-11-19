@@ -141,6 +141,7 @@ describe("dashboard HTTP shell", () => {
       ["app.css", "text/css"],
       ["companion.css", "text/css"],
       ["app.js", "application/javascript"],
+      ["tool-trigger-test.js", "application/javascript"],
       ["collection.css", "text/css"],
       ["design.js", "application/javascript"],
       ["fx.js", "application/javascript"],
@@ -743,6 +744,54 @@ describe("dashboard memory and naming authorization", () => {
     });
     expect((await patch({ action: "remove", target: "image", kind: "regex", value: "a[bc]" })).status).toBe(200);
     expect(write).toHaveBeenLastCalledWith(42, { deliberate_tool_triggers: { dice: ["roll"] } });
+  });
+
+  it("adds regular expressions with the existing tool trigger permissions and validation", async () => {
+    const saved = { image: ["draw this", { type: "regex" as const, value: "^paint" }], dice: ["roll"] };
+    const { app, headers } = setup(true, { deliberate_tool_triggers: saved });
+    const path = "/settings/api/guilds/123456789012345678/settings/tool-triggers";
+    let canManage = false;
+    spyOn(fakeClient.guilds.cache, "get").mockReturnValue({
+      members: {
+        fetch: async () => ({
+          permissions: new PermissionsBitField(canManage ? PermissionFlagsBits.ManageGuild : 0n),
+        }),
+      },
+    } as unknown as Guild);
+    const write = spyOn(configRepository, "updateTriggerBehaviorConfig").mockResolvedValue(true);
+    const patch = (value: string, requestHeaders = headers) =>
+      app.request(path, {
+        method: "PATCH",
+        headers: requestHeaders,
+        body: JSON.stringify({ action: "add", target: "image", kind: "regex", value }),
+      });
+
+    expect((await app.request(path, { headers })).status).toBe(403);
+    expect((await patch("^Sketch")).status).toBe(403);
+    canManage = true;
+    expect((await patch("^Sketch", { ...headers, "X-CSRF-Token": "invalid" })).status).toBe(403);
+    const invalid = await patch("[");
+    expect(invalid.status).toBe(422);
+    expect((await invalid.json()).error.code).toBe("tool_regex_invalid");
+    expect((await patch(" ^paint ")).status).toBe(409);
+    expect((await patch("x".repeat(121))).status).toBe(422);
+    expect(write).not.toHaveBeenCalled();
+
+    const result = await patch(" ^Sketch ");
+    expect(result.status).toBe(200);
+    expect((await result.json()).targets).toContainEqual(
+      expect.objectContaining({
+        target: "image",
+        entries: [
+          { kind: "literal", value: "draw this" },
+          { kind: "regex", value: "^paint" },
+          { kind: "regex", value: "^Sketch" },
+        ],
+      }),
+    );
+    expect(write).toHaveBeenLastCalledWith(42, {
+      deliberate_tool_triggers: { ...saved, image: [...saved.image, { type: "regex", value: "^Sketch" }] },
+    });
   });
 
   it("edits schedules only in visible text channels and keeps the target of an existing schedule fixed", async () => {
